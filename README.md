@@ -78,7 +78,7 @@ There is one file per agent-user pair and one file per agent-agent pair that has
 All inter-agent communication follows an **asker/responder** model:
 
 - The **asker** is always the agent that initiates the conversation. For example, Agent A is tasked with merging Agent B's changes and needs details -- Agent A is the asker, Agent B is the responder.
-- A conversation between two agents is always one-directional in terms of roles: if A asked B, the entire exchange (even if B asks clarifying questions back) is stored as `agentA-agentB.json` with A as asker.
+- A conversation between two agents is always one-directional in terms of roles: if A asked B, the entire exchange (even if B asks clarifying questions back) is stored as `agentA-agentB.jsonl` with A as asker.
 - **The responder cannot initiate a conversation back to the asker.** Anything it needs to say to the asker goes in its response. If B needs clarification from A, B asks within its response, and A answers in its next message -- but the roles don't flip.
 - **The responder CAN initiate conversations with other agents.** While responding to A's request, Agent B has full tool access, including the ability to ask Agent C for help. This creates a chain: A asks B, B asks C, C responds to B, B responds to A.
 
@@ -89,17 +89,17 @@ When an agent receives a request (from user or another agent), its **full pre-cu
 **For a user request to Agent X:**
 | Source | Included |
 |---|---|
-| `user-agentX.json` | Full conversation with user |
-| `agentY-agentX.json` (for all Y) | Only **responses Agent X received** (i.e., Agent X was the asker, so these are the responder's replies) |
-| `agentX-agentY.json` (for all Y) | **Not included** -- Agent X's own responses to others' questions are not needed |
+| `user-agentX.jsonl` | Full conversation with user |
+| `agentX-agentY.jsonl` (for all Y) | Only **responses X received** -- X was the asker, Y was the responder, so these contain Y's replies to X |
+| `agentY-agentX.jsonl` (for all Y) | **Not included** -- Y was the asker, X was the responder, so these contain X's responses to others' questions |
 
 **For Agent A asking Agent B:**
 | Source | Included |
 |---|---|
-| `user-agentB.json` | Full conversation with user |
-| `agentY-agentB.json` (for all Y, Y != A) | Only responses B received from others |
-| `agentA-agentB.json` | **Full history** -- B can see its own previous responses to A, so it has continuity across multiple requests from the same asker |
-| `agentB-agentY.json` (for all Y) | Not included -- B's responses to other agents' questions are not needed |
+| `user-agentB.jsonl` | Full conversation with user |
+| `agentB-agentY.jsonl` (for all Y) | Only responses B received -- B was the asker, Y was the responder |
+| `agentA-agentB.jsonl` | **Full history** -- B can see its own previous responses to A, so it has continuity across multiple requests from the same asker |
+| `agentY-agentB.jsonl` (for all Y, Y != A) | Not included -- Y was the asker, B was the responder, so these contain B's responses to others' questions |
 
 The key asymmetry: an agent always sees responses it *received* from others but not responses it *gave* to others -- except when responding to a specific asker, where it sees its own prior responses to that asker for continuity.
 
@@ -195,7 +195,7 @@ Claude Code provides extensive extension points that Multiverse can leverage:
 - [ ] CLI commands or slash skills for branching operations
 
 ### Phase 2: Context Management
-- [ ] Define JSON schema for conversation files (`user-agent.json`, `agent-agent.json`)
+- [ ] Define JSONL schema for conversation files (`user-agent.jsonl`, `agent-agent.jsonl`)
 - [ ] Implement context assembly logic (merge user conversations + received responses per the assembly rules)
 - [ ] Implement context manager model that curates assembled context before API calls
 - [ ] Auto-summarize large tool outputs (file reads, command outputs) after they've been processed
@@ -211,7 +211,7 @@ Claude Code provides extensive extension points that Multiverse can leverage:
 - [ ] Progress tracking and status reporting
 
 ### Phase 4: Inter-Agent Communication
-- [ ] Implement per-pair conversation files (`agentA-agentB.json`) with asker/responder roles
+- [ ] Implement per-pair conversation files (`agentA-agentB.jsonl`) with asker/responder roles
 - [ ] Build asker/responder protocol: initiation, response, chained delegation
 - [ ] Implement context assembly rules (received responses only, asker history for continuity)
 - [ ] Enforce no-circular-call constraint (responder cannot call back to asker)
@@ -266,10 +266,3 @@ Claude Code provides extensive extension points that Multiverse can leverage:
 - **Cursor / Windsurf** -- current state of agent coding assistants (linear chat)
 - **Ralph Wiggum Claude Code configs** -- community prompt engineering on top of Claude Code
 
----
-
-## Playground
-
-The `Playground/` directory contains early experiments:
-- `agent_playground.py` -- Terminal-based agent with tool use (OpenRouter)
-- `two_model_conversation.py` -- Two AI personas conversing with each other
