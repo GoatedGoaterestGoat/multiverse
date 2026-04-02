@@ -1,3 +1,13 @@
+# Playground
+Playground/
+
+# Reference CC source
+claude-code-src/
+
+# Test files
+context-original.md
+context-folded.md
+
 # Python
 __pycache__/
 *.pyc

@@ -1,0 +1,11 @@
+[project]
+name = "context-fold-mcp"
+version = "0.2.0"
+description = "MCP server for agent-initiated selective context folding in Claude Code"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+context-fold-mcp = "src.server:mcp.run"
