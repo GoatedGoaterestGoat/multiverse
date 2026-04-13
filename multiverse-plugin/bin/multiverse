@@ -1,95 +1,29 @@
 #!/usr/bin/env bash
-# multiverse — extensible wrapper for Claude Code with context management
+# multiverse — launcher for the multiverse monitor TUI.
 #
-# Wraps `claude` to enable features that require stopping and restarting
-# sessions (e.g. context folding). Communicates with plugin hooks via a
-# control file in a per-session temp directory.
+# Previously this script wrapped a single claude process in a loop.
+# That responsibility now lives in `multiverse-session`, one copy of
+# which runs inside each tmux session spawned by the monitor.
 #
 # Usage: multiverse [claude args...]
-#   All arguments are passed through to `claude`.
-#
-# Environment:
-#   MULTIVERSE_CONTROL — path to the control file (set automatically)
-#   Hooks and MCP tools write JSON actions here; the wrapper dispatches them.
+#   Any passed args are forwarded to claude when the user spawns a
+#   new session from the monitor.
 
 set -euo pipefail
 
-# ── Dependency check ────────────────────────────────────────────────
-if ! command -v jq &>/dev/null; then
-  echo "[multiverse] Error: jq is required but not found. Install with: brew install jq" >&2
-  exit 1
-fi
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
-if ! command -v claude &>/dev/null; then
-  echo "[multiverse] Error: claude CLI not found in PATH." >&2
-  exit 1
-fi
+# Preserve the user's original cwd so the monitor can default new
+# sessions to it (uv run below will cd into the plugin root).
+export MULTIVERSE_ORIG_CWD="$PWD"
+export MULTIVERSE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
-# ── Session setup ───────────────────────────────────────────────────
-# Each wrapper invocation gets its own temp directory so concurrent
-# sessions never collide.
-MULTIVERSE_SESSION_DIR=$(mktemp -d "${TMPDIR:-/tmp}/multiverse-XXXXXX")
-export MULTIVERSE_CONTROL="$MULTIVERSE_SESSION_DIR/control.json"
-trap 'rm -rf "$MULTIVERSE_SESSION_DIR"' EXIT
-
-CLAUDE_ARGS=("$@")
-
-# ── Main loop ───────────────────────────────────────────────────────
-# After each `claude` exit, check if a hook/tool wrote an action to the
-# control file. If so, dispatch it and loop; otherwise exit.
-while true; do
-  # Clear control file before each run
-  : > "$MULTIVERSE_CONTROL"
-
-  # Run Claude Code (don't exit wrapper on non-zero)
-  claude "${CLAUDE_ARGS[@]}" || true
-
-  # No action written → normal exit
-  if [ ! -s "$MULTIVERSE_CONTROL" ]; then
-    break
+for dep in tmux jq uv; do
+  if ! command -v "$dep" &>/dev/null; then
+    echo "[multiverse] Error: $dep is required but not found." >&2
+    exit 1
   fi
-
-  # Read the action
-  ACTION=$(jq -r '.action // empty' "$MULTIVERSE_CONTROL" 2>/dev/null || true)
-
-  if [ -z "$ACTION" ]; then
-    break
-  fi
-
-  # ── Action dispatch ─────────────────────────────────────────────
-  case "$ACTION" in
-
-    resume_folded)
-      NEW_SESSION=$(jq -r '.new_session_id' "$MULTIVERSE_CONTROL")
-      echo ""
-      echo "[multiverse] Context folded. Resuming with optimized context..."
-      echo ""
-
-      # Step 1: print-mode response so Claude continues immediately
-      claude -p "Context was folded successfully. Continue with your current task." \
-             --resume "$NEW_SESSION" 2>/dev/null || true
-
-      # Step 2: switch to interactive resume for the next loop iteration
-      CLAUDE_ARGS=(--resume "$NEW_SESSION")
-      ;;
-
-    # ── Future actions ──────────────────────────────────────────────
-    #
-    # spawn_agent)
-    #   PROMPT=$(jq -r '.prompt' "$MULTIVERSE_CONTROL")
-    #   WORKTREE=$(jq -r '.worktree // empty' "$MULTIVERSE_CONTROL")
-    #   # ... spawn a new claude session in a worktree
-    #   ;;
-    #
-    # send_message)
-    #   TARGET_SESSION=$(jq -r '.session_id' "$MULTIVERSE_CONTROL")
-    #   MESSAGE=$(jq -r '.message' "$MULTIVERSE_CONTROL")
-    #   # ... inject a message into another session
-    #   ;;
-
-    *)
-      echo "[multiverse] Unknown action: $ACTION" >&2
-      break
-      ;;
-  esac
 done
+
+cd "$PLUGIN_ROOT"
+exec uv run python -m src.monitor "$@"

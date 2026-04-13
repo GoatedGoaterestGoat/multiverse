@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# multiverse-session — inner loop that wraps ONE claude process.
+#
+# Launched by the multiverse monitor inside a detached tmux session.
+# Responsible for: running claude, dispatching control-file actions
+# (currently just resume_folded), and exiting cleanly when claude does.
+#
+# Required env (set by the monitor on `tmux new-session -e ...`):
+#   MULTIVERSE_SESSION_ID — short id for this multiverse session
+#   MULTIVERSE_CONTROL    — path to control.json for fold/resume signaling
+#   MULTIVERSE_STATUS     — path to status.json (written by hook scripts)
+
+set -euo pipefail
+
+if ! command -v jq &>/dev/null; then
+  echo "[multiverse-session] jq is required (brew install jq)" >&2
+  exit 1
+fi
+if ! command -v claude &>/dev/null; then
+  echo "[multiverse-session] claude CLI not found in PATH" >&2
+  exit 1
+fi
+
+: "${MULTIVERSE_CONTROL:?multiverse-session must be launched by the monitor}"
+: "${MULTIVERSE_STATUS:?multiverse-session must be launched by the monitor}"
+
+mkdir -p "$(dirname "$MULTIVERSE_CONTROL")"
+
+# Load the multiverse plugin into every claude invocation (dev mode).
+PLUGIN_ARGS=()
+if [ -n "${MULTIVERSE_PLUGIN_ROOT:-}" ]; then
+  PLUGIN_ARGS=(--plugin-dir "$MULTIVERSE_PLUGIN_ROOT")
+fi
+
+CLAUDE_ARGS=("$@")
+
+while true; do
+  : > "$MULTIVERSE_CONTROL"
+
+  claude "${PLUGIN_ARGS[@]}" "${CLAUDE_ARGS[@]}" || true
+
+  if [ ! -s "$MULTIVERSE_CONTROL" ]; then
+    break
+  fi
+
+  ACTION=$(jq -r '.action // empty' "$MULTIVERSE_CONTROL" 2>/dev/null || true)
+  [ -z "$ACTION" ] && break
+
+  case "$ACTION" in
+    resume_folded)
+      NEW_SESSION=$(jq -r '.new_session_id' "$MULTIVERSE_CONTROL")
+      echo ""
+      echo "[multiverse] Context folded. Resuming with optimized context..."
+      echo ""
+      claude "${PLUGIN_ARGS[@]}" -p "Context was folded successfully. Continue with your current task." \
+             --resume "$NEW_SESSION" 2>/dev/null || true
+      CLAUDE_ARGS=(--resume "$NEW_SESSION")
+      ;;
+    *)
+      echo "[multiverse-session] Unknown action: $ACTION" >&2
+      break
+      ;;
+  esac
+done
+
+# Mark ended so the monitor can reap this entry.
+if [ -n "${MULTIVERSE_STATUS:-}" ]; then
+  TS=$(date +%s)
+  printf '{"status":"ended","ts":%d}\n' "$TS" > "$MULTIVERSE_STATUS" || true
+fi
