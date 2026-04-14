@@ -32,12 +32,18 @@ if [ -n "${MULTIVERSE_PLUGIN_ROOT:-}" ]; then
   PLUGIN_ARGS=(--plugin-dir "$MULTIVERSE_PLUGIN_ROOT")
 fi
 
+# Apply the multiverse session name to every claude invocation.
+NAME_ARGS=()
+if [ -n "${MULTIVERSE_SESSION_NAME:-}" ]; then
+  NAME_ARGS=(--name "$MULTIVERSE_SESSION_NAME")
+fi
+
 CLAUDE_ARGS=("$@")
 
 while true; do
   : > "$MULTIVERSE_CONTROL"
 
-  claude "${PLUGIN_ARGS[@]}" "${CLAUDE_ARGS[@]}" || true
+  claude "${PLUGIN_ARGS[@]}" "${NAME_ARGS[@]}" "${CLAUDE_ARGS[@]}" || true
 
   if [ ! -s "$MULTIVERSE_CONTROL" ]; then
     break
@@ -52,7 +58,7 @@ while true; do
       echo ""
       echo "[multiverse] Context folded. Resuming with optimized context..."
       echo ""
-      claude "${PLUGIN_ARGS[@]}" -p "Context was folded successfully. Continue with your current task." \
+      claude "${PLUGIN_ARGS[@]}" "${NAME_ARGS[@]}" -p "Context was folded successfully. Continue with your current task." \
              --resume "$NEW_SESSION" 2>/dev/null || true
       CLAUDE_ARGS=(--resume "$NEW_SESSION")
       ;;

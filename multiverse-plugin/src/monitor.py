@@ -32,6 +32,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Header, Input, Static
 
+from .names import pick_random_name
+
 
 STATE_DIR = Path(os.path.expanduser("~/.multiverse/sessions"))
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
@@ -88,10 +90,38 @@ def _extract_preview(path: Path, max_lines: int = 80, max_chars: int = 80) -> st
     return "(no user message)"
 
 
+def read_claude_session_name(path: Path) -> Optional[str]:
+    """Return the user-assigned custom title of a claude session JSONL.
+
+    Scans for the last ``{type: "custom-title", customTitle: ...}`` entry
+    (matching claude-code's own ``extractLastJsonStringField`` behavior).
+    Does NOT fall back to ``ai-title`` — per feature spec, only user-set
+    names count.
+    """
+    try:
+        last: Optional[str] = None
+        with open(path, "r") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if raw.get("type") == "custom-title":
+                    ct = raw.get("customTitle")
+                    if ct:
+                        last = str(ct)
+        return last
+    except OSError:
+        return None
+
+
 def list_claude_sessions_in(cwd: str) -> list[dict]:
     """Return claude sessions under ``cwd``, newest first.
 
-    Each dict has: uuid, preview, mtime, size.
+    Each dict has: uuid, preview, mtime, size, name (from custom-title, or None).
     """
     cwd = cwd.strip()
     if not cwd:
@@ -111,9 +141,37 @@ def list_claude_sessions_in(cwd: str) -> list[dict]:
                 "preview": _extract_preview(path),
                 "mtime": st.st_mtime,
                 "size": st.st_size,
+                "name": read_claude_session_name(path),
             }
         )
     out.sort(key=lambda d: d["mtime"], reverse=True)
+    return out
+
+
+def existing_names_in_cwd(cwd: str) -> set[str]:
+    """Return the set of multiverse session names already assigned in ``cwd``.
+
+    Includes ended sessions — names are permanent per session since any
+    session can be resumed later and must re-attach with the same name.
+    """
+    out: set[str] = set()
+    if not STATE_DIR.exists():
+        return out
+    try:
+        cwd_abs = str(Path(cwd).expanduser().resolve())
+    except OSError:
+        return out
+    for entry in STATE_DIR.iterdir():
+        if not entry.is_dir():
+            continue
+        meta = _read_json(entry / "meta.json")
+        if not meta:
+            continue
+        if meta.get("cwd") != cwd_abs:
+            continue
+        name = meta.get("name")
+        if name:
+            out.add(str(name))
     return out
 
 
@@ -125,6 +183,7 @@ class Session:
     status: str = "unknown"
     status_ts: float = 0.0
     resumed_from: Optional[str] = None
+    name: Optional[str] = None
 
     @property
     def tmux_name(self) -> str:
@@ -164,6 +223,7 @@ def load_session(session_id: str) -> Optional[Session]:
         cwd=meta.get("cwd", "?"),
         created_at=meta.get("created_at", 0.0),
         resumed_from=meta.get("resumed_from"),
+        name=meta.get("name"),
     )
     st = _read_json(s.status_path)
     if st:
@@ -199,6 +259,7 @@ def create_session(
     cwd: str,
     claude_args: list[str],
     resumed_from: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> Session:
     sid = short_id()
     d = STATE_DIR / sid
@@ -216,6 +277,8 @@ def create_session(
     }
     if resumed_from:
         meta["resumed_from"] = resumed_from
+    if name:
+        meta["name"] = name
     (d / "meta.json").write_text(json.dumps(meta))
     (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
     (d / "control.json").write_text("")
@@ -236,8 +299,10 @@ def create_session(
         "-e", f"MULTIVERSE_CONTROL={d / 'control.json'}",
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
-        inner_cmd,
     ]
+    if name:
+        cmd += ["-e", f"MULTIVERSE_SESSION_NAME={name}"]
+    cmd.append(inner_cmd)
     subprocess.run(cmd, check=True)
     return Session(
         id=sid,
@@ -246,6 +311,7 @@ def create_session(
         status="starting",
         status_ts=now,
         resumed_from=resumed_from,
+        name=name,
     )
 
 
@@ -272,33 +338,118 @@ STATUS_STYLES = {
 }
 
 
-class NewSessionScreen(ModalScreen[Optional[str]]):
-    """Prompt the user for a working directory for a new session."""
+class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Prompt for a working directory + session name for a new session."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     def __init__(self, default_cwd: str) -> None:
         super().__init__()
         self.default_cwd = default_cwd
+        suggestion = pick_random_name(existing_names_in_cwd(default_cwd))
+        self.default_name = suggestion or ""
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Static("New session — working directory (Enter to confirm, Esc to cancel):"),
+            Static("New session"),
+            Static("Working directory:"),
             Input(value=self.default_cwd, id="new-cwd"),
+            Static("Session name:"),
+            Input(value=self.default_name, id="new-name"),
+            Static("", id="new-error"),
             id="new-dialog",
         )
 
     def on_mount(self) -> None:
-        self.query_one("#new-cwd", Input).focus()
+        self.query_one("#new-name", Input).focus()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        self.dismiss(event.value.strip() or None)
+        if event.input.id == "new-cwd":
+            self.query_one("#new-name", Input).focus()
+            return
+        self._try_submit()
+
+    def _try_submit(self) -> None:
+        cwd = self.query_one("#new-cwd", Input).value.strip()
+        name = self.query_one("#new-name", Input).value.strip()
+        err = self.query_one("#new-error", Static)
+
+        if not cwd:
+            err.update("[red]Working directory cannot be empty.[/]")
+            return
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except OSError as e:
+            err.update(f"[red]Invalid path: {e}[/]")
+            return
+        if not Path(cwd_abs).is_dir():
+            err.update(f"[red]Not a directory: {cwd_abs}[/]")
+            return
+        if not name:
+            err.update("[red]Name cannot be empty.[/]")
+            self.query_one("#new-name", Input).focus()
+            return
+        if name in existing_names_in_cwd(cwd_abs):
+            err.update(
+                f"[red]'{name}' is already used in this workspace. Choose another.[/]"
+            )
+            self.query_one("#new-name", Input).focus()
+            return
+        self.dismiss((cwd_abs, name))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
 
-class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
+class NameInputScreen(ModalScreen[Optional[str]]):
+    """Name-only modal used by the resume flow.
+
+    Validates non-empty and uniqueness within ``cwd`` before dismissing.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, cwd: str, default_name: str, reason: str) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self.default_name = default_name
+        self.reason = reason
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(self.reason, id="name-reason"),
+            Input(value=self.default_name, id="name-input"),
+            Static("", id="name-error"),
+            id="name-dialog",
+        )
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#name-input", Input)
+        inp.focus()
+        # Place cursor at end of prefilled name for easy editing
+        try:
+            inp.cursor_position = len(inp.value)
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        name = event.value.strip()
+        err = self.query_one("#name-error", Static)
+        if not name:
+            err.update("[red]Name cannot be empty.[/]")
+            return
+        if name in existing_names_in_cwd(self.cwd):
+            err.update(
+                f"[red]'{name}' is already used in this workspace. Choose another.[/]"
+            )
+            return
+        self.dismiss(name)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str, Optional[str]]]]):
     """Browse claude sessions under a cwd and pick one to resume."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -319,7 +470,7 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
 
     def on_mount(self) -> None:
         table = self.query_one("#resume-table", DataTable)
-        table.add_columns("UUID", "Preview", "Updated")
+        table.add_columns("UUID", "Name", "Preview", "Updated")
         self._populate()
         if self.sessions_info:
             table.focus()
@@ -335,7 +486,6 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
             self._populate()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        # Tab focus from the cwd input into the session table.
         if event.input.id == "resume-cwd" and self.sessions_info:
             self.query_one("#resume-table", DataTable).focus()
 
@@ -344,7 +494,12 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
         if not key:
             return
         cwd = self.query_one("#resume-cwd", Input).value.strip()
-        self.dismiss((cwd, str(key)))
+        claude_name: Optional[str] = None
+        for info in self.sessions_info:
+            if info["uuid"] == key:
+                claude_name = info.get("name")
+                break
+        self.dismiss((cwd, str(key), claude_name))
 
     def _populate(self) -> None:
         cwd = self.query_one("#resume-cwd", Input).value
@@ -354,8 +509,11 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
         now = time.time()
         for info in self.sessions_info:
             preview = info["preview"] or "(empty)"
+            claude_name = info.get("name")
+            name_cell = claude_name if claude_name else "[dim](unnamed)[/]"
             table.add_row(
                 info["uuid"][:8],
+                name_cell,
                 preview,
                 _ago(now - info["mtime"]),
                 key=info["uuid"],
@@ -374,11 +532,31 @@ class MonitorApp(App):
         height: 1fr;
     }
     #new-dialog {
-        width: 80;
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #new-error {
+        color: $error;
+        height: auto;
+        padding-top: 1;
+    }
+    #name-dialog {
+        width: 100;
         height: auto;
         padding: 1 2;
         border: round $primary;
         background: $surface;
+    }
+    #name-reason {
+        padding-bottom: 1;
+    }
+    #name-error {
+        color: $error;
+        height: auto;
+        padding-top: 1;
     }
     #resume-dialog {
         width: 100%;
@@ -415,7 +593,7 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
-        table.add_columns("ID", "Status", "CWD", "Updated")
+        table.add_columns("ID", "Name", "Status", "CWD", "Updated")
         yield table
         yield Footer()
 
@@ -448,7 +626,8 @@ class MonitorApp(App):
             cwd = s.cwd
             if len(cwd) > 48:
                 cwd = "..." + cwd[-45:]
-            table.add_row(s.id, status_cell, cwd, updated, key=s.id)
+            name_cell = s.name if s.name else "[dim](unnamed)[/]"
+            table.add_row(s.id, name_cell, status_cell, cwd, updated, key=s.id)
         if self.sessions:
             row = max(0, min(prev_cursor or 0, len(self.sessions) - 1))
             try:
@@ -468,26 +647,28 @@ class MonitorApp(App):
     def action_new_session(self) -> None:
         default = os.environ.get("MULTIVERSE_ORIG_CWD") or os.getcwd()
 
-        def cb(result: Optional[str]) -> None:
+        def cb(result: Optional[tuple[str, str]]) -> None:
             if not result:
                 return
+            cwd, name = result
             try:
-                create_session(result, self.claude_args)
+                create_session(cwd, self.claude_args, name=name)
             except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
                 self.notify(f"Spawn failed: {e}", severity="error")
                 return
             self.refresh_sessions()
-            self.notify("Session spawned")
+            self.notify(f"Spawned {name}")
 
         self.push_screen(NewSessionScreen(default), cb)
 
     def action_resume_session(self) -> None:
         default = os.environ.get("MULTIVERSE_ORIG_CWD") or os.getcwd()
 
-        def cb(result: Optional[tuple[str, str]]) -> None:
+        def on_picked(result: Optional[tuple[str, str, Optional[str]]]) -> None:
             if not result:
                 return
-            cwd, uuid = result
+            cwd, uuid, claude_name = result
+
             # De-dup: if a live multiverse session already wraps this claude
             # uuid, attach to that instance instead of spawning a fork.
             self.refresh_sessions()
@@ -502,18 +683,53 @@ class MonitorApp(App):
                         table.move_cursor(row=i)
                     except Exception:
                         pass
-                    self.notify(f"Already running as {s.id} — attaching")
+                    label = s.name or s.id
+                    self.notify(f"Already running as {label} — attaching")
                     self.action_attach()
                     return
-            try:
-                create_session(cwd, ["--resume", uuid], resumed_from=uuid)
-            except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
-                self.notify(f"Resume failed: {e}", severity="error")
-                return
-            self.refresh_sessions()
-            self.notify(f"Resumed {uuid[:8]}")
 
-        self.push_screen(ResumeSessionScreen(default), cb)
+            # Resolve name: if the claude session has a custom-title and it
+            # doesn't collide, use it directly; otherwise prompt.
+            try:
+                cwd_abs = str(Path(cwd).expanduser().resolve())
+            except OSError as e:
+                self.notify(f"Invalid cwd: {e}", severity="error")
+                return
+            existing = existing_names_in_cwd(cwd_abs)
+            if claude_name and claude_name not in existing:
+                self._spawn_resumed(cwd_abs, uuid, claude_name)
+                return
+
+            if claude_name:
+                reason = (
+                    f"'{claude_name}' is already used in this workspace. "
+                    "Pick a different name for this session:"
+                )
+                default_name = claude_name
+            else:
+                reason = (
+                    "This claude session has no name yet. "
+                    "Assign a name for the multiverse session:"
+                )
+                default_name = pick_random_name(existing) or ""
+
+            def on_name(name: Optional[str]) -> None:
+                if not name:
+                    return
+                self._spawn_resumed(cwd_abs, uuid, name)
+
+            self.push_screen(NameInputScreen(cwd_abs, default_name, reason), on_name)
+
+        self.push_screen(ResumeSessionScreen(default), on_picked)
+
+    def _spawn_resumed(self, cwd: str, uuid: str, name: str) -> None:
+        try:
+            create_session(cwd, ["--resume", uuid], resumed_from=uuid, name=name)
+        except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+            self.notify(f"Resume failed: {e}", severity="error")
+            return
+        self.refresh_sessions()
+        self.notify(f"Resumed {uuid[:8]} as {name}")
 
     def action_attach(self) -> None:
         s = self._current_session()
