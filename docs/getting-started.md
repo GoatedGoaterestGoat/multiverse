@@ -61,10 +61,13 @@ The official docs at [code.claude.com/docs](https://code.claude.com/docs) are th
 | `utils/sessionStorage.ts` | JSONL persistence, `insertMessageChain()`, parentUuid handling |
 | `utils/messages.ts` | Message creation, normalization for API |
 | `utils/messagePredicates.ts` | `isHumanTurn()` and other message classifiers |
-| `main.tsx` | CLI argument parsing — `--resume`, `--continue`, `--fork-session`, `-p` |
+| `main.tsx` | CLI argument parsing — `--resume`, `--continue`, `--fork-session`, `-p`, plus *hidden* flags (`--max-turns`, `--session-id`) |
 | `cli/print.ts` | Print mode logic, headless resume behavior |
 | `state/AppStateStore.ts` | App-level state, initial message handling |
 | `types/message.ts` | The discriminated `Message` union type |
+| `commands/btw/btw.tsx` | The `/btw` slash command UI — React component, not a CLI flag |
+| `utils/sideQuestion.ts` | The strict `<system-reminder>` wrapper + `runForkedAgent` call powering `/btw` |
+| `utils/forkedAgent.ts` | `CacheSafeParams`, `runForkedAgent`, `getLastCacheSafeParams` — the cache-safe forking machinery |
 
 **Key insights extracted from this exploration:**
 
@@ -75,6 +78,8 @@ The official docs at [code.claude.com/docs](https://code.claude.com/docs) are th
 3. **Plugins cannot replicate `/compact`'s hot-swap.** Plugins run as external processes (hooks, MCP servers) with no access to `messagesRef`, the generator state, or `setMessages()`. The only way to swap context from a plugin is to stop the session and resume.
 
 4. **Compact boundaries sever the JSONL chain.** A compaction boundary message is written with `parentUuid: null`, orphaning the old conversation chain on disk while in-memory state continues seamlessly.
+
+5. **`/btw` is the canonical "side question" pattern.** It runs `runForkedAgent` with cached params from the main thread's last request, denies all tools, caps at 1 turn, and never persists. From outside the process we can approximate it via `claude -p --resume --fork-session --session-id <fresh> --tools "" --max-turns 1` — same wrapper prompt, same single-turn semantics, but only the *fallback* cache path (rebuild from scratch) is available since `getLastCacheSafeParams()` is in-process state.
 
 ### MCP (Model Context Protocol)
 

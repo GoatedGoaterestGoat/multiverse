@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "context-fold": {
+    "multiverse": {
       "command": "uv",
-      "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}", "run", "context-fold-mcp"]
+      "args": ["--directory", "${CLAUDE_PLUGIN_ROOT}", "run", "multiverse-mcp"]
     }
   }
 }

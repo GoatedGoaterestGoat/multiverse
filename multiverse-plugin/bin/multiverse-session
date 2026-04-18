@@ -40,10 +40,14 @@ fi
 
 CLAUDE_ARGS=("$@")
 
+# Bash 3.2 (default on macOS) errors on `"${ARR[@]}"` when ARR is empty under
+# `set -u`. Use `${ARR[@]+"${ARR[@]}"}` — expand only if set — to stay safe.
 while true; do
   : > "$MULTIVERSE_CONTROL"
 
-  claude "${PLUGIN_ARGS[@]}" "${NAME_ARGS[@]}" "${CLAUDE_ARGS[@]}" || true
+  claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+         ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
+         ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} || true
 
   if [ ! -s "$MULTIVERSE_CONTROL" ]; then
     break
@@ -58,7 +62,9 @@ while true; do
       echo ""
       echo "[multiverse] Context folded. Resuming with optimized context..."
       echo ""
-      claude "${PLUGIN_ARGS[@]}" "${NAME_ARGS[@]}" -p "Context was folded successfully. Continue with your current task." \
+      claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+             ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
+             -p "Context was folded successfully. Continue with your current task." \
              --resume "$NEW_SESSION" 2>/dev/null || true
       CLAUDE_ARGS=(--resume "$NEW_SESSION")
       ;;

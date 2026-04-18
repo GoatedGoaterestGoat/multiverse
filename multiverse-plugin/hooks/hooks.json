@@ -6,6 +6,14 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/set-status.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/record-claude-uuid.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/deliver-inbox.py"
           }
         ]
       }
@@ -16,6 +24,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/set-status.sh working"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/deliver-inbox.py"
           }
         ]
       }
@@ -25,7 +37,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/set-status.sh waiting"
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-notification.sh"
           }
         ]
       }
@@ -56,6 +68,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/set-status.sh idle"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/deliver-inbox.py"
           }
         ]
       }

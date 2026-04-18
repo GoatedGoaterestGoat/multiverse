@@ -9,8 +9,8 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase 0: Foundation | 🟡 In progress | Repo set up, plugin scaffolding done |
 | Phase 1: Branching conversations | ⚪ Not started | |
 | Phase 2: Context management | 🟡 Partial | Context folding works (manual + auto-resume) |
-| Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor POC (tmux + Textual TUI) landed |
-| Phase 4: Inter-agent communication | ⚪ Not started | |
+| Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
+| Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `ask_agent` / `respond_to_agent` with file-based inbox delivery |
 | Phase 5: UI | 🟡 Partial | Monitor TUI doubles as the first UI surface |
 | Phase 6: Polish & distribution | ⚪ Not started | |
 
@@ -88,11 +88,23 @@ The wrapper script was rewritten from "single claude in a loop" into a **multi-s
 | `scripts/set-status.sh` | One-liner called by status hooks with `idle`/`working`/`waiting`/`ended` |
 | `hooks/hooks.json` | Added `SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse` (`.*`), `Stop`, `SessionEnd` handlers alongside the existing `context_fold` hook |
 
-**State layout** (`~/.multiverse/sessions/<mv-id>/`):
+**State layout** (`~/.multiverse/`):
 
-- `meta.json` — cwd, created_at, claude_args, optional `resumed_from` (the claude UUID the user picked in the resume screen)
-- `status.json` — `{"status": ..., "ts": ...}` written by hook scripts
-- `control.json` — existing context-fold signaling channel (now per-session instead of `mktemp`)
+```
+sessions/<mv-id>/
+  meta.json        — cwd, created_at, claude_args, name, optional resumed_from
+  status.json      — {"status": ..., "ts": ...} written by hook scripts
+  claude_uuid      — current claude session UUID (SessionStart hook → record-claude-uuid.sh)
+  control.json     — context-fold signaling channel
+
+asks/<ask-id>.json — inter-agent ask metadata (from/to/cwd/question/wait_for_response).
+                     Persistent until respond_to_agent deletes it; survives crashes.
+
+inbox/<encoded-cwd>/<recipient-name>/<ask-id>.json
+                   — pending message file (question or response). Written atomically
+                     by ask_agent / respond_to_agent. Consumed (deleted) by the
+                     deliver-inbox hook on first delivery.
+```
 
 **How it fits together:**
 
@@ -107,12 +119,75 @@ The wrapper script was rewritten from "single claude in a loop" into a **multi-s
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session (cwd prompt) |
-| `R` | Resume — browse claude sessions under a cwd |
-| `Enter` | Attach to highlighted session |
+| `n` | New session — name-only prompt (cwd is fixed at monitor launch) |
+| `R` | Resume — pick from claude sessions in the monitor's cwd (live/ended wraps hidden) |
+| `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
+| `Enter` | Live rows → attach; ended/dormant rows → resume |
 | `k` | Kill session (tmux kill + remove state dir) |
 | `r` | Manual refresh |
 | `q` | Quit monitor (sessions keep running in tmux) |
+
+**Dashboard columns**: `ID · Name · Inbox (📩 N) · Status · Updated · Preview`. Inbox shows pending inter-agent messages waiting on this agent's hooks. Preview shows the first non-system user message from the agent's transcript (cached by `(path, mtime)`).
+
+### Dashboard: per-cwd scope + dormant sessions
+
+The monitor is scoped to a single cwd — whichever `MULTIVERSE_ORIG_CWD` was set when `bin/multiverse` was launched. Other multiverse instances manage other cwds independently. The dashboard surfaces two kinds of rows, both filtered to the monitor's cwd:
+
+1. **Named multiverse sessions** (live or ended) — from `~/.multiverse/sessions/<id>/meta.json`. Unnamed sessions are hidden per design.
+2. **Dormant named claude sessions** — claude JSONLs in `~/.claude/projects/<encoded-cwd>/` that have a user-assigned `custom-title` and aren't wrapped by any multiverse session. Enter on one of these resumes it (reaping the ended multiverse meta first if needed, so the name is free).
+
+**Dedup** uses each session's `claude_uuid` (hook-captured) with `resumed_from` as a fallback. Reading every JSONL every tick would be expensive — metadata is cached by `(path, mtime)` so dormant scans are cheap once warm.
+
+The resume widget hides wrapped UUIDs (both live and ended) — each claude session therefore has exactly one canonical place in the UI.
+
+### Ask-all: user→agents temporary questions
+
+Location: `multiverse-plugin/src/ask_agents.py`
+
+Press `a` in the monitor to fan out a one-shot question to every named session in the cwd. Each target gets a forked subprocess:
+
+```
+claude --plugin-dir $MULTIVERSE_PLUGIN_ROOT --resume <uuid> --fork-session \
+       --session-id <fresh-uuid> --tools "" --max-turns 1 -p "<wrapped question>"
+```
+
+Responses are collected in parallel (`ThreadPoolExecutor`, max 5) and shown in a scrollable modal with per-agent elapsed time. The fork JSONL is `unlink`ed in a `finally` block after the subprocess exits, and active fork UUIDs are tracked in a locked set so they're hidden from both the dashboard and resume widget for their brief lifetime.
+
+**The wrapped prompt** is a verbatim copy of claude-code's `utils/sideQuestion.ts` — same `<system-reminder>` wording that the built-in `/btw` uses. This is by design: we want the side question to present identically to the model across both paths.
+
+**Cache behavior**: from an external subprocess we can't call claude-code's internal `getLastCacheSafeParams()`, which is what `/btw` uses to guarantee a byte-identical prefix against the live process's last request. The subprocess must rebuild `systemPrompt`/`userContext`/`systemContext` from scratch. If the build is deterministic (no `--agent`, `--system-prompt`, `--append-system-prompt`, or coordinator mode), the rebuilt bytes match → cache hit on the prefix. This is equivalent to `/btw`'s documented fallback path. For dormant sessions the cache is cold anyway, so rebuilding is the only option.
+
+**Tool containment**: `--tools ""` is the documented disable-all sentinel; `--max-turns 1` caps at one assistant turn. Both are backed by the strict side-question prompt. A subprocess timeout (60s default) is the final guard.
+
+### Inter-agent comms (agent-callable MCP tools)
+
+Location: `multiverse-plugin/src/server.py`, `src/inbox.py`, `scripts/deliver-inbox.py`
+
+The MCP server (renamed from `context-fold` → `multiverse`) now exposes three agent-callable tools for inter-agent coordination, all scoped to the calling agent's cwd:
+
+- **`list_agents(max_agents=15)`** — Returns named agents in the workspace (live, ended, dormant). Calling agent is pinned to the top with a `← this is you` marker. Sorted by status priority (live → idle → dormant → ended) and truncated when long.
+- **`ask_agent(target_name, question, wait_for_response=False, timeout_seconds=600)`** — Sends a question to another agent. Default non-blocking: drops into the target's inbox and returns immediately. Blocking mode (`wait_for_response=True`) polls the asker's own inbox for the response, returning either inline or "not yet responded — you'll be notified" on timeout. **Auto-resumes dormant targets** by spawning a multiverse-managed tmux session (`--resume <uuid>`).
+- **`respond_to_agent(ask_id, response)`** — Looks up the ask by id, verifies the caller was the original recipient, drops the response into the asker's inbox (carrying the original question text along for context), deletes the ask record.
+
+**Delivery via inbox + hook injection**:
+
+1. Writers (`ask_agent`, `respond_to_agent`) atomically (`tmp + rename`) drop a JSON file into `~/.multiverse/inbox/<encoded-cwd>/<recipient>/<ask-id>.json`.
+2. `scripts/deliver-inbox.py` is wired to **three hooks** on every multiverse-managed claude session: `SessionStart`, `UserPromptSubmit`, `Stop`. On each fire it lists pending files; if any exist, formats them as one `<system-reminder>` block, returns the right injection JSON for the firing event, and **deletes** the consumed files.
+3. Whichever hook fires first wins — subsequent hook fires see an empty inbox. Once injected, the system-reminder lives in the recipient's conversation history forever, so re-injection isn't needed.
+4. **Stop hook is the post-turn delivery path**: claude-code's hook output schema doesn't expose `additionalContext` for Stop, so we use `decision: "block"` with the message body as `reason`. This becomes a synthetic `"Stop hook feedback:\n…"` user message and triggers another model turn — exactly the wakeup we want when an inbox arrives mid-task.
+5. **Critical write order**: when ask_agent auto-resumes a dormant target, the inbox file is written **before** spawning so SessionStart fires after the file exists. Reverse order races the file write against tmux startup — SessionStart sees an empty inbox and the question sits unread until UserPromptSubmit fires later (when the user types something).
+
+**Notification filtering**: claude-code's `Notification` hook fires for *both* permission prompts AND idle alerts (`notification_type: "idle_prompt"`, "Claude is waiting for your input"). The original handler set status to `waiting` for any notification, which then overwrote the post-Stop `idle` status on every turn. New `scripts/on-notification.sh` reads the hook input JSON, ignores informational types (`idle_prompt`, `elicitation_*`, `auth_success`, `computer_use_*`), and only sets `waiting` for genuinely blocking notifications.
+
+**Dashboard surfacing**: the monitor table now has an `Inbox` column showing `📩 N` when an agent has pending messages, plus a `Preview` column showing the first user message (cached metadata, populated for both live and dormant rows).
+
+### Code layout: data layer extracted
+
+Location: `multiverse-plugin/src/sessions.py`
+
+The pure data layer (no Textual, no in-process state) was extracted from `monitor.py` into `sessions.py` so the MCP server can use it without dragging the TUI in. Includes: `Session`, `DashboardRow`, `_read_session_metadata` (with `(path, mtime)` cache), `list_sessions`, `build_dashboard_rows`, `wrapped_claude_uuids`, `list_named_agents_in_cwd`, `find_agent_by_name`, plus `create_session` / `kill_session` (moved from monitor so the MCP server's `ask_agent` can auto-resume dormant targets without inverting the dependency direction).
+
+`monitor.py` now only contains UI concerns (`MonitorApp`, all `*Screen` modal classes) plus thin wiring.
 
 ## What we learned
 
@@ -175,6 +250,59 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 - Used for `tmux attach-session` — no manual raw-mode juggling required
 - Textual 8.x supports this directly
 
+### About `/btw` internals (from claude-code-src/commands/btw + utils/sideQuestion)
+
+- `/btw` is a React-backed slash command (`commands/btw/btw.tsx`), not a CLI-exposed feature — plugins and external subprocesses cannot invoke it directly
+- Its actual work is in `utils/sideQuestion.ts` → `runForkedAgent` (`utils/forkedAgent.ts`), which takes a `CacheSafeParams` blob and runs a single-turn, tool-denied API call
+- The blob comes from `getLastCacheSafeParams()` — exact `systemPrompt`/`userContext`/`systemContext` bytes captured in stopHooks on the main thread's last request. Reusing them guarantees prompt cache hit
+- Fallback (first turn, or prompt-suggestion disabled): rebuild from scratch via `getSystemPrompt` / `getUserContext` / `getSystemContext`. May miss cache if `--agent`/`--system-prompt`/coordinator extras were applied
+- **We can only do the fallback path from outside.** `claude -p --resume --fork-session` rebuilds the same way — byte-identical iff the same extras (or lack thereof) apply
+
+### Hidden CLI flags (worth knowing about)
+
+- `--max-turns <N>` — early-exits after N agentic turns. Only works with `--print`. Hidden via `.hideHelp()` in `main.tsx`, so it doesn't show in `claude -h`. Use this to hard-cap one-off subprocess asks instead of fighting with prompts.
+- `--tools ""` — disable ALL tools (documented sentinel for the `--tools` variadic). Cleaner than enumerating tool names or using `--permission-mode plan` (which has other side effects).
+- `--session-id <uuid>` — explicitly name the session file. Only valid with `--continue`/`--resume` when combined with `--fork-session`. Essential for ask-all-style flows where we need to delete the fork JSONL afterward and therefore need to know its filename up front.
+
+### Textual CSS gotcha — `height` includes padding
+
+- `height: 1; padding-top: 1;` on a `Static` renders as zero visible rows, not one. Textual's box model puts padding *inside* the declared height, so the content gets squeezed to 0.
+- Use `height: auto` (and let padding add on top) for any short hint/label with padding. Bit us across all of the modal dialogs — hints were invisible until we noticed.
+
+### Hook output capabilities are hook-event-specific
+
+- The `hookSpecificOutput.additionalContext` field is **NOT** supported on every event. The Zod union in `claude-code-src/types/hooks.ts` only lists it for `PreToolUse`, `UserPromptSubmit`, `SessionStart`, `Setup`, `SubagentStart`, `PostToolUse`, `PostToolUseFailure`, `Notification`. **`Stop` is missing.**
+- For Stop hooks, use `decision: "block"` with the message body as `reason`. The runtime renders that as a synthetic user message prefixed with `"Stop hook feedback:\n"` and triggers another model turn — which doubles as a "wake from idle" mechanism for inbox delivery.
+
+### `Notification` hook fires for non-blocking events too
+
+- `notification_type` is the discriminator. Known types: `idle_prompt` (the "Claude is waiting for your input" alert that fires after `messageIdleNotifThresholdMs`), `worker_permission_prompt`, `elicitation_complete`, `elicitation_response`, `auth_success`, `computer_use_enter`, `computer_use_exit`, plus permission-request types.
+- Don't use the Notification hook as a generic "agent is blocked" signal — read the type and only react to the genuinely blocking ones, otherwise you'll overwrite `idle` with `waiting` after every turn once the idle timer fires.
+
+### macOS bash 3.2 + `set -u` + empty arrays
+
+- Apple ships bash 3.2 (licensing). Under `set -u`, expanding `"${ARR[@]}"` when `ARR=()` is empty raises "unbound variable" — the script dies before its first command runs.
+- Fix: `${ARR[@]+"${ARR[@]}"}` (the canonical "expand only if set" pattern). Works on bash 3.2 and 4+. Bit us in `bin/multiverse-session` — new sessions launched via plain `multiverse` (no claude args) crashed silently and the wrapper wrote `"ended"` immediately on exit.
+
+### `uv run <script>` requires the project to be packaged
+
+- Plain `uv run script-name` does not actually invoke `[project.scripts]` entries unless the project has a `[build-system]` (so uv can install a wheel into the venv). Without it, uv silently skips entry-point installation — it warns once at sync time but the entries don't exist at run time.
+- Fix: add a minimal hatchling block:
+  ```toml
+  [build-system]
+  requires = ["hatchling"]
+  build-backend = "hatchling.build"
+  
+  [tool.hatch.build.targets.wheel]
+  packages = ["src"]
+  ```
+- After this, `.mcp.json` can dispatch the server via `uv --directory ${CLAUDE_PLUGIN_ROOT} run multiverse-mcp` and the entry actually resolves.
+
+### MCP tool display in Claude Code is NOT plugin-extensible
+
+- All MCP tool results route through a single hardcoded renderer in `tools/MCPTool/UI.tsx`. There's no MCP protocol field, no plugin hook, no per-tool registration mechanism for custom rendering.
+- The few "customizations" that exist (Slack send compaction; `classifyForCollapse.ts`'s ~600-tool collapse list) are **upstream-hardcoded special cases**, not extension points. To get nicer rendering for a plugin's tools, control only what you can: the *text* the tool returns. The renderer auto-unwraps dominant-text JSON, renders small flat objects as aligned `key: value`, and falls through to `OutputLine` (truncated text) otherwise.
+
 ## What's next
 
 ### Immediate (Phase 0 → Phase 2 completion)
@@ -185,14 +313,18 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 - [ ] Add a `recall` MCP tool for expanding folded content back (Phase 2 roadmap item)
 - [ ] Decide on context manager model strategy (Haiku vs same-as-agent)
 
-### Monitor follow-ups (from the POC)
+### Monitor follow-ups
 
+- [x] Track live claude UUID per multiverse session (via `SessionStart` hook → `claude_uuid` file) so we can dedup against dormant listings
+- [x] Surface dormant named claude sessions on the dashboard; let Enter resume them directly
+- [x] Hide live/ended wraps from the resume widget — each session has one canonical place in the UI
+- [x] Scope each monitor instance to a single cwd (`MULTIVERSE_ORIG_CWD`); drop the CWD column from the dashboard
 - [ ] Ended sessions linger on disk until manually killed — auto-reap on monitor start, or add a "purge ended" binding
 - [ ] `claude_args` passed to `multiverse` are forwarded verbatim to every new session — probably want per-session args instead
 - [ ] No way to trigger context-fold from the monitor itself; it still requires the agent inside a session
 - [ ] Attach UX assumes default tmux `Ctrl-b` prefix; no custom keybinding yet
 - [ ] Status transitions rely on hooks only — a detached session blocked on the long-resume cost prompt stays at `starting` forever
-- [ ] Dedup by `resumed_from` only catches the resume path; branching (explicit new branch off an existing session) will need its own action
+- [ ] Dedup by `resumed_from`/`claude_uuid` only catches the resume path; branching (explicit new branch off an existing session) will need its own action
 
 ### Phase 1: Branching conversations
 
@@ -210,10 +342,19 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 
 ### Phase 4: Inter-agent communication
 
-- [ ] Asker/responder protocol implementation
-- [ ] `agentA-agentB.jsonl` mailbox files
-- [ ] Add `send_message` action to the wrapper dispatch loop
+- [x] User→agents fan-out (ask-all from the monitor)
+- [x] Agent-callable `list_agents` MCP tool (workspace discovery)
+- [x] Agent→agent direct ask — `ask_agent` + `respond_to_agent`, file-based inbox delivery
+- [x] Auto-resume dormant agents on incoming ask
+- [x] Stop-hook wakeup so mid-task asks get picked up after the current turn finishes
+- [x] Notification filtering so `idle_prompt` doesn't overwrite `idle` with `waiting`
+- [x] Inbox + Preview columns on the dashboard
+- [ ] Agent→agents MCP fan-out tool (the agent-callable equivalent of the `a` keybinding) — useful as a discovery prelude before a targeted `ask_agent`
+- [ ] Multi-turn asker/responder protocol — `ask_agent` is currently one-shot per ask_id; threading subsequent follow-ups into the same conversation isn't supported
+- [ ] Persistent thread mailbox (`agentA-agentB.jsonl`) for ongoing relationships, distinct from the per-message inbox files we have now
+- [ ] **Idle-no-activity blind spot**: if recipient B is live and idle with nothing happening, no hook fires until something else triggers one. Inbox sits until B's user types or B is restarted. Workaround: dashboard surfaces `📩 N` indicator so the user knows to attach + nudge B.
 - [ ] Context assembly logic per the rules in the root README
+- [ ] Garbage-collect orphan asks (timed-out, unanswered) — currently `~/.multiverse/asks/<id>.json` lingers if respond is never called
 
 ### Phase 5: UI
 
