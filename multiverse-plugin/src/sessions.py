@@ -498,6 +498,18 @@ def create_session(
         cmd += ["-e", f"MULTIVERSE_SESSION_NAME={name}"]
     cmd.append(inner_cmd)
     subprocess.run(cmd, check=True)
+
+    # Per-session mouse mode: scroll wheel scrolls the pane history naturally
+    # (no Ctrl-b [ to enter copy mode). Scoped to this session so the user's
+    # global tmux config is untouched. Selecting text now goes through tmux
+    # copy-mode — hold Shift while dragging for terminal-native selection
+    # (iTerm2/Alacritty/Kitty/etc.).
+    subprocess.run(
+        ["tmux", "set-option", "-t", tmux_name, "mouse", "on"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
     return Session(
         id=sid,
         cwd=cwd_abs,
