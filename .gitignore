@@ -4,6 +4,9 @@ Playground/
 # Reference CC source
 claude-code-src/
 
+# Legacy standalone MCP server (superseded by multiverse-plugin/)
+context-fold-mcp/
+
 # Test files
 context-original.md
 context-folded.md
