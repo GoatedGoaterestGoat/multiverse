@@ -161,25 +161,29 @@ Responses are collected in parallel (`ThreadPoolExecutor`, max 5) and shown in a
 
 ### Inter-agent comms (agent-callable MCP tools)
 
-Location: `multiverse-plugin/src/server.py`, `src/inbox.py`, `scripts/deliver-inbox.py`
+Location: `multiverse-plugin/src/server.py`, `src/inbox.py`, `src/ask_agents.py`, `scripts/deliver-inbox.py`
 
-The MCP server (renamed from `context-fold` → `multiverse`) now exposes three agent-callable tools for inter-agent coordination, all scoped to the calling agent's cwd:
+The MCP server (renamed from `context-fold` → `multiverse`) exposes three agent-callable tools for inter-agent coordination, all scoped to the calling agent's cwd. The design splits into **persistent messaging** vs **ephemeral side-questions**:
 
-- **`list_agents(max_agents=15)`** — Returns named agents in the workspace (live, ended, dormant). Calling agent is pinned to the top with a `← this is you` marker. Sorted by status priority (live → idle → dormant → ended) and truncated when long.
-- **`ask_agent(target_name, question, wait_for_response=False, timeout_seconds=600)`** — Sends a question to another agent. Default non-blocking: drops into the target's inbox and returns immediately. Blocking mode (`wait_for_response=True`) polls the asker's own inbox for the response, returning either inline or "not yet responded — you'll be notified" on timeout. **Auto-resumes dormant targets** by spawning a multiverse-managed tmux session (`--resume <uuid>`).
-- **`respond_to_agent(ask_id, response)`** — Looks up the ask by id, verifies the caller was the original recipient, drops the response into the asker's inbox (carrying the original question text along for context), deletes the ask record.
+- **`list_agents(max_agents=15)`** — Returns named agents in the workspace (live, ended, dormant). Calling agent pinned to the top with a `← this is you` marker. Sorted by status priority (live → idle → dormant → ended) and truncated when long.
+- **`message_agent(target_name, message)`** — Persistent, fire-and-forget. Drops a message into the recipient's inbox, returns immediately. Recipient sees it as a system-reminder injected into their next turn (or on resume if dormant — auto-resume kicks in). The recipient has full tool access and the message persists in their conversation history. Replies are done by calling `message_agent` back at the original sender; there is no separate "respond" tool.
+- **`ask_agent(target_name, question, timeout_seconds=60)`** — Ephemeral side-question. Reuses the ask-all fork-session mechanism but for a single named target: spawns `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1`. Blocking — returns the answer inline or `"<agent>" did not respond within Ns` on timeout. Target's main session is NOT involved; nothing persists.
 
-**Delivery via inbox + hook injection**:
+The split is intentional: `message_agent` is for instructions and complex requests (target reads, runs commands, thinks); `ask_agent` is for facts the target already knows (no tools, no context pollution).
 
-1. Writers (`ask_agent`, `respond_to_agent`) atomically (`tmp + rename`) drop a JSON file into `~/.multiverse/inbox/<encoded-cwd>/<recipient>/<ask-id>.json`.
+**Delivery via inbox + hook injection** (only used by `message_agent` — `ask_agent` is a forked subprocess, separate path):
+
+1. `message_agent` atomically writes (`tmp + rename`) a single JSON file to `~/.multiverse/inbox/<encoded-cwd>/<recipient>/<message-id>.json` containing `{message_id, from, body, ts}`.
 2. `scripts/deliver-inbox.py` is wired to **three hooks** on every multiverse-managed claude session: `SessionStart`, `UserPromptSubmit`, `Stop`. On each fire it lists pending files; if any exist, formats them as one `<system-reminder>` block, returns the right injection JSON for the firing event, and **deletes** the consumed files.
 3. Whichever hook fires first wins — subsequent hook fires see an empty inbox. Once injected, the system-reminder lives in the recipient's conversation history forever, so re-injection isn't needed.
-4. **Stop hook is the post-turn delivery path**: claude-code's hook output schema doesn't expose `additionalContext` for Stop, so we use `decision: "block"` with the message body as `reason`. This becomes a synthetic `"Stop hook feedback:\n…"` user message and triggers another model turn — exactly the wakeup we want when an inbox arrives mid-task.
-5. **Critical write order**: when ask_agent auto-resumes a dormant target, the inbox file is written **before** spawning so SessionStart fires after the file exists. Reverse order races the file write against tmux startup — SessionStart sees an empty inbox and the question sits unread until UserPromptSubmit fires later (when the user types something).
+4. **Stop hook is the post-turn delivery path**: claude-code's hook output schema doesn't expose `additionalContext` for Stop, so we use `decision: "block"` with the message body as `reason`. This becomes a synthetic `"Stop hook feedback:\n…"` user message and triggers another model turn — exactly the wakeup we want when a message arrives mid-task.
+5. **Critical write order**: when `message_agent` auto-resumes a dormant target, the inbox file is written **before** spawning so SessionStart fires after the file exists. Reverse order races the file write against tmux startup — SessionStart sees an empty inbox and the message sits unread until UserPromptSubmit fires later (when the user types something).
 
 **Notification filtering**: claude-code's `Notification` hook fires for *both* permission prompts AND idle alerts (`notification_type: "idle_prompt"`, "Claude is waiting for your input"). The original handler set status to `waiting` for any notification, which then overwrote the post-Stop `idle` status on every turn. New `scripts/on-notification.sh` reads the hook input JSON, ignores informational types (`idle_prompt`, `elicitation_*`, `auth_success`, `computer_use_*`), and only sets `waiting` for genuinely blocking notifications.
 
-**Dashboard surfacing**: the monitor table now has an `Inbox` column showing `📩 N` when an agent has pending messages, plus a `Preview` column showing the first user message (cached metadata, populated for both live and dormant rows).
+**Dashboard surfacing**: the monitor table now has an `Inbox` column showing `📩 N` when an agent has pending `message_agent` messages, plus a `Preview` column showing the first user message (cached metadata, populated for both live and dormant rows).
+
+**Earlier ask/respond design (replaced)**: an earlier iteration had `ask_agent` (with `wait_for_response` flag) and `respond_to_agent`, both routed via the inbox plus a persistent `~/.multiverse/asks/<ask-id>.json` ask-record for response routing. That's been retired in favor of the cleaner two-tool split above. The asks/ directory is no longer touched (safe to delete on disk).
 
 ### Code layout: data layer extracted
 

@@ -1,9 +1,15 @@
 """Multiverse MCP server.
 
 Hosts the agent-facing tools for the multiverse plugin:
-  - context_info / context_fold        — selective context folding
-  - list_agents                        — discover other agents in workspace
-  - ask_agent / respond_to_agent       — inter-agent question/response
+  - context_info / context_fold   — selective context folding
+  - list_agents                   — discover other agents in workspace
+  - message_agent                 — send a persistent message to another
+                                    agent (delivered via inbox + hook
+                                    injection; recipient may use tools and
+                                    reply by calling message_agent back)
+  - ask_agent                     — quick ephemeral question to another
+                                    agent (forked side-question, no tools,
+                                    blocking with timeout)
 """
 
 from __future__ import annotations
@@ -11,7 +17,6 @@ from __future__ import annotations
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -26,22 +31,12 @@ from src.sessions import (
     find_agent_by_name,
     list_named_agents_in_cwd,
 )
-from src.inbox import (
-    AskRecord,
-    delete_ask,
-    find_response_file,
-    load_ask,
-    new_ask_id,
-    save_ask,
-    write_question_to_inbox,
-    write_response_to_inbox,
-)
+from src.inbox import write_message_to_inbox
+from src.ask_agents import AskTarget, ask_one
 
 mcp = FastMCP("multiverse")
 
-# Default timeout (seconds) for blocking ask_agent calls.
-_DEFAULT_ASK_TIMEOUT = 600
-_POLL_INTERVAL = 0.5
+_DEFAULT_ASK_TIMEOUT = 60
 
 
 def _write_control_action(action: dict) -> bool:
@@ -234,44 +229,31 @@ def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
 
 
 @mcp.tool()
-def ask_agent(
-    target_name: str,
-    question: str,
-    wait_for_response: bool = False,
-    timeout_seconds: int = _DEFAULT_ASK_TIMEOUT,
-) -> str:
-    """Send a question to another named agent in your workspace.
+def message_agent(target_name: str, message: str) -> str:
+    """Send a durable message to another named agent in your workspace.
 
-    The target agent receives your question as a notification (system-
-    reminder) injected into their next turn. They can use any tools to
-    investigate, then call ``respond_to_agent`` with their answer.
+    Use this for instructions, in-depth questions, or any communication
+    where the recipient should be able to take action — read files, run
+    commands, use tools, then reply at their own pace.
 
-    The target agent's main session is involved (this is not a forked one-
-    shot like ``/btw``). The full back-and-forth lives in the target's
-    conversation history, and they can use Read, Bash, Grep, etc. as needed
-    to answer.
+    Delivery: the message is dropped into the recipient's inbox and
+    surfaces as a system-reminder injected into their next turn (or
+    immediately on resume if they're dormant — they get auto-resumed). The
+    message persists in the recipient's conversation history. This is
+    fire-and-forget: the tool returns as soon as the message is delivered;
+    you do NOT block on a reply.
 
-    If the target is dormant, they're auto-resumed in a detached tmux
-    session before the question is delivered.
+    To reply to a message you received, simply call ``message_agent`` back
+    at the original sender — there is no separate "respond" tool.
 
-    Modes:
-      - ``wait_for_response=False`` (default, recommended): non-blocking.
-        Returns immediately after the question is delivered to the target's
-        inbox. The response, when it arrives, will be delivered back to YOU
-        as a notification on your next turn.
-      - ``wait_for_response=True``: blocks for up to ``timeout_seconds``
-        (default 600s = 10min) waiting for the target to respond. Returns
-        the response inline. If the timeout elapses, returns a "not yet
-        responded" message — the response will still arrive as a
-        notification when the target eventually answers.
+    For quick one-off questions where you just need a fact and don't want
+    to disturb the target's main session, use ``ask_agent`` instead.
 
     Args:
-        target_name: Name of the agent to ask. Use ``list_agents`` to see
-            available targets in your workspace.
-        question: The question text to send.
-        wait_for_response: If True, block waiting for a response.
-        timeout_seconds: Max seconds to block (only used with
-            ``wait_for_response=True``). Default 600.
+        target_name: Name of the agent to message. Use ``list_agents`` to
+            see who's available.
+        message: The message text. Can be multi-line, can include
+            instructions, code, anything.
     """
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
@@ -279,6 +261,74 @@ def ask_agent(
         return (
             "Error: this tool requires running inside a multiverse-managed "
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
+        )
+
+    if target_name == self_name:
+        return "Error: cannot message yourself."
+
+    target = find_agent_by_name(cwd, target_name)
+    if target is None:
+        return (
+            f"Error: no agent named '{target_name}' in this workspace. "
+            "Call list_agents to see who's available."
+        )
+
+    # IMPORTANT: write the inbox file BEFORE auto-resuming. Reverse order
+    # races claude's SessionStart hook, which fires within milliseconds of
+    # spawn — if it fires first, it sees an empty inbox and the message
+    # sits unread until something else triggers a hook later.
+    write_message_to_inbox(
+        sender_name=self_name,
+        recipient_name=target_name,
+        recipient_cwd=cwd,
+        message=message,
+    )
+
+    needs_resume = target.session is None or target.status == "ended"
+    if needs_resume:
+        try:
+            _auto_resume(target, cwd)
+        except Exception as e:  # noqa: BLE001
+            return f"Error: failed to auto-resume '{target_name}': {e}"
+
+    suffix = " (target was dormant; auto-resumed)" if needs_resume else ""
+    return f"Message delivered to '{target_name}'{suffix}."
+
+
+@mcp.tool()
+def ask_agent(
+    target_name: str,
+    question: str,
+    timeout_seconds: int = _DEFAULT_ASK_TIMEOUT,
+) -> str:
+    """Ask a single named agent a quick question and wait for the answer.
+
+    Use this for ephemeral, fact-gathering questions: "what are you working
+    on?", "did you implement feature X?", "do you remember the API key
+    location?". The target answers from their existing context only — they
+    have NO tools available, can't read files or run commands. If the
+    answer requires investigation, send a ``message_agent`` instead.
+
+    Mechanism: spawns a forked, one-shot ``claude -p`` subprocess against
+    the target's session (same approach as the monitor's ``a`` keybinding,
+    but for a single agent). The target's main session is NOT involved —
+    no notification, no entry in their conversation history. The question
+    is purely sidechannel.
+
+    This call BLOCKS until the target responds or the timeout elapses.
+
+    Args:
+        target_name: Name of the agent to ask. Use ``list_agents``.
+        question: The question text. Keep it focused — the target can only
+            answer from what they already know.
+        timeout_seconds: Max seconds to wait. Default 60.
+    """
+    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    if not cwd or not self_name:
+        return (
+            "Error: this tool requires running inside a multiverse-managed "
+            "session."
         )
 
     if target_name == self_name:
@@ -290,132 +340,40 @@ def ask_agent(
             f"Error: no agent named '{target_name}' in this workspace. "
             "Call list_agents to see who's available."
         )
+    if target.claude_uuid is None:
+        return (
+            f"Error: '{target_name}' has no tracked claude UUID yet "
+            "(may have just started). Try again in a moment."
+        )
 
-    # IMPORTANT: write the inbox file BEFORE auto-resuming, otherwise we
-    # race claude's SessionStart hook (which fires within milliseconds of
-    # spawn). If the hook fires first, it sees an empty inbox and the
-    # question sits unread until UserPromptSubmit/Stop fires later.
-    ask_id = new_ask_id()
-    record = AskRecord(
-        ask_id=ask_id,
-        from_name=self_name,
-        from_cwd=cwd,
-        to_name=target_name,
-        to_cwd=cwd,
+    timeout = max(1, int(timeout_seconds))
+    result = ask_one(
         question=question,
-        ts=time.time(),
-        wait_for_response=wait_for_response,
-    )
-    save_ask(record)
-    write_question_to_inbox(record)
-
-    needs_resume = target.session is None or target.status == "ended"
-    if needs_resume:
-        try:
-            _auto_resume(target, cwd)
-        except Exception as e:  # noqa: BLE001 — surface anything as tool error
-            return f"Error: failed to auto-resume '{target_name}': {e}"
-
-    if not wait_for_response:
-        suffix = " (target was dormant; auto-resumed)" if needs_resume else ""
-        return (
-            f"Question delivered to '{target_name}'{suffix}.\n"
-            f"ask_id: {ask_id}\n"
-            "You will be notified when they respond."
-        )
-
-    # Blocking: poll for the response file in our own inbox.
-    deadline = time.time() + max(1, int(timeout_seconds))
-    while time.time() < deadline:
-        path = find_response_file(cwd, self_name, ask_id)
-        if path is not None:
-            try:
-                data = json.loads(path.read_text())
-            except (OSError, json.JSONDecodeError):
-                time.sleep(_POLL_INTERVAL)
-                continue
-            # Consume the response file so the deliver-inbox hook doesn't
-            # also surface it later — we're delivering it inline right now.
-            try:
-                path.unlink()
-            except OSError:
-                pass
-            delete_ask(ask_id)
-            return (
-                f"Response from '{data.get('from', target_name)}':\n\n"
-                f"{data.get('body', '(empty response)')}"
-            )
-        time.sleep(_POLL_INTERVAL)
-
-    return (
-        f"'{target_name}' has not yet responded (waited "
-        f"{int(timeout_seconds)}s).\n"
-        f"ask_id: {ask_id}\n"
-        "You will be notified when they respond — no need to ask again."
+        target=AskTarget(
+            name=target.name, cwd=target.cwd, claude_uuid=target.claude_uuid
+        ),
+        timeout=float(timeout),
     )
 
-
-@mcp.tool()
-def respond_to_agent(ask_id: str, response: str) -> str:
-    """Respond to a question received from another agent.
-
-    Use the ``ask_id`` from the inbox notification you received. Your
-    response will be delivered to the asking agent — either inline (if they
-    used wait_for_response=True and are still waiting) or as a notification
-    on their next turn (if they used the default non-blocking ask).
-
-    Args:
-        ask_id: The ask_id from the question notification you received.
-        response: Your answer to the asker.
-    """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
-    if not cwd or not self_name:
-        return (
-            "Error: this tool requires running inside a multiverse-managed "
-            "session."
-        )
-
-    record = load_ask(ask_id)
-    if record is None:
-        return (
-            f"Error: no ask record found for ask_id={ask_id!r}. "
-            "It may have already been responded to or expired."
-        )
-    if record.to_name != self_name:
-        return (
-            f"Error: ask_id={ask_id!r} was sent to '{record.to_name}', "
-            f"not to you ('{self_name}'). You cannot respond on behalf of "
-            "another agent."
-        )
-
-    write_response_to_inbox(
-        asker_name=record.from_name,
-        asker_cwd=record.from_cwd,
-        responder_name=self_name,
-        ask_id=ask_id,
-        original_question=record.question,
-        response_body=response,
-    )
-    delete_ask(ask_id)
-    return f"Response delivered to '{record.from_name}' (ask_id={ask_id})."
+    if result.error:
+        if "timed out" in result.error:
+            return f"'{target_name}' did not respond within {timeout}s."
+        return f"Error asking '{target_name}': {result.error}"
+    return result.response or f"'{target_name}' returned an empty response."
 
 
 def _auto_resume(target, cwd: str) -> None:
     """Spawn a multiverse session that resumes the dormant/ended target.
 
-    Mirrors the monitor's resume flow but headless. The target's existing
-    name is reused; collisions with an ended-but-still-recorded multiverse
-    session are resolved by reaping that record first (the same kill-then-
-    spawn step the dashboard's Enter-on-ended-row does).
+    Mirrors the monitor's resume flow but headless. Reuses the target's
+    existing name; if an ended multiverse session is still occupying the
+    name slot, reap it first.
     """
     if target.claude_uuid is None:
         raise RuntimeError(
             f"target '{target.name}' has no tracked claude UUID — "
             "cannot resume programmatically"
         )
-    # If an ended multiverse session is occupying this name, reap it first
-    # so create_session's name-collision check doesn't fire.
     if target.session is not None and target.status == "ended":
         from src.sessions import kill_session  # local import to avoid cycle
         kill_session(target.session)

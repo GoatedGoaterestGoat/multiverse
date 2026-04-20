@@ -169,3 +169,14 @@ def ask_all(
             i = futures[f]
             results[i] = f.result()
     return [r for r in results if r is not None]
+
+
+def ask_one(
+    question: str,
+    target: AskTarget,
+    timeout: float = 60.0,
+    register_fork: Optional[Callable[[str, bool], None]] = None,
+) -> AskResult:
+    """Ask one target and return the single result. Used by the MCP ask_agent tool."""
+    plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
+    return _ask_one(target, question, plugin_root, timeout, register_fork)

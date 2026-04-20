@@ -85,14 +85,12 @@ def _render(messages: list[dict]) -> str:
     parts: list[str] = []
     parts.append("<system-reminder>")
     parts.append(
-        f"[Multiverse Inter-Agent] You have {n} new inbox message{plural} "
-        "from other agents in your workspace."
+        f"[Multiverse Inter-Agent] You have received {n} new "
+        f"message{plural} from other agents in your workspace."
     )
     parts.append("")
     for i, m in enumerate(messages, 1):
-        kind = m.get("kind", "?")
         from_name = m.get("from", "?")
-        ask_id = m.get("ask_id", "?")
         body = m.get("body", "")
         ts = m.get("ts", 0)
         ts_str = (
@@ -100,54 +98,19 @@ def _render(messages: list[dict]) -> str:
         )
 
         parts.append("─" * 56)
-        parts.append(f"[{i}/{n}] from agent: {from_name}    ask_id: {ask_id}")
-        parts.append(f"      received: {ts_str}")
+        parts.append(f"[{i}/{n}] Message from agent: {from_name}")
+        parts.append(f"        received: {ts_str}")
         parts.append("")
-
-        if kind == "question":
-            parts.append("Type: QUESTION (asking you to respond)")
-            parts.append("")
-            parts.append("Question:")
-            parts.extend(_fmt_lines(body))
-            parts.append("")
-            parts.append(
-                "To respond, call the `respond_to_agent` tool with this exact "
-                "ask_id and your answer:"
-            )
-            parts.append(
-                f'  respond_to_agent(ask_id="{ask_id}", response="<your answer>")'
-            )
-            parts.append(
-                "You may use any tools (Read, Bash, Grep, etc.) to investigate "
-                "before responding. Keep the response focused — the asker is "
-                "waiting for an answer, not a new project."
-            )
-        elif kind == "response":
-            parts.append("Type: RESPONSE (reply to your earlier ask)")
-            orig = m.get("in_reply_to_question", "")
-            if orig:
-                parts.append("")
-                parts.append("Your original question:")
-                lines = orig.splitlines()
-                for line in lines[:5]:
-                    parts.append(f"> {line}")
-                if len(lines) > 5:
-                    parts.append("> … (truncated)")
-            parts.append("")
-            parts.append("Response:")
-            parts.extend(_fmt_lines(body))
-            parts.append("")
-            parts.append(
-                "(Informational — no required action. Continue with your "
-                "current task and incorporate the response if relevant.)"
-            )
-        else:
-            parts.append(f"Type: {kind}")
-            parts.append("")
-            parts.extend(_fmt_lines(body))
+        parts.extend(_fmt_lines(body))
         parts.append("")
 
     parts.append("─" * 56)
+    parts.append(
+        "You may use any tools (Read, Bash, Grep, etc.) to act on these "
+        "messages. To reply to a sender, call the `message_agent` tool "
+        "with their name as the target. Replies are not required — only "
+        "respond if it's useful."
+    )
     parts.append("</system-reminder>")
     return "\n".join(parts)
 

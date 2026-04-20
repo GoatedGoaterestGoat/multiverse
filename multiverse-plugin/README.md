@@ -1,26 +1,26 @@
 # Multiverse Plugin for Claude Code
 
-Context management and multi-session orchestration for Claude Code — selective context folding plus a Textual TUI that manages parallel claude sessions.
+Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messaging, and selective context folding.
 
 ## What it does
 
-Two things, both designed to scale past the limits of a single `claude` process:
+Three things, all designed to scale past the limits of a single `claude` process:
 
-**1. Context folding.** When your conversation grows large, you lose context quality and hit token limits. `/compact` is all-or-nothing. Multiverse gives you **granular control**: fold specific message ranges into agent-written summaries, keeping what matters and discarding what doesn't. The agent picks what to fold (using `context_info`), writes the summary, and the session resumes automatically with the optimized context.
+**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `dormant` / `ended`) is driven by hooks. Each multiverse instance is scoped to one workspace (cwd).
 
-**2. Multi-session monitor (POC).** Running more than one claude at a time usually means juggling terminals. The `multiverse` command now launches a **Textual TUI** that tracks every session's status (`idle` / `working` / `waiting-for-permission` / `ended`), lets you attach to any of them, detach back with `Ctrl-b d`, spawn new ones, and resume old ones from disk. Each session runs in its own detached tmux session under the hood.
+**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), or fire quick ephemeral side-questions (`ask_agent`). Plus a TUI `a` keybinding to ask all agents the same question at once. Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session.
+
+**3. Context folding.** When a conversation grows large, fold specific message ranges into agent-written summaries — a granular alternative to `/compact`. The agent picks what to fold (using `context_info`), writes the summary, and the session resumes automatically with the optimized context.
 
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- [uv](https://docs.astral.sh/uv/) (Python package runner) — resolves the Python deps including `textual`
-- [jq](https://jqlang.github.io/jq/) (JSON processor) — needed by the wrapper scripts
-- [tmux](https://github.com/tmux/tmux) ≥ 3.2 — each claude session runs inside a detached tmux session
 - Python 3.11+
+- A system package manager for `multiverse setup` to install the rest: Homebrew (macOS), `apt`/`dnf`/`pacman` (Linux). If you'd rather install manually, the deps are [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/), and [tmux](https://github.com/tmux/tmux) ≥ 3.2.
 
 ## Installation
 
-### As a plugin (recommended)
+### As a plugin (single-session, no monitor)
 
 ```bash
 # Load during development
@@ -30,60 +30,106 @@ claude --plugin-dir ./multiverse-plugin
 claude plugin install multiverse@your-marketplace
 ```
 
-### With the wrapper (enables auto-resume + multi-session monitor)
+In this mode you get the MCP tools (context folding, inter-agent comms — though the latter requires multiple sessions to be useful) but no monitor TUI and no auto-resume after fold.
 
-The `multiverse` wrapper launches a Textual TUI that manages claude sessions. Without it, the plugin still works — you just run a single `claude` at a time and resume manually after folding.
+### With the wrapper (full feature set: monitor + auto-resume + inter-agent)
+
+The `multiverse` wrapper launches the Textual TUI that manages claude sessions and gives the plugin access to the `MULTIVERSE_*` env vars that the inter-agent tools need.
 
 ```bash
-# One-time: install Python deps (textual, mcp, etc.)
-cd multiverse-plugin && uv sync && cd -
+# 1. Clone the repo (anywhere — paths resolve relative to the script)
+git clone https://github.com/Silicon23/Multiverse.git
 
-# Make the wrappers executable
-chmod +x multiverse-plugin/bin/multiverse multiverse-plugin/bin/multiverse-session
+# 2. Add the bin directory to your PATH (e.g. in ~/.zshrc)
+export PATH="/path/to/Multiverse/multiverse-plugin/bin:$PATH"
 
-# Add to your PATH (e.g. in ~/.zshrc)
-export PATH="/path/to/multiverse-plugin/bin:$PATH"
+# 3. One-time setup: installs tmux, jq, uv (prompting before each),
+#    then runs `uv sync` to install Python deps.
+multiverse setup
 
-# Launch the monitor
+# 4. Launch the monitor in a workspace
+cd /path/to/your/project
 multiverse
 ```
 
-Any arguments passed to `multiverse` are forwarded as default `claude` args to every session spawned from the TUI. The monitor auto-loads the plugin into each session via `claude --plugin-dir <plugin_root>`, so you don't need to install the plugin globally for dev work.
+`multiverse setup` is idempotent — re-run it anytime to sync Python deps after a pull.
+
+**Updating.** The plugin is under active development; to pull the latest changes from origin:
+
+```bash
+multiverse update   # git pull inside the clone
+multiverse setup    # re-run if Python deps changed (pyproject.toml/uv.lock)
+```
+
+Any arguments passed to `multiverse` (other than a subcommand like `setup`/`update`) are forwarded as default `claude` args to every session spawned from the TUI. The monitor auto-loads the plugin into each session via `claude --plugin-dir <plugin_root>`, so you don't need to install the plugin globally for dev work.
 
 ## Usage
 
 ### Monitor TUI
 
-Run `multiverse` to launch the TUI. Each row is one claude session; statuses are driven by hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse`, `Stop`, `SessionEnd`).
+Run `multiverse` in your project directory. The TUI lists every multiverse session in this workspace, plus dormant (named-but-not-running) claude sessions you could resume.
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — prompts for a working directory (defaults to where you launched `multiverse`) |
-| `R` | Resume — browses `~/.claude/projects/<encoded-cwd>/*.jsonl` with first-prompt previews; Enter on a row resumes it |
-| `Enter` | Attach to the highlighted session (drops into its tmux session) |
+| `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse` |
+| `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden) |
+| `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place |
 | `k` | Kill the highlighted session — tmux kill + remove state dir |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
 
-**Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`. You land back in the monitor.
+**Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
 
-**De-dup**: if you pick a session UUID in the resume screen that's already running as a multiverse session, the monitor attaches to the existing instance instead of forking a new one.
+**Dashboard columns**: `ID · Name · Inbox · Status · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks. The Preview column shows the first user message from each session's transcript.
 
-**State** lives under `~/.multiverse/sessions/<mv-id>/` — one directory per session with `meta.json`, `status.json`, and `control.json`. Sessions survive monitor restarts (the TUI rebuilds its state from disk on launch).
+**Workspace scope**: each `multiverse` instance is bound to the cwd it was launched from. Sessions in other workspaces are managed by other monitor instances independently. The dashboard surfaces both **multiverse-wrapped** sessions (live or ended) and **dormant named claude sessions** in this cwd that aren't currently wrapped.
 
-### Automatic (agent-initiated)
+**Sessions survive the monitor**. State lives under `~/.multiverse/sessions/<mv-id>/`. If you `q`uit the monitor, sessions keep running in their tmux sessions; the next `multiverse` launch picks them back up.
 
-The agent can use context folding autonomously when it detects the context is getting large or polluted. The MCP tools are available to Claude automatically:
+### Inter-agent communication
 
-1. **`context_info`** — Returns a numbered table of contents of the conversation with message types, sizes, and previews. The agent uses this to decide what to fold.
+Three MCP tools are available to any agent running under the wrapper. Each is workspace-scoped — agents in other multiverse workspaces are not visible.
 
-2. **`context_fold`** — Folds a range of messages into a summary. The agent writes the summary itself (it already has the full context).
+**`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster.
 
-### Manual (user-initiated)
+**`message_agent(target_name, message)`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
-Ask Claude to fold specific parts of the conversation:
+- Delivered as a system-reminder injected into the recipient's next turn
+- Recipient has full tool access (Read, Bash, Grep, etc.) and can take their time
+- Persists in the recipient's conversation history
+- Fire-and-forget — the tool returns as soon as the message is queued; you don't block on a reply
+- To reply, the recipient simply calls `message_agent` back at the original sender (no separate respond tool)
+- If the target is dormant, they're auto-resumed in a detached tmux session before delivery
 
-> "Fold messages 20-75 — they were the debugging session for the auth bug, which is now fixed."
+**`ask_agent(target_name, question, timeout_seconds=60)`** — send a quick ephemeral question. Use this for facts the target already knows.
+
+- Target answers from their existing context only — **no tools available**
+- Target's main session is NOT involved (no notification, no entry in their conversation history)
+- Blocking — returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
+- Works regardless of target state (idle, working, dormant) — uses a forked claude subprocess that doesn't disturb the target's main process
+
+**TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
+
+When to pick which:
+
+| Use case | Tool |
+|:---------|:-----|
+| "What are you working on?" / "Did you implement X?" | `ask_agent` (or `a` for all) |
+| "Please review the PR at /path/to/branch" | `message_agent` |
+| "Find me which agent owns the auth code" | `list_agents` then `ask_agent` |
+| "Run tests and tell me what failed" (delegate work) | `message_agent` |
+
+### Context folding
+
+The agent can use folding autonomously when context is getting large or polluted. Two MCP tools:
+
+- **`context_info(session_id, cwd)`** — TOC of the conversation with message types, sizes, and previews. The agent uses this to decide what to fold.
+- **`context_fold(summary, start, end, session_id, cwd)`** — Fold a message range into an agent-written summary. Creates a new session JSONL (original preserved). Under the wrapper, the session resumes automatically with the optimized context.
+
+Manual prompts work too:
+
+> "Fold messages 20-75 — that was the debugging session for the auth bug, which is fixed."
 
 Or let Claude decide:
 
@@ -91,95 +137,160 @@ Or let Claude decide:
 
 ### With vs without the wrapper
 
-| Setup | Behavior after fold | Multi-session |
-|:------|:---|:---|
-| `multiverse` monitor | Session stops, resumes automatically with folded context. Claude continues immediately. | Yes — TUI + tmux |
-| Plain `claude` | Session continues. Claude tells you to run `claude --resume <session_id>`. | No |
+| Setup | Context-fold auto-resume | Inter-agent comms | Multi-session monitor |
+|:------|:---|:---|:---|
+| `multiverse` wrapper | ✅ session resumes immediately | ✅ all three tools work | ✅ Textual TUI + tmux |
+| Plain `claude --plugin-dir …` | ❌ tells you to `claude --resume <id>` | ❌ MCP tools error (env vars unset) | ❌ |
+
+The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_CWD` env vars, which are only set when the monitor spawns the session via `tmux new-session -e`.
 
 ## How it works
+
+### State layout
+
+```
+~/.multiverse/
+├── sessions/<mv-id>/
+│   ├── meta.json     — cwd, created_at, claude_args, name, optional resumed_from
+│   ├── status.json   — {"status": "idle"|"working"|"waiting"|"ended"|…, "ts": …}
+│   ├── claude_uuid   — current claude session UUID (captured by SessionStart hook)
+│   └── control.json  — context-fold signaling channel
+└── inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
+                      — pending inter-agent message; consumed (deleted) by the
+                        deliver-inbox hook on first delivery as a system-reminder
+```
+
+Sessions survive monitor restarts — the TUI rebuilds its view from disk every refresh. Inbox files survive everything; they wait until the recipient's hooks fire.
 
 ### Architecture
 
 ```
-┌───────────────────────────────────────────────────────┐
-│  multiverse (bin/multiverse)                          │
-│  Thin bash launcher — execs `uv run python -m         │
-│  src.monitor`, preserves $PWD as MULTIVERSE_ORIG_CWD  │
-└──────────────────┬────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│  multiverse (bin/multiverse)                           │
+│  Thin bash launcher — execs `uv run python -m          │
+│  src.monitor`, exports MULTIVERSE_ORIG_CWD=$PWD        │
+│  and MULTIVERSE_PLUGIN_ROOT=<plugin_root>              │
+└──────────────────┬─────────────────────────────────────┘
                    │ launches
-┌──────────────────▼────────────────────────────────────┐
-│  Monitor TUI (src/monitor.py, Textual)                │
-│  - Lists sessions from ~/.multiverse/sessions/        │
-│  - Spawns via `tmux new-session -d -s multiverse-<id>│
-│    -e MULTIVERSE_… -c <cwd> multiverse-session …`    │
-│  - Attaches via `App.suspend()` + `tmux attach-…`    │
-└──────────────────┬────────────────────────────────────┘
+┌──────────────────▼─────────────────────────────────────┐
+│  Monitor TUI (src/monitor.py, Textual)                 │
+│  - Workspace-scoped: filters sessions to cwd           │
+│  - Lists multiverse sessions + dormant claude sessions │
+│  - Spawns via tmux new-session -d -s multiverse-<id>   │
+│    -e MULTIVERSE_SESSION_NAME=<name> -e ...            │
+│  - Attaches via App.suspend() + tmux attach-session    │
+│  - `a` key → ask_agents fan-out to all named sessions  │
+└──────────────────┬─────────────────────────────────────┘
                    │ tmux new-session -d
-┌──────────────────▼────────────────────────────────────┐
-│  tmux session: multiverse-<id>                        │
-│  └─ multiverse-session (bin/multiverse-session)      │
-│     └─ claude --plugin-dir $MULTIVERSE_PLUGIN_ROOT …  │
-│        ├─ MCP server: context_info, context_fold     │
-│        ├─ Hooks: status writers + on-context-fold    │
-│        └─ On context_fold: writes control.json,      │
-│           hook returns {continue:false}, claude      │
-│           exits, inner loop dispatches resume_folded │
-└───────────────────────────────────────────────────────┘
+┌──────────────────▼─────────────────────────────────────┐
+│  tmux session: multiverse-<id>                         │
+│  └─ multiverse-session (bin/multiverse-session)        │
+│     └─ claude --plugin-dir $MULTIVERSE_PLUGIN_ROOT …   │
+│        ├─ MCP server (multiverse):                     │
+│        │    context_info, context_fold,                │
+│        │    list_agents, message_agent, ask_agent      │
+│        ├─ Hooks (SessionStart/UserPromptSubmit/Stop/…):│
+│        │    set-status, record-claude-uuid,            │
+│        │    deliver-inbox, on-notification,            │
+│        │    on-context-fold                            │
+│        └─ Inter-agent inbox: hook checks               │
+│           ~/.multiverse/inbox/<cwd>/<name>/, injects   │
+│           any pending messages as system-reminders     │
+└────────────────────────────────────────────────────────┘
 ```
 
-Per-session state under `~/.multiverse/sessions/<mv-id>/`:
+### Per-session env vars (set by the monitor on `tmux new-session -e`)
 
-| File | Written by | Read by |
-|:-----|:-----------|:--------|
-| `meta.json` | monitor on spawn | monitor on startup/refresh |
-| `status.json` | `scripts/set-status.sh` via hooks | monitor poll loop (every 1s) |
-| `control.json` | MCP `context_fold` tool | `multiverse-session` loop |
+| Env var | Used by |
+|:--------|:--------|
+| `MULTIVERSE_SESSION_ID=<mv-id>` | identifies the multiverse session |
+| `MULTIVERSE_SESSION_NAME=<name>` | inter-agent tools (caller identity) |
+| `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
+| `MULTIVERSE_STATUS=…/status.json` | hook scripts |
+| `MULTIVERSE_CONTROL=…/control.json` | context-fold MCP tool, hook |
+| `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir`) |
+
+### MCP server: tools
+
+The single MCP server (named `multiverse` in `.mcp.json`) exposes five tools:
+
+| Tool | Purpose |
+|:-----|:--------|
+| `context_info(session_id, cwd)` | TOC of the conversation |
+| `context_fold(summary, start, end, session_id, cwd)` | Fold a range into a summary |
+| `list_agents(max_agents)` | Discover other agents in the workspace |
+| `message_agent(target_name, message)` | Send a durable message (inbox-delivered) |
+| `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
+
+### Hooks
+
+Wired to claude lifecycle events; all of them are no-ops outside the multiverse wrapper (they detect the absence of `MULTIVERSE_*` env vars and exit).
+
+| Hook | Script(s) | Purpose |
+|:-----|:----------|:--------|
+| `SessionStart` | `set-status.sh idle`, `record-claude-uuid.sh`, `deliver-inbox.py` | Initial status, capture claude UUID, deliver any pending inbox messages |
+| `UserPromptSubmit` | `set-status.sh working`, `deliver-inbox.py` | Update status, deliver new inbox messages on each user turn |
+| `Notification` | `on-notification.sh` | Set `waiting` for blocking notifications (permission prompts) — filters out informational ones like `idle_prompt` |
+| `PostToolUse` (`context_fold`) | `on-context-fold.sh` | Stops the session after a fold so the wrapper can dispatch `resume_folded` |
+| `PostToolUse` (any) | `set-status.sh working` | Status update during tool use |
+| `Stop` | `set-status.sh idle`, `deliver-inbox.py` | Mark idle; deliver any pending inbox via `decision: "block"` (which triggers another turn — the post-task wakeup mechanism) |
+| `SessionEnd` | `set-status.sh ended` | Mark ended |
 
 ### Communication protocol
 
-The monitor and each session's plugin instance communicate through a **control file** — a per-session JSON file whose path is passed via `tmux new-session -e`:
+The monitor and each session's plugin instance communicate through **per-session files** under `~/.multiverse/sessions/<mv-id>/`. The `MULTIVERSE_CONTROL` env var tells the MCP server which control file to write to:
 
-```
-MULTIVERSE_CONTROL=~/.multiverse/sessions/<mv-id>/control.json
-MULTIVERSE_STATUS=~/.multiverse/sessions/<mv-id>/status.json
-MULTIVERSE_PLUGIN_ROOT=/path/to/multiverse-plugin
-MULTIVERSE_SESSION_ID=<mv-id>
-```
-
-The MCP server writes fold actions:
 ```json
 {"action": "resume_folded", "new_session_id": "abc-123-..."}
 ```
 
-The hook detects the action and stops the session; `multiverse-session` reads the action and dispatches it, staying inside the same tmux session. Separately, the status hooks write `{"status": "working", "ts": ...}` to `$MULTIVERSE_STATUS` on each hook event and the monitor polls those files.
+The hook (`on-context-fold.sh`) detects the action and stops the session; `multiverse-session` reads the action and dispatches it.
 
-### Control actions
-
-| Action | Description | Fields |
-|:-------|:-----------|:-------|
-| `resume_folded` | Resume with folded context | `new_session_id` |
-| *(future)* `spawn_agent` | Spawn a parallel agent session | `prompt`, `worktree` |
-| *(future)* `send_message` | Inject a message into another session | `session_id`, `message` |
+Inter-agent messages use a separate channel: `~/.multiverse/inbox/<encoded-cwd>/<recipient-name>/<message-id>.json`, written atomically by `message_agent` and consumed by `deliver-inbox.py` on the recipient side.
 
 ### What happens during a fold
 
 1. Agent calls `context_info` to get the conversation table of contents
 2. Agent identifies messages to fold and writes a summary
 3. Agent calls `context_fold(summary, start, end, session_id, cwd)`
-4. MCP tool creates a **new** session JSONL with the folded content (original preserved)
+4. MCP tool creates a new session JSONL with the folded content (original preserved)
 5. MCP tool writes a `resume_folded` action to the control file
 6. PostToolUse hook detects the action and returns `{continue: false}`
 7. Session stops cleanly
 8. Wrapper reads the action, sends a continuation prompt, resumes interactively
 
+### What happens during a `message_agent` call
+
+1. `message_agent(target, message)` writes `~/.multiverse/inbox/<cwd>/<target>/<id>.json` (atomic tmp+rename)
+2. If the target is dormant, the wrapper auto-resumes them via `tmux new-session -d` + `claude --resume <uuid>` (after the inbox file is written, so SessionStart sees it)
+3. Tool returns immediately with `"Message delivered to '<target>'"`
+4. On the recipient side, the next firing hook (`SessionStart` if just resumed, `Stop` after current turn, or `UserPromptSubmit` on next user input) runs `deliver-inbox.py`, which:
+   - Reads all pending messages in the recipient's inbox
+   - Formats them as one `<system-reminder>` block
+   - Returns the right injection JSON for the firing event (`additionalContext` for SessionStart/UserPromptSubmit, `decision: "block"` with the body as `reason` for Stop)
+   - **Deletes** the consumed files (so subsequent hook fires don't re-inject)
+5. Recipient sees the message, may use tools to act on it, may reply via `message_agent` back at the sender
+
+### What happens during an `ask_agent` call
+
+1. `ask_agent(target, question)` looks up the target's `claude_uuid`
+2. Spawns subprocess: `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1 -p "<wrapped question>"`
+3. The fork creates a **new** JSONL (the `<fresh>` UUID), reads the target's existing context, denies all tools, caps at one turn
+4. Target's main session is unaffected — works regardless of whether the target is idle, working, or dormant
+5. Subprocess exits with the answer on stdout; the fork JSONL is unlinked in a `finally` block
+6. Tool returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
+
 ### Key design decisions
 
-- **Agent writes its own summaries.** The agent already has the full context and knows what's important. No external summarization model needed.
-- **Non-destructive.** Original session JSONL is never modified. A new session is created with a new ID.
-- **Graceful degradation.** Without the wrapper, everything still works — you just run single sessions and resume manually.
-- **Concurrent-safe.** Each session has its own directory under `~/.multiverse/sessions/`; env vars are injected via `tmux new-session -e` so nothing leaks between sessions.
-- **One multiverse session per claude UUID.** The resume screen records `resumed_from` in `meta.json`; a second resume of the same UUID attaches to the existing instance instead of spawning a fork. Branching (deliberate fork from an existing session) is a separate action on the roadmap.
-- **Dev-mode plugin loading.** The inner script passes `--plugin-dir $MULTIVERSE_PLUGIN_ROOT` to every `claude` invocation, so the plugin works without a marketplace install.
+- **Workspace scope.** Each multiverse instance is bound to one cwd. This keeps inter-agent tools well-defined (you can't accidentally message an agent in a different project) and matches the natural unit of work.
+- **Names are first-class.** Sessions without names don't show on the dashboard and aren't reachable by inter-agent tools. Naming is the primary way agents identify each other.
+- **Two messaging modes for two use cases.** Durable (`message_agent`, full tools, persistent) vs ephemeral (`ask_agent`, no tools, blocking, fork-based). Use the cheap one for fact-gathering, the heavy one for delegation.
+- **No "respond" tool.** Replies are just messages back at the sender. This avoids async-mailbox complexity (no ask records, no response routing, no waiter state). The cost: the sender doesn't know automatically when a response arrives — but their next inbox check picks it up like any other message.
+- **Fork doesn't interrupt the target.** `ask_agent` and the `a` ask-all both use `--fork-session` against the target's UUID. Multiple claude processes reading the same JSONL is safe; the fork writes to a new session file, so no contention.
+- **Agent writes its own summaries.** For context folding, the agent already has the full context and knows what's important. No external summarization model needed.
+- **Non-destructive.** Original session JSONLs are never modified — folds and forks both create new ones.
+- **Graceful degradation.** Without the wrapper, the plugin still loads and the context-fold MCP tools work; you just resume manually after a fold.
+- **Concurrent-safe.** Each session has its own state directory and its own env vars (injected via `tmux new-session -e`); nothing leaks between sessions.
 
 ## Plugin structure
 
@@ -187,46 +298,43 @@ The hook detects the action and stops the session; `multiverse-session` reads th
 multiverse-plugin/
 ├── .claude-plugin/
 │   └── plugin.json           # Plugin manifest
+├── .mcp.json                 # MCP server config (registers `multiverse` server)
+├── pyproject.toml            # Python package: MCP server, monitor, inter-agent tools
 ├── bin/
 │   ├── multiverse            # Launcher — execs the Textual monitor
 │   └── multiverse-session    # Per-session inner loop (runs inside each tmux session)
 ├── hooks/
-│   └── hooks.json            # Hook config: status writers + context_fold handler
+│   └── hooks.json            # Hook config
 ├── scripts/
-│   ├── set-status.sh         # Called by status hooks with idle/working/waiting/ended
-│   └── on-context-fold.sh    # Stops the session after a fold so the inner loop can dispatch
-├── .mcp.json                 # MCP server config
-├── pyproject.toml             # Python package (MCP server + monitor)
+│   ├── set-status.sh         # Status writers (idle/working/waiting/ended)
+│   ├── on-notification.sh    # Notification hook — filters by notification_type
+│   ├── on-context-fold.sh    # Stops the session after a fold
+│   ├── record-claude-uuid.sh # SessionStart hook — captures claude session UUID
+│   └── deliver-inbox.py      # Inter-agent message delivery (3 hooks: SessionStart/UserPromptSubmit/Stop)
 ├── src/
 │   ├── __init__.py
 │   ├── types.py              # JSONL entry types
-│   ├── session.py            # Session file discovery and I/O
+│   ├── session.py            # Session file discovery and I/O (context-fold)
 │   ├── rewriter.py           # Core folding algorithm
-│   ├── server.py             # MCP server (context_info, context_fold)
-│   └── monitor.py            # Textual TUI: session table, modals, tmux control
+│   ├── server.py             # MCP server: all five tools
+│   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find)
+│   ├── inbox.py              # Inter-agent message inbox (write/list/consume)
+│   ├── ask_agents.py         # Forked-subprocess ask machinery (used by ask_all + ask_agent)
+│   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control
+│   └── names.py              # Random name pool for new sessions
 └── README.md
 ```
 
 ## Extending the plugin
 
-The wrapper is designed to be extensible. To add a new action:
+The plugin is designed so new agent capabilities can be added as MCP tools or hook scripts. To add a new tool:
 
-1. **Define the action** in the MCP server or a new MCP tool:
-   ```python
-   _write_control_action({"action": "your_action", "field": "value"})
-   ```
+1. **Add the tool** in `src/server.py` with `@mcp.tool()`. The function's docstring becomes the description visible to the model — be specific about when and how to use it.
+2. **If the tool needs cross-session state**, add a small data-layer module (like `src/inbox.py`) and write atomically (tmp + rename) so concurrent readers never see partial files.
+3. **If the tool needs the target session to react**, wire a hook script that reads the relevant state and returns `additionalContext` (for SessionStart/UserPromptSubmit) or `decision: "block"` with `reason` (for Stop). All hooks run as separate processes; keep them stdlib-only Python or bash for fast startup.
+4. **The full set of `MULTIVERSE_*` env vars** is available to every MCP server process and hook script spawned by a multiverse-managed claude session.
 
-2. **Add a hook** (if the action needs to stop the session) in `hooks/hooks.json`
-
-3. **Add a case** to the wrapper's dispatch loop in `bin/multiverse`:
-   ```bash
-   your_action)
-     FIELD=$(jq -r '.field' "$MULTIVERSE_CONTROL")
-     # ... handle it
-     ;;
-   ```
-
-The `MULTIVERSE_CONTROL` environment variable is available to all hooks and MCP server processes spawned by the Claude session.
+For deeper architectural notes, hidden CLI flags, hook output quirks, and lessons learned along the way, see [`docs/PROGRESS.md`](../docs/PROGRESS.md) in the repo root.
 
 ## Authors
 

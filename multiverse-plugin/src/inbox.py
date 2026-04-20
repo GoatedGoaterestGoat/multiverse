@@ -1,18 +1,11 @@
-"""Inter-agent inbox + ask-record data layer.
+"""Inter-agent message inbox.
 
-Two on-disk surfaces:
+A single on-disk surface:
 
-  ~/.multiverse/asks/<ask-id>.json        — persistent ask metadata. Created
-                                             by ask_agent, consulted by
-                                             respond_to_agent for routing,
-                                             deleted after a successful
-                                             response (or kept around for
-                                             timed-out asks).
-
-  ~/.multiverse/inbox/<encoded-cwd>/<recipient-name>/<ask-id>.json
+  ~/.multiverse/inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
                                           — pending message file. Written
-                                             by ask_agent (questions) and
-                                             respond_to_agent (responses).
+                                             atomically by message_agent
+                                             (one tool call = one file).
                                              Consumed (deleted) by the
                                              deliver-inbox hook after a
                                              single delivery as system-
@@ -29,14 +22,12 @@ import os
 import re
 import time
 import uuid
-from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
 
 MULTIVERSE_DIR = Path(os.path.expanduser("~/.multiverse"))
 INBOX_DIR = MULTIVERSE_DIR / "inbox"
-ASKS_DIR = MULTIVERSE_DIR / "asks"
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -47,7 +38,7 @@ def agent_inbox_dir(cwd: str, name: str) -> Path:
     return INBOX_DIR / _encode_cwd(cwd) / name
 
 
-def new_ask_id() -> str:
+def new_message_id() -> str:
     return str(uuid.uuid4())
 
 
@@ -58,79 +49,21 @@ def _atomic_write_json(path: Path, data: dict) -> None:
     tmp.rename(path)
 
 
-@dataclass
-class AskRecord:
-    """Persistent ask metadata. Used by respond_to_agent for routing."""
-
-    ask_id: str
-    from_name: str
-    from_cwd: str
-    to_name: str
-    to_cwd: str
-    question: str
-    ts: float
-    wait_for_response: bool = False
-
-
-def save_ask(record: AskRecord) -> None:
-    path = ASKS_DIR / f"{record.ask_id}.json"
-    _atomic_write_json(path, asdict(record))
-
-
-def load_ask(ask_id: str) -> Optional[AskRecord]:
-    path = ASKS_DIR / f"{ask_id}.json"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    try:
-        return AskRecord(**data)
-    except TypeError:
-        return None
-
-
-def delete_ask(ask_id: str) -> None:
-    path = ASKS_DIR / f"{ask_id}.json"
-    try:
-        path.unlink()
-    except OSError:
-        pass
-
-
-def write_question_to_inbox(record: AskRecord) -> Path:
-    """Drop the question into the recipient's inbox."""
-    inbox_file = agent_inbox_dir(record.to_cwd, record.to_name) / f"{record.ask_id}.json"
-    _atomic_write_json(
-        inbox_file,
-        {
-            "ask_id": record.ask_id,
-            "kind": "question",
-            "from": record.from_name,
-            "body": record.question,
-            "ts": record.ts,
-        },
-    )
-    return inbox_file
-
-
-def write_response_to_inbox(
-    asker_name: str,
-    asker_cwd: str,
-    responder_name: str,
-    ask_id: str,
-    original_question: str,
-    response_body: str,
+def write_message_to_inbox(
+    sender_name: str,
+    recipient_name: str,
+    recipient_cwd: str,
+    message: str,
 ) -> Path:
-    """Drop a response into the original asker's inbox."""
-    inbox_file = agent_inbox_dir(asker_cwd, asker_name) / f"{ask_id}.json"
+    """Drop a message into the recipient's inbox."""
+    message_id = new_message_id()
+    inbox_file = agent_inbox_dir(recipient_cwd, recipient_name) / f"{message_id}.json"
     _atomic_write_json(
         inbox_file,
         {
-            "ask_id": ask_id,
-            "kind": "response",
-            "from": responder_name,
-            "in_reply_to_question": original_question,
-            "body": response_body,
+            "message_id": message_id,
+            "from": sender_name,
+            "body": message,
             "ts": time.time(),
         },
     )
@@ -179,9 +112,3 @@ def pending_inbox_count(cwd: str, name: str) -> int:
         return sum(1 for _ in d.glob("*.json"))
     except OSError:
         return 0
-
-
-def find_response_file(asker_cwd: str, asker_name: str, ask_id: str) -> Optional[Path]:
-    """Used by blocking ask_agent to poll for a response."""
-    path = agent_inbox_dir(asker_cwd, asker_name) / f"{ask_id}.json"
-    return path if path.exists() else None

@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
-# multiverse — launcher for the multiverse monitor TUI.
+# multiverse — launcher for the multiverse monitor TUI, and setup dispatcher.
+#
+# Subcommands:
+#   setup       Install system dependencies (tmux, jq, uv) and run `uv sync`.
+#   update      Pull the latest changes from origin (dev-mode install only).
+#   (default)   Launch the monitor TUI. Extra args forward to claude when the
+#               user spawns a new session from the monitor.
 #
 # Previously this script wrapped a single claude process in a loop.
 # That responsibility now lives in `multiverse-session`, one copy of
 # which runs inside each tmux session spawned by the monitor.
-#
-# Usage: multiverse [claude args...]
-#   Any passed args are forwarded to claude when the user spawns a
-#   new session from the monitor.
 
 set -euo pipefail
 
@@ -18,9 +20,116 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export MULTIVERSE_ORIG_CWD="$PWD"
 export MULTIVERSE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
+prompt_yes() {
+  local reply
+  read -r -p "$1 [y/N] " reply
+  [[ "$reply" =~ ^[Yy]$ ]]
+}
+
+detect_installer() {
+  if [[ "$OSTYPE" == darwin* ]]; then
+    command -v brew &>/dev/null && echo "brew" || echo ""
+  elif command -v apt-get &>/dev/null; then
+    echo "apt"
+  elif command -v dnf &>/dev/null; then
+    echo "dnf"
+  elif command -v pacman &>/dev/null; then
+    echo "pacman"
+  else
+    echo ""
+  fi
+}
+
+install_pkg() {
+  case "$2" in
+    brew)   brew install "$1" ;;
+    apt)    sudo apt-get install -y "$1" ;;
+    dnf)    sudo dnf install -y "$1" ;;
+    pacman) sudo pacman -S --noconfirm "$1" ;;
+  esac
+}
+
+run_setup() {
+  local installer
+  installer=$(detect_installer)
+
+  local missing=()
+  for dep in tmux jq; do
+    command -v "$dep" &>/dev/null || missing+=("$dep")
+  done
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    if [ -z "$installer" ]; then
+      echo "[multiverse setup] Missing: ${missing[*]}" >&2
+      echo "[multiverse setup] No supported package manager detected (brew/apt/dnf/pacman)." >&2
+      echo "[multiverse setup] Install these manually, then re-run 'multiverse setup'." >&2
+      exit 1
+    fi
+    echo "[multiverse setup] Missing system packages: ${missing[*]}"
+    echo "[multiverse setup] Will install via: $installer"
+    if prompt_yes "Proceed?"; then
+      for pkg in "${missing[@]}"; do
+        install_pkg "$pkg" "$installer"
+      done
+    else
+      echo "[multiverse setup] Skipped. Install ${missing[*]} manually and re-run." >&2
+      exit 1
+    fi
+  else
+    echo "[multiverse setup] System deps OK (tmux, jq)."
+  fi
+
+  if ! command -v uv &>/dev/null; then
+    echo "[multiverse setup] uv is not installed."
+    echo "[multiverse setup] Will run: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    if prompt_yes "Proceed?"; then
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.local/bin:$PATH"
+    else
+      echo "[multiverse setup] Install uv manually (https://docs.astral.sh/uv/) and re-run." >&2
+      exit 1
+    fi
+  else
+    echo "[multiverse setup] uv OK."
+  fi
+
+  echo "[multiverse setup] Running 'uv sync' in $PLUGIN_ROOT..."
+  (cd "$PLUGIN_ROOT" && uv sync)
+
+  echo "[multiverse setup] Done. Launch with: multiverse"
+}
+
+run_update() {
+  if ! command -v git &>/dev/null; then
+    echo "[multiverse update] git is required but not found." >&2
+    exit 1
+  fi
+  if ! git -C "$PLUGIN_ROOT" rev-parse --is-inside-work-tree &>/dev/null; then
+    echo "[multiverse update] $PLUGIN_ROOT is not a git working tree." >&2
+    echo "[multiverse update] 'update' only works for dev-mode clones of the repo." >&2
+    exit 1
+  fi
+  echo "[multiverse update] Pulling latest from origin..."
+  git -C "$PLUGIN_ROOT" pull
+  echo "[multiverse update] Done. If Python deps changed, re-run 'multiverse setup'."
+}
+
+if [ "${1:-}" = "setup" ]; then
+  shift
+  run_setup "$@"
+  exit 0
+fi
+
+if [ "${1:-}" = "update" ]; then
+  shift
+  run_update "$@"
+  exit 0
+fi
+
 for dep in tmux jq uv; do
   if ! command -v "$dep" &>/dev/null; then
     echo "[multiverse] Error: $dep is required but not found." >&2
+    echo "[multiverse] Run 'multiverse setup' to install dependencies." >&2
     exit 1
   fi
 done
