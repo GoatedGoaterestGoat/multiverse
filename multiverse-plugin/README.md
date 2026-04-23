@@ -8,7 +8,7 @@ Three things, all designed to scale past the limits of a single `claude` process
 
 **1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `dormant` / `ended`) is driven by hooks. Each multiverse instance is scoped to one workspace (cwd).
 
-**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), or fire quick ephemeral side-questions (`ask_agent`). Plus a TUI `a` keybinding to ask all agents the same question at once. Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session.
+**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus a TUI `a` keybinding to ask all agents the same question at once. Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
 
 **3. Context folding.** When a conversation grows large, fold specific message ranges into agent-written summaries — a granular alternative to `/compact`. The agent picks what to fold (using `context_info`), writes the summary, and the session resumes automatically with the optimized context.
 
@@ -109,6 +109,15 @@ Three MCP tools are available to any agent running under the wrapper. Each is wo
 - Blocking — returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
 - Works regardless of target state (idle, working, dormant) — uses a forked claude subprocess that doesn't disturb the target's main process
 
+**`spawn_agent(instruction, name="")`** — start a brand-new subagent with a fresh context and hand it a starting task. Use this when you want to delegate to a clean slate, not bother an existing agent.
+
+- `instruction` becomes the subagent's first user message, auto-submitted on startup
+- The subagent has **no memory of your conversation** — include any relevant context directly in `instruction` if it matters
+- User brokers the creation: the monitor pops a naming widget showing your instruction + a suggested name (your `name` arg, or random if unset/taken). User accepts, edits, or rejects
+- Blocking (300s timeout). Returns `"Spawned agent with name '<chosen>'"` on acceptance; on reject/timeout returns an error and no subagent is created
+- Concurrent spawn requests from multiple agents queue in the monitor — one modal at a time, FIFO
+- If you're attached to any multiverse-managed tmux session when a spawn request arrives, the monitor force-detaches you back to itself so you see the modal; it reattaches you to the same session automatically once the queue clears
+
 **TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
 
 When to pick which:
@@ -118,7 +127,8 @@ When to pick which:
 | "What are you working on?" / "Did you implement X?" | `ask_agent` (or `a` for all) |
 | "Please review the PR at /path/to/branch" | `message_agent` |
 | "Find me which agent owns the auth code" | `list_agents` then `ask_agent` |
-| "Run tests and tell me what failed" (delegate work) | `message_agent` |
+| "Run tests and tell me what failed" (delegate to an existing agent) | `message_agent` |
+| "Investigate the migration failure from scratch" (fresh context, no distractions) | `spawn_agent` |
 
 ### Context folding
 
@@ -155,9 +165,13 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │   ├── status.json   — {"status": "idle"|"working"|"waiting"|"ended"|…, "ts": …}
 │   ├── claude_uuid   — current claude session UUID (captured by SessionStart hook)
 │   └── control.json  — context-fold signaling channel
-└── inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
-                      — pending inter-agent message; consumed (deleted) by the
-                        deliver-inbox hook on first delivery as a system-reminder
+├── inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
+│                     — pending inter-agent message; consumed (deleted) by the
+│                       deliver-inbox hook on first delivery as a system-reminder
+└── spawn_requests/
+    ├── <req-id>.json           — agent-initiated subagent spawn request
+    └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
+                                  monitors can't double-resolve)
 ```
 
 Sessions survive monitor restarts — the TUI rebuilds its view from disk every refresh. Inbox files survive everything; they wait until the recipient's hooks fire.
@@ -212,7 +226,7 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 
 ### MCP server: tools
 
-The single MCP server (named `multiverse` in `.mcp.json`) exposes five tools:
+The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 
 | Tool | Purpose |
 |:-----|:--------|
@@ -221,6 +235,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes five tools:
 | `list_agents(max_agents)` | Discover other agents in the workspace |
 | `message_agent(target_name, message)` | Send a durable message (inbox-delivered) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
+| `spawn_agent(instruction, name)` | Spawn a fresh subagent with the instruction as its first user message; user-brokered naming in the monitor |
 
 ### Hooks
 
@@ -274,11 +289,26 @@ Inter-agent messages use a separate channel: `~/.multiverse/inbox/<encoded-cwd>/
 ### What happens during an `ask_agent` call
 
 1. `ask_agent(target, question)` looks up the target's `claude_uuid`
-2. Spawns subprocess: `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1 -p "<wrapped question>"`
+2. Spawns subprocess: `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1 -p "<wrapped question>"` with `MULTIVERSE_*` env vars **stripped** (so the fork's hooks don't corrupt the caller's state dir)
 3. The fork creates a **new** JSONL (the `<fresh>` UUID), reads the target's existing context, denies all tools, caps at one turn
 4. Target's main session is unaffected — works regardless of whether the target is idle, working, or dormant
 5. Subprocess exits with the answer on stdout; the fork JSONL is unlinked in a `finally` block
 6. Tool returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
+
+### What happens during a `spawn_agent` call
+
+1. `spawn_agent(instruction, name)` writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name (caller's `name` arg if free, else random), and the caller's tmux session id
+2. Tool fires `tmux display-message` on the caller's tmux pane so a user attached there sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve"
+3. Tool polls `<req-id>.resolved.json` every 250ms (timeout: 300s)
+4. All cwd-matching monitors scan `spawn_requests/` on each 1s tick and enqueue new, unresolved requests. When a monitor has no modal open and its queue is non-empty, it pops the next request's naming widget — seeded with the default name, showing the instruction preview
+5. User hits Enter to accept (writes `{status: "accepted", name: "<chosen>"}` to `<req-id>.resolved.json`, `O_EXCL`-atomic) or Esc to reject
+6. First monitor to write the resolution wins via `O_EXCL`; other monitors detect the external resolution on their next tick and dismiss their modal. If their user had already been typing, they get a notification that another monitor accepted first
+7. Tool reads the resolution. On accept → `create_session(cwd, claude_args=[instruction], name=chosen)` spawns the new tmux + claude with the instruction as a positional arg (claude auto-submits positional args as the first user message). On reject/timeout → returns an error, no subagent created
+8. Tool cleans up both files on exit
+
+**Auto-detach/reattach:** if the user is attached to any multiverse-managed tmux session when step 1 writes a request file, the monitor's sidecar guard (`_SpawnAttachGuard`) detects it within 1s and runs `tmux detach-client -s <attached-session>`, forcing the user back into the monitor. Textual's event loop is paused during attach, so this external detach is the only way to wake the modal. Once the spawn queue fully drains (all modals accepted/rejected), the monitor auto-reattaches the user to the tmux session they were booted out of. Skipped with a heads-up if that session was killed while they were away.
+
+The subagent starts from a **fresh prompt cache** with no memory of the caller's conversation. If context matters, the caller must put it in `instruction`.
 
 ### Key design decisions
 
@@ -320,6 +350,7 @@ multiverse-plugin/
 │   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find)
 │   ├── inbox.py              # Inter-agent message inbox (write/list/consume)
 │   ├── ask_agents.py         # Forked-subprocess ask machinery (used by ask_all + ask_agent)
+│   ├── spawn_requests.py     # Filesystem protocol for agent-initiated spawn_agent requests
 │   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control
 │   └── names.py              # Random name pool for new sessions
 └── README.md

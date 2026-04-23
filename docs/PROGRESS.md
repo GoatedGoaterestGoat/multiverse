@@ -10,7 +10,7 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase 1: Branching conversations | ⚪ Not started | |
 | Phase 2: Context management | 🟡 Partial | Context folding works (manual + auto-resume) |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
-| Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `ask_agent` / `respond_to_agent` with file-based inbox delivery |
+| Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `message_agent` / `ask_agent` / `spawn_agent` with file-based inbox delivery and monitor-brokered spawn approval |
 | Phase 5: UI | 🟡 Partial | Monitor TUI doubles as the first UI surface |
 | Phase 6: Polish & distribution | ⚪ Not started | |
 
@@ -104,6 +104,12 @@ inbox/<encoded-cwd>/<recipient-name>/<ask-id>.json
                    — pending message file (question or response). Written atomically
                      by ask_agent / respond_to_agent. Consumed (deleted) by the
                      deliver-inbox hook on first delivery.
+
+spawn_requests/<req-id>.json           — agent-initiated subagent spawn request.
+spawn_requests/<req-id>.resolved.json — user's naming decision (O_EXCL-atomic so
+                                          concurrent monitors can't double-resolve).
+                                          Both files cleaned up by the MCP tool
+                                          when it returns to the caller.
 ```
 
 **How it fits together:**
@@ -163,13 +169,14 @@ Responses are collected in parallel (`ThreadPoolExecutor`, max 5) and shown in a
 
 Location: `multiverse-plugin/src/server.py`, `src/inbox.py`, `src/ask_agents.py`, `scripts/deliver-inbox.py`
 
-The MCP server (renamed from `context-fold` → `multiverse`) exposes three agent-callable tools for inter-agent coordination, all scoped to the calling agent's cwd. The design splits into **persistent messaging** vs **ephemeral side-questions**:
+The MCP server (renamed from `context-fold` → `multiverse`) exposes four agent-callable tools for inter-agent coordination, all scoped to the calling agent's cwd. The design splits into **discovery**, **persistent messaging**, **ephemeral side-questions**, and **subagent spawning**:
 
 - **`list_agents(max_agents=15)`** — Returns named agents in the workspace (live, ended, dormant). Calling agent pinned to the top with a `← this is you` marker. Sorted by status priority (live → idle → dormant → ended) and truncated when long.
 - **`message_agent(target_name, message)`** — Persistent, fire-and-forget. Drops a message into the recipient's inbox, returns immediately. Recipient sees it as a system-reminder injected into their next turn (or on resume if dormant — auto-resume kicks in). The recipient has full tool access and the message persists in their conversation history. Replies are done by calling `message_agent` back at the original sender; there is no separate "respond" tool.
 - **`ask_agent(target_name, question, timeout_seconds=60)`** — Ephemeral side-question. Reuses the ask-all fork-session mechanism but for a single named target: spawns `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1`. Blocking — returns the answer inline or `"<agent>" did not respond within Ns` on timeout. Target's main session is NOT involved; nothing persists.
+- **`spawn_agent(instruction, name="")`** — Start a brand-new subagent with `instruction` as its first user message. User confirms + names via a monitor-popped modal (300s timeout). Blocking. The subagent has no memory of the caller's conversation — if context is needed, the caller must include it in `instruction`. See the "Agent-initiated subagent spawning" subsection below for the full protocol.
 
-The split is intentional: `message_agent` is for instructions and complex requests (target reads, runs commands, thinks); `ask_agent` is for facts the target already knows (no tools, no context pollution).
+The split is intentional: `message_agent` is for instructions and complex requests to an existing agent (target reads, runs commands, thinks); `ask_agent` is for facts the target already knows (no tools, no context pollution); `spawn_agent` is for delegation to a fresh context.
 
 **Delivery via inbox + hook injection** (only used by `message_agent` — `ask_agent` is a forked subprocess, separate path):
 
@@ -185,13 +192,43 @@ The split is intentional: `message_agent` is for instructions and complex reques
 
 **Earlier ask/respond design (replaced)**: an earlier iteration had `ask_agent` (with `wait_for_response` flag) and `respond_to_agent`, both routed via the inbox plus a persistent `~/.multiverse/asks/<ask-id>.json` ask-record for response routing. That's been retired in favor of the cleaner two-tool split above. The asks/ directory is no longer touched (safe to delete on disk).
 
+### Agent-initiated subagent spawning (`spawn_agent`)
+
+Location: `multiverse-plugin/src/spawn_requests.py`, `src/server.py`, `src/monitor.py`
+
+The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` to start a fresh subagent in the workspace, with its own `instruction` as the new session's first user message. The user retains control — the monitor pops a naming widget that the user must approve before the session is created.
+
+**Flow:**
+
+1. Agent calls `spawn_agent(instruction, name="<preferred>")`.
+2. MCP tool writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name, and the caller's tmux session name.
+3. Tool fires `tmux display-message` on the caller's pane so a user attached to the caller's tmux session sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve in the monitor." — best-effort status-line notification.
+4. Tool polls `<req-id>.resolved.json` every 250ms (timeout: 300s).
+5. Monitor scans `spawn_requests/` on each 1s tick. Enqueues new cwd-matching, unresolved requests into a per-monitor queue. Only one modal at a time; if multiple requests arrive concurrently they queue behind the active modal. Modal only opens when no other modal is already open.
+6. Modal shows `'<from>' wants to spawn a subagent:` + truncated instruction preview + name input seeded with the caller's preferred name (or a random one if that's taken). User hits Enter to accept, Esc to reject.
+7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
+8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[instruction], name=chosen)` — the instruction becomes a positional arg to `claude`, which auto-submits it as the first user message (verified via `claude-code-src/screens/REPL.tsx`'s `initialMessage` effect). Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject/timeout, returns an error string.
+9. Tool cleans up both files on exit.
+
+**Summarization is deliberately out of scope for v1.** Claude-code's `/compact` is in-process (hot-swaps `messagesRef`) and can't be triggered externally. Instead, the tool's docstring tells the agent to include a targeted summary in the instruction itself if prior context matters — the caller knows its own context best.
+
+**Multi-monitor coordination:** all cwd-matching monitors enqueue the same request and all pop their own modal when their queue is empty. First monitor to write the resolution file wins via `O_EXCL`; losers detect the external resolution on their next tick and dismiss their modal. A monitor whose modal is dismissed before its user has typed anything writes a `rejected` resolution that `O_EXCL`-no-ops. On concurrent acceptance, the losing monitor's user sees a "another monitor already accepted this spawn as 'X'" notification.
+
+**Stale request handling:** the MCP tool writes a timeout resolution on its way out, so any monitor with the modal still open dismisses cleanly. Stale request files (tool crashed before cleanup) are skipped by `list_pending_requests` via the `timeout_seconds` field vs `ts` comparison.
+
+**Context assembly note:** the subagent has zero memory of the caller's conversation. If it needs context, the caller must put it in the `instruction`. This is a hard boundary — principled, not a limitation — and it means spawned subagents start from a clean prompt cache rather than a forked one.
+
+**Auto-detach while attached to tmux** (`_SpawnAttachGuard` in `monitor.py`): Textual's `App.suspend()` pauses the event loop during a tmux attach, so the normal 1s tick can't detect incoming spawn requests while the user is watching an agent work. The fix is a background thread started alongside each `tmux attach-session` — it polls `spawn_requests/` every second and runs `tmux detach-client -s <session>` when one arrives, force-booting the user back to the monitor. When `_attach_to` sees `guard.forced_detach = True`, it sets `_pending_reattach = <tmux-session>`; the next `_tick_spawn_requests` call with an empty queue + no open modal automatically reattaches the user. The reattach re-enters `_attach_to` with a fresh guard, so consecutive spawn bursts keep cycling detach → modal → reattach without duplicating state. `tmux_session_exists` guards against reattaching to a session the user killed from the dashboard meanwhile.
+
 ### Code layout: data layer extracted
 
 Location: `multiverse-plugin/src/sessions.py`
 
-The pure data layer (no Textual, no in-process state) was extracted from `monitor.py` into `sessions.py` so the MCP server can use it without dragging the TUI in. Includes: `Session`, `DashboardRow`, `_read_session_metadata` (with `(path, mtime)` cache), `list_sessions`, `build_dashboard_rows`, `wrapped_claude_uuids`, `list_named_agents_in_cwd`, `find_agent_by_name`, plus `create_session` / `kill_session` (moved from monitor so the MCP server's `ask_agent` can auto-resume dormant targets without inverting the dependency direction).
+The pure data layer (no Textual, no in-process state) was extracted from `monitor.py` into `sessions.py` so the MCP server can use it without dragging the TUI in. Includes: `Session`, `DashboardRow`, `_read_session_metadata` (with `(path, mtime)` cache), `list_sessions`, `build_dashboard_rows`, `wrapped_claude_uuids`, `list_named_agents_in_cwd`, `find_agent_by_name`, plus `create_session` / `kill_session` (moved from monitor so the MCP server's `ask_agent` / `spawn_agent` can auto-resume dormant targets and create fresh subagents without inverting the dependency direction).
 
-`monitor.py` now only contains UI concerns (`MonitorApp`, all `*Screen` modal classes) plus thin wiring.
+`monitor.py` now only contains UI concerns (`MonitorApp`, all `*Screen` modal classes — including `SpawnRequestScreen`) plus thin wiring.
+
+`spawn_requests.py` is a tiny sibling module for the spawn-request filesystem protocol: atomic request writes, `O_EXCL`-atomic resolution writes (so racing monitors can't double-resolve), and staleness checks. Used by both the MCP server (`spawn_agent` tool) and the monitor's request watcher.
 
 ## What we learned
 
@@ -288,6 +325,14 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 - Apple ships bash 3.2 (licensing). Under `set -u`, expanding `"${ARR[@]}"` when `ARR=()` is empty raises "unbound variable" — the script dies before its first command runs.
 - Fix: `${ARR[@]+"${ARR[@]}"}` (the canonical "expand only if set" pattern). Works on bash 3.2 and 4+. Bit us in `bin/multiverse-session` — new sessions launched via plain `multiverse` (no claude args) crashed silently and the wrapper wrote `"ended"` immediately on exit.
 
+### Fork subprocesses silently corrupt the caller's state dir if env isn't sanitized
+
+- `ask_agent` (and any future tool that spawns `claude -p --resume … --fork-session` as a raw subprocess) inherits the **caller's** `MULTIVERSE_STATUS` / `MULTIVERSE_SESSION_*` env vars by default. The fork's hooks (`record-claude-uuid.sh`, `set-status.sh`, `deliver-inbox.py`) then fire with those envs and write into the **caller's** state dir — overwriting the caller's `claude_uuid` with the fork's/resumed session's UUID.
+- Symptom: caller disappears from the monitor dashboard and a phantom dormant row appears for its real JSONL, because `wrapped_claude_uuids` is now pointing at a different JSONL than the caller actually owns. `claude --resume` outside the monitor still shows the truth; only the multiverse view is wrong.
+- Fix: `src/ask_agents.py::_env_without_session_vars()` strips all `MULTIVERSE_*` from the subprocess env before spawning. All hook scripts already no-op when those vars are missing, so stripping is safe.
+- **Not affected:** `create_session` (both from the monitor and from `spawn_agent`). That uses `tmux new-session -d -e …`, which properly overrides inherited env in the new session — verified empirically, including the nested-tmux case.
+- Recovery after a corrupted claude_uuid: manually write the correct UUID into `~/.multiverse/sessions/<mv-id>/claude_uuid`. The correct UUID is in `meta.json`'s `resumed_from` (if resumed) or in the JSONL file with the matching `customTitle`.
+
 ### `uv run <script>` requires the project to be packaged
 
 - Plain `uv run script-name` does not actually invoke `[project.scripts]` entries unless the project has a `[build-system]` (so uv can install a wheel into the venv). Without it, uv silently skips entry-point installation — it warns once at sync time but the entries don't exist at run time.
@@ -353,6 +398,8 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 - [x] Stop-hook wakeup so mid-task asks get picked up after the current turn finishes
 - [x] Notification filtering so `idle_prompt` doesn't overwrite `idle` with `waiting`
 - [x] Inbox + Preview columns on the dashboard
+- [x] Agent-initiated subagent spawning (`spawn_agent`) with monitor-brokered naming widget, queue-coalesced concurrent requests, tmux-pane notification to the caller's user
+- [x] Fork-subprocess env leak fix (`ask_agent` no longer writes into the caller's state dir)
 - [ ] Agent→agents MCP fan-out tool (the agent-callable equivalent of the `a` keybinding) — useful as a discovery prelude before a targeted `ask_agent`
 - [ ] Multi-turn asker/responder protocol — `ask_agent` is currently one-shot per ask_id; threading subsequent follow-ups into the same conversation isn't supported
 - [ ] Persistent thread mailbox (`agentA-agentB.jsonl`) for ongoing relationships, distinct from the per-message inbox files we have now

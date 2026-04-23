@@ -78,6 +78,31 @@ def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
+def _env_without_session_vars() -> dict[str, str]:
+    """Return ``os.environ`` minus session-scoped ``MULTIVERSE_*`` vars.
+
+    Why this matters: when ``ask_agent`` is called by a running multiverse
+    agent, the MCP server (a subprocess of that agent's claude) inherits
+    the agent's ``MULTIVERSE_STATUS`` / ``MULTIVERSE_SESSION_*`` env vars.
+    If we launch the fork subprocess without stripping those, the fork's
+    hooks (``record-claude-uuid.sh``, ``set-status.sh``, ``deliver-inbox.py``)
+    will see the CALLER's session path and **write the fork's session_id
+    into the caller's state dir** — corrupting the caller's ``claude_uuid``
+    so dedup against dormant listings breaks and the caller appears twice
+    in the dashboard (once live-wrapping-a-wrong-uuid, once as a phantom
+    dormant row for the caller's real uuid).
+
+    The fork is ephemeral, tool-less, single-turn — it has no business
+    touching any multiverse state — so we strip ALL ``MULTIVERSE_*`` from
+    its env. The hooks all have ``[ -z "${MULTIVERSE_STATUS:-}" ] && exit 0``
+    guards, so stripping makes them no-op cleanly.
+
+    ``MULTIVERSE_PLUGIN_ROOT`` is read by the caller BEFORE calling this,
+    so the ``--plugin-dir`` CLI flag is still correctly populated.
+    """
+    return {k: v for k, v in os.environ.items() if not k.startswith("MULTIVERSE_")}
+
+
 def _ask_one(
     target: AskTarget,
     question: str,
@@ -115,6 +140,7 @@ def _ask_one(
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=_env_without_session_vars(),
         )
         if r.returncode != 0:
             err = (r.stderr.strip() or f"claude exited {r.returncode}")[:400]

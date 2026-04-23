@@ -50,6 +50,12 @@ from .sessions import (
     tmux_session_exists,
     wrapped_claude_uuids,
 )
+from .spawn_requests import (
+    list_pending_requests,
+    read_resolution,
+    request_path,
+    write_resolution,
+)
 
 
 STATUS_STYLES = {
@@ -61,6 +67,59 @@ STATUS_STYLES = {
     "dormant": "blue",
     "unknown": "dim",
 }
+
+
+class _SpawnAttachGuard:
+    """Background watcher while the user is attached to a tmux session.
+
+    Polls ``~/.multiverse/spawn_requests/`` every second for cwd-matching
+    pending requests. When one appears, runs ``tmux detach-client -s
+    <session>`` to force the user back into the monitor so they can see
+    the naming modal (Textual's event loop is suspended during attach, so
+    the normal tick can't fire).
+
+    ``forced_detach`` is set to True when we issue the detach so the
+    caller can schedule a reattach once the queue has fully drained.
+    """
+
+    _POLL_INTERVAL = 1.0
+
+    def __init__(self, cwd: str, tmux_session: str) -> None:
+        self.cwd = cwd
+        self.tmux_session = tmux_session
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self.forced_detach = False
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=0.5)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                pending = list_pending_requests(self.cwd)
+            except Exception:
+                pending = []
+            if pending:
+                try:
+                    subprocess.run(
+                        ["tmux", "detach-client", "-s", self.tmux_session],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=3,
+                    )
+                    self.forced_detach = True
+                except (OSError, subprocess.SubprocessError):
+                    pass
+                return  # one detach is all we need
+            if self._stop.wait(self._POLL_INTERVAL):
+                return
 
 
 class NewSessionScreen(ModalScreen[Optional[str]]):
@@ -100,6 +159,73 @@ class NewSessionScreen(ModalScreen[Optional[str]]):
         if name in existing_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
+            )
+            return
+        self.dismiss(name)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class SpawnRequestScreen(ModalScreen[Optional[str]]):
+    """Naming widget for an agent-initiated spawn request.
+
+    Returns the chosen name on accept, or ``None`` on Esc. The monitor's
+    watcher may also dismiss this externally (if another monitor resolved
+    the request first) — in that case the callback still sees ``None`` and
+    ``write_resolution`` no-ops via O_EXCL.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    _PREVIEW_CHARS = 280
+
+    def __init__(self, cwd: str, request: dict) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self.request = request
+        seeded = (request.get("default_name") or "").strip()
+        if not seeded or seeded in existing_names_in_cwd(cwd):
+            seeded = pick_random_name(existing_names_in_cwd(cwd)) or ""
+        self.default_name = seeded
+
+    def compose(self) -> ComposeResult:
+        from_name = self.request.get("from", "?")
+        instruction = self.request.get("instruction", "") or ""
+        preview = instruction[: self._PREVIEW_CHARS]
+        if len(instruction) > self._PREVIEW_CHARS:
+            preview = preview.rstrip() + "…"
+
+        yield Vertical(
+            Static(
+                f"[bold]'{from_name}'[/] wants to spawn a subagent:",
+                id="spawn-header",
+            ),
+            Static(f"[dim italic]{preview or '(empty instruction)'}[/]", id="spawn-preview"),
+            Static("Name the new agent:", id="spawn-prompt"),
+            Input(value=self.default_name, id="spawn-name"),
+            Static("", id="spawn-error"),
+            Static("Enter to accept · Esc to reject", id="spawn-hint"),
+            id="spawn-dialog",
+        )
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#spawn-name", Input)
+        inp.focus()
+        try:
+            inp.cursor_position = len(inp.value)
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        name = event.value.strip()
+        err = self.query_one("#spawn-error", Static)
+        if not name:
+            err.update("[red]Name cannot be empty.[/]")
+            return
+        if name in existing_names_in_cwd(self.cwd):
+            err.update(
+                f"[red]'{name}' is already used in this workspace.[/]"
             )
             return
         self.dismiss(name)
@@ -394,6 +520,35 @@ class MonitorApp(App):
         color: $text-muted;
         padding-top: 1;
     }
+    #spawn-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #spawn-header {
+        padding-bottom: 1;
+        height: auto;
+    }
+    #spawn-preview {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #spawn-prompt {
+        padding-top: 1;
+        height: auto;
+    }
+    #spawn-error {
+        color: $error;
+        height: auto;
+        padding-top: 1;
+    }
+    #spawn-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     """
 
     BINDINGS = [
@@ -417,6 +572,17 @@ class MonitorApp(App):
         # the dashboard + resume widget for their brief lifetime.
         self._active_fork_uuids: set[str] = set()
         self._fork_lock = threading.Lock()
+        # Spawn-request queue state. Each tick scans ``spawn_requests/`` and
+        # shows at most one modal at a time — the rest queue behind it.
+        self._seen_spawn_ids: set[str] = set()
+        self._spawn_queue: list[dict] = []
+        self._active_spawn_id: Optional[str] = None
+        self._active_spawn_modal: Optional[SpawnRequestScreen] = None
+        # When the attach sidecar forcibly detaches the user to deal with a
+        # spawn request, we remember the tmux session here so we can
+        # reattach once the queue fully drains (set by ``_attach_to``;
+        # consumed by ``_tick_spawn_requests``).
+        self._pending_reattach: Optional[str] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -451,6 +617,112 @@ class MonitorApp(App):
             hide_uuids=hide,
         )
         self._redraw_table()
+        self._tick_spawn_requests()
+
+    def _tick_spawn_requests(self) -> None:
+        """One pass of the spawn-request watcher. Called every 1s.
+
+        Responsibilities:
+          1. Enqueue any newly-seen, cwd-matching, unresolved requests.
+          2. If the active modal's request was resolved externally (another
+             monitor got there first), dismiss it.
+          3. If no modal is open and the queue is non-empty, push the next
+             one — skipping queued entries that have been resolved since.
+        """
+        for req in list_pending_requests(self.monitor_cwd):
+            rid = req.get("id")
+            if not rid or rid in self._seen_spawn_ids:
+                continue
+            self._seen_spawn_ids.add(rid)
+            self._spawn_queue.append(req)
+
+        if self._active_spawn_id is not None:
+            if read_resolution(self._active_spawn_id) is not None:
+                modal = self._active_spawn_modal
+                if modal is not None:
+                    try:
+                        modal.dismiss(None)
+                    except Exception:
+                        # Modal may already be tearing down; the callback
+                        # handles the cleanup either way.
+                        pass
+
+        if self._active_spawn_id is None and self._spawn_queue:
+            # Don't stomp on a modal the user opened explicitly (New,
+            # Resume, Ask, etc). Wait for the next tick.
+            if isinstance(self.screen, ModalScreen):
+                return
+            while self._spawn_queue:
+                req = self._spawn_queue.pop(0)
+                rid = req.get("id") or ""
+                # The request may have been resolved by another monitor, or
+                # cleaned up by the tool (timeout/rejection path) during the
+                # interval between enqueue and push. Drop silently.
+                if read_resolution(rid) is not None:
+                    continue
+                if not request_path(rid).is_file():
+                    continue
+                timeout = int(req.get("timeout_seconds") or 300)
+                ts = float(req.get("ts") or 0)
+                if time.time() - ts > timeout:
+                    continue
+                self._show_spawn_modal(req)
+                break
+
+        # Reattach path: if a spawn request previously yanked the user out
+        # of a tmux session AND the queue has fully drained AND no modal
+        # is open, put them back. Skip (with a heads-up) if the target
+        # session was killed while they were away.
+        if (
+            self._pending_reattach
+            and self._active_spawn_id is None
+            and not self._spawn_queue
+            and not isinstance(self.screen, ModalScreen)
+        ):
+            target = self._pending_reattach
+            self._pending_reattach = None
+            if tmux_session_exists(target):
+                self.notify(f"Reattaching to {target}…")
+                self._attach_to(target)
+            else:
+                self.notify(
+                    f"Skipping reattach — {target} is no longer running",
+                    severity="warning",
+                )
+
+    def _show_spawn_modal(self, req: dict) -> None:
+        rid = req.get("id") or ""
+        self._active_spawn_id = rid
+
+        def on_close(chosen_name: Optional[str]) -> None:
+            self._active_spawn_id = None
+            self._active_spawn_modal = None
+            if chosen_name:
+                won = write_resolution(rid, status="accepted", name=chosen_name)
+                if won:
+                    self.notify(
+                        f"Approved spawn from '{req.get('from', '?')}' "
+                        f"as '{chosen_name}'"
+                    )
+                else:
+                    # Another monitor beat us to the resolution. Show what
+                    # actually won, if anything meaningful.
+                    actual = read_resolution(rid)
+                    if actual and actual.get("status") == "accepted":
+                        won_name = actual.get("name") or "?"
+                        self.notify(
+                            f"Another monitor already accepted this "
+                            f"spawn as '{won_name}'",
+                            severity="warning",
+                        )
+            else:
+                # Could be user Esc OR external dismiss. O_EXCL makes the
+                # second case a no-op.
+                write_resolution(rid, status="rejected", reason="cancelled")
+
+        modal = SpawnRequestScreen(self.monitor_cwd, req)
+        self._active_spawn_modal = modal
+        self.push_screen(modal, on_close)
 
     def _redraw_table(self) -> None:
         table = self.query_one(DataTable)
@@ -544,6 +816,27 @@ class MonitorApp(App):
 
         self.push_screen(ResumeSessionScreen(self.monitor_cwd, hide), on_picked)
 
+    def _attach_to(self, tmux_session: str) -> None:
+        """Attach the user to a tmux session, with a sidecar guard that
+        force-detaches them back to this monitor if a spawn_agent request
+        arrives while they're inside. On forced detach, queues a reattach
+        that will fire once the spawn queue fully drains.
+        """
+        guard = _SpawnAttachGuard(cwd=self.monitor_cwd, tmux_session=tmux_session)
+        guard.start()
+        try:
+            with self.suspend():
+                subprocess.run(["tmux", "attach-session", "-t", tmux_session])
+        finally:
+            guard.stop()
+
+        if guard.forced_detach:
+            self._pending_reattach = tmux_session
+            self.notify(
+                f"Detached from {tmux_session} to review a spawn request — "
+                "will reattach when the queue clears."
+            )
+
     def _spawn_resumed(self, cwd: str, uuid: str, name: str) -> None:
         try:
             create_session(cwd, ["--resume", uuid], resumed_from=uuid, name=name)
@@ -564,8 +857,7 @@ class MonitorApp(App):
             if not tmux_session_exists(e.session.tmux_name):
                 self.notify(f"Session {e.session.id} is not running", severity="warning")
                 return
-            with self.suspend():
-                subprocess.run(["tmux", "attach-session", "-t", e.session.tmux_name])
+            self._attach_to(e.session.tmux_name)
             self.refresh_sessions()
             return
 

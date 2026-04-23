@@ -10,12 +10,18 @@ Hosts the agent-facing tools for the multiverse plugin:
   - ask_agent                     — quick ephemeral question to another
                                     agent (forked side-question, no tools,
                                     blocking with timeout)
+  - spawn_agent                   — start a brand-new subagent in the
+                                    workspace with the calling agent's
+                                    instruction as its first user message
+                                    (user confirms+names via a monitor
+                                    modal)
 """
 
 from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -28,15 +34,25 @@ from src.session import find_session_path, parse_jsonl, format_context_info
 from src.rewriter import fold_context
 from src.sessions import (
     create_session,
+    existing_names_in_cwd,
     find_agent_by_name,
     list_named_agents_in_cwd,
 )
 from src.inbox import write_message_to_inbox
 from src.ask_agents import AskTarget, ask_one
+from src.names import pick_random_name
+from src.spawn_requests import (
+    cleanup_request,
+    new_request_id,
+    wait_for_resolution,
+    write_resolution,
+    write_spawn_request,
+)
 
 mcp = FastMCP("multiverse")
 
 _DEFAULT_ASK_TIMEOUT = 60
+_DEFAULT_SPAWN_TIMEOUT = 300
 
 
 def _write_control_action(action: dict) -> bool:
@@ -360,6 +376,126 @@ def ask_agent(
             return f"'{target_name}' did not respond within {timeout}s."
         return f"Error asking '{target_name}': {result.error}"
     return result.response or f"'{target_name}' returned an empty response."
+
+
+@mcp.tool()
+def spawn_agent(instruction: str, name: str = "") -> str:
+    """Spawn a brand-new subagent in your workspace with a starting task.
+
+    The ``instruction`` you pass becomes the subagent's first user message —
+    the subagent starts a fresh session and acts on it immediately.
+
+    The subagent has NO knowledge of your prior conversation. If context
+    from your conversation is relevant to the task, include a targeted
+    summary directly in the instruction. Be deliberate — the subagent only
+    sees what you put here.
+
+    User flow: a naming widget opens in the multiverse monitor showing your
+    instruction and a suggested name. The user can accept, edit the name,
+    or reject. This tool blocks until they respond (or a 5-minute timeout).
+    If rejected or timed out, no subagent is created.
+
+    Args:
+        instruction: The first user message for the new agent. Can be
+            multi-line, can include task context, code, a summary of your
+            own prior context — anything the subagent should see to start
+            its work.
+        name: Optional preferred name for the new agent. The user sees this
+            pre-filled in the naming widget and can accept or edit it. If
+            empty or already taken in this workspace, a random name is
+            suggested instead.
+    """
+    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    caller_sid = os.environ.get("MULTIVERSE_SESSION_ID")
+    if not cwd or not self_name or not caller_sid:
+        return (
+            "Error: this tool requires running inside a multiverse-managed "
+            "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME / "
+            "MULTIVERSE_SESSION_ID unset)."
+        )
+
+    if not instruction or not instruction.strip():
+        return "Error: instruction cannot be empty."
+
+    existing = existing_names_in_cwd(cwd)
+    requested = (name or "").strip()
+    if requested and requested not in existing:
+        default_name = requested
+    else:
+        default_name = pick_random_name(existing) or ""
+    if not default_name:
+        return (
+            "Error: could not pick a default name — the workspace name "
+            "pool may be exhausted. Kill some ended sessions and retry."
+        )
+
+    req_id = new_request_id()
+    caller_tmux = f"multiverse-{caller_sid}"
+
+    try:
+        write_spawn_request(
+            req_id=req_id,
+            from_name=self_name,
+            cwd=cwd,
+            instruction=instruction,
+            default_name=default_name,
+            caller_tmux_session=caller_tmux,
+            timeout_seconds=_DEFAULT_SPAWN_TIMEOUT,
+        )
+    except OSError as e:
+        return f"Error: failed to write spawn request: {e}"
+
+    # Nudge any user attached to the caller's pane. Best-effort — if the
+    # tmux session doesn't exist or tmux isn't on PATH, skip silently.
+    try:
+        subprocess.run(
+            [
+                "tmux", "display-message", "-t", caller_tmux,
+                f"'{self_name}' wants to spawn a subagent — "
+                "detach (Ctrl-b d) to approve in the monitor.",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    res = wait_for_resolution(req_id, _DEFAULT_SPAWN_TIMEOUT)
+
+    try:
+        if res is None:
+            # Timed out before the user (or any monitor) resolved. Write a
+            # terminal resolution so any still-open modal dismisses itself.
+            write_resolution(req_id, status="timeout", reason="timeout")
+            return (
+                f"Spawn request timed out after {_DEFAULT_SPAWN_TIMEOUT}s "
+                "with no user response in the monitor. No subagent was "
+                "created."
+            )
+
+        status = res.get("status")
+        if status != "accepted":
+            reason = res.get("reason") or status or "rejected"
+            return f"Spawn request rejected by user ({reason}). No subagent was created."
+
+        chosen = (res.get("name") or "").strip()
+        if not chosen:
+            return "Error: resolution contained an empty name — no subagent created."
+
+        try:
+            create_session(
+                cwd=cwd,
+                claude_args=[instruction],
+                name=chosen,
+            )
+        except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+            return f"Error: failed to create session: {e}"
+
+        return f"Spawned agent with name '{chosen}'."
+    finally:
+        cleanup_request(req_id)
 
 
 def _auto_resume(target, cwd: str) -> None:
