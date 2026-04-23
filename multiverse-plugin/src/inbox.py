@@ -25,8 +25,10 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from .paths import multiverse_dir
 
-MULTIVERSE_DIR = Path(os.path.expanduser("~/.multiverse"))
+
+MULTIVERSE_DIR = multiverse_dir()
 INBOX_DIR = MULTIVERSE_DIR / "inbox"
 
 

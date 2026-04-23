@@ -217,6 +217,7 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 
 | Env var | Used by |
 |:--------|:--------|
+| `MULTIVERSE_ROOT=<state_dir>` | canonical `~/.multiverse` — pinned to an absolute path so the monitor and every spawned process agree even when `HOME` differs between them |
 | `MULTIVERSE_SESSION_ID=<mv-id>` | identifies the multiverse session |
 | `MULTIVERSE_SESSION_NAME=<name>` | inter-agent tools (caller identity) |
 | `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
@@ -321,6 +322,7 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 - **Non-destructive.** Original session JSONLs are never modified — folds and forks both create new ones.
 - **Graceful degradation.** Without the wrapper, the plugin still loads and the context-fold MCP tools work; you just resume manually after a fold.
 - **Concurrent-safe.** Each session has its own state directory and its own env vars (injected via `tmux new-session -e`); nothing leaks between sessions.
+- **Cross-process path coherence.** All state paths — including `MULTIVERSE_ROOT` (the `~/.multiverse` directory itself) — flow as absolute paths via `tmux -e` rather than being derived from `HOME` in each process. This matters in deployments where the monitor and the spawned claude processes have different `HOME` values (e.g. containers where a wrapper sets `HOME=/weka/...` for claude so `~/.claude` lands on persistent storage); without an explicit `MULTIVERSE_ROOT` the inbox and spawn-request directories silently diverge between the two sides.
 
 ## Plugin structure
 
@@ -351,6 +353,7 @@ multiverse-plugin/
 │   ├── inbox.py              # Inter-agent message inbox (write/list/consume)
 │   ├── ask_agents.py         # Forked-subprocess ask machinery (used by ask_all + ask_agent)
 │   ├── spawn_requests.py     # Filesystem protocol for agent-initiated spawn_agent requests
+│   ├── paths.py              # Canonical ~/.multiverse resolution (MULTIVERSE_ROOT > MULTIVERSE_STATUS > HOME)
 │   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control
 │   └── names.py              # Random name pool for new sessions
 └── README.md

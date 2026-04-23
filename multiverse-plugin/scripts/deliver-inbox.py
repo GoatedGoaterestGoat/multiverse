@@ -30,7 +30,18 @@ import time
 from pathlib import Path
 
 
-INBOX_DIR = Path(os.path.expanduser("~/.multiverse")) / "inbox"
+def _multiverse_dir() -> Path:
+    """Canonical multiverse state dir (see src/paths.py for rationale)."""
+    explicit = os.environ.get("MULTIVERSE_ROOT")
+    if explicit:
+        return Path(explicit)
+    status = os.environ.get("MULTIVERSE_STATUS")
+    if status:
+        return Path(status).parent.parent.parent
+    return Path(os.path.expanduser("~/.multiverse"))
+
+
+INBOX_DIR = _multiverse_dir() / "inbox"
 
 
 def _encode_cwd(cwd: str) -> str:

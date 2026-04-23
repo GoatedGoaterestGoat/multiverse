@@ -25,8 +25,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
+from .paths import multiverse_dir
 
-STATE_DIR = Path(os.path.expanduser("~/.multiverse/sessions"))
+
+MULTIVERSE_DIR = multiverse_dir()
+STATE_DIR = MULTIVERSE_DIR / "sessions"
 CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
 TMUX_PREFIX = "multiverse-"
 
@@ -488,6 +491,7 @@ def create_session(
         "tmux", "new-session", "-d",
         "-s", tmux_name,
         "-c", cwd_abs,
+        "-e", f"MULTIVERSE_ROOT={MULTIVERSE_DIR}",
         "-e", f"MULTIVERSE_SESSION_ID={sid}",
         "-e", f"MULTIVERSE_SESSION_CWD={cwd_abs}",
         "-e", f"MULTIVERSE_CONTROL={d / 'control.json'}",

@@ -20,6 +20,11 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 export MULTIVERSE_ORIG_CWD="$PWD"
 export MULTIVERSE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
+# Pin the multiverse state dir to one absolute path that the monitor and
+# every tmux-spawned session will see. Respects a caller-set value so
+# deployments that need to route this elsewhere can override.
+export MULTIVERSE_ROOT="${MULTIVERSE_ROOT:-$HOME/.multiverse}"
+
 prompt_yes() {
   local reply
   read -r -p "$1 [y/N] " reply
