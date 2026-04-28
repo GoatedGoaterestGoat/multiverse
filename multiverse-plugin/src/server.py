@@ -298,11 +298,18 @@ def message_agent(target_name: str, message: str) -> str:
     commands, use tools, then reply at their own pace.
 
     Delivery: the message is dropped into the recipient's inbox and
-    surfaces as a system-reminder injected into their next turn (or
-    immediately on resume if they're dormant — they get auto-resumed). The
+    surfaces as a system-reminder injected into their next turn. The
     message persists in the recipient's conversation history. This is
-    fire-and-forget: the tool returns as soon as the message is delivered;
+    fire-and-forget: the tool returns as soon as the message is queued;
     you do NOT block on a reply.
+
+    Live recipients see the message at their next turn boundary (Stop
+    hook or UserPromptSubmit hook injection). Dormant recipients stay
+    dormant — the inbox file waits on disk and is delivered the moment
+    the user resumes their session from the monitor (the inbox-prime
+    machinery in ``bin/multiverse-session`` fires automatically on
+    resume when the inbox is non-empty). The dashboard shows a 📩 N
+    badge on dormant rows so the user can see who has pending work.
 
     To reply to a message you received, simply call ``message_agent`` back
     at the original sender — there is no separate "respond" tool.
@@ -334,10 +341,6 @@ def message_agent(target_name: str, message: str) -> str:
             "Call list_agents to see who's available."
         )
 
-    # IMPORTANT: write the inbox file BEFORE auto-resuming. Reverse order
-    # races claude's SessionStart hook, which fires within milliseconds of
-    # spawn — if it fires first, it sees an empty inbox and the message
-    # sits unread until something else triggers a hook later.
     write_message_to_inbox(
         sender_name=self_name,
         recipient_name=target_name,
@@ -345,15 +348,9 @@ def message_agent(target_name: str, message: str) -> str:
         message=message,
     )
 
-    needs_resume = target.session is None or target.status == "ended"
-    if needs_resume:
-        try:
-            _auto_resume(target, cwd)
-        except Exception as e:  # noqa: BLE001
-            return f"Error: failed to auto-resume '{target_name}': {e}"
-
-    suffix = " (target was dormant; auto-resumed)" if needs_resume else ""
-    return f"Message delivered to '{target_name}'{suffix}."
+    is_dormant = target.session is None or target.status == "ended"
+    suffix = " (dormant; will be delivered when the user resumes)" if is_dormant else ""
+    return f"Message queued for '{target_name}'{suffix}."
 
 
 @mcp.tool()
@@ -541,30 +538,6 @@ def spawn_agent(instruction: str, name: str = "") -> str:
         return f"Spawned agent with name '{chosen}'."
     finally:
         cleanup_request(req_id)
-
-
-def _auto_resume(target, cwd: str) -> None:
-    """Spawn a multiverse session that resumes the dormant/ended target.
-
-    Mirrors the monitor's resume flow but headless. Reuses the target's
-    existing name; if an ended multiverse session is still occupying the
-    name slot, reap it first.
-    """
-    if target.claude_uuid is None:
-        raise RuntimeError(
-            f"target '{target.name}' has no tracked claude UUID — "
-            "cannot resume programmatically"
-        )
-    if target.session is not None and target.status == "ended":
-        from src.sessions import kill_session  # local import to avoid cycle
-        kill_session(target.session)
-
-    create_session(
-        cwd=cwd,
-        claude_args=["--resume", target.claude_uuid],
-        resumed_from=target.claude_uuid,
-        name=target.name,
-    )
 
 
 if __name__ == "__main__":
