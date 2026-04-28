@@ -47,6 +47,7 @@ from .sessions import (
     kill_session,
     list_claude_sessions_in,
     list_sessions,
+    strip_fold_suffix,
     tmux_session_exists,
     wrapped_claude_uuids,
 )
@@ -838,6 +839,11 @@ class MonitorApp(App):
             )
 
     def _spawn_resumed(self, cwd: str, uuid: str, name: str) -> None:
+        # Strip ghost-row display suffixes — passing the literal "step2b
+        # (folded 02:33)" as `--name` would write that into the new
+        # session's custom-title and the dashboard would re-suffix it on
+        # the next refresh, accumulating ad infinitum.
+        name = strip_fold_suffix(name) or name
         try:
             create_session(cwd, ["--resume", uuid], resumed_from=uuid, name=name)
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:

@@ -39,6 +39,26 @@ def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
+# Suffix written by build_dashboard_rows onto ghost row display names,
+# matching every format _format_fold_time produces (HH:MM, "Mon DD",
+# YYYY-MM-DD). Strip it on read so a JSONL whose custom-title was
+# corrupted by a previous resume of a ghost row (which passed the
+# already-suffixed display name to `claude --name`) still resolves to
+# the underlying clean title — and dashboard renders don't double-suffix.
+_FOLD_SUFFIX_RE = re.compile(r" \(folded [^)]+\)$")
+
+
+def strip_fold_suffix(name: Optional[str]) -> Optional[str]:
+    """Remove trailing ``(folded …)`` markers, idempotently."""
+    if name is None:
+        return None
+    while True:
+        new = _FOLD_SUFFIX_RE.sub("", name)
+        if new == name:
+            return name
+        name = new
+
+
 def _extract_user_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -90,7 +110,7 @@ def _read_session_metadata(path: Path) -> dict:
                 if typ == "custom-title":
                     ct = raw.get("customTitle")
                     if ct:
-                        title = str(ct)
+                        title = strip_fold_suffix(str(ct))
                 if cwd is None:
                     c = raw.get("cwd")
                     if c:
