@@ -110,9 +110,36 @@ while true; do
 
   prime_inbox_if_needed
 
+  # Run claude as a backgrounded job so we can SIGTERM it from a watcher
+  # when MULTIVERSE_CONTROL gets a control action written (e.g. by
+  # context_fold). Job control is off in scripts, so claude stays in our
+  # process group and shares the controlling TTY normally — no SIGTTIN.
+  #
+  # Why we can't rely on the PostToolUse hook to exit claude: returning
+  # `{"continue":false}` from PostToolUse only sets shouldPreventContinuation
+  # in claude's query loop, which ends the model's current turn and drops
+  # back to the input prompt. The CLI process keeps running. Without this
+  # watcher, the wrapper would block forever in `wait` after a fold.
   claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
          ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
-         ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} || true
+         ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} &
+  CLAUDE_PID=$!
+
+  ( while kill -0 "$CLAUDE_PID" 2>/dev/null; do
+      sleep 0.5
+      if [ -s "$MULTIVERSE_CONTROL" ]; then
+        # Give claude a beat to finish writing the tool_result and run
+        # any other PostToolUse hooks before terminating it.
+        sleep 1
+        kill -TERM "$CLAUDE_PID" 2>/dev/null || true
+        exit 0
+      fi
+    done ) &
+  WATCHER_PID=$!
+
+  wait "$CLAUDE_PID" 2>/dev/null || true
+  kill "$WATCHER_PID" 2>/dev/null || true
+  wait "$WATCHER_PID" 2>/dev/null || true
 
   if [ ! -s "$MULTIVERSE_CONTROL" ]; then
     break

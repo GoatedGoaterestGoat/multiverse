@@ -44,7 +44,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "context_fold",
+        "matcher": "mcp__plugin_multiverse_multiverse__context_fold",
         "hooks": [
           {
             "type": "command",
