@@ -40,10 +40,75 @@ fi
 
 CLAUDE_ARGS=("$@")
 
+# Resolve the canonical multiverse state dir the same way src/paths.py does:
+# explicit MULTIVERSE_ROOT > grandparent of MULTIVERSE_STATUS > $HOME fallback.
+# Used below to find this session's pending inbox files.
+resolve_multiverse_root() {
+  if [ -n "${MULTIVERSE_ROOT:-}" ]; then
+    printf '%s' "$MULTIVERSE_ROOT"
+  elif [ -n "${MULTIVERSE_STATUS:-}" ]; then
+    printf '%s' "$(dirname "$(dirname "$(dirname "$MULTIVERSE_STATUS")")")"
+  else
+    printf '%s' "$HOME/.multiverse"
+  fi
+}
+
+# If this session has pending inbox messages AND we have a --resume UUID
+# to anchor against, run a print-mode prime call before going interactive.
+# Why: claude's SessionStart hook delivers the inbox via additionalContext,
+# but additionalContext alone doesn't trigger an API call — the model only
+# sees it when something else (a user-typed prompt) prompts a turn. Without
+# this prime, a dormant agent that gets message_agent'd would have the
+# message buffered in claude's memory but the model wouldn't actually
+# engage with it until a human attached and typed something. The prime
+# fills that role with a synthetic system-style "you have N messages"
+# prompt — same single API call delivers the inbox additionalContext +
+# the wake prompt, the model reads and acts, response lands in the JSONL,
+# the interactive claude that follows resumes the same UUID and surfaces
+# the result to anyone who attaches.
+prime_inbox_if_needed() {
+  [ -z "${MULTIVERSE_SESSION_NAME:-}" ] && return 0
+  [ -z "${MULTIVERSE_SESSION_CWD:-}" ] && return 0
+
+  local mv_root inbox_dir enc count
+  mv_root=$(resolve_multiverse_root)
+  enc=$(printf '%s' "$MULTIVERSE_SESSION_CWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  inbox_dir="$mv_root/inbox/$enc/$MULTIVERSE_SESSION_NAME"
+  [ -d "$inbox_dir" ] || return 0
+  count=$(find "$inbox_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$count" = "0" ] && return 0
+
+  # Locate --resume <uuid> in CLAUDE_ARGS — print-mode prime needs an
+  # existing session UUID to anchor. Fresh sessions (no --resume) have
+  # no inbox at startup by construction, so skip in that case too.
+  local resume_uuid="" prev=""
+  for arg in ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"}; do
+    if [ "$prev" = "--resume" ]; then
+      resume_uuid="$arg"
+      break
+    fi
+    prev="$arg"
+  done
+  [ -z "$resume_uuid" ] && return 0
+
+  local plural="messages"
+  [ "$count" = "1" ] && plural="message"
+
+  echo ""
+  echo "[multiverse] Processing $count pending inbox $plural before going interactive…"
+  echo ""
+  claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+         ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
+         -p "You have $count pending inbox $plural from other agents in your workspace. They have just been delivered to your context as a <system-reminder>. Please read them and respond/act on them as appropriate — a user may attach to your session shortly to see the result." \
+         --resume "$resume_uuid" 2>/dev/null || true
+}
+
 # Bash 3.2 (default on macOS) errors on `"${ARR[@]}"` when ARR is empty under
 # `set -u`. Use `${ARR[@]+"${ARR[@]}"}` — expand only if set — to stay safe.
 while true; do
   : > "$MULTIVERSE_CONTROL"
+
+  prime_inbox_if_needed
 
   claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
          ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \

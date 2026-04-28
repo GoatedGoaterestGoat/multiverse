@@ -287,6 +287,8 @@ Inter-agent messages use a separate channel: `~/.multiverse/inbox/<encoded-cwd>/
    - **Deletes** the consumed files (so subsequent hook fires don't re-inject)
 5. Recipient sees the message, may use tools to act on it, may reply via `message_agent` back at the sender
 
+**Wakeup on resume.** SessionStart's `additionalContext` is buffered in claude's REPL but doesn't autonomously trigger an API call — without intervention the model wouldn't engage with the message until a human attached and typed something. To bridge that gap, `bin/multiverse-session` runs a print-mode prime call (`claude -p "You have N pending inbox messages…" --resume <uuid>`) at the top of every loop iteration if the inbox is non-empty. That single API call delivers the inbox `additionalContext` (via SessionStart) AND the synthetic prompt, the model engages and acts, and the response lands in the JSONL — visible to whoever attaches afterwards. Applies uniformly across every resume path: user-initiated Enter on a dormant row, `message_agent` auto-resume, and post-context-fold resume.
+
 ### What happens during an `ask_agent` call
 
 1. `ask_agent(target, question)` looks up the target's `claude_uuid`
