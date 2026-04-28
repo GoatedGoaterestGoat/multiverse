@@ -479,8 +479,15 @@ def build_dashboard_rows(
                 )
             )
 
+    # Sort: non-ghosts first by status then recency, ghosts always last
+    # (regardless of how recent the underlying fold was — they're stale
+    # forks the user shouldn't have to scroll past).
     rows.sort(
-        key=lambda r: (_STATUS_SORT.get(r.status, 9), -(r.status_ts or 0))
+        key=lambda r: (
+            1 if r.is_ghost else 0,
+            _STATUS_SORT.get(r.status, 9),
+            -(r.status_ts or 0),
+        )
     )
     return rows
 
