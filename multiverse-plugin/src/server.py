@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -70,6 +71,45 @@ def _write_control_action(action: dict) -> bool:
         return True
     except OSError:
         return False
+
+
+def _record_superseded_uuid(old_uuid: str) -> None:
+    """Append the pre-fold claude UUID to this multiverse session's meta.json.
+
+    Lets the dashboard render the old JSONL as `Name (folded HH:MM)` and
+    keeps it filtered out of the inter-agent registry. No-op when not running
+    under the wrapper (manual `claude --plugin-dir` mode has no meta.json to
+    update — the user resumes the new session id manually).
+    """
+    if not old_uuid:
+        return
+    control_path = os.environ.get("MULTIVERSE_CONTROL")
+    if not control_path:
+        return
+    state_dir = Path(control_path).parent
+    meta_path = state_dir / "meta.json"
+    try:
+        with open(meta_path, "r") as f:
+            meta = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(meta, dict):
+        return
+    superseded = meta.get("superseded_uuids")
+    if not isinstance(superseded, list):
+        superseded = []
+    superseded.append({"uuid": old_uuid, "folded_at": time.time()})
+    meta["superseded_uuids"] = superseded
+    tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
+    try:
+        with open(tmp, "w") as f:
+            json.dump(meta, f)
+        os.replace(tmp, meta_path)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 @mcp.tool()
@@ -124,6 +164,11 @@ def context_fold(
             end=end,
             summary=summary,
         )
+
+        # Mark the pre-fold JSONL as a ghost in this session's meta.json
+        # before signaling resume — the dashboard reads meta.json on its
+        # next refresh.
+        _record_superseded_uuid(session_id)
 
         # Signal the multiverse wrapper to resume with folded context
         auto_resume = _write_control_action({

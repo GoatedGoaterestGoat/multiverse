@@ -21,7 +21,8 @@ import shlex
 import shutil
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -193,6 +194,9 @@ class Session:
     resumed_from: Optional[str] = None
     name: Optional[str] = None
     claude_uuid: Optional[str] = None
+    # claude UUIDs that this multiverse session has superseded via
+    # context_fold. Each entry: {"uuid": str, "folded_at": float}.
+    superseded_uuids: list[dict] = field(default_factory=list)
 
     @property
     def tmux_name(self) -> str:
@@ -241,6 +245,11 @@ class DashboardRow:
     session: Optional[Session] = None
     claude_uuid: Optional[str] = None
     preview: str = ""
+    # True if this row represents a JSONL that was superseded by a
+    # context_fold. Ghost rows display in the dashboard but are filtered
+    # out of the inter-agent registry (list_agents/message_agent/ask_agent).
+    is_ghost: bool = False
+    folded_at: Optional[float] = None
 
     @property
     def is_dormant(self) -> bool:
@@ -277,6 +286,8 @@ def load_session(session_id: str) -> Optional[Session]:
     meta = _read_json(d / "meta.json")
     if meta is None:
         return None
+    raw_superseded = meta.get("superseded_uuids") or []
+    superseded = [e for e in raw_superseded if isinstance(e, dict) and e.get("uuid")]
     s = Session(
         id=session_id,
         cwd=meta.get("cwd", "?"),
@@ -284,6 +295,7 @@ def load_session(session_id: str) -> Optional[Session]:
         resumed_from=meta.get("resumed_from"),
         name=meta.get("name"),
         claude_uuid=_read_text_stripped(d / "claude_uuid"),
+        superseded_uuids=superseded,
     )
     st = _read_json(s.status_path)
     if st:
@@ -327,6 +339,25 @@ _STATUS_SORT = {
 }
 
 
+def _format_fold_time(ts: float) -> str:
+    """Format a fold timestamp for display in `(folded …)` suffixes.
+
+    Today → ``HH:MM``; same year → ``MMM DD``; older → ``YYYY-MM-DD``.
+    """
+    if not ts:
+        return "?"
+    try:
+        dt = datetime.fromtimestamp(ts)
+    except (OSError, OverflowError, ValueError):
+        return "?"
+    now = datetime.now()
+    if dt.date() == now.date():
+        return dt.strftime("%H:%M")
+    if dt.year == now.year:
+        return dt.strftime("%b %d")
+    return dt.strftime("%Y-%m-%d")
+
+
 def build_dashboard_rows(
     sessions: list[Session],
     cwd: str,
@@ -349,6 +380,21 @@ def build_dashboard_rows(
         u = s.effective_claude_uuid
         if u:
             wrapped_uuids.add(u)
+
+    # Map each superseded claude UUID to its fold timestamp. Used to render
+    # those JSONLs as `Name (folded HH:MM)` ghost rows instead of plain
+    # dormants, and to keep them out of the inter-agent registry.
+    ghost_map: dict[str, float] = {}
+    for s in sessions:
+        for entry in s.superseded_uuids:
+            uid = entry.get("uuid") if isinstance(entry, dict) else None
+            if not uid:
+                continue
+            ts = entry.get("folded_at") if isinstance(entry, dict) else None
+            try:
+                ghost_map[uid] = float(ts or 0.0)
+            except (TypeError, ValueError):
+                ghost_map[uid] = 0.0
 
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
 
@@ -390,15 +436,26 @@ def build_dashboard_rows(
                 st = path.stat()
             except OSError:
                 continue
+
+            ghost_ts = ghost_map.get(uuid)
+            if ghost_ts is not None:
+                display_name = f"{title} (folded {_format_fold_time(ghost_ts)})"
+                status_ts = ghost_ts or st.st_mtime
+            else:
+                display_name = title
+                status_ts = st.st_mtime
+
             rows.append(
                 DashboardRow(
-                    name=title,
+                    name=display_name,
                     cwd=recorded_cwd or cwd,
                     status="dormant",
-                    status_ts=st.st_mtime,
+                    status_ts=status_ts,
                     session=None,
                     claude_uuid=uuid,
                     preview=meta.get("preview") or "",
+                    is_ghost=ghost_ts is not None,
+                    folded_at=ghost_ts,
                 )
             )
 
@@ -430,7 +487,10 @@ def list_named_agents_in_cwd(cwd: str) -> list[DashboardRow]:
     """
     cwd_abs = str(Path(cwd).expanduser().resolve())
     sessions = [s for s in list_sessions() if s.cwd == cwd_abs]
-    return build_dashboard_rows(sessions, cwd=cwd_abs)
+    rows = build_dashboard_rows(sessions, cwd=cwd_abs)
+    # Ghosts (pre-fold JSONLs) are display-only — they must not be reachable
+    # by list_agents / message_agent / ask_agent.
+    return [r for r in rows if not r.is_ghost]
 
 
 def find_agent_by_name(cwd: str, name: str) -> Optional[DashboardRow]:
