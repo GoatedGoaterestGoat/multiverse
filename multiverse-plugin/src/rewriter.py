@@ -163,7 +163,14 @@ def fold_context(
     _relink_parent_uuids(new_entries, all_remove, entries, summary_uuid)
 
     # Step 7: Append synthetic context_fold tool call + result
-    last_uuid = new_entries[-1].uuid if new_entries else summary_uuid
+    # Walk back through new_entries to the most recent entry with a real
+    # uuid — `new_entries[-1]` may be a metadata entry (last-prompt,
+    # custom-title, permission-mode) which has no uuid. If we use that
+    # empty uuid as parentUuid the synthetic entries become orphaned and
+    # claude-code's chain traversal skips them entirely, leaving the model
+    # with no record of the fold and prompting it to re-invoke the tool
+    # on resume.
+    last_uuid = next((e.uuid for e in reversed(new_entries) if e.uuid), summary_uuid)
 
     fold_tool_use_id = f"toolu_fold_{new_uuid()[:12]}"
     fold_tool_uuid = new_uuid()
@@ -179,7 +186,11 @@ def fold_context(
                     {
                         "type": "tool_use",
                         "id": fold_tool_use_id,
-                        "name": "context_fold",
+                        # Use the canonical MCP-registered tool name. Bare
+                        # "context_fold" reads as an unregistered tool to
+                        # both claude-code and the model, undermining the
+                        # synthetic record's credibility.
+                        "name": "mcp__plugin_multiverse_multiverse__context_fold",
                         "input": {
                             "summary": summary,
                             "start": start,
@@ -317,55 +328,65 @@ def _expand_targets(
 def _find_fold_traces(
     entries: list[JsonlEntry], conv: list
 ) -> set[int]:
-    """Find the context_info call and intermediate reasoning to remove.
+    """Find fold-prep entries that should NOT be carried into the new session.
 
-    These are in the current turn (after last turn_duration) and before the end.
-    We look for:
-    - assistant tool_use entries calling "context_info"
-    - their matching tool_result entries
-    - thinking blocks in the same turn
-    - text blocks that are part of fold reasoning
+    Targets: assistant tool_use calls for context_info or context_fold
+    itself, every entry that shares a requestId with one of those calls (so
+    the agent's accompanying text/thinking blocks vanish too), and the
+    matching tool_result entries.
+
+    Tool-name matching uses substring rather than equality — when registered
+    as MCP tools the canonical names are
+    ``mcp__plugin_<plugin>_<server>__context_info`` etc., not bare. The
+    earlier exact-match logic silently failed against MCP-prefixed names,
+    leaving every fold-prep call in the rewritten transcript.
+
+    The original ``context_fold`` invocation that triggered the rewrite
+    must also be stripped: its tool_result hasn't been written to the
+    JSONL yet at this point, so preserving the tool_use produces an orphan
+    that claude-code's chain-walker steps past on resume — making the
+    model believe the fold never completed and re-invoke it.
     """
-    # Find the last turn boundary
     last_turn_idx = -1
     for i, entry in enumerate(entries):
         if entry.type == "system" and entry.raw.get("subtype") == "turn_duration":
             last_turn_idx = i
 
     if last_turn_idx == -1:
-        # No turn boundaries yet — current turn is the whole session
-        # Only remove context_info traces, not the user's messages
         last_turn_idx = 0
 
-    traces = set()
+    traces: set[int] = set()
+    fold_request_ids: set[str] = set()
+    fold_tool_use_ids: set[str] = set()
 
-    # Find context_info tool calls in the current turn
-    context_info_tool_ids: set[str] = set()
+    def _is_fold_tool(name: str) -> bool:
+        return "context_info" in name or "context_fold" in name
+
+    # First pass: tool_use calls for fold-prep / fold itself.
     for i in range(last_turn_idx, len(entries)):
         entry = entries[i]
         if not entry.is_conversation_message:
             continue
-        if entry.role == "assistant" and entry.is_tool_use:
-            if "context_info" in entry.tool_names:
-                traces.add(i)
-                context_info_tool_ids.update(entry.tool_use_ids)
-                # Also remove thinking blocks with same requestId
-                if entry.request_id:
-                    for j in range(last_turn_idx, len(entries)):
-                        if (
-                            entries[j].request_id == entry.request_id
-                            and entries[j].line_index != entry.line_index
-                            and "thinking" in entries[j].content_types
-                        ):
-                            traces.add(j)
+        if entry.role != "assistant" or not entry.is_tool_use:
+            continue
+        if any(_is_fold_tool(name) for name in entry.tool_names):
+            traces.add(i)
+            fold_tool_use_ids.update(entry.tool_use_ids)
+            if entry.request_id:
+                fold_request_ids.add(entry.request_id)
 
-    # Find matching tool_results for context_info
+    # Second pass: everything sharing a requestId with the above (the
+    # accompanying text/thinking entries from the same API response) plus
+    # the matching tool_results.
     for i in range(last_turn_idx, len(entries)):
         entry = entries[i]
+        if entry.request_id and entry.request_id in fold_request_ids:
+            traces.add(i)
         if entry.role == "user" and entry.is_tool_result:
             for tid in entry.tool_use_ids:
-                if tid in context_info_tool_ids:
+                if tid in fold_tool_use_ids:
                     traces.add(i)
+                    break
 
     return traces
 
