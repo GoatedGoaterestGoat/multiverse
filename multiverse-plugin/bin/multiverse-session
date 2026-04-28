@@ -97,10 +97,19 @@ prime_inbox_if_needed() {
   echo ""
   echo "[multiverse] Processing $count pending inbox $plural before going interactive…"
   echo ""
+  # Silence the prime call's stdout/stderr — its output is the model's
+  # response, which is already persisted in the JSONL and will appear in
+  # the interactive claude's scrollback when the user attaches. Leaving
+  # it on the regular tmux screen just creates a confusing "ghost" view
+  # behind the alternate-screen TUI that the next interactive claude
+  # switches into.
   claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
          ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
          -p "You have $count pending inbox $plural from other agents in your workspace. They have just been delivered to your context as a <system-reminder>. Please read them and respond/act on them as appropriate — a user may attach to your session shortly to see the result." \
-         --resume "$resume_uuid" 2>/dev/null || true
+         --resume "$resume_uuid" >/dev/null 2>&1 || true
+  # Clear the regular screen so a copy-mode toggle on the next attach
+  # doesn't reveal the prime's leftover echo line either.
+  clear || true
 }
 
 # Bash 3.2 (default on macOS) errors on `"${ARR[@]}"` when ARR is empty under
@@ -154,10 +163,12 @@ while true; do
       echo ""
       echo "[multiverse] Context folded. Resuming with optimized context..."
       echo ""
+      # Silence + clear, same reasoning as prime_inbox_if_needed.
       claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
              ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
              -p "Context was folded successfully. Continue with your current task." \
-             --resume "$NEW_SESSION" 2>/dev/null || true
+             --resume "$NEW_SESSION" >/dev/null 2>&1 || true
+      clear || true
       CLAUDE_ARGS=(--resume "$NEW_SESSION")
       ;;
     *)
