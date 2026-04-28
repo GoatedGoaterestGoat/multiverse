@@ -525,6 +525,61 @@ def short_id() -> str:
     return secrets.token_hex(4)
 
 
+def detect_fold_ancestors(jsonl_path: Path) -> list[dict]:
+    """Scan a claude JSONL for synthetic context_fold marker entries and
+    return the chain of pre-fold session UUIDs they reference.
+
+    The fold rewriter (src/rewriter.py) appends an assistant entry with
+    ``model: "context-fold"`` whose tool_use ``input.session_id`` is the
+    pre-fold session UUID. These markers are copied across subsequent
+    folds, so a single JSONL can carry the entire ancestry. Used at
+    ``create_session`` time so resuming a folded session re-establishes
+    ghost annotations on the dashboard without manual bookkeeping.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if e.get("type") != "assistant":
+                    continue
+                msg = e.get("message") or {}
+                if msg.get("model") != "context-fold":
+                    continue
+                content = msg.get("content")
+                if not isinstance(content, list):
+                    continue
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") != "tool_use":
+                        continue
+                    inp = block.get("input") or {}
+                    pre_fold = inp.get("session_id")
+                    if not isinstance(pre_fold, str) or pre_fold in seen:
+                        continue
+                    seen.add(pre_fold)
+                    folded_at = 0.0
+                    ts_str = e.get("timestamp", "") or ""
+                    if ts_str:
+                        try:
+                            iso = ts_str.replace("Z", "+00:00") if ts_str.endswith("Z") else ts_str
+                            folded_at = datetime.fromisoformat(iso).timestamp()
+                        except (TypeError, ValueError):
+                            folded_at = 0.0
+                    out.append({"uuid": pre_fold, "folded_at": folded_at})
+    except OSError:
+        pass
+    return out
+
+
 def create_session(
     cwd: str,
     claude_args: list[str],
@@ -555,6 +610,24 @@ def create_session(
         meta["resumed_from"] = resumed_from
     if name:
         meta["name"] = name
+
+    # If this is a resume of a folded JSONL, recover the full pre-fold
+    # ancestry from the synthetic context_fold markers and seed
+    # superseded_uuids so the dashboard ghost-tags those JSONLs. Without
+    # this, every container restart / monitor restart would lose ghost
+    # annotation as soon as the original folding multiverse session is
+    # reaped.
+    resume_uuid: Optional[str] = None
+    for i, arg in enumerate(claude_args):
+        if arg == "--resume" and i + 1 < len(claude_args):
+            resume_uuid = claude_args[i + 1]
+            break
+    if resume_uuid:
+        jsonl_path = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd_abs) / f"{resume_uuid}.jsonl"
+        ancestors = detect_fold_ancestors(jsonl_path) if jsonl_path.exists() else []
+        if ancestors:
+            meta["superseded_uuids"] = ancestors
+
     (d / "meta.json").write_text(json.dumps(meta))
     (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
     (d / "control.json").write_text("")
