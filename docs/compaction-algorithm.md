@@ -40,9 +40,7 @@ Compaction is computed by expanding from the root frontier:
 
 This walks the tree back through merges in reverse construction order. It is mathematically equivalent to picking the kth construction frontier, but does not require storing all N-1 frontiers — the tree alone is sufficient, and expansion is computed on demand.
 
-Query-aware retrieval is a one-line generalization: replace the priority function. Instead of "highest ID first" use "highest (relevance × size) first," where relevance comes from embedding similarity or a small LLM judging the query against each node's summary. Same expansion mechanism, query-biased priority. Optionally, expansion can be deeper-than-one-level for high-relevance subtrees.
-
-No LLM call required at compaction time in the default path — it is a structural traversal.
+No LLM call, no embeddings, no similarity scoring at compaction time. The only signal used during expansion is `node.id`. Compaction is a deterministic structural traversal of the tree.
 
 ### 4. Single-tool agentic merging
 
@@ -85,7 +83,6 @@ Node {
   summary: str            # text covering the span
   preview: str            # short rendering used in agent prompts
   tokens: int             # exact token count of `summary`
-  embedding: vec | null   # optional, for query-aware expansion
 }
 
 Frontier = [Node | Leaf]  # ordered, contiguous, tiles the turn exactly
@@ -202,19 +199,17 @@ Call merge() exactly once.
 Compaction is expansion from the per-turn root, prioritized by node ID. To use more of the budget, the highest-ID node currently in the frontier is replaced by its direct children. This walks the tree back through merges in reverse order, returning the frontier just before the next expansion would exceed the budget.
 
 ```python
-def expand_to_budget(root, budget, priority_fn=lambda n: n.id):
+def expand_to_budget(root, budget):
     """Expand a single tree's frontier from [root] until the budget
-    cannot accommodate the next expansion. Generic over priority."""
+    cannot accommodate the next expansion."""
     frontier = [root]
     while True:
-        # Pick the highest-priority node that has children to expand.
         candidates = [n for n in frontier if isinstance(n, Node)
                                           and n.children]
         if not candidates:
             return frontier
-        target = max(candidates, key=priority_fn)
+        target = max(candidates, key=lambda n: n.id)
 
-        # Compute the frontier that would result from expanding target.
         expanded = []
         for n in frontier:
             expanded.extend(n.children if n is target else [n])
@@ -224,37 +219,20 @@ def expand_to_budget(root, budget, priority_fn=lambda n: n.id):
         frontier = expanded
 
 
-def compact(forest, budget, query=None):
-    if query is not None:
-        weights = llm_rank_turns(
-            roots=[t.root.summary for t in forest],
-            query=query,
-        )  # one Sonnet call; returns weight per turn
-    else:
-        weights = recency_decay(forest)
-
+def compact(forest, budget):
+    weights = recency_decay(forest)
     per_turn_budget = {t.turn_id: budget * weights[t.turn_id]
                         for t in forest}
 
-    if query is not None:
-        priority = lambda n: relevance(n, query) * n.tokens
-    else:
-        priority = lambda n: n.id
-
     chosen = []
     for t in forest:
-        frontier = expand_to_budget(t.root, per_turn_budget[t.turn_id],
-                                     priority_fn=priority)
+        frontier = expand_to_budget(t.root, per_turn_budget[t.turn_id])
         chosen.extend(frontier)
 
     return render_as_message_stream(chosen)
 ```
 
-Without a query, `priority_fn = lambda n: n.id` gives the natural compaction frontier (always expand the most-abstract node first — the one created by the most recent merge). This is structurally identical to picking the kth construction frontier without storing all frontiers.
-
-With a query, `priority_fn = lambda n: relevance(n, query) * n.tokens` expands the most-relevant heaviest nodes first. `relevance` is cosine similarity between the query and node embedding, or a small LLM scorer; `n.tokens` weights the choice toward expanding high-information-density nodes (a small but highly-relevant node may be skipped in favor of a larger relevant node that hides more content).
-
-Optionally, expansion can recurse multiple levels into a single relevant subtree before considering siblings — controlled by a `expansion_depth_per_step` parameter. Default 1.
+`recency_decay` allocates more of the global budget to recent turns. The within-turn expansion is always priority-by-ID: undo the most recent merge first, then the next, and so on, until the budget cannot accommodate one more expansion.
 
 ### Phase 3: Integration with Claude Code
 
@@ -286,11 +264,7 @@ compaction:
 
   compaction:
     default_budget_tokens: 32000
-    weight_strategy: recency_decay        # or "llm_rank"
-    priority_strategy: node_id            # or "relevance_x_size"
-    expansion_depth_per_step: 1
-    enable_query_expansion: true
-    expansion_model: sonnet-4.6
+    weight_strategy: recency_decay        # how the global budget splits across turns
 ```
 
 ## Cost estimate
@@ -302,7 +276,7 @@ For a 50-entry tool-heavy turn:
 - Construction: 24 merges, 24 fresh agent invocations with prompt caching.
 - Total per turn: ~$0.05-0.15 with Sonnet 4.6 + Haiku 4.5 at current pricing.
 
-Compaction itself is free in the no-query path (structural lookup). Query path is one Sonnet call for ranking plus optional expansion.
+Compaction itself is free — no LLM call, just a tree traversal.
 
 For comparison, Claude Code's flat compaction runs whenever the threshold trips and re-summarizes the entire context each time at full cost. The amortized cost crossover point is approximately the second compaction in a session.
 
@@ -346,7 +320,7 @@ For comparison, Claude Code's flat compaction runs whenever the threshold trips 
 
 1. **Preprocessing module.** Auto-merge rule engine + pre-summarize for oversized leaves. Hand-eval on 5 real session logs.
 2. **Constructor agent + loop.** Single `merge()` tool, frontier renderer, fresh-agent-per-step loop. Inspect every intermediate frontier on the same 5 logs by hand. Look for chaining/skewing. If skewed, harden the prompt's anti-lopsidedness instruction.
-3. **Compaction primitive.** Expand-from-root with `priority_fn = node.id` until budget. No LLM in the default path.
+3. **Compaction primitive.** Expand-from-root by highest node ID until budget. No LLM, no embeddings.
 4. **Factory.ai eval.** Decision point: must beat Claude Code 5-layer flat at 75% compression, or pause and diagnose.
 5. **ACON's AppWorld + OfficeBench.** Full baseline matrix.
 6. **Query-aware expansion + LLM-rank-turns.** Add the agentic compaction layer.
@@ -364,8 +338,7 @@ For comparison, Claude Code's flat compaction runs whenever the threshold trips 
 1. **Anti-lopsidedness in the constructor prompt.** Whether the natural-language instruction to "distribute merges across the trace" is enough, or whether we need a structural counter (e.g., feed the model a "current frontier balance" stat). Resolved empirically in step 2.
 2. **Cross-turn anchors at compaction.** When turn N references something introduced in turn M, should turn M's frontier be expanded further around the relevant subtree? Probably handled by the query-aware priority function (relevance × size), but worth measuring against a stricter rule.
 3. **Tool-result chunking.** A 50KB file read should not be one leaf; how to split. Probably split by deterministic boundaries (line ranges of N tokens) before pre-summarization runs.
-4. **Embedding choice for query expansion.** Whether to embed at construction time (cost per node) or lazily (latency at compaction). Default: at construction time, since cache amortization is good.
-5. **Multi-leaf preview rendering at compaction time.** After picking a frontier, the rendering back into the agent's prompt needs a format choice — flat reconstruction with `[summary of N entries]` markers, or structured XML with explicit compression levels. Default: flat for v1, structured later.
+4. **Multi-leaf preview rendering at compaction time.** After picking a frontier, the rendering back into the agent's prompt needs a format choice — flat reconstruction with `[summary of N entries]` markers, or structured XML with explicit compression levels. Default: flat for v1, structured later.
 
 ## References
 
