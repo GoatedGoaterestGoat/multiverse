@@ -28,15 +28,21 @@ The construction property we want: **every intermediate frontier (after k merges
 
 This is the headline construction invariant. As of 2026-04, no published method explicitly enforces or evaluates it. The closest analogs are Wu et al.'s recursive book summarization (level-by-level, but discards intermediate trees) and contiguity-constrained Ward's method (gives a frontier at every k, but greedy cost-based merging is known to skew).
 
-### 3. Compaction = frontier checkpoint selection
+### 3. Compaction = expansion from the root by node ID
 
-Each merge step records the current frontier as a *checkpoint*. Compaction is then:
+Each `merge()` call assigns a sequential ID to the node it creates. The first merge produces node `0` (covers a small local span); the last merge produces the root (largest ID, covers the whole turn). Higher ID = later merge = more abstract / covers more leaves.
 
-1. Allocate a token budget per turn (recency-weighted by default, optionally LLM-ranked against a query).
-2. For each turn's tree, binary-search the checkpoint list for the largest frontier fitting the per-turn budget.
-3. Concatenate the chosen frontiers in turn order.
+Compaction is computed by expanding from the root frontier:
 
-No LLM call required at compaction time in the default path — it is a structural lookup. Optionally, a retrieval agent can expand specific subtrees back toward leaves when a query needs detail.
+1. Start with `frontier = [root]`.
+2. To use more of the budget, expand: pick the highest-ID node currently in the frontier and replace it with its direct children.
+3. Repeat until the next expansion would exceed the budget.
+
+This walks the tree back through merges in reverse construction order. It is mathematically equivalent to picking the kth construction frontier, but does not require storing all N-1 frontiers — the tree alone is sufficient, and expansion is computed on demand.
+
+Query-aware retrieval is a one-line generalization: replace the priority function. Instead of "highest ID first" use "highest (relevance × size) first," where relevance comes from embedding similarity or a small LLM judging the query against each node's summary. Same expansion mechanism, query-biased priority. Optionally, expansion can be deeper-than-one-level for high-relevance subtrees.
+
+No LLM call required at compaction time in the default path — it is a structural traversal.
 
 ### 4. Single-tool agentic merging
 
@@ -56,9 +62,9 @@ No scoring functions, no priority queues, no hand-tuned weights. The agent uses 
 | CAM (NeurIPS 2025) | Corpus | Bottom-up incremental | Semantic + positional | Retrieval | Per-layer, not per-cardinality |
 | ACON (ICLR 2026) | Whole session | Flat (learned guideline) | n/a | LLM compress | n/a |
 | Ward's contiguous | Sequence | Bottom-up | Yes | Cut at height | Frontier at every k, but skews |
-| **This design** | **Per turn (forest)** | **Bottom-up agentic** | **Yes** | **Frontier checkpoint pick** | **Maintained as construction invariant** |
+| **This design** | **Per turn (forest)** | **Bottom-up agentic** | **Yes** | **Expand-from-root by node ID** | **Maintained as construction invariant** |
 
-The combination — per-turn forest, structural-adjacency, agentic single-tool construction, frontier-coherence as a stated invariant, checkpoint-pick as the compaction primitive — is unclaimed in the literature as of 2026-04.
+The combination — per-turn forest, structural-adjacency, agentic single-tool construction, frontier-coherence as a stated invariant, expand-from-root-by-merge-id as the compaction primitive — is unclaimed in the literature as of 2026-04.
 
 ## Algorithm
 
@@ -73,6 +79,7 @@ Leaf {
 }
 
 Node {
+  id: int                 # sequential merge id; root has the highest id in the tree
   span: (start, end)      # half-open over the original leaf array
   children: [Node | Leaf] # variable arity, ordered, contiguous
   summary: str            # text covering the span
@@ -86,9 +93,7 @@ Frontier = [Node | Leaf]  # ordered, contiguous, tiles the turn exactly
 Tree {
   turn_id: str
   leaves: [Leaf]
-  root: Node
-  checkpoints: [Frontier] # one per merge step, oldest first
-  by_tokens: SortedIndex  # checkpoints indexed by total token count
+  root: Node              # highest-id node; covers the whole turn
 }
 
 Forest = [Tree]           # one per session, ordered by turn
@@ -133,29 +138,27 @@ preprocessing:
 ```python
 def construct_tree(leaves, config):
     frontier = list(leaves)
-    checkpoints = [frontier.copy()]
+    next_id = 0
 
     while len(frontier) > 1:
         prompt = render_constructor_prompt(frontier, config)
         merge_call = call_constructor(prompt)  # returns (start, end, summary)
         new_node = make_node(
+            id=next_id,
             children=frontier[merge_call.start:merge_call.end],
             summary=merge_call.summary,
         )
+        next_id += 1
         frontier = (
             frontier[:merge_call.start]
             + [new_node]
             + frontier[merge_call.end:]
         )
-        checkpoints.append(frontier.copy())
 
-    return Tree(
-        leaves=leaves,
-        root=frontier[0],
-        checkpoints=checkpoints,
-        by_tokens=SortedIndex(checkpoints, key=total_tokens),
-    )
+    return Tree(leaves=leaves, root=frontier[0])
 ```
+
+Node IDs are assigned sequentially as merges happen. The root has the largest ID. By construction, a parent's ID is greater than any of its children's IDs.
 
 **Constructor prompt sketch:**
 
@@ -196,7 +199,31 @@ Call merge() exactly once.
 
 ### Phase 2: Compaction (the read path)
 
+Compaction is expansion from the per-turn root, prioritized by node ID. To use more of the budget, the highest-ID node currently in the frontier is replaced by its direct children. This walks the tree back through merges in reverse order, returning the frontier just before the next expansion would exceed the budget.
+
 ```python
+def expand_to_budget(root, budget, priority_fn=lambda n: n.id):
+    """Expand a single tree's frontier from [root] until the budget
+    cannot accommodate the next expansion. Generic over priority."""
+    frontier = [root]
+    while True:
+        # Pick the highest-priority node that has children to expand.
+        candidates = [n for n in frontier if isinstance(n, Node)
+                                          and n.children]
+        if not candidates:
+            return frontier
+        target = max(candidates, key=priority_fn)
+
+        # Compute the frontier that would result from expanding target.
+        expanded = []
+        for n in frontier:
+            expanded.extend(n.children if n is target else [n])
+
+        if total_tokens(expanded) > budget:
+            return frontier
+        frontier = expanded
+
+
 def compact(forest, budget, query=None):
     if query is not None:
         weights = llm_rank_turns(
@@ -209,18 +236,25 @@ def compact(forest, budget, query=None):
     per_turn_budget = {t.turn_id: budget * weights[t.turn_id]
                         for t in forest}
 
+    if query is not None:
+        priority = lambda n: relevance(n, query) * n.tokens
+    else:
+        priority = lambda n: n.id
+
     chosen = []
     for t in forest:
-        b = per_turn_budget[t.turn_id]
-        frontier = t.by_tokens.largest_at_most(b)
-        if query is not None:
-            frontier = expand_for_query(frontier, query, b)
+        frontier = expand_to_budget(t.root, per_turn_budget[t.turn_id],
+                                     priority_fn=priority)
         chosen.extend(frontier)
 
     return render_as_message_stream(chosen)
 ```
 
-`expand_for_query` is the optional retrieval layer: embed the query, score frontier nodes by cosine, walk down high-similarity nodes toward leaves until the budget is exhausted. Tool surface mirrors ChatIndex's `view_node` and `get_messages` for a sub-agent that drives the expansion.
+Without a query, `priority_fn = lambda n: n.id` gives the natural compaction frontier (always expand the most-abstract node first — the one created by the most recent merge). This is structurally identical to picking the kth construction frontier without storing all frontiers.
+
+With a query, `priority_fn = lambda n: relevance(n, query) * n.tokens` expands the most-relevant heaviest nodes first. `relevance` is cosine similarity between the query and node embedding, or a small LLM scorer; `n.tokens` weights the choice toward expanding high-information-density nodes (a small but highly-relevant node may be skipped in favor of a larger relevant node that hides more content).
+
+Optionally, expansion can recurse multiple levels into a single relevant subtree before considering siblings — controlled by a `expansion_depth_per_step` parameter. Default 1.
 
 ### Phase 3: Integration with Claude Code
 
@@ -253,6 +287,8 @@ compaction:
   compaction:
     default_budget_tokens: 32000
     weight_strategy: recency_decay        # or "llm_rank"
+    priority_strategy: node_id            # or "relevance_x_size"
+    expansion_depth_per_step: 1
     enable_query_expansion: true
     expansion_model: sonnet-4.6
 ```
@@ -310,7 +346,7 @@ For comparison, Claude Code's flat compaction runs whenever the threshold trips 
 
 1. **Preprocessing module.** Auto-merge rule engine + pre-summarize for oversized leaves. Hand-eval on 5 real session logs.
 2. **Constructor agent + loop.** Single `merge()` tool, frontier renderer, fresh-agent-per-step loop. Inspect every intermediate frontier on the same 5 logs by hand. Look for chaining/skewing. If skewed, harden the prompt's anti-lopsidedness instruction.
-3. **Compaction primitive.** Checkpoint selection by token budget. No LLM in the default path.
+3. **Compaction primitive.** Expand-from-root with `priority_fn = node.id` until budget. No LLM in the default path.
 4. **Factory.ai eval.** Decision point: must beat Claude Code 5-layer flat at 75% compression, or pause and diagnose.
 5. **ACON's AppWorld + OfficeBench.** Full baseline matrix.
 6. **Query-aware expansion + LLM-rank-turns.** Add the agentic compaction layer.
@@ -326,7 +362,7 @@ For comparison, Claude Code's flat compaction runs whenever the threshold trips 
 ## Open questions
 
 1. **Anti-lopsidedness in the constructor prompt.** Whether the natural-language instruction to "distribute merges across the trace" is enough, or whether we need a structural counter (e.g., feed the model a "current frontier balance" stat). Resolved empirically in step 2.
-2. **Cross-turn anchors at compaction.** When turn N references something introduced in turn M, should turn M's checkpoint be re-picked at a finer granularity? Probably handled by the LLM-rank step, but worth measuring.
+2. **Cross-turn anchors at compaction.** When turn N references something introduced in turn M, should turn M's frontier be expanded further around the relevant subtree? Probably handled by the query-aware priority function (relevance × size), but worth measuring against a stricter rule.
 3. **Tool-result chunking.** A 50KB file read should not be one leaf; how to split. Probably split by deterministic boundaries (line ranges of N tokens) before pre-summarization runs.
 4. **Embedding choice for query expansion.** Whether to embed at construction time (cost per node) or lazily (latency at compaction). Default: at construction time, since cache amortization is good.
 5. **Multi-leaf preview rendering at compaction time.** After picking a frontier, the rendering back into the agent's prompt needs a format choice — flat reconstruction with `[summary of N entries]` markers, or structured XML with explicit compression levels. Default: flat for v1, structured later.
