@@ -194,14 +194,21 @@ Call merge() exactly once.
 
 **Caching properties.** The system prompt and tool schema are constant across merge steps. The frontier representation changes only where the previous merge happened — everything before the merged region is byte-identical from step to step. Anthropic prompt caching captures most of the prefix on every step after the first.
 
-### Phase 2: Compaction (the read path)
+### Phase 2: Read path
 
-Compaction is expansion from the per-turn root, prioritized by node ID. To use more of the budget, the highest-ID node currently in the frontier is replaced by its direct children. This walks the tree back through merges in reverse order, returning the frontier just before the next expansion would exceed the budget.
+Two cleanly-separated layers:
+
+1. **Expansion** — a fixed per-tree primitive. Always priority-by-node-ID. No knobs.
+2. **Compaction** — an across-tree budget allocator (the *scheduler*). Pluggable. Decides how the global token budget splits across the forest's turns. Composable.
+
+Compaction calls expansion once per turn with that turn's allocated budget.
+
+#### Expansion (per tree, fixed)
 
 ```python
 def expand_to_budget(root, budget):
-    """Expand a single tree's frontier from [root] until the budget
-    cannot accommodate the next expansion."""
+    """Expand a single tree's frontier from [root] until the next
+    expansion would exceed budget. Priority is always node.id."""
     frontier = [root]
     while True:
         candidates = [n for n in frontier if isinstance(n, Node)
@@ -217,22 +224,88 @@ def expand_to_budget(root, budget):
         if total_tokens(expanded) > budget:
             return frontier
         frontier = expanded
+```
 
+This is the unchangeable retrieval primitive. Highest-ID node first means undoing the most recent merge first; the result is structurally equivalent to the kth construction frontier without storing all frontiers.
 
-def compact(forest, budget):
-    weights = recency_decay(forest)
-    per_turn_budget = {t.turn_id: budget * weights[t.turn_id]
-                        for t in forest}
+#### Compaction (across trees, pluggable scheduler)
 
+A *scheduler* is a function from `(forest, total_budget)` to a per-turn budget mapping:
+
+```python
+Scheduler = Callable[[Forest, int], dict[turn_id, int]]
+
+def compact(forest, total_budget, scheduler):
+    per_turn_budget = scheduler(forest, total_budget)
     chosen = []
     for t in forest:
         frontier = expand_to_budget(t.root, per_turn_budget[t.turn_id])
         chosen.extend(frontier)
-
     return render_as_message_stream(chosen)
 ```
 
-`recency_decay` allocates more of the global budget to recent turns. The within-turn expansion is always priority-by-ID: undo the most recent merge first, then the next, and so on, until the budget cannot accommodate one more expansion.
+Concrete schedulers shipped with the implementation:
+
+```python
+def uniform(forest, budget):
+    """Equal split across all turns."""
+    n = len(forest)
+    per = budget // n
+    return {t.turn_id: per for t in forest}
+
+
+def recency_decay(forest, budget, half_life=5):
+    """Exponential decay: most-recent turn gets the most budget."""
+    weights = {}
+    for i, t in enumerate(reversed(forest)):
+        weights[t.turn_id] = 0.5 ** (i / half_life)
+    total_w = sum(weights.values())
+    return {tid: int(budget * w / total_w) for tid, w in weights.items()}
+
+
+def proportional(forest, budget):
+    """Budget proportional to original turn size."""
+    sizes = {t.turn_id: t.original_token_count for t in forest}
+    total = sum(sizes.values())
+    return {tid: int(budget * s / total) for tid, s in sizes.items()}
+
+
+def last_k_raw(forest, budget, k=3):
+    """Last k turns get unlimited budget (rendered raw); the rest
+    share the remainder uniformly. Falls back to uniform if k recent
+    turns alone exceed the budget."""
+    last = forest[-k:]
+    rest = forest[:-k]
+    raw_cost = sum(t.full_token_count for t in last)
+    if raw_cost >= budget or not rest:
+        return uniform(forest, budget)
+    per_rest = (budget - raw_cost) // len(rest)
+    return {
+        **{t.turn_id: t.full_token_count for t in last},
+        **{t.turn_id: per_rest for t in rest},
+    }
+
+
+def cap(scheduler, max_per_turn):
+    """Cap any scheduler's per-turn allocations and redistribute the
+    overflow to remaining turns."""
+    def wrapped(forest, budget):
+        alloc = scheduler(forest, budget)
+        overflow = sum(max(0, v - max_per_turn) for v in alloc.values())
+        capped = {tid: min(v, max_per_turn) for tid, v in alloc.items()}
+        # redistribute overflow uniformly among non-capped turns
+        targets = [tid for tid, v in alloc.items() if v <= max_per_turn]
+        if targets and overflow:
+            bonus = overflow // len(targets)
+            for tid in targets:
+                capped[tid] += bonus
+        return capped
+    return wrapped
+```
+
+Schedulers are pure data → data; they do not call the model and do not see the tree structure beyond turn-level metadata. New schedulers (e.g., flag-the-failed-tool-result turns, weight by user emphasis, learned schedulers) plug in by implementing the same signature.
+
+The default in production is `recency_decay(half_life=5)`. For benchmarks against flat-summary baselines, `last_k_raw(k=3)` matches Claude Code's de-facto behavior of keeping recent turns verbatim and is a useful apples-to-apples baseline.
 
 ### Phase 3: Integration with Claude Code
 
@@ -264,7 +337,14 @@ compaction:
 
   compaction:
     default_budget_tokens: 32000
-    weight_strategy: recency_decay        # how the global budget splits across turns
+    scheduler: recency_decay              # name of a registered Scheduler
+    scheduler_args:
+      half_life: 5
+    # alternative examples:
+    # scheduler: uniform
+    # scheduler: last_k_raw
+    # scheduler_args: {k: 3}
+    # scheduler: cap(recency_decay, max_per_turn=8000)
 ```
 
 ## Cost estimate
