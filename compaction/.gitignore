@@ -1,0 +1,14 @@
+# Build artifacts from build_tree.py / visualize.py
+tree_*.json
+tree_*.html
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+.venv/
+.eggs/
+build/
+dist/
