@@ -129,8 +129,12 @@ def _resolve_scheduler(args):
 
 
 def _flatten_result(result):
+    """Interleave each turn's verbatim user_prompt before its (compacted)
+    frontier. The prompt is rendered raw and is never part of the tree."""
     out = []
-    for _turn, frontier in result["frontiers"]:
+    for turn, frontier in result["frontiers"]:
+        if turn.user_prompt is not None:
+            out.append(turn.user_prompt)
         out.extend(frontier)
     return out
 
@@ -146,9 +150,11 @@ def print_stage(name: str, forest: Forest, with_roots: bool = False) -> None:
     n_leaves = sum(len(t.leaves) for t in forest)
     n_tokens = sum(l.tokens for t in forest for l in t.leaves)
     kinds = Counter(l.kind for t in forest for l in t.leaves)
+    n_prompts = sum(1 for t in forest if t.user_prompt is not None)
+    prompt_tokens = sum(t.user_prompt.tokens for t in forest if t.user_prompt is not None)
     msg = (
-        f"[{name}] turns={len(forest)} leaves={n_leaves} "
-        f"tokens={n_tokens:,} kinds={dict(kinds)}"
+        f"[{name}] turns={len(forest)} prompts={n_prompts} ({prompt_tokens:,} tok, verbatim) "
+        f"leaves={n_leaves} tokens={n_tokens:,} kinds={dict(kinds)}"
     )
     if with_roots:
         n_roots = sum(1 for t in forest if t.root is not None)

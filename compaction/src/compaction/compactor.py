@@ -33,30 +33,59 @@ def expand_to_budget(root: Node | Leaf, budget: int) -> Frontier:
     expansion would exceed the budget. Priority is always node.id
     (highest first = undo most recent merge first).
 
-    If the root is already a Leaf (single-leaf turn), returns [root].
+    Budget math uses `Leaf.tokens` directly — that field is the cost the
+    live agent will pay if a leaf is preserved raw in the compacted output
+    (structured rendering: thinking leaves stay as native blocks with
+    signatures, billed at the original thinking length; everything else
+    bills at its text-rendering cost). Node.delta is cached at construction
+    time over the same `tokens` values, so the loop is O(N log N).
+
+    If the root is a Leaf (single-leaf turn), returns [root].
     If `budget` is non-positive, returns [root] unchanged.
     """
-    frontier: Frontier = [root]
-    if budget <= 0:
-        return frontier
+    if budget <= 0 or not isinstance(root, Node) or not root.children:
+        return [root]
 
-    while True:
-        # Candidates: Nodes in the current frontier that have children.
-        candidates = [n for n in frontier if isinstance(n, Node) and n.children]
-        if not candidates:
-            return frontier
-        target = max(candidates, key=lambda n: n.id)
+    internals = _collect_internals(root)
+    internals.sort(key=lambda n: -n.id)
 
-        expanded: Frontier = []
-        for n in frontier:
-            if n is target:
-                expanded.extend(target.children)
-            else:
-                expanded.append(n)
+    expanded: set[int] = set()
+    total = root.tokens
+    for n in internals:
+        if total + n.delta > budget:
+            break
+        expanded.add(id(n))
+        total += n.delta
 
-        if _frontier_tokens(expanded) > budget:
-            return frontier
-        frontier = expanded
+    return _materialize_frontier(root, expanded)
+
+
+def _collect_internals(root: Node | Leaf) -> list[Node]:
+    """All internal Nodes in the subtree rooted at `root`, in arbitrary order."""
+    out: list[Node] = []
+    stack: list[Node | Leaf] = [root]
+    while stack:
+        n = stack.pop()
+        if isinstance(n, Node):
+            out.append(n)
+            stack.extend(n.children)
+    return out
+
+
+def _materialize_frontier(root: Node | Leaf, expanded: set[int]) -> Frontier:
+    """Walk `root` in tree order, expanding any Node whose `id()` is in
+    `expanded` (recursively). Result tiles the original leaves in left-to-right
+    order — the same shape the iterative algorithm would have produced.
+    """
+    out: Frontier = []
+    def walk(n: Node | Leaf) -> None:
+        if isinstance(n, Node) and id(n) in expanded:
+            for c in n.children:
+                walk(c)
+        else:
+            out.append(n)
+    walk(root)
+    return out
 
 
 def _frontier_tokens(frontier: Iterable[Node | Leaf]) -> int:

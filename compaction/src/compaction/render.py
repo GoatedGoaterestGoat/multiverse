@@ -41,7 +41,7 @@ def _span_size(node: Node) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Compaction output
+# Compaction output — text mode (default)
 # ---------------------------------------------------------------------------
 
 def render_frontier_as_messages(frontier: Frontier) -> str:
@@ -49,11 +49,62 @@ def render_frontier_as_messages(frontier: Frontier) -> str:
 
     For a Leaf, emits its content (kind-aware).
     For a Node, emits its summary marked as a compressed-region.
+
+    Lossy on thinking blocks (rendered as `[thinking: encrypted]` placeholder).
+    Use `render_frontier_as_message_blocks` for byte-equivalent thinking-block
+    preservation.
     """
     lines: list[str] = []
     for entry in frontier:
         lines.append(_render_entry(entry))
     return "\n\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Compaction output — structured mode (Anthropic content blocks)
+# ---------------------------------------------------------------------------
+
+def render_frontier_as_message_blocks(frontier: Frontier) -> list[dict]:
+    """Render a frontier as a list of Anthropic content blocks suitable for
+    use as a single assistant-role message's content array.
+
+    Thinking leaves emit `{"type":"thinking", "thinking":..., "signature":...}`
+    blocks **verbatim**. The signature carries the encrypted thinking content;
+    when fed back to the API under the same credential, the server validates
+    the signature and decrypts, giving the next-turn model server-side access
+    to the original chain-of-thought.
+
+    All other leaves and Node summaries emit `{"type":"text", "text":...}`.
+    Tool calls become text descriptions rather than `{"type":"tool_use"}`
+    blocks because tool_use requires a matching tool_result in a following
+    user message, which a compacted assistant-only output can't supply.
+
+    Returns a list of dicts shaped like Anthropic's content-block schema. The
+    caller wraps them in a `{"role":"assistant", "content":[...]}` message
+    when feeding back to the live agent.
+    """
+    blocks: list[dict] = []
+    for entry in frontier:
+        if isinstance(entry, Leaf):
+            if entry.kind == "thinking":
+                blocks.append({
+                    "type": "thinking",
+                    "thinking": entry.content.get("text", ""),
+                    "signature": entry.content.get("signature", ""),
+                })
+            else:
+                blocks.append({"type": "text", "text": _render_leaf(entry)})
+        else:  # Node summary
+            n = _span_size(entry)
+            blocks.append({
+                "type": "text",
+                "text": (
+                    f'<compacted-context entries="{n}">\n'
+                    f"{entry.summary.strip()}\n"
+                    f"</compacted-context>"
+                ),
+            })
+    return blocks
 
 
 def _render_entry(entry: Leaf | Node) -> str:

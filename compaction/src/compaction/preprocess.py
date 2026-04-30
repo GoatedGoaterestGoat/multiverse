@@ -27,7 +27,10 @@ from .types import Leaf, Turn
 
 @dataclass
 class PreprocessConfig:
-    auto_merge_tool_pairs: bool = True
+    # Disabled by default: tool_use and tool_result are kept as separate
+    # leaves so the constructor agent sees the true call/result structure
+    # and can decide on its own when (and whether) to merge them.
+    auto_merge_tool_pairs: bool = False
     collapse_consecutive_thinking: bool = False
     collapse_consecutive_asst_text: bool = False
     preview_max_len: int = 120
@@ -47,7 +50,7 @@ def preprocess_turn(turn: Turn, config: PreprocessConfig | None = None) -> Turn:
     if cfg.collapse_consecutive_asst_text:
         leaves = collapse_consecutive(leaves, "asst_text", max_preview=cfg.preview_max_len)
 
-    return Turn(turn_id=turn.turn_id, leaves=leaves)
+    return Turn(turn_id=turn.turn_id, user_prompt=turn.user_prompt, leaves=leaves)
 
 
 def preprocess_forest(forest, config: PreprocessConfig | None = None):

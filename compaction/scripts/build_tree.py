@@ -179,6 +179,7 @@ def main() -> int:
         "turn_id": turn.turn_id,
         "n_leaves": len(turn.leaves),
         "model": args.model,
+        "user_prompt": serialize(turn.user_prompt) if turn.user_prompt is not None else None,
         "leaves": [serialize(l) for l in turn.leaves],
         "tree": serialize(root) if root is not None else None,
         "history": history,

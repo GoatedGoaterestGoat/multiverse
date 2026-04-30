@@ -160,6 +160,8 @@ PAGE_TEMPLATE = """\
    <span class="dot k-tool_exchange"></span>tool</span>
 </section>
 
+{user_prompt_html}
+
 <main>
 {tree_html}
 </main>
@@ -333,6 +335,52 @@ summary:hover { background: var(--bg-soft); }
 .history th, .history td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
 .history th { color: var(--fg-dim); font-weight: 500; }
 .history td.summary-cell { white-space: pre-wrap; word-break: break-word; max-width: 800px; }
+
+.user-prompt {
+  margin: 16px 0 24px 0;
+  border: 1px solid #e7c0d3;
+  border-left: 4px solid var(--c-user);
+  background: #fff7fb;
+  border-radius: 6px;
+  padding: 10px 14px;
+}
+.user-prompt-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--c-user);
+  margin-bottom: 6px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.user-prompt-label .pill {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  color: var(--fg-dim);
+  background: #fff;
+  border: 1px solid #e7c0d3;
+  padding: 1px 6px;
+  border-radius: 10px;
+}
+.user-prompt-text {
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  color: var(--fg);
+}
+.user-prompt-empty {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
 """
 
 
@@ -346,17 +394,47 @@ def render_history(history: list[dict]) -> str:
                 f"<td class='summary-cell'>ERROR: {h.escape(h_['error'])}</td></tr>"
             )
             continue
+        span = h_.get("span", h_.get("end", 0) - h_.get("start", 0))
+        sumtok = h_.get("summary_tokens", "?")
+        elapsed = h_.get("elapsed_s", "?")
         rows.append(
             f"<tr>"
             f"<td>{h_['step']}</td>"
-            f"<td>{h_['span']}</td>"
+            f"<td>{span}</td>"
             f"<td>[{h_['start']}:{h_['end']})</td>"
-            f"<td>{h_['summary_tokens']}</td>"
-            f"<td>{h_['elapsed_s']}s</td>"
+            f"<td>{sumtok}</td>"
+            f"<td>{elapsed}{'s' if elapsed != '?' else ''}</td>"
             f"<td class='summary-cell'>{h.escape(h_['summary'])}</td>"
             f"</tr>"
         )
     return "\n".join(rows)
+
+
+def render_user_prompt(data: dict) -> str:
+    """Render the verbatim user prompt that bounded this turn.
+
+    The prompt is hoisted out of the tree (it's a separator, not a
+    compactable leaf), so we display it as a banner above the tree.
+    """
+    prompt = data.get("user_prompt")
+    if prompt is None:
+        return (
+            '<section class="user-prompt">'
+            '<div class="user-prompt-label">User prompt'
+            ' <span class="pill">verbatim · not compacted</span></div>'
+            '<div class="user-prompt-empty">'
+            '(no user prompt for this turn — orphan content before any prompt)'
+            '</div></section>'
+        )
+    text = (prompt.get("content") or {}).get("text", "")
+    tokens = prompt.get("tokens", 0)
+    return (
+        '<section class="user-prompt">'
+        '<div class="user-prompt-label">User prompt'
+        f' <span class="pill">verbatim · not compacted · {tokens}t</span></div>'
+        f'<pre class="user-prompt-text">{h.escape(text)}</pre>'
+        '</section>'
+    )
 
 
 def render_page(data: dict) -> str:
@@ -372,6 +450,7 @@ def render_page(data: dict) -> str:
         n_merges=len([h_ for h_ in data.get("history", []) if "error" not in h_]),
         model=h.escape(str(data.get("model", "?"))),
         css=CSS,
+        user_prompt_html=render_user_prompt(data),
         tree_html=tree_html,
         history_rows=render_history(data.get("history", [])),
     )

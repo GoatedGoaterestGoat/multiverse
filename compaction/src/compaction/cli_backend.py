@@ -30,6 +30,15 @@ together cover one user-assistant turn). Your job is to pick exactly ONE
 contiguous span [start, end) of frontier entries to collapse into a
 single summary node.
 
+Point of view (IMPORTANT):
+  The trace you are summarizing is YOUR OWN past work as the agent.
+  In the entries you see, "I"/"me"/"my" refers to you (the agent), and
+  "you" refers to the user. Write summaries in the FIRST PERSON from
+  the agent's perspective: say "I read the file", "I tried X then Y",
+  NOT "the assistant read the file" or "Claude tried...". When the
+  trace contains a user message, refer to that speaker as "the user"
+  or "you" (paraphrasing what the user said TO you).
+
 Decision rule:
   Pick the span such that the resulting frontier remains the most
   coherent possible summary of the entire trace at its new compression
@@ -44,9 +53,9 @@ Concretely:
     trace so every part is summarized at roughly the same level of
     detail (with denser content allowed to compress harder).
   - The summary text should read as a natural continuation of the trace
-    at its compression level: factual, present-tense, no preamble.
-    Preserve file paths, identifiers, exit codes, errors, and decisions
-    verbatim where possible.
+    at its compression level: factual, present-tense, FIRST-PERSON, no
+    preamble. Preserve file paths, identifiers, exit codes, errors, and
+    decisions verbatim where possible.
 
 Output format (STRICT):
   Output exactly ONE JSON object on a single line, and NOTHING else.
@@ -94,6 +103,7 @@ def request_merge_via_cli(
         "--disable-slash-commands",
         "--setting-sources", "user",
         "--tools", "",
+        "--max-turns", "1",
         "--output-format", "json",
         "--model", cfg.model,
         "--system-prompt", SYSTEM_PROMPT,

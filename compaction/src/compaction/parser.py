@@ -42,6 +42,42 @@ def _iter_jsonl(path: str) -> Iterator[dict[str, Any]]:
             yield json.loads(line)
 
 
+def _build_usage_index(path: str) -> tuple[dict[str, int], dict[str, int]]:
+    """Pre-pass over the JSONL: build per-assistant-message totals for
+    `output_tokens` and visible-content tokens. Used to estimate the cost
+    of redacted thinking blocks via `output_tokens - visible`.
+
+    Visible content = sum of text-block tokens + tool_use (name + input)
+    tokens. Thinking blocks have empty plaintext, so they contribute zero
+    here; the residual after subtraction is the thinking estimate.
+    """
+    out_tok: dict[str, int] = {}
+    visible_tok: dict[str, int] = {}
+    for row in _iter_jsonl(path):
+        if row.get("type") != "assistant":
+            continue
+        msg = row.get("message", {})
+        if not isinstance(msg, dict):
+            continue
+        mid = msg.get("id")
+        if not mid:
+            continue
+        u = msg.get("usage")
+        if isinstance(u, dict) and "output_tokens" in u:
+            out_tok[mid] = u["output_tokens"]
+        for block in msg.get("content", []) or []:
+            if not isinstance(block, dict):
+                continue
+            bt = block.get("type")
+            if bt == "text":
+                visible_tok[mid] = visible_tok.get(mid, 0) + count_tokens(block.get("text", ""))
+            elif bt == "tool_use":
+                nm = block.get("name", "")
+                inp = json.dumps(block.get("input", {}))
+                visible_tok[mid] = visible_tok.get(mid, 0) + count_tokens(nm + inp)
+    return out_tok, visible_tok
+
+
 def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """Turn one JSONL row into a Leaf, or None if the row is metadata.
 
@@ -116,6 +152,12 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
             btype = block.get("type")
             if btype == "thinking":
                 text = block.get("thinking", "")
+                # tokens here is a baseline (count_tokens of any visible
+                # plaintext). The post-pass in parse_session() overrides
+                # this with the verbatim estimate from message-level usage
+                # for redacted thinking — that's the cost the live agent
+                # actually pays when this leaf is preserved as a native
+                # thinking block in the compacted output.
                 return Leaf(
                     kind="thinking",
                     content={"text": text, "signature": block.get("signature")},
@@ -176,9 +218,20 @@ def _preview(text: str, kind: str, max_len: int = 120) -> str:
     return flat if len(flat) <= max_len else flat[: max_len - 3] + "..."
 
 
-def _is_user_prompt_row(row: dict[str, Any]) -> bool:
-    """True if this row starts a new turn (a user prompt, not a tool_result)."""
+def _is_user_prompt_row(row: dict[str, Any], last_pid: str | None) -> bool:
+    """True if this row starts a new turn.
+
+    The harness assigns a fresh `promptId` to every real user prompt and
+    inherits it for everything (tool_results, hook-injected user records,
+    assistant blocks) produced in response. So a `promptId` change is the
+    canonical turn boundary; content-shape heuristics misfire on synthetic
+    user records like "Stop hook feedback:" that share a promptId with the
+    prompt they're paired to.
+    """
     if row.get("type") != "user":
+        return False
+    pid = row.get("promptId")
+    if pid is None or pid == last_pid:
         return False
     msg = row.get("message")
     if not isinstance(msg, dict):
@@ -195,24 +248,40 @@ def _is_user_prompt_row(row: dict[str, Any]) -> bool:
 
 def parse_session(path: str) -> Forest:
     """Parse a Claude Code JSONL session log into a Forest of Turns."""
+    out_tok, visible_tok = _build_usage_index(path)
+
     turns: Forest = []
     current: Turn | None = None
     pending_orphans: list[Leaf] = []
+    last_pid: str | None = None
 
     for row in _iter_jsonl(path):
         leaf = _classify_and_extract(row)
 
-        if _is_user_prompt_row(row):
+        # For thinking leaves, override `tokens` with an estimate of the
+        # original API-billed thinking length: output_tokens of the source
+        # message minus the visible content. This is the cost the live
+        # agent will pay if this leaf is preserved as a native thinking
+        # block in the compacted output (signature decrypts server-side).
+        if leaf is not None and leaf.kind == "thinking":
+            mid = (row.get("message") or {}).get("id")
+            if mid and mid in out_tok:
+                est = max(0, out_tok[mid] - visible_tok.get(mid, 0))
+                if est > leaf.tokens:
+                    leaf.tokens = est
+
+        if _is_user_prompt_row(row, last_pid):
             if current is not None:
                 turns.append(current)
             turn_id = row.get("promptId") or row.get("uuid") or f"turn-{len(turns)}"
-            current = Turn(turn_id=turn_id, leaves=[])
-            # Drain any pre-first-prompt orphans into this turn
+            last_pid = row.get("promptId")
+            # The user prompt is hoisted out of `leaves` — it acts as a
+            # verbatim separator and never enters the compactable region.
+            current = Turn(turn_id=turn_id, user_prompt=leaf, leaves=[])
+            # Drain any pre-first-prompt orphans into this turn's leaves
             if pending_orphans:
                 current.leaves.extend(pending_orphans)
                 pending_orphans = []
-            if leaf is not None:
-                current.leaves.append(leaf)
             continue
 
         # Non-prompt row
@@ -228,6 +297,6 @@ def parse_session(path: str) -> Forest:
         turns.append(current)
     elif pending_orphans:
         # Edge case: file with content but no user prompt at all
-        turns.append(Turn(turn_id="turn-0", leaves=pending_orphans))
+        turns.append(Turn(turn_id="turn-0", user_prompt=None, leaves=pending_orphans))
 
     return turns
