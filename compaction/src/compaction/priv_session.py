@@ -69,6 +69,15 @@ def _metadata_row(session_id: str, title: str = "priv_compaction") -> dict:
     }
 
 
+_UUID_RE = __import__("re").compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+
+
+def _looks_like_uuid(s: str) -> bool:
+    return bool(s) and bool(_UUID_RE.match(s))
+
+
 def build_synthetic_jsonl_from_source(
     source_path: str,
     turn: Turn,
@@ -176,3 +185,179 @@ def write_session(jsonl_text: str, session_id: str, cwd: str | None = None) -> P
     p = session_path(session_id, cwd)
     p.write_text(jsonl_text)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Multi-turn compacted session rendering
+# ---------------------------------------------------------------------------
+#
+# Once every turn has its tree built, the entire forest can be rendered as
+# one synthetic Claude Code session JSONL — the live agent can `--resume`
+# it and continue from a fully-compacted state. Per-turn output is produced
+# independently (so it can be cached/inspected per turn at a chosen
+# compaction level); the multi-turn assembler stitches them together by
+# chaining parentUuid and sharing one sessionId.
+
+
+def _user_row(
+    text: str,
+    session_id: str,
+    cwd: str,
+    parent_uuid: str | None,
+    prompt_id: str | None = None,
+    timestamp: str = SYNTHETIC_TIMESTAMP,
+) -> dict:
+    """Build a user-role row. `prompt_id`, when set, marks this as the
+    start of a new turn — our parser uses promptId changes to detect turn
+    boundaries, so user-prompt rows in multi-turn synthetic sessions need
+    one for the JSONL to round-trip cleanly."""
+    row = {
+        "parentUuid": parent_uuid,
+        "uuid": str(uuidlib.uuid4()),
+        "sessionId": session_id,
+        "type": "user",
+        "timestamp": timestamp,
+        "cwd": cwd,
+        "userType": "external",
+        "message": {"role": "user", "content": text},
+    }
+    if prompt_id is not None:
+        row["promptId"] = prompt_id
+    return row
+
+
+def _assistant_block_row(
+    block: dict,
+    msg_id: str,
+    session_id: str,
+    cwd: str,
+    parent_uuid: str,
+    is_final: bool,
+    timestamp: str = SYNTHETIC_TIMESTAMP,
+) -> dict:
+    return {
+        "parentUuid": parent_uuid,
+        "uuid": str(uuidlib.uuid4()),
+        "sessionId": session_id,
+        "type": "assistant",
+        "timestamp": timestamp,
+        "cwd": cwd,
+        "userType": "external",
+        "message": {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "model": SYNTHETIC_MODEL,
+            "content": [block],
+            "stop_reason": "end_turn" if is_final else None,
+            "stop_sequence": None,
+            "usage": {},
+        },
+    }
+
+
+def turn_to_rows(
+    turn: Turn,
+    frontier: Frontier,
+    session_id: str,
+    cwd: str,
+    parent_uuid: str | None,
+) -> tuple[list[dict], str | None]:
+    """Render one turn's compacted output as session JSONL rows.
+
+    Emits one user-role row containing the turn's user_prompt followed by
+    one assistant-role row per content block from
+    `render_frontier_as_message_blocks(frontier)` — thinking leaves stay as
+    native blocks (with signatures), other leaves and Node summaries become
+    text blocks (Node summaries wrapped in `<compacted-context>` markers).
+
+    Returns (rows, last_uuid). `last_uuid` is the parentUuid the next
+    turn's first row should chain to.
+    """
+    rows: list[dict] = []
+
+    user_text = ""
+    if turn.user_prompt is not None:
+        user_text = turn.user_prompt.content.get("text", "") or ""
+    if not user_text:
+        user_text = "<no user prompt for this turn>"
+
+    # Reuse the original turn_id as the promptId when it's already a UUID
+    # (it usually is — turn_id originates from the source JSONL's promptId);
+    # fall back to a fresh UUID otherwise (orphan turns, etc.).
+    prompt_id = turn.turn_id if _looks_like_uuid(turn.turn_id) else str(uuidlib.uuid4())
+    user_row = _user_row(user_text, session_id, cwd, parent_uuid, prompt_id=prompt_id)
+    rows.append(user_row)
+    prev_uuid: str = user_row["uuid"]
+
+    blocks = render_frontier_as_message_blocks(frontier) if frontier else []
+    if not blocks:
+        # Empty frontier — emit a single placeholder text block so the
+        # alternation holds and the message isn't empty.
+        blocks = [{"type": "text", "text": "<no compacted output for this turn>"}]
+
+    msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
+    for i, block in enumerate(blocks):
+        row = _assistant_block_row(
+            block, msg_id, session_id, cwd, prev_uuid,
+            is_final=(i == len(blocks) - 1),
+        )
+        rows.append(row)
+        prev_uuid = row["uuid"]
+
+    return rows, prev_uuid
+
+
+def _expand_turn_frontier(turn: Turn, budget: int) -> Frontier:
+    """Expand a turn to its allocated budget. Uses the constructed tree if
+    present; falls back to greedy-leaves-from-start if not."""
+    # Lazy import to avoid the circular dependency (compactor depends on
+    # types only; priv_session is a higher-level layer).
+    from .compactor import expand_to_budget
+
+    if turn.root is not None:
+        return expand_to_budget(turn.root, budget)
+    # No tree built — take leaves greedily from the start until budget
+    # would be exceeded.
+    frontier: Frontier = []
+    tokens_used = 0
+    for leaf in turn.leaves:
+        if tokens_used + leaf.tokens > budget and frontier:
+            break
+        frontier.append(leaf)
+        tokens_used += leaf.tokens
+    return frontier
+
+
+def compact_forest_to_session_jsonl(
+    forest,
+    per_turn_budget: dict[str, int],
+    session_id: str | None = None,
+    cwd: str | None = None,
+    title: str = "compacted_forest",
+) -> str:
+    """Render a compacted forest as one synthetic Claude Code session JSONL.
+
+    For each turn, expand its tree to the allocated per-turn budget (or
+    greedy leaves if the tree wasn't built), emit user_prompt + compacted
+    assistant rows, chain parentUuid continuously across turns. All rows
+    share one sessionId. Result is loadable via `claude --resume`.
+
+    `per_turn_budget` is the output of one of the schedulers in
+    `compactor.py` (e.g. `recency_decay`, `last_k_raw`, `proportional`).
+    """
+    session_id = session_id or str(uuidlib.uuid4())
+    cwd = cwd or os.getcwd()
+
+    out_rows: list[dict] = [_metadata_row(session_id, title)]
+    parent_uuid: str | None = None
+
+    for turn in forest:
+        budget = per_turn_budget.get(turn.turn_id, 0)
+        frontier = _expand_turn_frontier(turn, budget)
+        rows, parent_uuid = turn_to_rows(
+            turn, frontier, session_id, cwd, parent_uuid
+        )
+        out_rows.extend(rows)
+
+    return "\n".join(json.dumps(r) for r in out_rows) + "\n"
