@@ -505,6 +505,17 @@ def build_dashboard_rows(
                 )
             )
 
+    # Override status to "compacting" for any row whose claude_uuid holds
+    # an active compaction lock. Cross-monitor: every monitor reads from
+    # ~/.multiverse/compacting/ on each refresh, so the locked rows render
+    # uniformly across monitors and the action handlers refuse to start /
+    # resume / kill them.
+    locked = list_locked()
+    if locked:
+        for r in rows:
+            if r.claude_uuid and r.claude_uuid in locked:
+                r.status = "compacting"
+
     # Sort: non-ghosts first by status then recency, ghosts always last
     # (regardless of how recent the underlying fold was — they're stale
     # forks the user shouldn't have to scroll past).

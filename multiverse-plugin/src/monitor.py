@@ -31,9 +31,23 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Header, Input, Static
+from textual.widgets import (
+    DataTable,
+    Footer,
+    Header,
+    Input,
+    ProgressBar,
+    RichLog,
+    Static,
+)
 
 from .ask_agents import AskResult, AskTarget, ask_all
+from .compact_runner import CompactRunner, State as CompactState
+from .full_jsonl import (
+    live_jsonl_path,
+    total_token_count,
+    total_turn_count,
+)
 from .inbox import pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
@@ -66,8 +80,14 @@ STATUS_STYLES = {
     "starting": "cyan",
     "ended": "dim strike",
     "dormant": "blue",
+    "compacting": "bold magenta",
     "unknown": "dim",
 }
+
+# Statuses where the user is allowed to launch a compaction. Working/
+# waiting/starting/compacting are excluded — the session is busy or
+# already locked.
+_COMPACTABLE_STATUSES = {"idle", "ended", "dormant"}
 
 
 class _SpawnAttachGuard:
@@ -426,6 +446,284 @@ class AskResultsScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class CompactScreen(ModalScreen[None]):
+    """Drive a manual compaction for one session.
+
+    Two phases:
+      1. ``input`` — fetch total tokens / turn count from full.jsonl in
+         the background, show them, prompt the user for a token budget.
+      2. ``running`` — kick off the CompactRunner in a thread, display
+         its log + an overall trees-built / total-turns progress bar.
+
+    Esc:
+      - In ``input``: cancel the modal.
+      - In ``running``: signal the runner to abort at the next safe
+        checkpoint (won't kill an in-flight build subprocess).
+      - In ``done``: dismiss.
+
+    The actual *expansion* step (rendering the compacted live JSONL from
+    the per-turn budget) is intentionally not yet wired in — first version
+    stops once every turn has a tree. The next iteration will plug in
+    the proportional scheduler + ``compact_forest_to_session_jsonl`` and
+    rewrite the live JSONL.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        claude_uuid: str,
+        cwd: str,
+        display_name: str,
+        mv_session: Optional[Session],
+    ) -> None:
+        super().__init__()
+        self.claude_uuid = claude_uuid
+        self.cwd = cwd
+        self.display_name = display_name
+        self.mv_session = mv_session
+        self.total_tokens = 0
+        self.total_turns = 0
+        self.budget = 0
+        self.phase = "input"  # input | running | done | failed
+        self._runner: Optional[CompactRunner] = None
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                f"Compact session: [bold]{self.display_name}[/]",
+                id="compact-title",
+            ),
+            Static(
+                f"[dim]uuid {self.claude_uuid[:8]} · cwd {self.cwd}[/]",
+                id="compact-meta",
+            ),
+            Static(
+                "[dim]Loading uncompacted session stats from full.jsonl…[/]",
+                id="compact-stats",
+            ),
+            Input(
+                placeholder="Token budget (e.g. 32000)",
+                id="compact-budget",
+                disabled=True,
+            ),
+            Static("", id="compact-state"),
+            ProgressBar(total=100, id="compact-progress", show_eta=False),
+            RichLog(
+                id="compact-log",
+                wrap=False,
+                highlight=False,
+                markup=False,
+                max_lines=2000,
+            ),
+            Static(
+                "[dim]Enter to start once stats load · Esc to cancel[/]",
+                id="compact-hint",
+            ),
+            id="compact-dialog",
+        )
+
+    def on_mount(self) -> None:
+        # Hide the running-phase widgets until the user submits a budget.
+        for wid in ("compact-state", "compact-progress", "compact-log"):
+            self.query_one(f"#{wid}").display = False
+        self._load_stats()
+
+    # ----- Phase 1: stats loading + budget input ---------------------------
+
+    @work(thread=True, exclusive=True, group="compact_stats")
+    def _load_stats(self) -> None:
+        try:
+            toks = total_token_count(self.claude_uuid, self.cwd)
+            turns = total_turn_count(self.claude_uuid, self.cwd)
+        except Exception as e:  # noqa: BLE001
+            self.call_from_thread(self._stats_failed, repr(e))
+            return
+        self.call_from_thread(self._stats_ready, toks, turns)
+
+    def _stats_failed(self, err: str) -> None:
+        self.query_one("#compact-stats", Static).update(
+            f"[red]Failed to load stats: {err}[/]"
+        )
+
+    def _stats_ready(self, total_tokens: int, total_turns: int) -> None:
+        self.total_tokens = total_tokens
+        self.total_turns = total_turns
+        suggested = max(1, total_tokens // 2)
+        self.query_one("#compact-stats", Static).update(
+            f"Total: [bold]{total_tokens:,}[/] tokens · "
+            f"[bold]{total_turns}[/] turn(s) (uncompacted)"
+        )
+        budget = self.query_one("#compact-budget", Input)
+        budget.disabled = False
+        budget.placeholder = f"Token budget (e.g. {suggested:,} for ~50%)"
+        budget.focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if self.phase != "input":
+            return
+        raw = event.value.replace(",", "").replace("_", "").strip()
+        try:
+            b = int(raw)
+        except ValueError:
+            self.notify("Enter an integer token budget", severity="warning")
+            return
+        if b <= 0:
+            self.notify("Budget must be positive", severity="warning")
+            return
+        if self.total_tokens == 0:
+            self.notify("Stats still loading — wait a moment", severity="warning")
+            return
+        self.budget = b
+        self._enter_running_phase()
+
+    # ----- Phase 2: running ------------------------------------------------
+
+    def _enter_running_phase(self) -> None:
+        self.phase = "running"
+
+        budget = self.query_one("#compact-budget", Input)
+        budget.disabled = True
+        budget.display = False
+
+        stats = self.query_one("#compact-stats", Static)
+        stats.update(
+            f"Total: [bold]{self.total_tokens:,}[/]t  →  "
+            f"Budget: [bold]{self.budget:,}[/]t  ·  "
+            f"[bold]{self.total_turns}[/] turn(s)"
+        )
+
+        for wid in ("compact-state", "compact-progress", "compact-log"):
+            self.query_one(f"#{wid}").display = True
+
+        self.query_one("#compact-state", Static).update(
+            "[cyan]Starting compaction…[/]"
+        )
+        progress = self.query_one("#compact-progress", ProgressBar)
+        progress.update(total=max(1, self.total_turns), progress=0)
+        log_widget = self.query_one("#compact-log", RichLog)
+        log_widget.clear()
+        self.query_one("#compact-hint", Static).update(
+            "[dim]Esc to abort (won't kill in-flight build subprocess)[/]"
+        )
+
+        self._start_runner()
+
+    def _start_runner(self) -> None:
+        live = live_jsonl_path(self.claude_uuid, self.cwd)
+        if self.mv_session is not None:
+            kill_fn = self._make_kill_fn(self.mv_session)
+        else:
+            kill_fn = None
+        self._runner = CompactRunner(
+            claude_uuid=self.claude_uuid,
+            cwd=self.cwd,
+            live_jsonl=live,
+            kill_session_fn=kill_fn,
+        )
+        self._run_in_thread()
+
+    @staticmethod
+    def _make_kill_fn(session: Session):
+        """Build a callable that kills the multiverse session's tmux pane
+        without reaping its state directory.
+
+        We intentionally do NOT call ``sessions.kill_session`` here — it
+        also shutil.rmtree's the per-session state dir, which would erase
+        the multiverse name and friendly-row identity for the duration
+        of the compaction. Killing the tmux session alone is enough: the
+        existing dashboard logic detects the missing tmux and downgrades
+        status to ``ended`` (which our compacting-lock then overrides to
+        ``compacting``).
+        """
+        tmux_name = session.tmux_name
+
+        def _kill():
+            if tmux_session_exists(tmux_name):
+                subprocess.run(
+                    ["tmux", "kill-session", "-t", tmux_name],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        return _kill
+
+    @work(thread=True, exclusive=True, group="compact_run")
+    def _run_in_thread(self) -> None:
+        runner = self._runner
+        if runner is None:
+            return
+
+        def on_log(line: str) -> None:
+            self.call_from_thread(self._append_log, line)
+
+        def on_progress(built: int, total: int) -> None:
+            self.call_from_thread(self._update_progress, built, total)
+
+        def on_state(state: str) -> None:
+            self.call_from_thread(self._update_state, state)
+
+        def on_done(ok: bool, msg: str) -> None:
+            self.call_from_thread(self._on_done, ok, msg)
+
+        runner.run(on_log, on_progress, on_state, on_done)
+
+    def _append_log(self, line: str) -> None:
+        try:
+            self.query_one("#compact-log", RichLog).write(line)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _update_progress(self, built: int, total: int) -> None:
+        progress = self.query_one("#compact-progress", ProgressBar)
+        progress.update(total=max(1, total), progress=built)
+        self.query_one("#compact-state", Static).update(
+            self._state_text() + f"  ·  {built}/{total} tree(s) built"
+        )
+
+    def _update_state(self, state: str) -> None:
+        self._state = state
+        self.query_one("#compact-state", Static).update(self._state_text())
+
+    def _state_text(self) -> str:
+        s = getattr(self, "_state", "starting")
+        styled = {
+            CompactState.LOCKING: "[cyan]Acquiring compaction lock…[/]",
+            CompactState.KILLING: "[cyan]Killing live session…[/]",
+            CompactState.SYNCING: "[cyan]Syncing full.jsonl…[/]",
+            CompactState.WAITING_AUTO: (
+                "[cyan]Waiting for in-flight auto-worker…[/]"
+            ),
+            CompactState.BUILDING: "[cyan]Building remaining trees…[/]",
+            CompactState.DONE: "[bold green]✓ Done[/]",
+            CompactState.FAILED: "[bold red]✗ Failed[/]",
+            CompactState.ABORTED: "[bold yellow]✗ Aborted[/]",
+        }.get(s, f"[dim]{s}…[/]")
+        return styled
+
+    def _on_done(self, ok: bool, msg: str) -> None:
+        self.phase = "done" if ok else "failed"
+        self._append_log("─" * 56)
+        self._append_log(("[OK] " if ok else "[FAIL] ") + msg)
+        verdict_color = "green" if ok else "red"
+        self.query_one("#compact-hint", Static).update(
+            f"[bold {verdict_color}]"
+            + ("Trees built. " if ok else "Compaction failed. ")
+            + "Esc to close.[/]"
+        )
+
+    # ----- Cancel / dismiss -----------------------------------------------
+
+    def action_cancel(self) -> None:
+        if self.phase == "running" and self._runner is not None:
+            # First Esc: signal abort (clean stop at next checkpoint).
+            if not self._runner.cancelled:
+                self._runner.cancel()
+                self._append_log("[user] cancel requested — will abort soon")
+                return
+            # Second Esc while still running: force-dismiss.
+        self.dismiss(None)
+
+
 class MonitorApp(App):
     CSS = """
     Screen {
@@ -550,11 +848,49 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #compact-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #compact-title {
+        height: auto;
+    }
+    #compact-meta {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #compact-stats {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #compact-state {
+        height: auto;
+        padding-top: 1;
+    }
+    #compact-progress {
+        height: auto;
+        padding-top: 1;
+        padding-bottom: 1;
+    }
+    #compact-log {
+        height: 1fr;
+        border: solid $primary-darken-2;
+        background: $surface-darken-1;
+    }
+    #compact-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     """
 
     BINDINGS = [
         Binding("n", "new_session", "New"),
         Binding("R", "resume_session", "Resume"),
+        Binding("c", "compact", "Compact"),
         Binding("a", "ask_all", "Ask all"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
@@ -858,6 +1194,13 @@ class MonitorApp(App):
         if e is None:
             return
 
+        if e.status == "compacting":
+            self.notify(
+                "Session is compacting — wait until it finishes",
+                severity="warning",
+            )
+            return
+
         # Live multiverse → attach.
         if e.is_live and e.session is not None:
             if not tmux_session_exists(e.session.tmux_name):
@@ -926,6 +1269,12 @@ class MonitorApp(App):
         e = self._current_entry()
         if e is None:
             return
+        if e.status == "compacting":
+            self.notify(
+                "Session is compacting — kill blocked until it finishes",
+                severity="warning",
+            )
+            return
         if e.session is None:
             self.notify(
                 "Dormant sessions cannot be killed from here — delete the JSONL manually",
@@ -935,6 +1284,40 @@ class MonitorApp(App):
         kill_session(e.session)
         self.notify(f"Killed {e.session.id}")
         self.refresh_sessions()
+
+    def action_compact(self) -> None:
+        e = self._current_entry()
+        if e is None:
+            return
+        if e.is_ghost:
+            self.notify("Cannot compact a folded ghost row", severity="warning")
+            return
+        if not e.claude_uuid:
+            self.notify(
+                "No claude UUID tracked for this row — cannot compact",
+                severity="warning",
+            )
+            return
+        if e.status not in _COMPACTABLE_STATUSES:
+            self.notify(
+                f"Compaction only allowed for idle/ended/dormant sessions "
+                f"(this is {e.status})",
+                severity="warning",
+            )
+            return
+
+        def _on_close(_: None) -> None:
+            self.refresh_sessions()
+
+        self.push_screen(
+            CompactScreen(
+                claude_uuid=e.claude_uuid,
+                cwd=e.cwd,
+                display_name=e.name,
+                mv_session=e.session,
+            ),
+            _on_close,
+        )
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
