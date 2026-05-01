@@ -7,6 +7,11 @@ claude-code-src/
 # Legacy standalone MCP server (superseded by multiverse-plugin/)
 context-fold-mcp/
 
+# Compaction package has been moved into the plugin at
+# multiverse-plugin/vendor/compaction/. The standalone compaction/ dir is
+# kept on disk as a scratch workspace but is no longer tracked.
+compaction/
+
 # Test files
 context-original.md
 context-folded.md
