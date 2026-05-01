@@ -31,6 +31,13 @@ def render_node(node: dict, depth: int = 0, total_leaves: int = 1) -> str:
     return render_internal(node, depth, total_leaves)
 
 
+def _state_class(node: dict) -> str:
+    """Optional CSS class derived from `_state`, used by the forest
+    visualizer to mark which entries survive at a given budget."""
+    s = node.get("_state")
+    return f" s-{s}" if s else ""
+
+
 def render_leaf(node: dict, depth: int) -> str:
     kind = node.get("kind", "?")
     tokens = node.get("tokens", 0)
@@ -46,7 +53,7 @@ def render_leaf(node: dict, depth: int) -> str:
     )
 
     return f"""\
-<details class="leaf k-{h.escape(kind)}" data-depth="{depth}">
+<details class="leaf k-{h.escape(kind)}{_state_class(node)}" data-depth="{depth}">
   <summary>
     <span class="badge leaf-badge">leaf</span>
     <span class="kind">{h.escape(kind)}</span>
@@ -75,7 +82,7 @@ def render_internal(node: dict, depth: int, total_leaves: int) -> str:
     )
 
     return f"""\
-<details class="node" data-depth="{depth}" open>
+<details class="node{_state_class(node)}" data-depth="{depth}" open>
   <summary>
     <span class="badge node-badge">#{nid}</span>
     <span class="span">span={span}</span>
