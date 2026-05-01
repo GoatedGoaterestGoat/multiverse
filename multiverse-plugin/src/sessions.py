@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from .compact_state import list_locked
 from .paths import multiverse_dir
 
 
@@ -349,6 +350,7 @@ def tmux_session_exists(name: str) -> bool:
 
 # Ranking for dashboard sort: lower = higher in the table.
 _STATUS_SORT = {
+    "compacting": 0,
     "working": 0,
     "waiting": 0,
     "starting": 1,
@@ -404,6 +406,18 @@ def build_dashboard_rows(
     # Map each superseded claude UUID to its fold timestamp. Used to render
     # those JSONLs as `Name (folded HH:MM)` ghost rows instead of plain
     # dormants, and to keep them out of the inter-agent registry.
+    #
+    # Two sources, in priority order:
+    #   1. ``superseded_uuids`` on live multiverse sessions — populated at
+    #      fold time (server.py's _record_superseded_uuid) and at resume
+    #      time (create_session's self-heal). Cheap and authoritative when
+    #      present.
+    #   2. The synthetic ``model: "context-fold"`` markers embedded in
+    #      every post-fold JSONL by the rewriter. Durable across container
+    #      migrations / state-dir loss / monitor restarts on a clean
+    #      MULTIVERSE_ROOT — the JSONL itself is the source of truth.
+    #      mtime-cached so the per-tick cost is negligible after the
+    #      initial scan.
     ghost_map: dict[str, float] = {}
     for s in sessions:
         for entry in s.superseded_uuids:
@@ -417,6 +431,18 @@ def build_dashboard_rows(
                 ghost_map[uid] = 0.0
 
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
+
+    if project_dir.is_dir():
+        for path in project_dir.glob("*.jsonl"):
+            for entry in detect_fold_ancestors_cached(path):
+                uid = entry.get("uuid") if isinstance(entry, dict) else None
+                if not uid or uid in ghost_map:
+                    continue
+                ts = entry.get("folded_at") if isinstance(entry, dict) else None
+                try:
+                    ghost_map[uid] = float(ts or 0.0)
+                except (TypeError, ValueError):
+                    ghost_map[uid] = 0.0
 
     for s in sessions:
         if not s.name:
@@ -530,6 +556,27 @@ def find_agent_by_name(cwd: str, name: str) -> Optional[DashboardRow]:
 
 def short_id() -> str:
     return secrets.token_hex(4)
+
+
+# mtime-keyed cache for detect_fold_ancestors. Dashboard refresh scans every
+# JSONL in the project dir on every tick; without caching, that's
+# O(MB-per-jsonl × tick-rate). Only re-scan when mtime changes.
+_FOLD_ANCESTOR_CACHE: dict[str, tuple[float, list[dict]]] = {}
+
+
+def detect_fold_ancestors_cached(jsonl_path: Path) -> list[dict]:
+    """mtime-cached wrapper around ``detect_fold_ancestors``."""
+    try:
+        mtime = jsonl_path.stat().st_mtime
+    except OSError:
+        return []
+    key = str(jsonl_path)
+    cached = _FOLD_ANCESTOR_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = detect_fold_ancestors(jsonl_path)
+    _FOLD_ANCESTOR_CACHE[key] = (mtime, result)
+    return result
 
 
 def detect_fold_ancestors(jsonl_path: Path) -> list[dict]:
