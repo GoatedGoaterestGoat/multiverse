@@ -1,16 +1,18 @@
 # Multiverse Plugin for Claude Code
 
-Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messaging, and selective context folding.
+Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messaging, selective context folding, and frontier-coherent context compaction.
 
 ## What it does
 
-Three things, all designed to scale past the limits of a single `claude` process:
+Four things, all designed to scale past the limits of a single `claude` process:
 
-**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `dormant` / `ended`) is driven by hooks. Each multiverse instance is scoped to one workspace (cwd).
+**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `dormant` / `ended` / `compacting`) is driven by hooks and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
 
 **2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus a TUI `a` keybinding to ask all agents the same question at once. Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
 
 **3. Context folding.** When a conversation grows large, fold specific message ranges into agent-written summaries — a granular alternative to `/compact`. The agent picks what to fold (using `context_info`), writes the summary, and the session resumes automatically with the optimized context.
+
+**4. Frontier-coherent compaction.** A bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
 
 ## Prerequisites
 
@@ -73,9 +75,10 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 |:----|:-------|
 | `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse` |
 | `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden) |
+| `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place |
-| `k` | Kill the highlighted session — tmux kill + remove state dir |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. Refused while the row is `compacting` |
+| `k` | Kill the highlighted session — tmux kill + remove state dir. Refused while the row is `compacting` |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
 
@@ -145,14 +148,49 @@ Or let Claude decide:
 
 > "The context is getting large. Review it and fold anything that's no longer relevant."
 
+### Frontier-coherent compaction
+
+Where context folding is range-based and agent-driven, frontier-coherent compaction is **whole-session and user-driven**. You pick a total token budget; the plugin distributes it proportionally across every turn, expands each turn's pre-built summary tree to its allocated share, and atomically replaces the live JSONL with the compacted version. The original transcript is preserved in a parallel "full" JSONL that the live one is mirrored from on every hook fire.
+
+**Two-JSONL architecture.** Every session has two on-disk JSONLs:
+
+| Path | Role |
+|:-----|:-----|
+| `~/.claude/projects/<slug>/<uuid>.jsonl` | **LIVE** — what claude reads/writes. Compaction rewrites this. |
+| `~/.multiverse/full_jsonls/<uuid>.jsonl` | **FULL** — append-only mirror of the uncompacted history. The source of truth for token counts, turn counts, and tree building. |
+| `~/.multiverse/full_jsonls/<uuid>.marker` | uuid of the last live row already mirrored to full. Tracking by uuid (not byte offset) so the mirror keeps working after compaction has rewritten live with a different prefix. |
+
+A `mirror-jsonl.py` hook wired into `UserPromptSubmit` / `Stop` / `SessionEnd` keeps full caught up with live. First-time fire (legacy session) bootstraps full from a verbatim copy of live.
+
+**Auto-build worker on every prompt.** Every `UserPromptSubmit` fires `spawn-tree-builder.py`, which detaches a worker that walks the full JSONL and builds a summary tree for every completed turn (skipping the in-progress one). Trees cache to `~/.multiverse/trees/<uuid>/<turn_id>.json`; subsequent fires only build newly-completed turns. By the time you trigger a manual compaction, the trees are usually already done.
+
+**Compact widget (`c`).** Pick the highlighted row, press `c`. The widget:
+
+1. Loads stats from the full JSONL — total uncompacted tokens, turn count.
+2. Asks for a token budget. The placeholder suggests ~50% of the total.
+3. On submit:
+   - Acquires a cross-monitor lock at `~/.multiverse/compacting/<uuid>.json` (other monitors render the row as `compacting` and refuse `Enter` / `k` actions on it).
+   - Kills the session's tmux pane (state dir kept; the multiverse name and identity survive).
+   - Syncs full from live one more time.
+   - Waits for any in-flight auto-worker to finish (its log tail streams into the widget).
+   - Spawns an `--all-turns` worker if any turn is still missing a tree (cache-aware: only builds the gaps).
+   - Loads each turn's tree, allocates the total budget across turns proportionally to each turn's full token count, expands each tree to its slice, and renders the new compacted JSONL via `compact_forest_to_session_jsonl`.
+   - Atomically replaces live (`tempfile` + `os.replace`); resets the mirror marker so subsequent appends are mirrored from the new boundary.
+   - Releases the lock.
+4. The dashboard refreshes; the row reverts to `ended` / `dormant`. `Enter` resumes from the compacted state seamlessly.
+
+Surviving thinking blocks are emitted verbatim with their original signatures (which validate server-side via subscription auth, so no `ANTHROPIC_API_KEY` needed). Summary nodes emit as `<compacted-context entries="N">…</compacted-context>` text blocks so the live agent can distinguish summarized regions from native output.
+
+**Compaction is non-destructive on the original.** The full JSONL is never compacted — only appended to. Re-compacting a session always reaches back to the full uncompacted history, regardless of how many prior compactions happened. Aborting a compaction (Esc during the running phase) stops at the next safe checkpoint without leaving live in a half-written state (the rewrite is atomic).
+
 ### With vs without the wrapper
 
-| Setup | Context-fold auto-resume | Inter-agent comms | Multi-session monitor |
-|:------|:---|:---|:---|
-| `multiverse` wrapper | ✅ session resumes immediately | ✅ all three tools work | ✅ Textual TUI + tmux |
-| Plain `claude --plugin-dir …` | ❌ tells you to `claude --resume <id>` | ❌ MCP tools error (env vars unset) | ❌ |
+| Setup | Context-fold auto-resume | Inter-agent comms | Multi-session monitor | Compaction (manual `c`) | Auto tree-build |
+|:------|:---|:---|:---|:---|:---|
+| `multiverse` wrapper | ✅ session resumes immediately | ✅ all three tools work | ✅ Textual TUI + tmux | ✅ widget drives the full pipeline | ✅ on every UserPromptSubmit |
+| Plain `claude --plugin-dir …` | ❌ tells you to `claude --resume <id>` | ❌ MCP tools error (env vars unset) | ❌ | ❌ no UI to trigger from | ✅ trees still build in the background |
 
-The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_CWD` env vars, which are only set when the monitor spawns the session via `tmux new-session -e`.
+The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_CWD` env vars, which are only set when the monitor spawns the session via `tmux new-session -e`. Auto tree-building requires only the plugin's hooks, so it works in plain `--plugin-dir` mode as well.
 
 ## How it works
 
@@ -168,10 +206,25 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 ├── inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
 │                     — pending inter-agent message; consumed (deleted) by the
 │                       deliver-inbox hook on first delivery as a system-reminder
-└── spawn_requests/
-    ├── <req-id>.json           — agent-initiated subagent spawn request
-    └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
-                                  monitors can't double-resolve)
+├── spawn_requests/
+│   ├── <req-id>.json           — agent-initiated subagent spawn request
+│   └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
+│                                 monitors can't double-resolve)
+├── full_jsonls/
+│   ├── <claude-uuid>.jsonl     — append-only mirror of the uncompacted
+│   │                             session history. Source of truth for tree
+│   │                             building and total-token counts.
+│   └── <claude-uuid>.marker    — uuid of the last live row already mirrored
+├── trees/<claude-uuid>/
+│   ├── <turn-id>.json          — per-turn summary tree (privileged-mode build)
+│   ├── .worker.lock            — PID of the running tree-build worker, if any
+│   └── worker.log              — append-only worker log (tailed live by the
+│                                 Compact widget)
+└── compacting/<claude-uuid>.json
+                                — cross-monitor compaction lock (O_EXCL with
+                                  stale-PID recovery). Holding monitor's PID
+                                  in body. Other monitors render the row as
+                                  ``compacting`` and refuse Enter / Kill.
 ```
 
 Sessions survive monitor restarts — the TUI rebuilds its view from disk every refresh. Inbox files survive everything; they wait until the recipient's hooks fire.
@@ -194,6 +247,9 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 │    -e MULTIVERSE_SESSION_NAME=<name> -e ...            │
 │  - Attaches via App.suspend() + tmux attach-session    │
 │  - `a` key → ask_agents fan-out to all named sessions  │
+│  - `c` key → Compact widget (CompactScreen) drives     │
+│    CompactRunner: lock, kill, sync, build trees,       │
+│    expand to budget, atomically replace live JSONL     │
 └──────────────────┬─────────────────────────────────────┘
                    │ tmux new-session -d
 ┌──────────────────▼─────────────────────────────────────┐
@@ -206,10 +262,29 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 │        ├─ Hooks (SessionStart/UserPromptSubmit/Stop/…):│
 │        │    set-status, record-claude-uuid,            │
 │        │    deliver-inbox, on-notification,            │
-│        │    on-context-fold                            │
-│        └─ Inter-agent inbox: hook checks               │
-│           ~/.multiverse/inbox/<cwd>/<name>/, injects   │
-│           any pending messages as system-reminders     │
+│        │    on-context-fold, mirror-jsonl,             │
+│        │    spawn-tree-builder                         │
+│        ├─ Inter-agent inbox: hook checks               │
+│        │  ~/.multiverse/inbox/<cwd>/<name>/, injects   │
+│        │  any pending messages as system-reminders     │
+│        └─ Mirror: hook keeps                           │
+│           ~/.multiverse/full_jsonls/<uuid>.jsonl in    │
+│           sync with the live JSONL (uuid-marker delta) │
+└────────────────────────────────────────────────────────┘
+
+           Detached, runs alongside the tmux session:
+┌────────────────────────────────────────────────────────┐
+│  Auto tree-build worker (scripts/tree-builder-worker)  │
+│  - Spawned by spawn-tree-builder.py on every           │
+│    UserPromptSubmit (lockfile keeps it singleton)      │
+│  - Runs build_tree_priv_cli.py per turn — invokes      │
+│    `claude --resume <synthetic>` against a JSONL we    │
+│    write into ~/.claude/projects/<slug>/<id>.jsonl.    │
+│    Subscription auth, no API key needed                │
+│  - Caches each turn's tree at                          │
+│    ~/.multiverse/trees/<uuid>/<turn-id>.json           │
+│  - MULTIVERSE_TREE_BUILDER_ACTIVE env var prevents     │
+│    recursion when synthetic sub-claudes inherit hooks  │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -245,12 +320,12 @@ Wired to claude lifecycle events; all of them are no-ops outside the multiverse 
 | Hook | Script(s) | Purpose |
 |:-----|:----------|:--------|
 | `SessionStart` | `set-status.sh idle`, `record-claude-uuid.sh`, `deliver-inbox.py` | Initial status, capture claude UUID, deliver any pending inbox messages |
-| `UserPromptSubmit` | `set-status.sh working`, `deliver-inbox.py` | Update status, deliver new inbox messages on each user turn |
+| `UserPromptSubmit` | `set-status.sh working`, `deliver-inbox.py`, `mirror-jsonl.py`, `spawn-tree-builder.py` | Update status, deliver new inbox messages, mirror live → full JSONL, spawn the auto tree-build worker (skips the in-progress last turn) |
 | `Notification` | `on-notification.sh` | Set `waiting` for blocking notifications (permission prompts) — filters out informational ones like `idle_prompt` |
 | `PostToolUse` (`context_fold`) | `on-context-fold.sh` | Stops the session after a fold so the wrapper can dispatch `resume_folded` |
 | `PostToolUse` (any) | `set-status.sh working` | Status update during tool use |
-| `Stop` | `set-status.sh idle`, `deliver-inbox.py` | Mark idle; deliver any pending inbox via `decision: "block"` (which triggers another turn — the post-task wakeup mechanism) |
-| `SessionEnd` | `set-status.sh ended` | Mark ended |
+| `Stop` | `set-status.sh idle`, `deliver-inbox.py`, `mirror-jsonl.py` | Mark idle; deliver any pending inbox via `decision: "block"` (which triggers another turn — the post-task wakeup mechanism); mirror the just-completed turn's rows into full JSONL |
+| `SessionEnd` | `set-status.sh ended`, `mirror-jsonl.py` | Mark ended; final mirror sync so full captures any rows written between Stop and shutdown |
 
 ### Communication protocol
 
@@ -274,6 +349,25 @@ Inter-agent messages use a separate channel: `~/.multiverse/inbox/<encoded-cwd>/
 6. PostToolUse hook detects the action and returns `{continue: false}`
 7. Session stops cleanly
 8. Wrapper reads the action, sends a continuation prompt, resumes interactively
+
+### What happens during a compaction
+
+1. User selects a session row (must be `idle` / `ended` / `dormant`) and presses `c`
+2. `CompactScreen` opens and runs `total_token_count` + `total_turn_count` against the full JSONL in a worker thread; stats render once loaded. `compaction.parser.parse_session` is the underlying counter.
+3. User types a token budget and hits Enter
+4. `CompactRunner` (in a worker thread) executes the state machine:
+   1. `acquire_lock` writes `~/.multiverse/compacting/<uuid>.json` with `O_EXCL`. If another monitor already holds it, fail closed. Stale-PID locks (holder dead) are reaped on contention.
+   2. If the session is wrapped by a multiverse session, kill its tmux pane only — the state dir stays so the multiverse name and identity survive across the compaction.
+   3. Run `sync_full` to bring the full JSONL up to live (no-op if the mirror hooks have been firing; bootstraps a verbatim copy for legacy sessions that never had a full JSONL).
+   4. If a tree-build worker is already running for this session (its lockfile PID is alive), wait for it — its `worker.log` is tailed live into the widget's RichLog. Auto-workers always skip the in-progress last turn, so we'll need a follow-up.
+   5. Count cached trees vs forest size. If any are missing, spawn `tree-builder-worker.py --all-turns`. The worker is cache-aware: it skips turns whose `<turn-id>.json` already exists, so this is typically just the last turn.
+   6. Once every turn has a tree, transition to `expanding`: load each tree from cache, run `proportional(forest, total_budget)` to allocate per-turn budgets ∝ each turn's full token count, expand each tree to its slice via `expand_to_budget`, and call `compact_forest_to_session_jsonl` to render the new compacted session JSONL.
+   7. Atomically replace live (`tempfile.mkstemp` in the same directory + `os.replace`). Original `custom-title` is preserved so the dashboard row keeps its name.
+   8. Reset the mirror marker to the new live's last uuid so subsequent `mirror-jsonl.py` calls pick up only post-compaction additions correctly.
+   9. `release_lock` in a `finally`.
+5. Dashboard refresh removes the `compacting` override; the row reverts to `ended` (or `dormant` if no mv wrapper) and is resumable normally. Resuming reads the new compacted JSONL — the live agent sees a mix of native thinking blocks (verbatim with original signatures) and `<compacted-context entries="N">…</compacted-context>` summary text blocks.
+
+If the user presses Esc during the running phase, the runner sets a cancellation flag and bails at the next checkpoint — but it does **not** kill any in-flight `claude --resume <synthetic>` subprocess that's mid-merge (that would leave a half-built tree). Worst case: one in-flight build finishes, then the runner exits.
 
 ### What happens during a `message_agent` call
 
@@ -325,6 +419,12 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 - **Graceful degradation.** Without the wrapper, the plugin still loads and the context-fold MCP tools work; you just resume manually after a fold.
 - **Concurrent-safe.** Each session has its own state directory and its own env vars (injected via `tmux new-session -e`); nothing leaks between sessions.
 - **Cross-process path coherence.** All state paths — including `MULTIVERSE_ROOT` (the `~/.multiverse` directory itself) — flow as absolute paths via `tmux -e` rather than being derived from `HOME` in each process. This matters in deployments where the monitor and the spawned claude processes have different `HOME` values (e.g. containers where a wrapper sets `HOME=/weka/...` for claude so `~/.claude` lands on persistent storage); without an explicit `MULTIVERSE_ROOT` the inbox and spawn-request directories silently diverge between the two sides.
+- **Two JSONLs, one source of truth.** Compaction rewrites *live* but the *full* JSONL is append-only and never compacted. Token counts, turn counts, and tree building always read from full — so re-compacting after a prior compaction reaches back to the original uncompacted history rather than compounding summaries.
+- **Marker by uuid, not byte offset.** The mirror tracks "last live row already mirrored" by uuid. Byte offsets break the moment compaction shrinks live; uuid lookup degrades gracefully (an unreachable marker just means "append nothing this round" rather than corrupting full).
+- **Cross-monitor compaction lock is the row's status.** No separate display state — the same `~/.multiverse/compacting/<uuid>.json` file that prevents Enter / Kill is also what triggers the `compacting` status badge in every monitor's dashboard refresh. One mechanism, no drift.
+- **Kill-tmux-only during compaction.** The Compact widget kills the session's tmux pane but leaves the multiverse state dir intact, so the session keeps its name and identity through the compaction. (`sessions.kill_session` does the destructive full reap; the Compact path uses a softer kill function inlined into the widget.)
+- **Auto-build is best-effort, not load-bearing.** Trees are pre-built in the background but the manual Compact path doesn't *require* them — if the auto-worker hasn't finished, the widget waits for it; if it failed entirely, the widget spawns a fresh `--all-turns` worker. Either way the user-visible flow is the same.
+- **Vendored compaction package.** `vendor/compaction/` is a copy of the standalone `compaction/` repo that lives at the monorepo root. Compaction logic moves between the two during development; the vendored copy is the canonical version used by the plugin. `compaction/` itself is gitignored — kept on disk as a scratch workspace.
 
 ## Plugin structure
 
@@ -344,20 +444,38 @@ multiverse-plugin/
 │   ├── on-notification.sh    # Notification hook — filters by notification_type
 │   ├── on-context-fold.sh    # Stops the session after a fold
 │   ├── record-claude-uuid.sh # SessionStart hook — captures claude session UUID
-│   └── deliver-inbox.py      # Inter-agent message delivery (3 hooks: SessionStart/UserPromptSubmit/Stop)
+│   ├── deliver-inbox.py      # Inter-agent message delivery (3 hooks: SessionStart/UserPromptSubmit/Stop)
+│   ├── mirror-jsonl.py       # Live → full JSONL mirror hook (UserPromptSubmit/Stop/SessionEnd)
+│   ├── spawn-tree-builder.py # UserPromptSubmit hook: detach a tree-build worker
+│   ├── tree-builder-worker.py# Long-running worker: build a summary tree per completed turn
+│   └── build_tree_priv_cli.py# Per-turn build entry point (privileged-mode constructor via claude CLI)
 ├── src/
 │   ├── __init__.py
-│   ├── types.py              # JSONL entry types
+│   ├── types.py              # JSONL entry types (used by context-fold rewriter)
 │   ├── session.py            # Session file discovery and I/O (context-fold)
 │   ├── rewriter.py           # Core folding algorithm
-│   ├── server.py             # MCP server: all five tools
-│   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find)
+│   ├── server.py             # MCP server: all six tools
+│   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find,
+│   │                         #  applies compacting status override from list_locked())
 │   ├── inbox.py              # Inter-agent message inbox (write/list/consume)
 │   ├── ask_agents.py         # Forked-subprocess ask machinery (used by ask_all + ask_agent)
 │   ├── spawn_requests.py     # Filesystem protocol for agent-initiated spawn_agent requests
 │   ├── paths.py              # Canonical ~/.multiverse resolution (MULTIVERSE_ROOT > MULTIVERSE_STATUS > HOME)
-│   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control
+│   ├── full_jsonl.py         # Two-JSONL helpers: sync_full / bootstrap / token+turn counts
+│   ├── compact_state.py      # Cross-monitor compacting lock (O_EXCL with stale-PID recovery)
+│   ├── compact_runner.py     # Compaction state machine (lock → kill → sync → build → expand → release)
+│   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control, CompactScreen
 │   └── names.py              # Random name pool for new sessions
+├── vendor/
+│   └── compaction/           # Vendored copy of the standalone compaction package
+│       ├── parser.py         #   JSONL → Forest of Turns
+│       ├── preprocess.py     #   per-turn cleanup; off by default
+│       ├── constructor.py    #   bottom-up tree builder (privileged + CLI variants)
+│       ├── compactor.py      #   expand_to_budget + schedulers (proportional / recency_decay / …)
+│       ├── priv_session.py   #   synthetic JSONL builders + multi-turn renderer
+│       ├── render.py         #   frontier → message-block / constructor-input rendering
+│       ├── tokenize.py       #   token counter
+│       └── types.py          #   Leaf, Node, Turn, Forest, Frontier
 └── README.md
 ```
 
