@@ -537,9 +537,9 @@ class CompactScreen(ModalScreen[None]):
             toks = total_token_count(self.claude_uuid, self.cwd)
             turns = total_turn_count(self.claude_uuid, self.cwd)
         except Exception as e:  # noqa: BLE001
-            self.call_from_thread(self._stats_failed, repr(e))
+            self.app.call_from_thread(self._stats_failed, repr(e))
             return
-        self.call_from_thread(self._stats_ready, toks, turns)
+        self.app.call_from_thread(self._stats_ready, toks, turns)
 
     def _stats_failed(self, err: str) -> None:
         self.query_one("#compact-stats", Static).update(
@@ -655,16 +655,16 @@ class CompactScreen(ModalScreen[None]):
             return
 
         def on_log(line: str) -> None:
-            self.call_from_thread(self._append_log, line)
+            self.app.call_from_thread(self._append_log, line)
 
         def on_progress(built: int, total: int) -> None:
-            self.call_from_thread(self._update_progress, built, total)
+            self.app.call_from_thread(self._update_progress, built, total)
 
         def on_state(state: str) -> None:
-            self.call_from_thread(self._update_state, state)
+            self.app.call_from_thread(self._update_state, state)
 
         def on_done(ok: bool, msg: str) -> None:
-            self.call_from_thread(self._on_done, ok, msg)
+            self.app.call_from_thread(self._on_done, ok, msg)
 
         runner.run(on_log, on_progress, on_state, on_done)
 
