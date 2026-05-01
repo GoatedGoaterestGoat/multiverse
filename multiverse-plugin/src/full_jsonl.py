@@ -91,7 +91,8 @@ def write_marker(claude_uuid: str, uuid: str) -> None:
     p.write_text(uuid)
 
 
-def _last_uuid_in(path: Path) -> str | None:
+def last_uuid_in(path: Path) -> str | None:
+    """Return the uuid of the last row in a JSONL file (or None if empty)."""
     last: str | None = None
     try:
         with path.open() as f:
@@ -109,6 +110,10 @@ def _last_uuid_in(path: Path) -> str | None:
     except OSError:
         return None
     return last
+
+
+# Backwards-compat alias for early callers that used the underscored name.
+_last_uuid_in = last_uuid_in
 
 
 # ---------------------------------------------------------------------------

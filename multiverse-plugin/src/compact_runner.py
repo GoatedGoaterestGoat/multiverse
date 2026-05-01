@@ -45,7 +45,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .compact_state import acquire_lock, release_lock
-from .full_jsonl import full_jsonl_path, sync_full
+from .full_jsonl import (
+    full_jsonl_path,
+    last_uuid_in,
+    live_jsonl_path,
+    sync_full,
+    write_marker,
+)
 from .paths import multiverse_dir
 
 # Vendored compaction package — needed for `parse_session` to count turns
@@ -66,6 +72,7 @@ class State:
     SYNCING = "syncing"
     WAITING_AUTO = "waiting_for_auto_worker"
     BUILDING = "building_remaining"
+    EXPANDING = "expanding"
     DONE = "done"
     FAILED = "failed"
     ABORTED = "aborted"
@@ -107,11 +114,13 @@ class CompactRunner:
         claude_uuid: str,
         cwd: str,
         live_jsonl: Path,
+        total_budget: int,
         kill_session_fn: Optional[Callable[[], None]] = None,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.live_jsonl = live_jsonl
+        self.total_budget = total_budget
         self.kill_session_fn = kill_session_fn
         self.paths = CompactPaths.for_session(claude_uuid)
         self._cancelled = threading.Event()
@@ -144,6 +153,16 @@ class CompactRunner:
         if not acquire_lock(self.claude_uuid):
             on_state(State.FAILED)
             on_done(False, "Another monitor is already compacting this session.")
+            return
+
+        # Ensure the per-session cache + log dir exists before any worker
+        # tries to open files inside it.
+        try:
+            self.paths.cache_root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            release_lock(self.claude_uuid)
+            on_state(State.FAILED)
+            on_done(False, f"could not create cache dir: {e}")
             return
 
         try:
@@ -245,8 +264,25 @@ class CompactRunner:
                 )
                 return
 
+            # 6. Expansion: load trees from cache, allocate budget
+            # proportionally, render the new compacted live JSONL, replace
+            # live atomically, update marker. Fast (no API calls).
+            if self._abort_check(on_state, on_done, "before expansion"):
+                return
+            on_state(State.EXPANDING)
+            try:
+                rendered = self._expand_and_render(full, on_log)
+            except Exception as e:  # noqa: BLE001
+                on_state(State.FAILED)
+                on_done(False, f"expansion failed: {e}")
+                return
+
             on_state(State.DONE)
-            on_done(True, f"All {total_turns} tree(s) built.")
+            on_done(
+                True,
+                f"Compacted to budget {self.total_budget:,}t across "
+                f"{total_turns} turn(s); wrote {rendered} row(s) to live.",
+            )
         finally:
             release_lock(self.claude_uuid)
 
@@ -390,3 +426,171 @@ class CompactRunner:
         except OSError:
             pass
         return proc
+
+    # ---------------------------- expansion + live-JSONL replace ----------
+
+    def _expand_and_render(self, full: Path, on_log: LogCb) -> int:
+        """Expand each turn's tree to its proportional share of the
+        budget, render the compacted forest as a session JSONL, replace
+        live atomically, update the mirror marker.
+
+        Returns the number of rows written to live.
+        """
+        # Lazy imports — vendor is on sys.path.
+        from compaction.compactor import proportional  # noqa: E402
+        from compaction.parser import parse_session  # noqa: E402
+        from compaction.priv_session import (  # noqa: E402
+            compact_forest_to_session_jsonl,
+        )
+
+        forest = parse_session(str(full))
+        if not forest:
+            raise RuntimeError("forest is empty after parse_session")
+
+        n_with, n_without = self._attach_trees_from_cache(forest)
+        on_log(
+            f"Loaded trees: {n_with} attached from cache, {n_without} "
+            f"will fall back to greedy-from-start.",
+        )
+
+        per_turn = proportional(forest, self.total_budget)
+        # Log per-turn budget allocation. Cap output at first 10 turns to
+        # keep the log readable on long sessions; full mapping is in the
+        # rendered JSONL via the rows themselves.
+        on_log(
+            f"Allocated {self.total_budget:,}t across {len(forest)} "
+            f"turn(s) by proportional scheduler:"
+        )
+        preview_turns = forest[:10]
+        for turn in preview_turns:
+            full_t = (turn.user_prompt.tokens if turn.user_prompt else 0) + sum(
+                l.tokens for l in turn.leaves
+            )
+            allocated = per_turn.get(turn.turn_id, 0)
+            ratio = (allocated / full_t * 100.0) if full_t else 0.0
+            on_log(
+                f"  {turn.turn_id[:8]}  full={full_t:>6,}t  "
+                f"budget={allocated:>6,}t  ({ratio:5.1f}%)"
+            )
+        if len(forest) > 10:
+            on_log(f"  … and {len(forest) - 10} more turn(s)")
+
+        title = self._read_existing_title() or "compacted"
+        jsonl_text = compact_forest_to_session_jsonl(
+            forest,
+            per_turn,
+            session_id=self.claude_uuid,
+            cwd=self.cwd,
+            title=title,
+        )
+
+        # Atomic replace: temp file in the same directory, then os.replace.
+        live = live_jsonl_path(self.claude_uuid, self.cwd)
+        live.parent.mkdir(parents=True, exist_ok=True)
+        import tempfile  # local import; only used here
+        fd, tmp = tempfile.mkstemp(
+            prefix=".compact_", suffix=".jsonl", dir=str(live.parent)
+        )
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(jsonl_text)
+            os.replace(tmp, live)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+        # Refresh the mirror marker so the next mirror call only mirrors
+        # rows added AFTER the new compacted prefix. Without this, the
+        # mirror would walk the new live looking for the old marker uuid
+        # (gone) and silently mirror nothing forever.
+        new_last = last_uuid_in(live)
+        if new_last:
+            write_marker(self.claude_uuid, new_last)
+            on_log(f"Updated mirror marker → {new_last[:8]}.")
+
+        n_rows = jsonl_text.count("\n")
+        on_log(
+            f"Wrote new compacted live JSONL: {n_rows} row(s), "
+            f"{len(jsonl_text):,} bytes (was uncompacted)."
+        )
+        return n_rows
+
+    def _attach_trees_from_cache(self, forest) -> tuple[int, int]:
+        """Walk the forest, attach turn.root from cache when available.
+
+        Returns (n_with_tree, n_without_tree). Turns without a cached
+        tree fall back to greedy-leaves-from-start during rendering
+        (handled by ``_expand_turn_frontier`` in priv_session).
+        """
+        import json  # local import — only this method needs it
+        n_with = n_without = 0
+        for turn in forest:
+            path = self.paths.cache_root / f"{turn.turn_id}.json"
+            tree_data = None
+            if path.is_file():
+                try:
+                    data = json.loads(path.read_text())
+                    tree_data = data.get("tree")
+                except (OSError, json.JSONDecodeError):
+                    tree_data = None
+            if tree_data is None:
+                n_without += 1
+                continue
+            try:
+                turn.root = _reconstruct_tree(tree_data)
+                n_with += 1
+            except (KeyError, TypeError):
+                n_without += 1
+        return n_with, n_without
+
+    def _read_existing_title(self) -> Optional[str]:
+        """Return the last ``custom-title`` value from the existing live
+        JSONL, so the compacted replacement keeps the same name."""
+        import json  # local — narrow blast radius
+        live = live_jsonl_path(self.claude_uuid, self.cwd)
+        if not live.is_file():
+            return None
+        title: Optional[str] = None
+        try:
+            with live.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if d.get("type") == "custom-title":
+                        ct = d.get("customTitle")
+                        if isinstance(ct, str) and ct:
+                            title = ct
+        except OSError:
+            return None
+        return title
+
+
+def _reconstruct_tree(d: dict):
+    """Rebuild a Leaf or Node from its serialized form (the same shape
+    that ``build_tree_priv_cli.py`` writes to its tree.json files)."""
+    from compaction.types import Leaf, Node  # noqa: E402
+    if d.get("type") == "leaf":
+        return Leaf(
+            kind=d["kind"],
+            content=d.get("content", {}),
+            tokens=d["tokens"],
+            preview=d.get("preview", ""),
+            source_uuids=d.get("source_uuids", []),
+        )
+    if d.get("type") == "node":
+        return Node(
+            id=d["id"],
+            children=[_reconstruct_tree(c) for c in d.get("children", [])],
+            summary=d.get("summary", ""),
+            tokens=d["tokens"],
+            preview=d.get("preview", ""),
+        )
+    raise TypeError(f"unknown tree node type: {d.get('type')!r}")

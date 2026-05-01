@@ -619,6 +619,7 @@ class CompactScreen(ModalScreen[None]):
             claude_uuid=self.claude_uuid,
             cwd=self.cwd,
             live_jsonl=live,
+            total_budget=self.budget,
             kill_session_fn=kill_fn,
         )
         self._run_in_thread()
@@ -694,6 +695,9 @@ class CompactScreen(ModalScreen[None]):
                 "[cyan]Waiting for in-flight auto-worker…[/]"
             ),
             CompactState.BUILDING: "[cyan]Building remaining trees…[/]",
+            CompactState.EXPANDING: (
+                "[cyan]Expanding trees + writing compacted live JSONL…[/]"
+            ),
             CompactState.DONE: "[bold green]✓ Done[/]",
             CompactState.FAILED: "[bold red]✗ Failed[/]",
             CompactState.ABORTED: "[bold yellow]✗ Aborted[/]",
