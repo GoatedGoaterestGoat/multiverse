@@ -14,6 +14,7 @@ Two distinct rendering jobs:
 from __future__ import annotations
 
 import json as _json
+import uuid as _uuidlib
 
 from .types import Frontier, Leaf, Node
 
@@ -177,6 +178,186 @@ def _render_leaf_for_block(leaf: Leaf) -> str:
     # Defensive — unknown kind. Use a labeled paragraph rather than an
     # XML wrapper so it still renders.
     return f"**[{kind}]** {leaf.content!r}"
+
+
+def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
+    """Render a frontier as a sequence of ``{role, content}`` messages
+    suitable for feeding back into a live claude session as part of its
+    compacted history.
+
+    Differences from ``render_frontier_as_message_blocks``:
+
+      - Returns MULTIPLE messages with alternating user/assistant roles.
+        ``tool_use`` blocks land in an assistant message and are
+        immediately followed by a user message containing the matching
+        ``tool_result`` blocks — that's the API rule for resume.
+
+      - Emits NATIVE block types (``tool_use`` / ``tool_result`` /
+        user-role ``text``) instead of markdown text wrappers. claude
+        code's REPL has dedicated renderers for these block types
+        (``AssistantToolUseMessage`` / ``UserToolResultMessage``) that
+        bypass the markdown pipeline entirely. The flat-blocks
+        renderer (used by the constructor's synthetic merge sessions)
+        keeps the markdown wrappers, since that path expects content
+        in one assistant message.
+
+      - Orphan ``tool_use`` leaves (matching ``tool_result`` got merged
+        into a Node summary) are followed by a synthetic
+        "(result summarized)" tool_result so the structure validates.
+        Orphan ``tool_result`` leaves get a synthetic placeholder
+        ``tool_use`` prepended.
+
+      - The first message is forced to be assistant-role (a leading
+        user-role record gets an empty assistant placeholder before
+        it). The last message is forced to be assistant-role (a
+        trailing tool_result gets a "(continuing)" placeholder
+        assistant after it). Both rules keep role alternation valid
+        across turn boundaries — the next turn always starts with the
+        user_prompt row.
+
+    Each message dict is ``{"role": "user"|"assistant", "content": [...]}``.
+    """
+    messages: list[dict] = []
+    current_role: str | None = None
+    current_blocks: list[dict] = []
+    pending_tool_uses: set[str] = set()
+
+    def flush() -> None:
+        nonlocal current_blocks, current_role
+        if current_blocks:
+            messages.append({"role": current_role, "content": current_blocks})
+            current_blocks = []
+            current_role = None
+
+    def append(role: str, block: dict) -> None:
+        nonlocal current_role
+        if current_role is not None and role != current_role:
+            flush()
+        current_role = role
+        current_blocks.append(block)
+
+    def synth_tu_id() -> str:
+        return f"toolu_synth_{_uuidlib.uuid4().hex[:16]}"
+
+    for entry in frontier:
+        if isinstance(entry, Leaf):
+            kind = entry.kind
+            if kind == "thinking":
+                append("assistant", {
+                    "type": "thinking",
+                    "thinking": entry.content.get("text", ""),
+                    "signature": entry.content.get("signature", ""),
+                })
+            elif kind == "asst_text":
+                append("assistant", {
+                    "type": "text",
+                    "text": entry.content.get("text", ""),
+                })
+            elif kind == "tool_use":
+                tu_id = entry.content.get("tool_use_id") or synth_tu_id()
+                append("assistant", {
+                    "type": "tool_use",
+                    "id": tu_id,
+                    "name": entry.content.get("name", "?"),
+                    "input": entry.content.get("input", {}) or {},
+                })
+                pending_tool_uses.add(tu_id)
+            elif kind == "tool_result":
+                tu_id = entry.content.get("tool_use_id") or synth_tu_id()
+                if tu_id not in pending_tool_uses:
+                    # Orphan tool_result — synthesize matching tool_use
+                    # in an assistant message right before it.
+                    append("assistant", {
+                        "type": "tool_use",
+                        "id": tu_id,
+                        "name": "(summarized)",
+                        "input": {},
+                    })
+                pending_tool_uses.discard(tu_id)
+                append("user", {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": entry.content.get("text", "") or "",
+                    "is_error": bool(entry.content.get("is_error", False)),
+                })
+            elif kind == "user_text":
+                append("user", {
+                    "type": "text",
+                    "text": entry.content.get("text", "") or "",
+                })
+            elif kind == "tool_exchange":
+                # Combined tool_use + tool_result leaf (auto-merge
+                # preprocessing). Emit as a native pair across two
+                # messages.
+                tu_id = entry.content.get("tool_use_id") or synth_tu_id()
+                append("assistant", {
+                    "type": "tool_use",
+                    "id": tu_id,
+                    "name": entry.content.get("name", "?"),
+                    "input": entry.content.get("input", {}) or {},
+                })
+                append("user", {
+                    "type": "tool_result",
+                    "tool_use_id": tu_id,
+                    "content": entry.content.get("result_text", "") or "",
+                    "is_error": bool(entry.content.get("is_error", False)),
+                })
+            else:
+                # Defensive — unknown leaf kind. Render as a labeled
+                # paragraph so it's at least visible.
+                append("assistant", {
+                    "type": "text",
+                    "text": f"**[{kind}]** {entry.content!r}",
+                })
+        else:  # Node summary — markdown blockquote in an assistant message
+            n = _span_size(entry)
+            append("assistant", {
+                "type": "text",
+                "text": _render_summary_block(entry.summary.strip(), n),
+            })
+
+    flush()
+
+    # Resolve any remaining unresolved tool_uses with a final user
+    # message of synthetic tool_results.
+    if pending_tool_uses:
+        synthetic = [
+            {
+                "type": "tool_result",
+                "tool_use_id": tu_id,
+                "content": "(result summarized)",
+                "is_error": False,
+            }
+            for tu_id in pending_tool_uses
+        ]
+        if messages and messages[-1]["role"] == "user":
+            messages[-1]["content"].extend(synthetic)
+        else:
+            messages.append({"role": "user", "content": synthetic})
+
+    # Force the FIRST message to be assistant-role: the surrounding
+    # turn renderer always emits a user_prompt user-role row before
+    # us, so a user-first compacted body would be user → user (invalid).
+    if messages and messages[0]["role"] == "user":
+        messages.insert(0, {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "_(no preceding assistant content)_"}
+            ],
+        })
+
+    # Force the LAST message to be assistant-role: the next turn
+    # always starts with a user_prompt user-role row, so a user-last
+    # body would also be user → user (invalid).
+    if messages and messages[-1]["role"] == "user":
+        messages.append({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "_(continuing)_"}
+            ],
+        })
+
+    return messages
 
 
 def _safe_fence(content: str) -> str:

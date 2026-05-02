@@ -333,14 +333,22 @@ def turn_to_rows(
 ) -> tuple[list[dict], str | None]:
     """Render one turn's compacted output as session JSONL rows.
 
-    Emits one user-role row containing the turn's user_prompt followed by
-    one assistant-role row per content block from
-    `render_frontier_as_message_blocks(frontier)` — thinking leaves stay as
-    native blocks (with signatures), other leaves and Node summaries become
-    text blocks (Node summaries wrapped in `<compacted-context>` markers).
+    Structure:
+      - one user-role row containing the turn's hoisted user_prompt
+        (verbatim separator, never compacted)
+      - then a sequence of alternating assistant/user messages from
+        ``render_frontier_as_messages(frontier)`` — each message
+        becomes one row per content block, all rows of the same
+        message sharing one ``message.id`` (which is how vanilla
+        claude-code stores multi-block messages).
 
-    Returns (rows, last_uuid). `last_uuid` is the parentUuid the next
-    turn's first row should chain to.
+    Tool calls / tool results / mid-turn user-role text are emitted
+    as their NATIVE block types in their proper role rows. claude
+    code's UI has dedicated renderers for those; markdown wrappers
+    would get dropped by the markdown lexer.
+
+    Returns (rows, last_uuid). ``last_uuid`` is the parentUuid the
+    next turn's first row should chain to.
     """
     rows: list[dict] = []
 
@@ -360,22 +368,71 @@ def turn_to_rows(
     rows.append(user_row)
     prev_uuid: str = user_row["uuid"]
 
-    blocks = render_frontier_as_message_blocks(frontier) if frontier else []
-    if not blocks:
-        # Empty frontier — emit a single placeholder text block so the
-        # alternation holds and the message isn't empty. Plain markdown
-        # rather than angle brackets (claude code's lexer would parse
-        # `<...>` as raw HTML and the renderer drops `'html'` tokens).
-        blocks = [{"type": "text", "text": "_(no compacted output for this turn)_"}]
+    from .render import render_frontier_as_messages  # local — avoid early import
+    messages = render_frontier_as_messages(frontier) if frontier else []
+    if not messages:
+        # Empty frontier — emit a single assistant placeholder so the
+        # turn isn't structurally empty. Plain markdown rather than
+        # angle brackets.
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "_(no compacted output for this turn)_"}
+                ],
+            }
+        ]
 
-    msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
-    for i, block in enumerate(blocks):
-        row = _assistant_block_row(
-            block, msg_id, session_id, cwd, prev_uuid,
-            is_final=(i == len(blocks) - 1),
-        )
-        rows.append(row)
-        prev_uuid = row["uuid"]
+    n_msgs = len(messages)
+    for msg_idx, msg in enumerate(messages):
+        role = msg["role"]
+        blocks = msg["content"]
+        if role == "assistant":
+            msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
+            # Pick a stop_reason that matches the message's content. The
+            # last block of an assistant message that contains tool_use
+            # blocks is followed by a user message with tool_results;
+            # claude code records stop_reason="tool_use" on those rows.
+            # The final assistant message of the turn (no user message
+            # comes after within this turn) gets stop_reason="end_turn".
+            has_tool_use = any(
+                isinstance(b, dict) and b.get("type") == "tool_use"
+                for b in blocks
+            )
+            is_last_msg = msg_idx == n_msgs - 1
+            stop_reason = (
+                "tool_use" if has_tool_use and not is_last_msg
+                else "end_turn"
+            )
+            for i, block in enumerate(blocks):
+                row = _assistant_block_row(
+                    block, msg_id, session_id, cwd, prev_uuid,
+                    is_final=is_last_msg and i == len(blocks) - 1,
+                )
+                # Override stop_reason from the simple end_turn-only
+                # default to whatever is correct for this message's
+                # content + position.
+                row["message"]["stop_reason"] = stop_reason
+                rows.append(row)
+                prev_uuid = row["uuid"]
+        else:  # user
+            # User-role messages contain tool_results and/or text. Each
+            # block becomes its own row, all sharing no message.id (user
+            # rows in claude code's JSONL don't carry an outer message.id
+            # — content sits directly on the row's ``message.content``).
+            for block in blocks:
+                row_uuid = str(uuidlib.uuid4())
+                rows.append({
+                    "parentUuid": prev_uuid,
+                    "uuid": row_uuid,
+                    "sessionId": session_id,
+                    "type": "user",
+                    "timestamp": SYNTHETIC_TIMESTAMP,
+                    "cwd": cwd,
+                    "userType": "external",
+                    "message": {"role": "user", "content": [block]},
+                })
+                prev_uuid = row_uuid
 
     return rows, prev_uuid
 
