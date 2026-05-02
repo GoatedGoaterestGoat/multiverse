@@ -42,6 +42,80 @@ def _iter_jsonl(path: str) -> Iterator[dict[str, Any]]:
             yield json.loads(line)
 
 
+def _live_chain_rows(path: str) -> list[dict[str, Any]]:
+    """Read all rows, walk parentUuid back from the live tip, and return
+    only rows on the live chain (in chronological / file order).
+
+    Why this matters: claude code records "restore conversation" as a
+    new branch — the abandoned rows stay in the JSONL, and the new
+    branch's first row's ``parentUuid`` points at an earlier row,
+    leaving the abandoned subtree orphaned. A linear read of the JSONL
+    treats those orphans as part of the conversation, which corrupts
+    tree-build (turns include reverted content) and compaction (the
+    summarized output preserves content the user explicitly threw
+    away).
+
+    Live tip selection: among the leaves of the parentUuid DAG (uuids
+    no other row points to), pick the one with the latest ``timestamp``;
+    break ties by file order (last appearance wins).
+
+    Metadata rows (no ``uuid`` — custom-title, agent-name, file-history-
+    snapshot, etc.) are preserved at their original file positions.
+    They're ``SKIP_TYPES`` for parsing, so they're harmless either way,
+    but keeping them doesn't break anything.
+    """
+    all_rows = list(_iter_jsonl(path))
+
+    by_uuid: dict[str, dict] = {}
+    parented: set[str] = set()
+    for r in all_rows:
+        u = r.get("uuid")
+        if u:
+            by_uuid[u] = r
+            p = r.get("parentUuid")
+            if p:
+                parented.add(p)
+
+    # If the file is malformed or has no uuid'd rows, return everything.
+    if not by_uuid:
+        return all_rows
+
+    # Leaves of the DAG: rows that no one else points to as parent.
+    leaves = [u for u in by_uuid if u not in parented]
+    if not leaves:
+        # Cycle or orphaned ancestry — fall back to linear read.
+        return all_rows
+
+    # Tip = leaf with latest timestamp; tie-break by latest file
+    # appearance.
+    file_index = {u: i for i, r in enumerate(all_rows)
+                  for u in [r.get("uuid")] if u}
+    tip = max(
+        leaves,
+        key=lambda u: (
+            by_uuid[u].get("timestamp", "") or "",
+            file_index.get(u, -1),
+        ),
+    )
+
+    # Walk back via parentUuid.
+    chain: set[str] = set()
+    cur: str | None = tip
+    while cur and cur in by_uuid and cur not in chain:
+        chain.add(cur)
+        cur = by_uuid[cur].get("parentUuid")
+
+    # Return rows in original file order, keeping (a) chain rows and
+    # (b) metadata rows with no uuid. Drop any uuid'd row not on the
+    # chain (those are orphaned / reverted branches).
+    out: list[dict[str, Any]] = []
+    for r in all_rows:
+        u = r.get("uuid")
+        if u is None or u in chain:
+            out.append(r)
+    return out
+
+
 def _build_usage_index(path: str) -> tuple[dict[str, int], dict[str, int]]:
     """Pre-pass over the JSONL: build per-assistant-message totals for
     `output_tokens` and visible-content tokens. Used to estimate the cost
@@ -247,15 +321,22 @@ def _is_user_prompt_row(row: dict[str, Any], last_pid: str | None) -> bool:
 
 
 def parse_session(path: str) -> Forest:
-    """Parse a Claude Code JSONL session log into a Forest of Turns."""
+    """Parse a Claude Code JSONL session log into a Forest of Turns.
+
+    Only rows on the **live conversation chain** are processed.
+    Abandoned branches from "restore conversation" stay in the file
+    but are skipped here — see ``_live_chain_rows`` for the tip-
+    selection rule and rationale.
+    """
     out_tok, visible_tok = _build_usage_index(path)
+    chain_rows = _live_chain_rows(path)
 
     turns: Forest = []
     current: Turn | None = None
     pending_orphans: list[Leaf] = []
     last_pid: str | None = None
 
-    for row in _iter_jsonl(path):
+    for row in chain_rows:
         leaf = _classify_and_extract(row)
 
         # For thinking leaves, override `tokens` with an estimate of the
