@@ -344,12 +344,20 @@ class CompactRunner:
         on_progress: ProgCb,
         total_turns: int,
     ) -> None:
-        """Stream new log lines + emit progress updates until PID is dead.
+        """Stream new log lines + emit progress updates until the worker
+        is gone.
+
+        "Gone" is detected by EITHER the PID being dead OR the worker's
+        lockfile being absent. The lockfile check is the load-bearing
+        one: ``os.kill(pid, 0)`` returns success forever if the OS
+        recycled the worker's PID for an unrelated process — which can
+        happen on long builds — and would otherwise spin this loop
+        indefinitely. The worker unlinks its lockfile in a ``finally``
+        block, so the file's absence is an authoritative end-of-life
+        signal.
 
         Polls at 0.5s. Reads only the new tail of the log on each pass,
-        based on a stored byte offset. Exits when the PID is no longer
-        alive — caller is responsible for the success/failure verdict
-        based on cache contents.
+        based on a stored byte offset.
         """
         # If logs already exist from earlier runs, fast-forward our
         # offset to the end so we only stream genuinely new lines.
@@ -362,9 +370,13 @@ class CompactRunner:
         while True:
             self._stream_new_log_lines(on_log)
             on_progress(self._count_cached_trees(), total_turns)
-            if not self._alive(pid):
+            worker_done = (
+                not self._alive(pid)
+                or not self.paths.lockfile.is_file()
+            )
+            if worker_done:
                 # One more drain after death in case a tail line landed
-                # between the last poll and the PID exiting.
+                # between the last poll and the worker exiting.
                 self._stream_new_log_lines(on_log)
                 on_progress(self._count_cached_trees(), total_turns)
                 return
