@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid as uuidlib
 from pathlib import Path
 from typing import Iterable
@@ -47,8 +48,17 @@ SYNTHETIC_TIMESTAMP = "2026-04-30T00:00:00.000Z"
 
 
 def cwd_slug(cwd: str | None = None) -> str:
-    """Claude Code's project-slug rule: replace `/` with `-`."""
-    return (cwd or os.getcwd()).replace("/", "-")
+    """Claude Code's project-slug rule: replace **any** non-alphanumeric
+    character with ``-``. The previous implementation only replaced
+    slashes — fine for cwds like ``/Users/foo/proj`` (no other special
+    chars) but wrong for any path with underscores, dots, or spaces. On
+    such cwds the synthetic JSONL ends up under the wrong directory and
+    ``claude --resume <id>`` returns "No conversation found" in ~1
+    second; the constructor then catches the parse error and aborts
+    every turn at step 0 — a hard-to-spot failure mode because each
+    "abort" looks like a normal fast turn in the worker log.
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd or os.getcwd())
 
 
 def projects_dir(cwd: str | None = None) -> Path:
@@ -134,7 +144,7 @@ def _bridge_rows(
     ]
 
 
-_UUID_RE = __import__("re").compile(
+_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
 
