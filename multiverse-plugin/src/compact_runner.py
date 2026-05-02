@@ -534,8 +534,13 @@ class CompactRunner:
         """Walk the forest, attach turn.root from cache when available.
 
         Returns (n_with_tree, n_without_tree). Turns without a cached
-        tree fall back to greedy-leaves-from-start during rendering
-        (handled by ``_expand_turn_frontier`` in priv_session).
+        tree (or with an aborted-construction stub — a synthetic root
+        whose summary is just ``<construction aborted; uncollapsed
+        frontier>``) fall back to greedy-leaves-from-start during
+        rendering. The fallback produces real readable content; the
+        aborted-stub would render as an empty bullet because its
+        placeholder summary is itself an angle-bracket-wrapped string
+        that gets stripped by claude code's markdown renderer.
         """
         import json  # local import — only this method needs it
         n_with = n_without = 0
@@ -548,7 +553,7 @@ class CompactRunner:
                     tree_data = data.get("tree")
                 except (OSError, json.JSONDecodeError):
                     tree_data = None
-            if tree_data is None:
+            if tree_data is None or _is_aborted_stub(tree_data):
                 n_without += 1
                 continue
             try:
@@ -583,6 +588,25 @@ class CompactRunner:
         except OSError:
             return None
         return title
+
+
+def _is_aborted_stub(td: dict) -> bool:
+    """True if the cached tree is just the constructor's
+    'aborted-at-step-0' synthetic wrapper — a single Node whose summary
+    is the placeholder ``<construction aborted; uncollapsed frontier>``.
+
+    These trees provide no real summarization (the merge LLM never
+    produced a usable response). Treat them as 'no tree' so expansion
+    falls back to greedy leaves-from-start, which renders real content
+    instead of an angle-bracket-only string that the markdown UI
+    strips to nothing.
+    """
+    if not isinstance(td, dict):
+        return False
+    if td.get("type") != "node":
+        return False
+    summary = td.get("summary", "")
+    return isinstance(summary, str) and "construction aborted" in summary.lower()
 
 
 def _reconstruct_tree(d: dict):

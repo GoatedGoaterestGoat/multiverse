@@ -33,7 +33,7 @@ _PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PLUGIN))
 sys.path.insert(0, str(_PLUGIN / "vendor"))
 
-from src.compact_runner import _reconstruct_tree  # noqa: E402
+from src.compact_runner import _is_aborted_stub, _reconstruct_tree  # noqa: E402
 from src.compact_state import lock_path, release_lock  # noqa: E402
 from src.full_jsonl import (  # noqa: E402
     full_jsonl_path,
@@ -129,7 +129,7 @@ def main() -> int:
             n_without += 1
             continue
         td = data.get("tree")
-        if td is None:
+        if td is None or _is_aborted_stub(td):
             n_without += 1
             continue
         try:

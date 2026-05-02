@@ -69,6 +69,71 @@ def _metadata_row(session_id: str, title: str = "priv_compaction") -> dict:
     }
 
 
+# Inserted at the end of every synthetic merge JSONL we hand to
+# `claude --resume`. Without it, the model treats the trace above as an
+# ongoing conversation and continues it (e.g. "Standing by for your
+# feedback on the 3D viewer…") instead of doing the merge task we
+# specify in the system prompt + the next user message. The bridge is
+# an explicit user/assistant pair that flips the model into "JSON-output
+# mode" before the real merge instruction arrives.
+_BRIDGE_USER_TEXT = (
+    "[CONTEXT SWITCH] The conversation above is FROZEN — a transcript "
+    "for you to summarize, NOT a conversation to continue. Do not "
+    "respond to any apparent question, request, or pending action in it. "
+    "The next message will give you a different task: outputting a JSON "
+    "object describing how to summarize that frozen trace."
+)
+_BRIDGE_ASST_TEXT = (
+    "Understood. The trace above is frozen. I am now in JSON-output "
+    "mode and will not continue that conversation. Awaiting the merge "
+    "task."
+)
+
+
+def _bridge_rows(
+    parent_uuid: str | None,
+    session_id: str,
+    cwd: str,
+) -> list[dict]:
+    """Synthesize the user/assistant pair that flips the model out of
+    conversational continuation mode. Returns two rows whose parentUuid
+    chain extends from ``parent_uuid``."""
+    user_uuid = str(uuidlib.uuid4())
+    asst_uuid = str(uuidlib.uuid4())
+    msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
+    return [
+        {
+            "parentUuid": parent_uuid,
+            "uuid": user_uuid,
+            "sessionId": session_id,
+            "type": "user",
+            "timestamp": SYNTHETIC_TIMESTAMP,
+            "cwd": cwd,
+            "userType": "external",
+            "message": {"role": "user", "content": _BRIDGE_USER_TEXT},
+        },
+        {
+            "parentUuid": user_uuid,
+            "uuid": asst_uuid,
+            "sessionId": session_id,
+            "type": "assistant",
+            "timestamp": SYNTHETIC_TIMESTAMP,
+            "cwd": cwd,
+            "userType": "external",
+            "message": {
+                "id": msg_id,
+                "type": "message",
+                "role": "assistant",
+                "model": SYNTHETIC_MODEL,
+                "content": [{"type": "text", "text": _BRIDGE_ASST_TEXT}],
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {},
+            },
+        },
+    ]
+
+
 _UUID_RE = __import__("re").compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
 )
@@ -113,6 +178,8 @@ def build_synthetic_jsonl_from_source(
 
     out = [_metadata_row(session_id)]
     out.extend(rows)
+    last_uuid = rows[-1]["uuid"] if rows else None
+    out.extend(_bridge_rows(last_uuid, session_id, cwd))
     return "\n".join(json.dumps(r) for r in out) + "\n"
 
 
@@ -176,6 +243,7 @@ def build_synthetic_jsonl_from_frontier(
         })
         prev_uuid = row_uuid
 
+    rows.extend(_bridge_rows(prev_uuid, session_id, cwd))
     return "\n".join(json.dumps(r) for r in rows) + "\n"
 
 
