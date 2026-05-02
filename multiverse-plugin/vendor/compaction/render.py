@@ -107,17 +107,22 @@ def render_frontier_as_message_blocks(frontier: Frontier) -> list[dict]:
 
 
 def _render_summary_block(summary: str, n_entries: int) -> str:
-    """Render a Node summary as a markdown blockquote prefixed by a bold
-    label. Important: claude code's REPL discards ``'html'`` tokens
-    (and their content) from the markdown lexer, so XML-style wrappers
+    """Render a Node summary as a bold-labeled paragraph.
+
+    Important: claude code's REPL discards ``'html'`` tokens (and
+    their content) from the markdown lexer, so XML-style wrappers
     like ``<compacted-context>...</compacted-context>`` render as
-    nothing — empty bullet points in the UI. Markdown blockquotes do
-    render."""
-    quoted = "\n".join(
-        f"> {line}" if line.strip() else ">"
-        for line in summary.split("\n")
-    )
-    return f"**Compacted summary ({n_entries} entries):**\n\n{quoted}"
+    nothing — empty bullet points in the UI.
+
+    We previously wrapped the summary body in a markdown blockquote
+    for visual distinction, but blockquote rendering varies between
+    claude code versions: some draw a dim vertical bar + italic, some
+    fill with a contrasting background that inverts the theme. The
+    bold ``**Compacted summary (N entries):**`` header is enough of a
+    marker; keeping the body as a plain paragraph renders consistently
+    across versions.
+    """
+    return f"**Compacted summary ({n_entries} entries):**\n\n{summary}"
 
 
 def _render_leaf_for_block(leaf: Leaf) -> str:
@@ -137,13 +142,12 @@ def _render_leaf_for_block(leaf: Leaf) -> str:
     if kind == "user_text":
         # Mid-turn synthetic user record (e.g. Stop hook feedback) that
         # the parser captured under this turn's promptId. We're inside
-        # an assistant message, so prefix it clearly + blockquote.
-        text = leaf.content.get("text", "")
-        quoted = "\n".join(
-            f"> {line}" if line.strip() else ">"
-            for line in text.split("\n")
-        )
-        return f"**[Embedded user message]**\n\n{quoted}"
+        # an assistant message, so prefix it clearly. Keep the body as
+        # a plain paragraph rather than a blockquote — blockquote
+        # rendering varies between claude code versions (dim bar vs.
+        # background fill).
+        text = leaf.content.get("text", "") or ""
+        return f"**[Embedded user message]**\n\n{text}"
     if kind == "tool_use":
         name = leaf.content.get("name", "?")
         inp = leaf.content.get("input", {})
