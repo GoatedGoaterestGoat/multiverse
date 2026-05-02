@@ -13,6 +13,8 @@ Two distinct rendering jobs:
 
 from __future__ import annotations
 
+import json as _json
+
 from .types import Frontier, Leaf, Node
 
 
@@ -93,7 +95,7 @@ def render_frontier_as_message_blocks(frontier: Frontier) -> list[dict]:
                     "signature": entry.content.get("signature", ""),
                 })
             else:
-                blocks.append({"type": "text", "text": _render_leaf(entry)})
+                blocks.append({"type": "text", "text": _render_leaf_for_block(entry)})
         else:  # Node summary
             n = _span_size(entry)
             blocks.append({
@@ -105,6 +107,63 @@ def render_frontier_as_message_blocks(frontier: Frontier) -> list[dict]:
                 ),
             })
     return blocks
+
+
+def _render_leaf_for_block(leaf: Leaf) -> str:
+    """Render a non-thinking leaf as the body of a `text` block inside an
+    assistant message in the compacted live JSONL.
+
+    Differences from `_render_leaf` (which is a transcript formatter for
+    the constructor agent's eyes):
+      - No ``USER:`` / ``ASSISTANT:`` role labels — the role is already
+        carried by the surrounding message; an explicit prefix in the
+        text shows up as literal noise in the live UI.
+      - Tool calls / results use XML-ish wrappers so the live agent can
+        still recognize structure when reading the prefix back, while
+        avoiding markdown surprises.
+    """
+    kind = leaf.kind
+    if kind == "asst_text":
+        return leaf.content.get("text", "")
+    if kind == "user_text":
+        # Mid-turn synthetic user record (e.g. Stop hook feedback) that
+        # the parser captured under this turn's promptId. We're inside an
+        # assistant message, so wrap it explicitly.
+        return (
+            f'<embedded-user-message>\n'
+            f'{leaf.content.get("text", "")}\n'
+            f'</embedded-user-message>'
+        )
+    if kind == "tool_use":
+        name = leaf.content.get("name", "?")
+        inp = leaf.content.get("input", {})
+        inp_s = (
+            _json.dumps(inp, indent=2)
+            if isinstance(inp, (dict, list)) else str(inp)
+        )
+        return f'<tool-use name="{name}">\n{inp_s}\n</tool-use>'
+    if kind == "tool_result":
+        return (
+            f'<tool-result>\n{leaf.content.get("text", "")}\n</tool-result>'
+        )
+    if kind == "tool_exchange":
+        name = leaf.content.get("name", "?")
+        inp = leaf.content.get("input", {})
+        result = leaf.content.get("result_text", "")
+        is_error = bool(leaf.content.get("is_error"))
+        inp_s = (
+            _json.dumps(inp, indent=2)
+            if isinstance(inp, (dict, list)) else str(inp)
+        )
+        marker = ' error="true"' if is_error else ""
+        return (
+            f'<tool-exchange name="{name}"{marker}>\n'
+            f'<input>\n{inp_s}\n</input>\n'
+            f'<result>\n{result}\n</result>\n'
+            f'</tool-exchange>'
+        )
+    # Defensive — unknown kind. Render kind name + content as plain JSON.
+    return f'<{kind}>\n{leaf.content!r}\n</{kind}>'
 
 
 def _render_entry(entry: Leaf | Node) -> str:
