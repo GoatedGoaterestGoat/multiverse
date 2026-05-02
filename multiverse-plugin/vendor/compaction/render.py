@@ -100,40 +100,49 @@ def render_frontier_as_message_blocks(frontier: Frontier) -> list[dict]:
             n = _span_size(entry)
             blocks.append({
                 "type": "text",
-                "text": (
-                    f'<compacted-context entries="{n}">\n'
-                    f"{entry.summary.strip()}\n"
-                    f"</compacted-context>"
-                ),
+                "text": _render_summary_block(entry.summary.strip(), n),
             })
     return blocks
 
 
-def _render_leaf_for_block(leaf: Leaf) -> str:
-    """Render a non-thinking leaf as the body of a `text` block inside an
-    assistant message in the compacted live JSONL.
+def _render_summary_block(summary: str, n_entries: int) -> str:
+    """Render a Node summary as a markdown blockquote prefixed by a bold
+    label. Important: claude code's REPL discards ``'html'`` tokens
+    (and their content) from the markdown lexer, so XML-style wrappers
+    like ``<compacted-context>...</compacted-context>`` render as
+    nothing — empty bullet points in the UI. Markdown blockquotes do
+    render."""
+    quoted = "\n".join(
+        f"> {line}" if line.strip() else ">"
+        for line in summary.split("\n")
+    )
+    return f"**Compacted summary ({n_entries} entries):**\n\n{quoted}"
 
-    Differences from `_render_leaf` (which is a transcript formatter for
-    the constructor agent's eyes):
-      - No ``USER:`` / ``ASSISTANT:`` role labels — the role is already
-        carried by the surrounding message; an explicit prefix in the
-        text shows up as literal noise in the live UI.
-      - Tool calls / results use XML-ish wrappers so the live agent can
-        still recognize structure when reading the prefix back, while
-        avoiding markdown surprises.
+
+def _render_leaf_for_block(leaf: Leaf) -> str:
+    """Render a non-thinking leaf as the body of a ``text`` block inside
+    an assistant message in the compacted live JSONL.
+
+    Format choice: markdown delimiters (bold labels, fenced code
+    blocks, blockquotes) rather than XML-like tags. claude code's
+    markdown lexer produces ``'html'`` tokens for raw HTML/XML, and
+    its renderer discards those tokens (and their inner content)
+    entirely — so XML wrappers render as empty bullets. Markdown
+    delimiters render normally.
     """
     kind = leaf.kind
     if kind == "asst_text":
         return leaf.content.get("text", "")
     if kind == "user_text":
         # Mid-turn synthetic user record (e.g. Stop hook feedback) that
-        # the parser captured under this turn's promptId. We're inside an
-        # assistant message, so wrap it explicitly.
-        return (
-            f'<embedded-user-message>\n'
-            f'{leaf.content.get("text", "")}\n'
-            f'</embedded-user-message>'
+        # the parser captured under this turn's promptId. We're inside
+        # an assistant message, so prefix it clearly + blockquote.
+        text = leaf.content.get("text", "")
+        quoted = "\n".join(
+            f"> {line}" if line.strip() else ">"
+            for line in text.split("\n")
         )
+        return f"**[Embedded user message]**\n\n{quoted}"
     if kind == "tool_use":
         name = leaf.content.get("name", "?")
         inp = leaf.content.get("input", {})
@@ -141,11 +150,12 @@ def _render_leaf_for_block(leaf: Leaf) -> str:
             _json.dumps(inp, indent=2)
             if isinstance(inp, (dict, list)) else str(inp)
         )
-        return f'<tool-use name="{name}">\n{inp_s}\n</tool-use>'
+        fence = _safe_fence(inp_s)
+        return f"**Tool call: `{name}`**\n\n{fence}json\n{inp_s}\n{fence}"
     if kind == "tool_result":
-        return (
-            f'<tool-result>\n{leaf.content.get("text", "")}\n</tool-result>'
-        )
+        text = leaf.content.get("text", "")
+        fence = _safe_fence(text)
+        return f"**Tool result:**\n\n{fence}\n{text}\n{fence}"
     if kind == "tool_exchange":
         name = leaf.content.get("name", "?")
         inp = leaf.content.get("input", {})
@@ -155,15 +165,35 @@ def _render_leaf_for_block(leaf: Leaf) -> str:
             _json.dumps(inp, indent=2)
             if isinstance(inp, (dict, list)) else str(inp)
         )
-        marker = ' error="true"' if is_error else ""
+        marker = " *(error)*" if is_error else ""
+        in_fence = _safe_fence(inp_s)
+        out_fence = _safe_fence(result)
         return (
-            f'<tool-exchange name="{name}"{marker}>\n'
-            f'<input>\n{inp_s}\n</input>\n'
-            f'<result>\n{result}\n</result>\n'
-            f'</tool-exchange>'
+            f"**Tool call: `{name}`**{marker}\n\n"
+            f"{in_fence}json\n{inp_s}\n{in_fence}\n\n"
+            f"**Result:**\n\n"
+            f"{out_fence}\n{result}\n{out_fence}"
         )
-    # Defensive — unknown kind. Render kind name + content as plain JSON.
-    return f'<{kind}>\n{leaf.content!r}\n</{kind}>'
+    # Defensive — unknown kind. Use a labeled paragraph rather than an
+    # XML wrapper so it still renders.
+    return f"**[{kind}]** {leaf.content!r}"
+
+
+def _safe_fence(content: str) -> str:
+    """Pick a code-fence length longer than the longest run of backticks
+    inside ``content`` so the fence doesn't get accidentally closed by
+    embedded triple-backticks (common in shell output that quotes
+    markdown)."""
+    max_run = 0
+    run = 0
+    for ch in content:
+        if ch == "`":
+            run += 1
+            if run > max_run:
+                max_run = run
+        else:
+            run = 0
+    return "`" * max(3, max_run + 1)
 
 
 def _render_entry(entry: Leaf | Node) -> str:

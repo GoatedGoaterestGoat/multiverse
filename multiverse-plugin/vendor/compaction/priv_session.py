@@ -348,7 +348,9 @@ def turn_to_rows(
     if turn.user_prompt is not None:
         user_text = turn.user_prompt.content.get("text", "") or ""
     if not user_text:
-        user_text = "<no user prompt for this turn>"
+        # Plain text — angle-bracket-only placeholders get parsed as
+        # raw HTML by claude code's markdown lexer and discarded.
+        user_text = "_(no user prompt for this turn)_"
 
     # Reuse the original turn_id as the promptId when it's already a UUID
     # (it usually is — turn_id originates from the source JSONL's promptId);
@@ -361,8 +363,10 @@ def turn_to_rows(
     blocks = render_frontier_as_message_blocks(frontier) if frontier else []
     if not blocks:
         # Empty frontier — emit a single placeholder text block so the
-        # alternation holds and the message isn't empty.
-        blocks = [{"type": "text", "text": "<no compacted output for this turn>"}]
+        # alternation holds and the message isn't empty. Plain markdown
+        # rather than angle brackets (claude code's lexer would parse
+        # `<...>` as raw HTML and the renderer drops `'html'` tokens).
+        blocks = [{"type": "text", "text": "_(no compacted output for this turn)_"}]
 
     msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
     for i, block in enumerate(blocks):
