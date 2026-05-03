@@ -895,6 +895,7 @@ class MonitorApp(App):
         Binding("n", "new_session", "New"),
         Binding("R", "resume_session", "Resume"),
         Binding("c", "compact", "Compact"),
+        Binding("v", "visualize", "Visualize"),
         Binding("a", "ask_all", "Ask all"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
@@ -1322,6 +1323,101 @@ class MonitorApp(App):
             ),
             _on_close,
         )
+
+    def action_visualize(self) -> None:
+        """Render the current live JSONL as a navigable HTML page.
+
+        For each turn (chain-walked): show the cached tree with frontier
+        highlighting matching the current live state, or a flat list of
+        leaves if there's no cached tree. Same gate as Compact minus the
+        idle/ended/dormant restriction — visualization is read-only and
+        safe to run while the session is working / waiting.
+        """
+        e = self._current_entry()
+        if e is None:
+            return
+        if e.is_ghost:
+            self.notify("Cannot visualize a folded ghost row", severity="warning")
+            return
+        if not e.claude_uuid:
+            self.notify(
+                "No claude UUID tracked for this row — cannot visualize",
+                severity="warning",
+            )
+            return
+
+        plugin_root = Path(
+            os.environ.get("MULTIVERSE_PLUGIN_ROOT")
+            or Path(__file__).resolve().parent.parent
+        )
+        script = plugin_root / "scripts" / "visualize_live.py"
+        if not script.is_file():
+            self.notify(
+                f"visualize_live.py not found at {script}",
+                severity="error",
+            )
+            return
+
+        self._visualize_worker(e.claude_uuid, e.cwd, str(script))
+
+    @work(thread=True, exclusive=True, group="visualize")
+    def _visualize_worker(
+        self, claude_uuid: str, cwd: str, script: str,
+    ) -> None:
+        try:
+            proc = subprocess.run(
+                [sys.executable, script, claude_uuid, cwd],
+                capture_output=True, text=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            self.app.call_from_thread(
+                self.notify, "Visualizer timed out (>120s)", severity="error",
+            )
+            return
+        if proc.returncode != 0:
+            tail = (proc.stderr or "").strip().splitlines()[-3:]
+            self.app.call_from_thread(
+                self.notify,
+                "Visualizer failed: " + " | ".join(tail),
+                severity="error",
+            )
+            return
+        # Last line of stdout is the path the script printed.
+        out_lines = [l for l in proc.stdout.splitlines() if l.strip()]
+        if not out_lines:
+            self.app.call_from_thread(
+                self.notify, "Visualizer produced no output path",
+                severity="warning",
+            )
+            return
+        path = out_lines[-1].strip()
+        # Try to open it via the platform handler. Falls back to a notify
+        # with the path if no handler is available (e.g. inside a Docker
+        # exec on a remote host).
+        opener = None
+        if sys.platform == "darwin":
+            opener = ["open", path]
+        elif sys.platform.startswith("linux"):
+            opener = ["xdg-open", path]
+        opened = False
+        if opener is not None:
+            try:
+                subprocess.Popen(
+                    opener, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                opened = True
+            except (FileNotFoundError, OSError):
+                opened = False
+        if opened:
+            self.app.call_from_thread(
+                self.notify, f"Opened {path}",
+            )
+        else:
+            self.app.call_from_thread(
+                self.notify,
+                f"Wrote {path} (couldn't auto-open; copy it out to view)",
+            )
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
