@@ -142,6 +142,29 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
             write_marker(claude_uuid, last)
         return _row_count(full)
 
+    # Load full's existing uuids so we can detect (and heal) parentUuid
+    # pointers that would otherwise leave full's chain broken — e.g.
+    # across a compaction boundary, where the previous live tip is a
+    # synthetic uuid that never made it into full.
+    full_uuids: set[str] = set()
+    full_last_uuid: str | None = None
+    try:
+        with full.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                u = d.get("uuid")
+                if isinstance(u, str):
+                    full_uuids.add(u)
+                    full_last_uuid = u
+    except OSError:
+        pass
+
     marker = read_marker(claude_uuid)
     last_appended = marker
     found = marker is None
@@ -159,15 +182,22 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
                 if d.get("uuid") == marker:
                     found = True
                 continue
-            dst.write(line if line.endswith("\n") else line + "\n")
-            appended += 1
             try:
                 d = json.loads(stripped)
-                u = d.get("uuid")
-                if isinstance(u, str):
-                    last_appended = u
             except json.JSONDecodeError:
-                pass
+                dst.write(line if line.endswith("\n") else line + "\n")
+                appended += 1
+                continue
+            parent = d.get("parentUuid")
+            if isinstance(parent, str) and parent and parent not in full_uuids:
+                d["parentUuid"] = full_last_uuid
+            u = d.get("uuid")
+            if isinstance(u, str):
+                full_uuids.add(u)
+                full_last_uuid = u
+                last_appended = u
+            dst.write(json.dumps(d) + "\n")
+            appended += 1
     if last_appended and last_appended != marker:
         write_marker(claude_uuid, last_appended)
     return appended
