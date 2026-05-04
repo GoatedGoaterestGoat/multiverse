@@ -19,6 +19,9 @@ context-original.md
 context-folded.md
 testing
 
+# Local scratch — downloaded JSONLs, stitching scripts, etc.
+/work/
+
 # Python
 __pycache__/
 *.pyc
