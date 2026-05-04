@@ -45,3 +45,17 @@ def multiverse_dir() -> Path:
         # .../.multiverse/sessions/<id>/status.json → .../.multiverse/
         return Path(status).parent.parent.parent
     return Path(os.path.expanduser("~/.multiverse"))
+
+
+def claude_projects_dir() -> Path:
+    """Return Claude Code's ``projects`` directory for this process.
+
+    Honors ``CLAUDE_CONFIG_DIR`` so non-default Claude Code installs (e.g.
+    a per-user copy that redirects ``~/.claude`` to a project-local path)
+    have their transcripts found by the plugin. Falls back to the standard
+    ``~/.claude/projects`` location.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "projects"
+    return Path(os.path.expanduser("~/.claude/projects"))

@@ -7,6 +7,7 @@ import os
 import re
 from pathlib import Path
 
+from .paths import claude_projects_dir
 from .types import ConversationIndex, JsonlEntry, estimate_tokens
 
 
@@ -21,7 +22,7 @@ def encode_cwd(cwd: str) -> str:
 
 def get_projects_dir() -> Path:
     """Return the Claude Code projects directory."""
-    return Path.home() / ".claude" / "projects"
+    return claude_projects_dir()
 
 
 def find_session_path(session_id: str, cwd: str) -> Path:

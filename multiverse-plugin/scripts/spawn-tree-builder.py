@@ -36,6 +36,13 @@ def _multiverse_dir() -> Path:
     return Path(os.path.expanduser("~/.multiverse"))
 
 
+def _claude_projects_dir() -> Path:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "projects"
+    return Path(os.path.expanduser("~/.claude/projects"))
+
+
 def _cwd_slug(cwd: str) -> str:
     return cwd.replace("/", "-")
 
@@ -71,7 +78,7 @@ def main() -> None:
         return
 
     source = (
-        Path.home() / ".claude" / "projects" / _cwd_slug(cwd) / f"{session_id}.jsonl"
+        _claude_projects_dir() / _cwd_slug(cwd) / f"{session_id}.jsonl"
     )
     if not source.is_file():
         return  # session not persisted yet (e.g. very first prompt)

@@ -33,12 +33,19 @@ def _multiverse_dir() -> Path:
     return Path(os.path.expanduser("~/.multiverse"))
 
 
+def _claude_projects_dir() -> Path:
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "projects"
+    return Path(os.path.expanduser("~/.claude/projects"))
+
+
 def _slug(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def _live(uuid: str, cwd: str) -> Path:
-    return Path.home() / ".claude" / "projects" / _slug(cwd) / f"{uuid}.jsonl"
+    return _claude_projects_dir() / _slug(cwd) / f"{uuid}.jsonl"
 
 
 def _full_dir() -> Path:

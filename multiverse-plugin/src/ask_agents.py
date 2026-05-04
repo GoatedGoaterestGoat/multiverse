@@ -34,8 +34,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from .paths import claude_projects_dir
 
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+CLAUDE_PROJECTS_DIR = claude_projects_dir()
 
 
 SIDE_QUESTION_WRAPPER = """<system-reminder>This is a side question from the user. You must answer this question directly in a single response.

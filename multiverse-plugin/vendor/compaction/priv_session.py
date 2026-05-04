@@ -62,7 +62,9 @@ def cwd_slug(cwd: str | None = None) -> str:
 
 
 def projects_dir(cwd: str | None = None) -> Path:
-    return Path.home() / ".claude" / "projects" / cwd_slug(cwd)
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return base / "projects" / cwd_slug(cwd)
 
 
 def session_path(session_id: str, cwd: str | None = None) -> Path:

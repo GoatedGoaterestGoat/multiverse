@@ -37,7 +37,7 @@ import re
 import sys
 from pathlib import Path
 
-from .paths import multiverse_dir
+from .paths import claude_projects_dir, multiverse_dir
 
 # Make the vendored compaction package importable. The compaction widget
 # wants per-turn token counts and total turn counts; both live in the
@@ -70,7 +70,7 @@ def cwd_slug(cwd: str) -> str:
 
 
 def live_jsonl_path(claude_uuid: str, cwd: str) -> Path:
-    return Path.home() / ".claude" / "projects" / cwd_slug(cwd) / f"{claude_uuid}.jsonl"
+    return claude_projects_dir() / cwd_slug(cwd) / f"{claude_uuid}.jsonl"
 
 
 # ---------------------------------------------------------------------------

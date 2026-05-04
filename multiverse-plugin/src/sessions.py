@@ -27,12 +27,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .compact_state import list_locked
-from .paths import multiverse_dir
+from .paths import claude_projects_dir, multiverse_dir
 
 
 MULTIVERSE_DIR = multiverse_dir()
 STATE_DIR = MULTIVERSE_DIR / "sessions"
-CLAUDE_PROJECTS_DIR = Path.home() / ".claude" / "projects"
+CLAUDE_PROJECTS_DIR = claude_projects_dir()
 TMUX_PREFIX = "multiverse-"
 
 
