@@ -716,6 +716,21 @@ def create_session(
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
     ]
+
+    # Propagate the user's Claude install env so the inner `claude`
+    # process resolves transcripts under the same projects dir the
+    # monitor used to find this session. Without this, a session
+    # spawned by a monitor with CLAUDE_CONFIG_DIR set would inherit
+    # only the tmux server's env (typically captured at server start
+    # under a different terminal) and write to the wrong directory —
+    # making cross-terminal resume produce a fresh JSONL instead of
+    # picking up the existing one. PATH carries the bin dir of the
+    # caller's `claude` so the inner shell finds the same binary.
+    for env_key in ("CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "PATH"):
+        val = os.environ.get(env_key)
+        if val:
+            cmd += ["-e", f"{env_key}={val}"]
+
     if name:
         cmd += ["-e", f"MULTIVERSE_SESSION_NAME={name}"]
     cmd.append(inner_cmd)
