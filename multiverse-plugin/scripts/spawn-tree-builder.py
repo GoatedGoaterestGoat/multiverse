@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -44,7 +45,14 @@ def _claude_projects_dir() -> Path:
 
 
 def _cwd_slug(cwd: str) -> str:
-    return cwd.replace("/", "-")
+    # Claude Code's actual project-slug rule: replace ANY non-alphanumeric
+    # character with `-`. The previous implementation only replaced
+    # slashes, which silently broke any cwd with underscores / dots /
+    # spaces — spawn-tree-builder would compute the wrong source path,
+    # `source.is_file()` returned False, and the hook bailed out
+    # without ever spawning a worker. Same bug we fixed in
+    # priv_session.cwd_slug; this one is the auto-spawn counterpart.
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def _read_input() -> dict:
