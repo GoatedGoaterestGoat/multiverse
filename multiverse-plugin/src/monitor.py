@@ -19,6 +19,7 @@ Detach with normal ``Ctrl-b d`` and you land back in the monitor.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -470,6 +471,11 @@ class CompactScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
+    # Match the worker.log lines that report a single turn's build time:
+    #   "[HH:MM:SS]   turn N done (X.Ys)"
+    # Used to drive the running ETA estimate.
+    _BUILD_TIME_RE = re.compile(r"\bturn\s+\d+\s+done\s+\(([0-9.]+)s\)")
+
     def __init__(
         self,
         claude_uuid: str,
@@ -487,6 +493,12 @@ class CompactScreen(ModalScreen[None]):
         self.budget = 0
         self.phase = "input"  # input | running | done | failed
         self._runner: Optional[CompactRunner] = None
+        # Per-turn build elapsed times collected from worker.log; powers
+        # the ETA estimate. Bounded — only the most-recent N are used so
+        # ETA tracks current rate, not a stale long-tail.
+        self._build_times: list[float] = []
+        self._last_built: int = 0
+        self._last_total: int = 0
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -509,6 +521,7 @@ class CompactScreen(ModalScreen[None]):
             ),
             Static("", id="compact-state"),
             ProgressBar(total=100, id="compact-progress", show_eta=False),
+            Static("", id="compact-cached"),
             RichLog(
                 id="compact-log",
                 wrap=False,
@@ -525,7 +538,7 @@ class CompactScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         # Hide the running-phase widgets until the user submits a budget.
-        for wid in ("compact-state", "compact-progress", "compact-log"):
+        for wid in ("compact-state", "compact-progress", "compact-cached", "compact-log"):
             self.query_one(f"#{wid}").display = False
         self._load_stats()
 
@@ -593,7 +606,7 @@ class CompactScreen(ModalScreen[None]):
             f"[bold]{self.total_turns}[/] turn(s)"
         )
 
-        for wid in ("compact-state", "compact-progress", "compact-log"):
+        for wid in ("compact-state", "compact-progress", "compact-cached", "compact-log"):
             self.query_one(f"#{wid}").display = True
 
         self.query_one("#compact-state", Static).update(
@@ -673,12 +686,50 @@ class CompactScreen(ModalScreen[None]):
             self.query_one("#compact-log", RichLog).write(line)
         except Exception:  # noqa: BLE001
             pass
+        # Pull per-turn build times out of the worker.log lines as they
+        # stream in, to drive the ETA estimate. Cap at the most-recent N
+        # so ETA tracks current rate, not stale early-build times.
+        m = self._BUILD_TIME_RE.search(line)
+        if m:
+            try:
+                self._build_times.append(float(m.group(1)))
+                if len(self._build_times) > 20:
+                    self._build_times = self._build_times[-20:]
+                self._refresh_cached_line()
+            except ValueError:
+                pass
 
     def _update_progress(self, built: int, total: int) -> None:
+        self._last_built = built
+        self._last_total = total
         progress = self.query_one("#compact-progress", ProgressBar)
         progress.update(total=max(1, total), progress=built)
-        self.query_one("#compact-state", Static).update(
-            self._state_text() + f"  ·  {built}/{total} tree(s) built"
+        self.query_one("#compact-state", Static).update(self._state_text())
+        self._refresh_cached_line()
+
+    def _refresh_cached_line(self) -> None:
+        built = self._last_built
+        total = self._last_total
+        try:
+            label = self.query_one("#compact-cached", Static)
+        except Exception:  # noqa: BLE001
+            return
+        if total <= 0:
+            label.update("")
+            return
+        pct = (built / total * 100.0) if total else 0.0
+        remaining = max(0, total - built)
+        if remaining == 0:
+            eta_str = "all done"
+        elif self._build_times:
+            avg = sum(self._build_times) / len(self._build_times)
+            eta_s = avg * remaining
+            eta_str = f"~{_fmt_eta(eta_s)} (avg {avg:.1f}s/turn over last {len(self._build_times)})"
+        else:
+            eta_str = "—"
+        label.update(
+            f"[bold]Cached:[/] {built:,} / {total:,} ({pct:.1f}%)  ·  "
+            f"[bold]ETA:[/] {eta_str}"
         )
 
     def _update_state(self, state: str) -> None:
@@ -877,6 +928,10 @@ class MonitorApp(App):
     #compact-progress {
         height: auto;
         padding-top: 1;
+        padding-bottom: 0;
+    }
+    #compact-cached {
+        height: auto;
         padding-bottom: 1;
     }
     #compact-log {
@@ -1431,6 +1486,20 @@ def _ago(delta: float) -> str:
     if delta < 3600:
         return f"{int(delta / 60)}m"
     return f"{int(delta / 3600)}h"
+
+
+def _fmt_eta(seconds: float) -> str:
+    """Format an ETA in seconds as HH:MM:SS / Mm Ss / Ss, whichever fits."""
+    if seconds < 0:
+        return "?"
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m {s % 60}s"
+    h = s // 3600
+    m = (s % 3600) // 60
+    return f"{h}h {m}m"
 
 
 def main() -> None:
