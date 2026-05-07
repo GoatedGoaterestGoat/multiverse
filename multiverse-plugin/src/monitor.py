@@ -45,10 +45,12 @@ from textual.widgets import (
 from .ask_agents import AskResult, AskTarget, ask_all
 from .compact_runner import CompactRunner, State as CompactState
 from .full_jsonl import (
+    full_jsonl_path,
     live_jsonl_path,
     total_token_count,
     total_turn_count,
 )
+from .paths import multiverse_dir
 from .inbox import pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
@@ -537,36 +539,106 @@ class CompactScreen(ModalScreen[None]):
         )
 
     def on_mount(self) -> None:
-        # Hide the running-phase widgets until the user submits a budget.
-        for wid in ("compact-state", "compact-progress", "compact-cached", "compact-log"):
+        # Hide the running-phase widgets until the user submits a budget,
+        # but keep `compact-cached` visible — the audit (cached/total +
+        # ETA) is useful BEFORE the user picks a budget so they can see
+        # how much work is already done and how long the rest will take.
+        for wid in ("compact-state", "compact-progress", "compact-log"):
             self.query_one(f"#{wid}").display = False
+        # Initial placeholder while the chain-audit thread runs.
+        self.query_one("#compact-cached", Static).update(
+            "[dim]Auditing cached trees…[/]"
+        )
         self._load_stats()
 
     # ----- Phase 1: stats loading + budget input ---------------------------
 
     @work(thread=True, exclusive=True, group="compact_stats")
     def _load_stats(self) -> None:
+        """Compute total tokens, total turns, cached-tree count (trees
+        whose turn_id is on the chain forest), and historical per-turn
+        build times from worker.log for ETA seeding."""
         try:
             toks = total_token_count(self.claude_uuid, self.cwd)
             turns = total_turn_count(self.claude_uuid, self.cwd)
+            cached, history = self._audit_cache_against_chain()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._stats_failed, repr(e))
             return
-        self.app.call_from_thread(self._stats_ready, toks, turns)
+        self.app.call_from_thread(
+            self._stats_ready, toks, turns, cached, history
+        )
+
+    def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
+        """Return (n_trees_matching_chain, recent_build_times)."""
+        import json as _json
+        cached = 0
+        history: list[float] = []
+        full = full_jsonl_path(self.claude_uuid)
+        cache_dir = multiverse_dir() / "trees" / self.claude_uuid
+
+        if full.is_file():
+            # Lazy import — the vendored package is added to sys.path by
+            # full_jsonl on import, so this is cheap once warm.
+            from compaction.parser import parse_session  # noqa: E402
+            try:
+                forest = parse_session(str(full))
+                chain_turns = {t.turn_id for t in forest}
+            except Exception:  # noqa: BLE001
+                chain_turns = set()
+
+            if chain_turns and cache_dir.is_dir():
+                for p in cache_dir.glob("*.json"):
+                    try:
+                        d = _json.loads(p.read_text())
+                    except (OSError, _json.JSONDecodeError):
+                        continue
+                    if d.get("turn_id") in chain_turns:
+                        cached += 1
+
+        log_path = cache_dir / "worker.log"
+        if log_path.is_file():
+            try:
+                with log_path.open() as f:
+                    for line in f:
+                        m = self._BUILD_TIME_RE.search(line)
+                        if m:
+                            try:
+                                history.append(float(m.group(1)))
+                            except ValueError:
+                                pass
+            except OSError:
+                pass
+        # Cap at the most-recent 20 — same window the running-phase logic
+        # uses, so ETA is consistent before/during the run.
+        if len(history) > 20:
+            history = history[-20:]
+        return cached, history
 
     def _stats_failed(self, err: str) -> None:
         self.query_one("#compact-stats", Static).update(
             f"[red]Failed to load stats: {err}[/]"
         )
 
-    def _stats_ready(self, total_tokens: int, total_turns: int) -> None:
+    def _stats_ready(
+        self,
+        total_tokens: int,
+        total_turns: int,
+        cached: int = 0,
+        history: list[float] | None = None,
+    ) -> None:
         self.total_tokens = total_tokens
         self.total_turns = total_turns
+        self._last_built = cached
+        self._last_total = total_turns
+        if history:
+            self._build_times = list(history)
         suggested = max(1, total_tokens // 2)
         self.query_one("#compact-stats", Static).update(
             f"Total: [bold]{total_tokens:,}[/] tokens · "
             f"[bold]{total_turns}[/] turn(s) (uncompacted)"
         )
+        self._refresh_cached_line()
         budget = self.query_one("#compact-budget", Input)
         budget.disabled = False
         budget.placeholder = f"Token budget (e.g. {suggested:,} for ~50%)"
