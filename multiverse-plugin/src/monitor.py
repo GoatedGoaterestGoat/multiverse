@@ -1004,6 +1004,7 @@ class MonitorApp(App):
     }
     #compact-cached {
         height: auto;
+        padding-top: 1;
         padding-bottom: 1;
     }
     #compact-log {
