@@ -210,12 +210,16 @@ _STATUS_PRIORITY = {
 
 
 @mcp.tool()
-def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
-    """List all named agents in the current multiverse workspace.
+def list_agents(
+    max_agents: int = _DEFAULT_MAX_AGENTS,
+    working_directory: str = "",
+) -> str:
+    """List all named agents in your multiverse workspace.
 
-    These are the agents you can talk to via inter-agent tools. The list is
-    scoped to your workspace's working directory — agents in other
-    workspaces are not visible.
+    These are the agents you can talk to via inter-agent tools. By default
+    the list is scoped to your own workspace's working directory. Pass
+    ``working_directory`` to instead list agents in a different workspace —
+    useful for discovering agents you can ``ask_agent`` across workspaces.
 
     Status values:
       - idle / working / waiting / starting — currently running
@@ -223,23 +227,46 @@ def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
       - dormant  — never wrapped by multiverse this run, but the underlying
                    transcript exists and is named
 
-    Your own entry is marked with ``← this is you``. The list is sorted
-    with you first, then live agents, then ended/dormant.
+    Your own entry is marked with ``← this is you`` (only when listing your
+    own workspace). The list is sorted with you first, then live agents,
+    then ended/dormant.
 
     Args:
         max_agents: Maximum entries to show before truncating with "and N
             more". Default 15 keeps the output compact. Pass a larger value
             (e.g. 100) if you need the full roster — your own entry is
             always kept visible regardless of this cap.
+        working_directory: Optional absolute path to another workspace's
+            working directory. When omitted, lists agents in your own
+            workspace. When provided, lists agents in that workspace
+            instead; the ``← this is you`` marker is suppressed.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    if not cwd:
-        return (
-            "Error: MULTIVERSE_SESSION_CWD is not set — this tool requires "
-            "running inside a multiverse-managed session."
-        )
-
+    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME") or ""
+
+    if working_directory:
+        try:
+            cwd = str(Path(working_directory).expanduser().resolve())
+        except (OSError, RuntimeError) as e:
+            return f"Error: invalid working_directory '{working_directory}': {e}"
+    else:
+        if not self_cwd:
+            return (
+                "Error: MULTIVERSE_SESSION_CWD is not set — this tool requires "
+                "running inside a multiverse-managed session."
+            )
+        cwd = self_cwd
+
+    self_cwd_abs = ""
+    if self_cwd:
+        try:
+            self_cwd_abs = str(Path(self_cwd).expanduser().resolve())
+        except (OSError, RuntimeError):
+            self_cwd_abs = self_cwd
+    in_own_workspace = bool(self_cwd_abs) and cwd == self_cwd_abs
+
+    # Suppress the "← this is you" marker when listing another workspace.
+    self_name_for_marker = self_name if in_own_workspace else ""
 
     try:
         agents = list_named_agents_in_cwd(cwd)
@@ -247,12 +274,14 @@ def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
         return f"Error listing agents: {e}"
 
     if not agents:
-        return "(no named agents in this workspace)"
+        if in_own_workspace or not working_directory:
+            return "(no named agents in this workspace)"
+        return f"(no named agents in workspace '{cwd}')"
 
     # Sort: you first, then by liveness, then by name (stable display).
     agents.sort(
         key=lambda a: (
-            a.name != self_name,
+            a.name != self_name_for_marker,
             _STATUS_PRIORITY.get(a.status, 9),
             a.name,
         )
@@ -262,11 +291,16 @@ def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
     live_count = sum(1 for a in agents if a.status not in ("ended", "dormant"))
     cap = max(1, int(max_agents))
 
-    # Truncate, but keep "you" in the visible slice no matter what.
+    # Truncate, but keep "you" in the visible slice no matter what
+    # (only relevant when listing your own workspace).
     if total > cap:
         visible = agents[:cap]
-        if self_name and not any(a.name == self_name for a in visible):
-            you = next((a for a in agents if a.name == self_name), None)
+        if self_name_for_marker and not any(
+            a.name == self_name_for_marker for a in visible
+        ):
+            you = next(
+                (a for a in agents if a.name == self_name_for_marker), None
+            )
             if you is not None:
                 visible = [you] + visible[: cap - 1]
         hidden = total - len(visible)
@@ -274,12 +308,17 @@ def list_agents(max_agents: int = _DEFAULT_MAX_AGENTS) -> str:
         visible = agents
         hidden = 0
 
-    summary = f"{total} agent(s) in workspace ({live_count} live)"
+    if in_own_workspace or not working_directory:
+        summary = f"{total} agent(s) in workspace ({live_count} live)"
+    else:
+        summary = (
+            f"{total} agent(s) in workspace '{cwd}' ({live_count} live)"
+        )
 
     lines = [summary, ""]
     name_width = max(len(a.name) for a in visible)
     for a in visible:
-        marker = "  ← this is you" if a.name == self_name else ""
+        marker = "  ← this is you" if a.name == self_name_for_marker else ""
         lines.append(f"- {a.name.ljust(name_width)}  {a.status}{marker}")
     if hidden:
         lines.append(
@@ -358,6 +397,7 @@ def ask_agent(
     target_name: str,
     question: str,
     timeout_seconds: int = _DEFAULT_ASK_TIMEOUT,
+    working_directory: str = "",
 ) -> str:
     """Ask a single named agent a quick question and wait for the answer.
 
@@ -366,6 +406,11 @@ def ask_agent(
     location?". The target answers from their existing context only — they
     have NO tools available, can't read files or run commands. If the
     answer requires investigation, send a ``message_agent`` instead.
+
+    By default the target is looked up in your own workspace. Pass
+    ``working_directory`` to ask an agent in a different workspace —
+    cross-workspace questions are allowed (read-only, ephemeral). Use
+    ``list_agents(working_directory=...)`` to discover targets there.
 
     Mechanism: spawns a forked, one-shot ``claude -p`` subprocess against
     the target's session (same approach as the monitor's ``a`` keybinding,
@@ -380,23 +425,46 @@ def ask_agent(
         question: The question text. Keep it focused — the target can only
             answer from what they already know.
         timeout_seconds: Max seconds to wait. Default 60.
+        working_directory: Optional absolute path to another workspace's
+            working directory. When omitted, looks up the target in your
+            own workspace. When provided, looks up the target in that
+            workspace instead.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
-    if not cwd or not self_name:
+    if not self_cwd or not self_name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
             "session."
         )
 
-    if target_name == self_name:
+    if working_directory:
+        try:
+            cwd = str(Path(working_directory).expanduser().resolve())
+        except (OSError, RuntimeError) as e:
+            return f"Error: invalid working_directory '{working_directory}': {e}"
+    else:
+        cwd = self_cwd
+
+    try:
+        self_cwd_abs = str(Path(self_cwd).expanduser().resolve())
+    except (OSError, RuntimeError):
+        self_cwd_abs = self_cwd
+    in_own_workspace = cwd == self_cwd_abs
+
+    if in_own_workspace and target_name == self_name:
         return "Error: cannot ask yourself. Use your own context directly."
 
     target = find_agent_by_name(cwd, target_name)
     if target is None:
+        if in_own_workspace:
+            return (
+                f"Error: no agent named '{target_name}' in this workspace. "
+                "Call list_agents to see who's available."
+            )
         return (
-            f"Error: no agent named '{target_name}' in this workspace. "
-            "Call list_agents to see who's available."
+            f"Error: no agent named '{target_name}' in workspace '{cwd}'. "
+            f"Call list_agents(working_directory='{cwd}') to see who's available."
         )
     if target.claude_uuid is None:
         return (
