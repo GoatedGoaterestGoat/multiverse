@@ -85,6 +85,13 @@ def main() -> None:
     if not session_id:
         return
 
+    # Per-session opt-in gate. Background tree-build is OFF by default;
+    # the user toggles it on per claude_uuid from the dashboard ('b').
+    # Marker file at $MULTIVERSE_ROOT/auto_build/<claude_uuid> — presence
+    # means enabled. See src/auto_build.py.
+    if not (_multiverse_dir() / "auto_build" / session_id).exists():
+        return
+
     source = (
         _claude_projects_dir() / _cwd_slug(cwd) / f"{session_id}.jsonl"
     )

@@ -43,6 +43,7 @@ from textual.widgets import (
 )
 
 from .ask_agents import AskResult, AskTarget, ask_all
+from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
 from .full_jsonl import (
     full_jsonl_path,
@@ -1024,6 +1025,7 @@ class MonitorApp(App):
         Binding("R", "resume_session", "Resume"),
         Binding("c", "compact", "Compact"),
         Binding("v", "visualize", "Visualize"),
+        Binding("b", "toggle_auto_build", "Build on/off"),
         Binding("a", "ask_all", "Ask all"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
@@ -1057,7 +1059,7 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
-        table.add_columns("ID", "Name", "Inbox", "Status", "Updated", "Preview")
+        table.add_columns("ID", "Name", "Inbox", "Build", "Status", "Updated", "Preview")
         yield table
         yield Footer()
 
@@ -1210,11 +1212,15 @@ class MonitorApp(App):
                 id_cell = f"[dim]{uuid[:8]}[/]"
             pending = pending_inbox_count(e.cwd, e.name)
             inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
+            if e.claude_uuid and auto_build_enabled(e.claude_uuid):
+                build_cell = "[bold green]on[/]"
+            else:
+                build_cell = "[dim]off[/]"
             preview = e.preview or "[dim](empty)[/]"
             if len(preview) > 60:
                 preview = preview[:59] + "…"
             table.add_row(
-                id_cell, e.name, inbox_cell, status_cell, updated, preview,
+                id_cell, e.name, inbox_cell, build_cell, status_cell, updated, preview,
                 key=e.row_key,
             )
         if self.entries:
@@ -1451,6 +1457,35 @@ class MonitorApp(App):
             ),
             _on_close,
         )
+
+    def action_toggle_auto_build(self) -> None:
+        """Flip the per-session auto tree-build gate for the highlighted
+        row. With auto-build on, every UserPromptSubmit on that session
+        spawns a detached worker that builds compaction trees for the
+        previous turn. Off by default — opt-in per session because each
+        build is a privileged claude --resume call.
+        """
+        e = self._current_entry()
+        if e is None:
+            return
+        if e.is_ghost:
+            self.notify(
+                "Cannot toggle auto-build on a folded ghost row",
+                severity="warning",
+            )
+            return
+        if not e.claude_uuid:
+            self.notify(
+                "No claude UUID tracked for this row — cannot toggle",
+                severity="warning",
+            )
+            return
+        new_state = auto_build_toggle(e.claude_uuid)
+        label = "ON" if new_state else "OFF"
+        self.notify(
+            f"Auto tree-build for [bold]{e.name}[/]: {label}",
+        )
+        self.refresh_sessions()
 
     def action_visualize(self) -> None:
         """Render the current live JSONL as a navigable HTML page.
