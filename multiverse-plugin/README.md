@@ -76,6 +76,8 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 | `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse` |
 | `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden) |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below |
+| `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
+| `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. Refused while the row is `compacting` |
 | `k` | Kill the highlighted session — tmux kill + remove state dir. Refused while the row is `compacting` |
@@ -84,7 +86,7 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 
 **Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
 
-**Dashboard columns**: `ID · Name · Inbox · Status · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks. The Preview column shows the first user message from each session's transcript.
+**Dashboard columns**: `ID · Name · Inbox · Build · Status · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks. The Build column shows `on` (green) / `off` for the per-session auto tree-build toggle — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Preview column shows the first user message from each session's transcript.
 
 **Workspace scope**: each `multiverse` instance is bound to the cwd it was launched from. Sessions in other workspaces are managed by other monitor instances independently. The dashboard surfaces both **multiverse-wrapped** sessions (live or ended) and **dormant named claude sessions** in this cwd that aren't currently wrapped.
 
@@ -162,7 +164,7 @@ Where context folding is range-based and agent-driven, frontier-coherent compact
 
 A `mirror-jsonl.py` hook wired into `UserPromptSubmit` / `Stop` / `SessionEnd` keeps full caught up with live. First-time fire (legacy session) bootstraps full from a verbatim copy of live.
 
-**Auto-build worker on every prompt.** Every `UserPromptSubmit` fires `spawn-tree-builder.py`, which detaches a worker that walks the full JSONL and builds a summary tree for every completed turn (skipping the in-progress one). Trees cache to `~/.multiverse/trees/<uuid>/<turn_id>.json`; subsequent fires only build newly-completed turns. By the time you trigger a manual compaction, the trees are usually already done.
+**Auto-build worker — opt-in per session.** Each tree-build is a privileged `claude --resume` call against a synthetic JSONL — non-trivial latency and rate-limit cost, so it's **off by default**. Flip it on per session with `b` in the dashboard. When enabled (marker file at `~/.multiverse/auto_build/<uuid>`), every `UserPromptSubmit` on that session fires `spawn-tree-builder.py`, which detaches a worker that walks the full JSONL and builds a summary tree for every completed turn (skipping the in-progress one). Trees cache to `~/.multiverse/trees/<uuid>/<turn_id>.json`; subsequent fires only build newly-completed turns. With auto-build on, by the time you trigger a manual compaction the trees are usually already done; without it, the Compact widget spawns an `--all-turns` worker on demand and you wait through the full build.
 
 **Compact widget (`c`).** Pick the highlighted row, press `c`. The widget:
 
@@ -187,10 +189,10 @@ Surviving thinking blocks are emitted verbatim with their original signatures (w
 
 | Setup | Context-fold auto-resume | Inter-agent comms | Multi-session monitor | Compaction (manual `c`) | Auto tree-build |
 |:------|:---|:---|:---|:---|:---|
-| `multiverse` wrapper | ✅ session resumes immediately | ✅ all three tools work | ✅ Textual TUI + tmux | ✅ widget drives the full pipeline | ✅ on every UserPromptSubmit |
-| Plain `claude --plugin-dir …` | ❌ tells you to `claude --resume <id>` | ❌ MCP tools error (env vars unset) | ❌ | ❌ no UI to trigger from | ✅ trees still build in the background |
+| `multiverse` wrapper | ✅ session resumes immediately | ✅ all three tools work | ✅ Textual TUI + tmux | ✅ widget drives the full pipeline | ✅ opt-in per session via `b` |
+| Plain `claude --plugin-dir …` | ❌ tells you to `claude --resume <id>` | ❌ MCP tools error (env vars unset) | ❌ | ❌ no UI to trigger from | ✅ if you create the marker file at `$MULTIVERSE_ROOT/auto_build/<uuid>` by hand |
 
-The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_CWD` env vars, which are only set when the monitor spawns the session via `tmux new-session -e`. Auto tree-building requires only the plugin's hooks, so it works in plain `--plugin-dir` mode as well.
+The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_CWD` env vars, which are only set when the monitor spawns the session via `tmux new-session -e`. Auto tree-building only needs the hooks, so it works in plain `--plugin-dir` mode too — you just have to toggle it on yourself.
 
 ## How it works
 
@@ -220,11 +222,15 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │   ├── .worker.lock            — PID of the running tree-build worker, if any
 │   └── worker.log              — append-only worker log (tailed live by the
 │                                 Compact widget)
-└── compacting/<claude-uuid>.json
-                                — cross-monitor compaction lock (O_EXCL with
-                                  stale-PID recovery). Holding monitor's PID
-                                  in body. Other monitors render the row as
-                                  ``compacting`` and refuse Enter / Kill.
+├── compacting/<claude-uuid>.json
+│                               — cross-monitor compaction lock (O_EXCL with
+│                                 stale-PID recovery). Holding monitor's PID
+│                                 in body. Other monitors render the row as
+│                                 ``compacting`` and refuse Enter / Kill.
+└── auto_build/<claude-uuid>    — empty marker file; presence means
+                                  background auto tree-build is enabled for
+                                  this session. Toggled with ``b`` in the
+                                  dashboard. Default state is OFF (no file).
 ```
 
 Sessions survive monitor restarts — the TUI rebuilds its view from disk every refresh. Inbox files survive everything; they wait until the recipient's hooks fire.
@@ -275,8 +281,10 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
            Detached, runs alongside the tmux session:
 ┌────────────────────────────────────────────────────────┐
 │  Auto tree-build worker (scripts/tree-builder-worker)  │
-│  - Spawned by spawn-tree-builder.py on every           │
-│    UserPromptSubmit (lockfile keeps it singleton)      │
+│  - Spawned by spawn-tree-builder.py on UserPromptSubmit│
+│    IF $MULTIVERSE_ROOT/auto_build/<uuid> exists        │
+│    (per-session opt-in; toggle with `b`).              │
+│    Lockfile keeps it singleton.                        │
 │  - Runs build_tree_priv_cli.py per turn — invokes      │
 │    `claude --resume <synthetic>` against a JSONL we    │
 │    write into ~/.claude/projects/<slug>/<id>.jsonl.    │
@@ -423,7 +431,7 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 - **Marker by uuid, not byte offset.** The mirror tracks "last live row already mirrored" by uuid. Byte offsets break the moment compaction shrinks live; uuid lookup degrades gracefully (an unreachable marker just means "append nothing this round" rather than corrupting full).
 - **Cross-monitor compaction lock is the row's status.** No separate display state — the same `~/.multiverse/compacting/<uuid>.json` file that prevents Enter / Kill is also what triggers the `compacting` status badge in every monitor's dashboard refresh. One mechanism, no drift.
 - **Kill-tmux-only during compaction.** The Compact widget kills the session's tmux pane but leaves the multiverse state dir intact, so the session keeps its name and identity through the compaction. (`sessions.kill_session` does the destructive full reap; the Compact path uses a softer kill function inlined into the widget.)
-- **Auto-build is best-effort, not load-bearing.** Trees are pre-built in the background but the manual Compact path doesn't *require* them — if the auto-worker hasn't finished, the widget waits for it; if it failed entirely, the widget spawns a fresh `--all-turns` worker. Either way the user-visible flow is the same.
+- **Auto-build is opt-in per session, off by default.** Each tree-build is a privileged `claude --resume` call — non-trivial cost. Most sessions never reach compaction, so the default is OFF and the user flips it on (`b`) for the ones they expect to compact. Whether or not auto-build was running, the manual Compact path doesn't *require* pre-built trees: if the auto-worker hasn't finished, the widget waits; if it never ran, the widget spawns a fresh `--all-turns` worker on demand.
 - **Vendored compaction package.** `vendor/compaction/` is a copy of the standalone `compaction/` repo that lives at the monorepo root. Compaction logic moves between the two during development; the vendored copy is the canonical version used by the plugin. `compaction/` itself is gitignored — kept on disk as a scratch workspace.
 
 ## Plugin structure
@@ -464,6 +472,7 @@ multiverse-plugin/
 │   ├── full_jsonl.py         # Two-JSONL helpers: sync_full / bootstrap / token+turn counts
 │   ├── compact_state.py      # Cross-monitor compacting lock (O_EXCL with stale-PID recovery)
 │   ├── compact_runner.py     # Compaction state machine (lock → kill → sync → build → expand → release)
+│   ├── auto_build.py         # Per-session auto tree-build toggle (marker file under auto_build/)
 │   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control, CompactScreen
 │   └── names.py              # Random name pool for new sessions
 ├── vendor/

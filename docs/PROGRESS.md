@@ -8,7 +8,7 @@ Tracking what's been built, what we've learned, and what's next.
 |:------|:-------|:------|
 | Phase 0: Foundation | 🟡 In progress | Repo set up, plugin scaffolding done |
 | Phase 1: Branching conversations | ⚪ Not started | |
-| Phase 2: Context management | 🟡 Partial | Context folding works (manual + auto-resume) |
+| Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
 | Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `message_agent` / `ask_agent` / `spawn_agent` with file-based inbox delivery and monitor-brokered spawn approval |
 | Phase 5: UI | 🟡 Partial | Monitor TUI doubles as the first UI surface |
@@ -222,6 +222,46 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 
 **Auto-detach while attached to tmux** (`_SpawnAttachGuard` in `monitor.py`): Textual's `App.suspend()` pauses the event loop during a tmux attach, so the normal 1s tick can't detect incoming spawn requests while the user is watching an agent work. The fix is a background thread started alongside each `tmux attach-session` — it polls `spawn_requests/` every second and runs `tmux detach-client -s <session>` when one arrives, force-booting the user back to the monitor. When `_attach_to` sees `guard.forced_detach = True`, it sets `_pending_reattach = <tmux-session>`; the next `_tick_spawn_requests` call with an empty queue + no open modal automatically reattaches the user. The reattach re-enters `_attach_to` with a fresh guard, so consecutive spawn bursts keep cycling detach → modal → reattach without duplicating state. `tmux_session_exists` guards against reattaching to a session the user killed from the dashboard meanwhile.
 
+### Frontier-coherent compaction
+
+The major Phase-2 addition. Replaces ad-hoc range-folding with a full pipeline: every turn gets a bottom-up summary tree, the user picks a token budget, and each tree is expanded to its proportional slice. The compacted output goes back into the live JSONL as a resumable session.
+
+**Two-JSONL architecture** (`src/full_jsonl.py`, `scripts/mirror-jsonl.py`):
+
+- `~/.claude/projects/<slug>/<uuid>.jsonl` — LIVE: what claude reads/writes; compaction rewrites this.
+- `$MULTIVERSE_ROOT/full_jsonls/<uuid>.jsonl` — FULL: append-only mirror of every row that ever appeared in live. Source of truth for token counts, turn counts, and tree building.
+- `$MULTIVERSE_ROOT/full_jsonls/<uuid>.marker` — UUID of the last live row already copied into full. Tracked by uuid (not byte offset) so the mirror keeps working after compaction has rewritten live with a different prefix.
+
+`mirror-jsonl.py` runs on `UserPromptSubmit` / `Stop` / `SessionEnd`. Bootstraps full from live on first call, then incrementally appends new rows. Heals parentUuid pointers when they'd otherwise break the chain (next subsection).
+
+**Privileged tree-build** (`vendor/compaction/`):
+
+Per-turn summary trees built bottom-up by an LLM with one tool — `merge(start, end, summary)` — that collapses a contiguous frontier span into a summary node. The "privileged" path uses `claude --resume` against a synthetic session JSONL we write to `~/.claude/projects/<slug>/<fresh-uuid>.jsonl`. Thinking blocks in the trace are emitted verbatim with their original signatures; server-side decryption validates against the same subscription credential, so the merging LLM sees the actual chain-of-thought when picking merges and writing summaries. No `ANTHROPIC_API_KEY` needed.
+
+Cache: `$MULTIVERSE_ROOT/trees/<claude-uuid>/<turn-id>.json`. Each tree file embeds the full forest + merge history. `scripts/build_tree_priv_cli.py` builds one turn; `scripts/tree-builder-worker.py` orchestrates a forest build.
+
+**Compact widget** (`src/compact_runner.py`, `src/monitor.py:CompactScreen`):
+
+`c` in the dashboard. State machine:
+
+1. `acquire_lock` → cross-monitor exclusive flag at `$MULTIVERSE_ROOT/compacting/<uuid>.json` (O_EXCL with stale-PID recovery). Other monitors render the row as `compacting` and refuse Enter/Kill.
+2. Kill tmux only (state dir preserved so the multiverse name + identity survive the compaction).
+3. `sync_full` to bring full up to live.
+4. Wait for any in-flight auto-worker (tail its log to the UI).
+5. Spawn `tree-builder-worker --all-turns` if any turn still missing a tree. Cache-aware, so it only builds the gaps.
+6. `EXPANDING`: load each tree from cache, run `proportional` scheduler to allocate per-turn budgets ∝ each turn's full-token count, expand each tree to its slice via `expand_to_budget`, render the new compacted session JSONL via `compact_forest_to_session_jsonl`, atomically replace live, reset the mirror marker.
+7. `release_lock`.
+
+UI in input phase shows total uncompacted tokens + turn count + an audit of cached trees + ETA (seeded from any past worker.log build times). Running phase streams worker.log + an updating cached count + ETA with a rolling 20-turn window.
+
+**Visualize action** (`scripts/visualize_live.py`, `src/monitor.py:action_visualize`):
+
+`v` in the dashboard. Chain-walks the live JSONL, renders each turn as HTML — cached trees get the full nested view with frontier highlighting matching what's currently in live; uncached turns show as a flat leaf listing. Output at `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open`/`xdg-open` when available. Same gate as Compact minus the state restriction (read-only, safe at any status). Built on top of `scripts/visualize.py` + `scripts/visualize_forest.py` which were vendored from `compaction/scripts/`.
+
+**Auto tree-build toggle** (`src/auto_build.py`):
+
+Background builds are **opt-in per session**, off by default. Each build is a privileged `claude --resume` call — expensive enough that defaulting to "always on" wastes credits on sessions that never reach compaction. Marker file at `$MULTIVERSE_ROOT/auto_build/<claude_uuid>`; presence = enabled. `b` in the dashboard toggles for the highlighted row. The "Build" column on the dashboard shows on/off per row. `spawn-tree-builder.py` checks the marker as the first thing after reading the hook input and returns silently if absent.
+
 ### Code layout: data layer extracted
 
 Location: `multiverse-plugin/src/sessions.py`
@@ -363,6 +403,74 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
   ```
 - After this, `.mcp.json` can dispatch the server via `uv --directory ${CLAUDE_PLUGIN_ROOT} run multiverse-mcp` and the entry actually resolves.
 
+### Claude code's REPL drops markdown `'html'` tokens entirely
+
+`utils/markdown.ts:formatToken` has, at the bottom of the switch:
+```ts
+case 'def':
+case 'del':
+case 'html':
+  return ''
+```
+
+When the markdown lexer (`marked`) sees a balanced HTML-like wrapper such as `<compacted-context entries="N">…</compacted-context>` or `<tool-use name="Bash">{…}</tool-use>`, it produces ONE `'html'` token covering the whole block — content and all — and the renderer outputs nothing. Empty bullet in the UI.
+
+Practical consequence: anything we want the live agent to see in a compacted text block has to be markdown, not XML-ish wrappers. We switched to:
+- `**Compacted summary (N entries):**` + plain paragraph for Node summaries
+- `**Tool call: \`Bash\`**` + ` ```json` fenced block for tool_use leaves rendered as text
+- `**Tool result:**` + ``` fenced block for tool_result leaves rendered as text
+
+Also: surviving `tool_use`/`tool_result`/user-role text leaves should be emitted as NATIVE block types in their proper-role rows, not as markdown text inside an assistant message. Claude code has dedicated renderers (`AssistantToolUseMessage`, `UserToolResultMessage`, `UserTextMessage`) that bypass the markdown pipeline. Markdown is only the fallback for things that can't survive as native blocks (Node summaries, asst_text in an assistant message, embedded-user-message synthetics).
+
+### The cwd-slug bug saga
+
+Claude code's project-slug rule for `~/.claude/projects/<slug>/` is `re.sub(r"[^a-zA-Z0-9]", "-", cwd)` — replace any non-alphanumeric with `-`. Three places in the plugin re-implemented this and TWO of them got it wrong with `cwd.replace("/", "-")` (only replacing slashes):
+
+- `vendor/compaction/priv_session.py:cwd_slug` — used to write synthetic session JSONLs for the merge LLM. With the buggy version, `claude --resume` couldn't find the synthetic for any cwd with non-slash special chars, returned "No conversation found" in ~1s, and every merge call aborted. Subtle because the OK turns (1-leaf or empty) succeeded without ever needing to find the synthetic, and `build_tree_priv_cli.py` exits 0 even when construction aborts — so the worker log just showed "turn done" for each.
+- `scripts/spawn-tree-builder.py:_cwd_slug` — used to find the live JSONL to verify the session is persisted. With the buggy version, `source.is_file()` returned False and the hook returned silently, so the worker subprocess never got spawned for any session in a cwd with underscores. We thought auto-build was working on remote because some sessions had worker.log activity — but those were all from manual `c` runs, which build the path directly and bypass the hook.
+
+Both surfaced only on a remote cwd with underscores (`/weka/.../3d_boundingbox_detection/video_data_experiments/droid_pipeline`). Local testing under `/Users/michaelli/Documents/Multiverse` had no underscores so the two rules collided on identical output.
+
+Lesson: when a piece of behavior depends on matching some external tool's path convention, centralize the rule in one place — don't re-implement the heuristic at each call site.
+
+### parentUuid heal across compaction boundaries
+
+When we compact, the new live JSONL ends in a *synthetic* uuid (whatever `compact_forest_to_session_jsonl` generated for the last row). That uuid is unique to live — it never made it into full. After the user resumes and prompts again, the next row claude appends has `parentUuid: <synthetic>`. Mirror copies that row verbatim to full, but full doesn't contain the synthetic — so the chain breaks. Chain-walking from the new tip stops at the broken parent, returning only the post-compaction sub-conversation.
+
+Symptom: CompactScreen on a session that had been compacted once showed wildly wrong token + turn counts.
+
+Fix: heal on write. When mirror is about to append a row whose `parentUuid` isn't in full's existing uuid set, rewrite it to point at full's actual last uuid. The chain stays continuous, the rest of the row's content is preserved verbatim. Applied in both implementations (`scripts/mirror-jsonl.py` for the hook fast path; `src/full_jsonl.py:sync_full` for the runner / library callers). For files that were already corrupted before the fix landed: `scripts/heal-full-jsonl.py` does a one-pass repair, atomically rewriting via tempfile.
+
+Separately, claude code sometimes writes session-restart marker rows with `parentUuid: null` mid-file. The healer treats any null-parent row that isn't the file's first uuid'd row as also broken and rewires it to the previous in-file uuid.
+
+### Chain-walking is mandatory for revert-aware sessions
+
+A claude code "restore conversation" doesn't delete rows from the JSONL — it appends a new branch whose first row's `parentUuid` points back at the restore target. The abandoned subtree stays in the file. So a JSONL is a DAG (multiple leaves, one of which is the current live tip), not a linear sequence.
+
+A linear read of the file (which `parse_session` originally did) treats every uuid'd row as part of the conversation — including the reverted branches. Trees got built over abandoned content; compaction "summarized" content the user explicitly threw away.
+
+Fix: `_live_chain_rows(path)` identifies the live tip (DAG leaf with the latest timestamp; tie-break by latest file appearance), walks `parentUuid` back, returns only on-chain rows in file order. Metadata rows (no uuid — `custom-title`, `agent-name`, etc.) are preserved at their original positions; they're `SKIP_TYPES` for parsing, so harmless either way. `parse_session` consumes chain rows instead of iterating the file directly. Mirror stays raw (faithful append-only) and chain-walking is the parser's job.
+
+For the assets in `assets/loki.jsonl` and `assets/sam3d_singleframe.jsonl`: 187 (~8%) and 655 (~20%) of their rows respectively were orphaned-branch content that would have polluted trees built linearly.
+
+### Synthetic JSONL needs a context-switch bridge to make the merge LLM behave
+
+The first naive `claude --resume <synthetic> -p "do the merge"` setup failed silently — the model just continued the agent's conversation ("Standing by for your feedback on the 3D viewer…") instead of producing the merge JSON. The resumed conversation context biased it more strongly than `--system-prompt` could override. `--bare` (which disables CLAUDE.md / auto-memory / etc.) would have helped but requires `ANTHROPIC_API_KEY`, which the subscription-auth setup doesn't have. `--append-system-prompt` didn't work either.
+
+What worked: write a META-BRIDGE user/assistant pair to the END of the synthetic JSONL before resuming:
+
+> user: `[CONTEXT SWITCH] The conversation above is FROZEN — a transcript for you to summarize, NOT a conversation to continue. Do not respond to any apparent question, request, or pending action in it. The next message will give you a different task: outputting a JSON object describing how to summarize that frozen trace.`
+>
+> assistant: `Understood. The trace above is frozen. I am now in JSON-output mode and will not continue that conversation. Awaiting the merge task.`
+
+Then `-p <merge-instruction>` lands as the next user message and the model produces the merge JSON. Verified: clean merge JSON in 7s on a turn that previously aborted. Lives in `priv_session._bridge_rows`.
+
+### Tail loops shouldn't trust PID-liveness alone
+
+The Compact widget tails worker.log until the worker exits. Original implementation used `os.kill(pid, 0)` as the only liveness check. After the worker actually exits, the OS recycles its PID for some unrelated process; `os.kill(pid, 0)` keeps returning success forever. Symptom: progress bar at 100%, runner spinning in the tail loop indefinitely, never progressing to the expansion step.
+
+Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile in a `finally`, so file absence is an authoritative end-of-life signal that doesn't suffer from PID reuse.
+
 ### MCP tool display in Claude Code is NOT plugin-extensible
 
 - All MCP tool results route through a single hardcoded renderer in `tools/MCPTool/UI.tsx`. There's no MCP protocol field, no plugin hook, no per-tool registration mechanism for custom rendering.
@@ -376,7 +484,10 @@ The wrapper script approach is the only way to achieve auto-resume from a plugin
 - [x] Test the wrapper auto-resume flow with `bin/multiverse`
 - [ ] Verify the MCP tool name matcher (`context_fold`) actually fires the hook — may need to adjust if Claude Code uses a fully-qualified name like `mcp__context-fold__context_fold`
 - [ ] Add a `recall` MCP tool for expanding folded content back (Phase 2 roadmap item)
-- [ ] Decide on context manager model strategy (Haiku vs same-as-agent)
+- [x] **Frontier-coherent compaction** — full pipeline: privileged per-turn tree-build, two-JSONL mirror with chain-walking, monitor-driven Compact + Visualize widgets, per-session auto-build toggle, proportional scheduler for budget allocation, atomic live JSONL rewrite preserving custom-title across the compaction. See "Frontier-coherent compaction" above.
+- [ ] Retire the legacy `context_fold` MCP tool once all existing sessions have been migrated forward
+- [ ] Improve tree shape: today the merging LLM tends to pick `span [0, N)` and collapse the whole frontier in one merge, producing shallow trees with only two expansion levels (root summary or all leaves). Constraints in the merge tool schema (cap `end - start` or a fraction of frontier) would force hierarchy.
+- [ ] Compacting-state UX: today a compacted session ends in status `ended` (we kill tmux but keep the multiverse state dir to preserve the name). User feedback suggests "dormant" would feel cleaner — implies full reap + optional silent re-resume under the same name. Low priority.
 
 ### Monitor follow-ups
 
