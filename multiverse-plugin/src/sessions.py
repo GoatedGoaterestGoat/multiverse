@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from . import forks
 from .compact_state import list_locked
 from .paths import claude_projects_dir, multiverse_dir
 
@@ -395,9 +396,18 @@ def build_dashboard_rows(
     ``resumed_from``, or if it's listed in ``hide_uuids`` (used for in-flight
     ask-all fork JSONLs).
     """
+    # Reap stale ask-fork registry entries (and any orphaned fork JSONLs)
+    # before we read the registry below.
+    forks.gc()
+
     rows: list[DashboardRow] = []
 
     wrapped_uuids: set[str] = set(hide_uuids or ())
+    # Ask-fork JSONLs inherit the origin's custom-title, so without this
+    # they'd surface as phantom dormant agents. The on-disk fork registry
+    # covers forks spawned by ANY process (TUI ask-all AND agent-initiated
+    # ask_agent) — hiding them from the dashboard and from list_agents.
+    wrapped_uuids |= forks.active_uuids()
     for s in sessions:
         u = s.effective_claude_uuid
         if u:

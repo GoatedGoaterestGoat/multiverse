@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import forks
 from .paths import claude_projects_dir
 
 
@@ -116,6 +117,7 @@ def _ask_one(
 
     fork_uuid = str(_uuid.uuid4())
     wrapped = SIDE_QUESTION_WRAPPER + question
+    jsonl = CLAUDE_PROJECTS_DIR / _encode_cwd(target.cwd) / f"{fork_uuid}.jsonl"
 
     cmd = ["claude"]
     if plugin_root:
@@ -131,6 +133,11 @@ def _ask_one(
 
     if register_fork:
         register_fork(fork_uuid, True)
+    # Register in the on-disk fork registry BEFORE spawning. This is what
+    # keeps the fork hidden from the dashboard / list_agents — and, unlike
+    # the monitor's in-memory set, it survives a kill mid-ask (when the
+    # `finally` below never runs). gc() reaps the orphan + this entry later.
+    forks.mark_active(fork_uuid, jsonl)
 
     start = time.time()
     err: Optional[str] = None
@@ -157,11 +164,11 @@ def _ask_one(
     except Exception as e:  # noqa: BLE001 — surface anything else as error text
         err = f"subprocess error: {e}"
     finally:
-        jsonl = CLAUDE_PROJECTS_DIR / _encode_cwd(target.cwd) / f"{fork_uuid}.jsonl"
         try:
             jsonl.unlink(missing_ok=True)
         except OSError:
             pass
+        forks.mark_done(fork_uuid)
         if register_fork:
             register_fork(fork_uuid, False)
 
