@@ -4,7 +4,7 @@
 Wired to SessionStart, UserPromptSubmit, and Stop. On each fire:
   1. Read pending messages from this agent's inbox
      (~/.multiverse/inbox/<encoded-cwd>/<name>/*.json)
-  2. If empty → exit silently (the common case, ~50ms tax per hook fire).
+  2. If empty → exit silently (the common case, ~30ms tax per hook fire).
   3. Otherwise → return injection JSON sized to the firing hook event,
      then delete the consumed files so the next hook fire sees an empty
      inbox.
@@ -16,36 +16,29 @@ Output format depends on the hook event:
     as a synthetic user message, triggering another model turn — exactly
     the wakeup we want when an inbox arrives mid-task.)
 
-Stdlib-only on purpose: invoked per hook fire, so we want a fast Python
-startup with no uv overhead.
+The agent-callable ``check_inbox`` MCP tool reuses the same renderer +
+consume path (``src.inbox.render_messages_as_system_reminder`` +
+``consume_messages``) so a hook-delivered batch and a tool-delivered
+batch are byte-identical.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import sys
-import time
 from pathlib import Path
 
+# Make `src` package importable so we can share the formatter + consume
+# logic with the MCP-tool path. src.inbox + src.paths are stdlib-only;
+# src/__init__.py is empty — total import overhead is single-digit ms.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-def _multiverse_dir() -> Path:
-    """Canonical multiverse state dir (see src/paths.py for rationale)."""
-    explicit = os.environ.get("MULTIVERSE_ROOT")
-    if explicit:
-        return Path(explicit)
-    status = os.environ.get("MULTIVERSE_STATUS")
-    if status:
-        return Path(status).parent.parent.parent
-    return Path(os.path.expanduser("~/.multiverse"))
-
-
-INBOX_DIR = _multiverse_dir() / "inbox"
-
-
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+from src.inbox import (  # noqa: E402
+    consume_messages,
+    list_pending_messages,
+    render_messages_as_system_reminder,
+)
 
 
 def _read_input() -> dict:
@@ -58,95 +51,22 @@ def _read_input() -> dict:
         return {}
 
 
-def _gather_messages(inbox: Path) -> list[dict]:
-    if not inbox.is_dir():
-        return []
-    out: list[dict] = []
-    for path in inbox.glob("*.json"):
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            continue
-        data["__path"] = str(path)
-        out.append(data)
-    out.sort(key=lambda d: d.get("ts", 0))
-    return out
-
-
-def _consume(messages: list[dict]) -> None:
-    for m in messages:
-        path = m.get("__path")
-        if not path:
-            continue
-        try:
-            Path(path).unlink()
-        except OSError:
-            pass
-
-
-def _fmt_lines(text: str, prefix: str = "> ") -> list[str]:
-    if not text:
-        return [f"{prefix}(empty)"]
-    return [f"{prefix}{line}" for line in text.splitlines() or [text]]
-
-
-def _render(messages: list[dict]) -> str:
-    n = len(messages)
-    plural = "s" if n != 1 else ""
-    parts: list[str] = []
-    parts.append("<system-reminder>")
-    parts.append(
-        f"[Multiverse Inter-Agent] You have received {n} new "
-        f"message{plural} from other agents in your workspace."
-    )
-    parts.append("")
-    for i, m in enumerate(messages, 1):
-        from_name = m.get("from", "?")
-        body = m.get("body", "")
-        ts = m.get("ts", 0)
-        ts_str = (
-            time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
-        )
-
-        parts.append("─" * 56)
-        parts.append(f"[{i}/{n}] Message from agent: {from_name}")
-        parts.append(f"        received: {ts_str}")
-        parts.append("")
-        parts.extend(_fmt_lines(body))
-        parts.append("")
-
-    parts.append("─" * 56)
-    parts.append(
-        "You may use any tools (Read, Bash, Grep, etc.) to act on these "
-        "messages. To reply to a sender, call the `message_agent` tool "
-        "with their name as the target. Replies are not required — only "
-        "respond if it's useful."
-    )
-    parts.append("</system-reminder>")
-    return "\n".join(parts)
-
-
 def main() -> None:
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     name = os.environ.get("MULTIVERSE_SESSION_NAME")
     if not cwd or not name:
         return  # not running under multiverse
 
-    inbox = INBOX_DIR / _encode_cwd(cwd) / name
-    messages = _gather_messages(inbox)
+    messages = list_pending_messages(cwd, name)
     if not messages:
         return  # nothing to deliver
 
     hook_input = _read_input()
     event = hook_input.get("hook_event_name") or "UserPromptSubmit"
 
-    body = _render(messages)
+    body = render_messages_as_system_reminder(messages)
 
     if event == "Stop":
-        # Stop hook can't return additionalContext — but decision:block with
-        # `reason` becomes a synthetic user message ("Stop hook feedback:\n…")
-        # and triggers another model turn, which is exactly the wakeup we
-        # want when an inbox arrives mid-task.
         out = {"decision": "block", "reason": body}
     else:
         out = {
@@ -157,7 +77,7 @@ def main() -> None:
         }
 
     print(json.dumps(out))
-    _consume(messages)
+    consume_messages(messages)
 
 
 if __name__ == "__main__":

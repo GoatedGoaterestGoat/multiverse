@@ -39,7 +39,12 @@ from src.sessions import (
     find_agent_by_name,
     list_named_agents_in_cwd,
 )
-from src.inbox import write_message_to_inbox
+from src.inbox import (
+    consume_messages,
+    list_pending_messages,
+    render_messages_as_tool_result,
+    write_message_to_inbox,
+)
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
 from src.spawn_requests import (
@@ -390,6 +395,40 @@ def message_agent(target_name: str, message: str) -> str:
     is_dormant = target.session is None or target.status == "ended"
     suffix = " (dormant; will be delivered when the user resumes)" if is_dormant else ""
     return f"Message queued for '{target_name}'{suffix}."
+
+
+@mcp.tool()
+def check_inbox() -> str:
+    """Read pending inbox messages now, without waiting for a hook to fire.
+
+    Normally inbox messages are delivered automatically as a system-reminder
+    on your next ``SessionStart`` / ``UserPromptSubmit`` / ``Stop`` hook. If
+    you want to check mid-turn — say, you just sent a ``message_agent`` and
+    suspect a reply has arrived, or you're in a long-running task and want
+    to drain anything that piled up — call this.
+
+    Returns either a system-reminder block (identical to the hook-delivered
+    format) containing every pending message, OR the literal string
+    ``"You have no pending inbox messages."`` when the inbox is empty.
+
+    Calling this **clears your inbox** — exactly like a hook delivery. So
+    don't call it without intending to act on the messages.
+    """
+    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    if not cwd or not name:
+        return (
+            "Error: this tool requires running inside a multiverse-managed "
+            "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
+        )
+
+    messages = list_pending_messages(cwd, name)
+    if not messages:
+        return "You have no pending inbox messages."
+
+    rendered = render_messages_as_tool_result(messages)
+    consume_messages(messages)
+    return rendered
 
 
 @mcp.tool()
