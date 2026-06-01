@@ -167,7 +167,11 @@ class QuickTunnelProvider:
                 "cloudflared not found. Install it (brew install cloudflared "
                 "/ apt-get install cloudflared) or pick a different backbone."
             )
-        logf = open(log_path, "ab", buffering=0)
+        # Truncate (wb): the share dir is reused across stop/start for this
+        # cwd, so an APPENDED log would let _scrape_url match a PREVIOUS run's
+        # stale trycloudflare URL sitting at the top of the file. A fresh log
+        # means the scraper only ever sees this run's URL.
+        logf = open(log_path, "wb", buffering=0)
         proc = subprocess.Popen(
             ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{local_port}"],
             stdout=logf,
@@ -231,7 +235,7 @@ class NamedCloudflareProvider:
                 "MULTIVERSE_WEB_HOSTNAME set (one-time setup — see "
                 "docs/remote-access.md)."
             )
-        logf = open(log_path, "ab", buffering=0)
+        logf = open(log_path, "wb", buffering=0)  # fresh log per share (see Quick)
         proc = subprocess.Popen(
             ["cloudflared", "tunnel", "run", self.tunnel],
             stdout=logf,
@@ -370,7 +374,7 @@ def start(
     # rely on bin/multiverse's `$PWD` default. (bin/multiverse respects a
     # pre-set MULTIVERSE_ORIG_CWD.)
     child_env = {**os.environ, "MULTIVERSE_ORIG_CWD": cwd_abs}
-    ttyd_log = open(sdir / "ttyd.log", "ab", buffering=0)
+    ttyd_log = open(sdir / "ttyd.log", "wb", buffering=0)  # fresh per share
     ttyd_proc = subprocess.Popen(
         ttyd_cmd,
         stdout=ttyd_log,
