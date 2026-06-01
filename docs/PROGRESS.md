@@ -11,7 +11,7 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
 | Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `message_agent` / `ask_agent` / `spawn_agent` with file-based inbox delivery and monitor-brokered spawn approval |
-| Phase 5: UI | 🟡 Partial | Monitor TUI doubles as the first UI surface |
+| Phase 5: UI | 🟡 Partial | Monitor TUI as the first UI surface; remote browser access via the `w` web share (ttyd-over-monitor + outbound tunnel) |
 | Phase 6: Polish & distribution | ⚪ Not started | |
 
 ## What's been built
@@ -272,7 +272,73 @@ The pure data layer (no Textual, no in-process state) was extracted from `monito
 
 `spawn_requests.py` is a tiny sibling module for the spawn-request filesystem protocol: atomic request writes, `O_EXCL`-atomic resolution writes (so racing monitors can't double-resolve), and staleness checks. Used by both the MCP server (`spawn_agent` tool) and the monitor's request watcher.
 
+### Remote access — web share (`w`)
+
+The Option-C remote-dashboard MVP (full setup in `multiverse-plugin/`-relative
+[`docs/remote-access.md`](remote-access.md)). A monitor keybinding (`w`) toggles
+an **ephemeral, per-workspace web share** so the dashboard — including
+live-attach into a running agent — is reachable from any browser.
+
+Location: `multiverse-plugin/src/web_share.py` (headless lifecycle), wired into
+`src/monitor.py` (`WebShareScreen`, `action_share_web`, `🌐 web: ON` header tag).
+`bin/multiverse` sources `$MULTIVERSE_ROOT/web-tunnel.env` and `setup` advises on
+the `ttyd` / `cloudflared` deps.
+
+**Architecture** (all co-located on the box — coordination is local tmux + files):
+
+```
+browser (xterm.js via ttyd) → outbound tunnel → ttyd -W -i 127.0.0.1 -c mv:<token>
+  → tmux new-session -A -s mvweb-<hash> -c <cwd> bin/multiverse
+    (a dedicated monitor scoped to that one workspace)
+```
+
+- **Live-attach works** here (unlike `textual serve`) because ttyd gives the
+  monitor a real PTY, so its `_attach_to` (`with self.suspend(): tmux
+  attach-session`) behaves as on a local terminal.
+- The share runs **detached, so it survives the local TUI quitting** — close
+  your terminal and keep controlling remotely. On-disk record at
+  `$MULTIVERSE_ROOT/web_shares/<hash>/record.json`; any later monitor for the cwd
+  shows it ON and can stop it (`w` → `s`); `web_share.status()` reaps a share
+  whose processes died.
+- Pluggable `TunnelProvider`: `quick` (cloudflared quick tunnel + ttyd token,
+  zero-setup, default) and `cloudflare` (named tunnel + Access; auth policy set
+  in Cloudflare — free SSO or paid mTLS).
+
+**Auth model** (defense in depth): the share is effectively an RCE endpoint (a
+writable terminal into a full-tool-access claude + the box env), so auth is
+mandatory and the gate must cover the WebSocket. ttyd binds loopback only; TLS
+terminates at the tunnel; a per-share token (`ttyd -c`, covers the WS) is
+minted/revoked per share; edge identity (Cloudflare Access SSO or mTLS) is the
+strong outer gate.
+
+**Decision trail**: overlay VPNs (Tailscale/ZeroTier) were rejected — both need
+the *remote* box enrolled in the mesh (can't be promised; ZeroTier also wants
+root+TUN). IP-allowlisting was rejected — only the public egress IP is visible
+(dynamic/NAT-shared/weak). Landed on Cloudflare named tunnel + Access, with the
+ttyd token as a second factor.
+
+**Status**: built + import-checked; not yet run end-to-end (needs `ttyd` +
+`cloudflared` on a box). The one-time Cloudflare setup is user-side.
+
 ## What we learned
+
+### Remote web access: textual-serve can't attach; Cloudflare mTLS is paid
+
+- `textual serve` / textual-web **cannot** deliver live-attach: `App.suspend()`
+  is a documented no-op when served (no controlling TTY), so the monitor's
+  suspend + `tmux attach` silently breaks. Wrapping the monitor in **ttyd**
+  instead works, because ttyd hands the app a real PTY. That's why the web share
+  is ttyd-over-monitor, not `textual serve`.
+- Cloudflare Access **mTLS with your own CA is a paid feature** (Business+); the
+  free plan can't use a custom CA in Access policies (free-plan users hit
+  "maximum certificates reached" with 0 certs). Free Zero Trust **does** include
+  Access **SSO / one-time-PIN** identity policies — strong per-user auth, any
+  browser, no install. So device-binding (mTLS) is paid; identity-binding (SSO)
+  is free. There is no "cloudflared account" — just a (free) Cloudflare account +
+  a domain; `cloudflared` is only the connector binary.
+- Overlay VPNs (Tailscale/ZeroTier) give device-key auth but require the *remote*
+  box to join the mesh — a non-starter when you can't enroll a daemon there (and
+  ZeroTier needs root + a TUN device, worse for locked-down containers).
 
 ### About `/compact` (from claude-code-src exploration)
 
@@ -538,6 +604,7 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 
 ### Phase 5: UI
 
+- [x] **Remote access — web share (`w`)**: ephemeral per-workspace ttyd-over-monitor + outbound tunnel (Cloudflare named/quick), per-share token + edge auth (Access SSO free / mTLS paid). Built; not yet run end-to-end. See [`docs/remote-access.md`](remote-access.md).
 - [ ] Web/TUI for timeline visualization
 - [ ] Branch/merge controls
 - [ ] Live tail of agent conversations

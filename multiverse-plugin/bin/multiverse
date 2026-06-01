@@ -70,6 +70,16 @@ if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
     && mv "$MULTIVERSE_ENV_FILE.tmp" "$MULTIVERSE_ENV_FILE"
 fi
 
+# Optional: remote web-share config (the `w` action in the monitor). If
+# present, source it so the monitor — and the ttyd / cloudflared it spawns,
+# and the dedicated web monitor inside them — all inherit the backbone
+# selection and named-tunnel settings. See docs/remote-access.md.
+MULTIVERSE_WEB_ENV_FILE="${MULTIVERSE_ROOT}/web-tunnel.env"
+if [ -f "$MULTIVERSE_WEB_ENV_FILE" ]; then
+  # shellcheck disable=SC1090
+  . "$MULTIVERSE_WEB_ENV_FILE"
+fi
+
 prompt_yes() {
   local reply
   read -r -p "$1 [y/N] " reply
@@ -145,6 +155,21 @@ run_setup() {
 
   echo "[multiverse setup] Running 'uv sync' in $PLUGIN_ROOT..."
   (cd "$PLUGIN_ROOT" && uv sync)
+
+  # Optional deps for remote web sharing (the `w` action). Not required for
+  # core monitor use, so advise rather than fail.
+  local web_missing=()
+  for dep in ttyd cloudflared; do
+    command -v "$dep" &>/dev/null || web_missing+=("$dep")
+  done
+  if [ "${#web_missing[@]}" -gt 0 ]; then
+    echo "[multiverse setup] Optional (web share, the 'w' action): missing ${web_missing[*]}."
+    echo "[multiverse setup]   ttyd:        brew install ttyd   /   apt-get install ttyd"
+    echo "[multiverse setup]   cloudflared: brew install cloudflared   /   https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+    echo "[multiverse setup]   Then see docs/remote-access.md to configure the 'w' web share."
+  else
+    echo "[multiverse setup] Web-share deps OK (ttyd, cloudflared)."
+  fi
 
   echo "[multiverse setup] Done. Launch with: multiverse"
 }

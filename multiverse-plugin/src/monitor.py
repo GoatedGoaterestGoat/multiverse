@@ -75,6 +75,7 @@ from .spawn_requests import (
     request_path,
     write_resolution,
 )
+from . import web_share
 
 
 STATUS_STYLES = {
@@ -447,6 +448,116 @@ class AskResultsScreen(ModalScreen[None]):
         yield VerticalScroll(*blocks, id="ask-results-dialog")
 
     def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class WebShareScreen(ModalScreen[None]):
+    """Start / stop an ephemeral web share for this workspace.
+
+    Pressing ``w`` opens this panel. When off, Enter launches a
+    browser-reachable terminal into a *dedicated* monitor for this cwd
+    (ttyd on loopback → your configured tunnel + auth), and shows the URL +
+    per-share token. When on, ``s`` tears it down. The share runs as
+    detached processes, so it survives this monitor quitting — that's the
+    point (keep controlling from a laptop after you close the local TUI);
+    any later monitor for this cwd shows it's ON and can stop it.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("enter", "start", "Start"),
+        Binding("s", "stop", "Stop"),
+    ]
+
+    def __init__(self, cwd: str) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                "[bold]Web share[/] — remote browser control of this workspace",
+                id="web-title",
+            ),
+            Static("", id="web-body"),
+            Static("", id="web-hint"),
+            id="web-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self._render()
+
+    def _render(self) -> None:
+        body = self.query_one("#web-body", Static)
+        hint = self.query_one("#web-hint", Static)
+        share = web_share.status(self.cwd)
+        if share is None:
+            backbone = web_share.configured_provider_name()
+            body.update(
+                "Status: [dim]off[/]\n\n"
+                "Starting exposes a browser terminal into a monitor for "
+                "[bold]this workspace only[/], behind your configured tunnel "
+                "and auth.\n"
+                "[yellow]⚠ This is a remote shell into a full-tool-access "
+                "agent — keep it short-lived and stop it when done.[/]\n\n"
+                f"Backbone: [bold]{backbone}[/]"
+            )
+            hint.update("[b]Enter[/] start share · [b]Esc[/] cancel")
+        else:
+            body.update(
+                "Status: [bold green]ON[/]\n\n"
+                f"URL:   [bold]{share.url}[/]\n"
+                "User:  [bold]mv[/]\n"
+                f"Token: [bold]{share.token}[/]\n"
+                f"Backbone: {share.provider}\n\n"
+                "[dim]Open the URL on an authorized device. The token is the "
+                "second factor; device/SSO auth (if configured) is enforced "
+                "at the tunnel edge before this.[/]"
+            )
+            hint.update("[b]s[/] stop share · [b]Esc[/] close (share keeps running)")
+
+    def action_start(self) -> None:
+        if self._busy or web_share.status(self.cwd) is not None:
+            return
+        self._busy = True
+        self.query_one("#web-body", Static).update(
+            "[cyan]Starting share… bringing up the tunnel (can take ~10–30s).[/]"
+        )
+        self.query_one("#web-hint", Static).update("[dim]please wait…[/]")
+        self._change_worker(start=True)
+
+    def action_stop(self) -> None:
+        if self._busy or web_share.status(self.cwd) is None:
+            return
+        self._busy = True
+        self.query_one("#web-body", Static).update("[cyan]Stopping share…[/]")
+        self.query_one("#web-hint", Static).update("[dim]please wait…[/]")
+        self._change_worker(start=False)
+
+    @work(thread=True, group="web_share")
+    def _change_worker(self, start: bool) -> None:
+        err: Optional[str] = None
+        try:
+            if start:
+                web_share.start(self.cwd)
+            else:
+                web_share.stop(self.cwd)
+        except Exception as exc:  # surface tunnel/ttyd failures to the panel
+            err = str(exc)
+        self.app.call_from_thread(self._after_change, err)
+
+    def _after_change(self, err: Optional[str]) -> None:
+        self._busy = False
+        if err:
+            self.query_one("#web-body", Static).update(f"[red]Failed:[/] {err}")
+            self.query_one("#web-hint", Static).update("[b]Esc[/] close")
+            return
+        self._render()
+
+    def action_close(self) -> None:
+        if self._busy:
+            return
         self.dismiss(None)
 
 
@@ -947,6 +1058,25 @@ class MonitorApp(App):
         color: $text-muted;
         padding-top: 1;
     }
+    #web-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #web-title {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #web-body {
+        height: 1fr;
+    }
+    #web-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     #spawn-dialog {
         width: 100%;
         height: 100%;
@@ -1027,6 +1157,7 @@ class MonitorApp(App):
         Binding("v", "visualize", "Visualize"),
         Binding("b", "toggle_auto_build", "Build on/off"),
         Binding("a", "ask_all", "Ask all"),
+        Binding("w", "share_web", "Web share"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
         Binding("r", "refresh", "Refresh"),
@@ -1090,6 +1221,18 @@ class MonitorApp(App):
         )
         self._redraw_table()
         self._tick_spawn_requests()
+        self._update_web_indicator()
+
+    def _update_web_indicator(self) -> None:
+        """Reflect web-share state in the header subtitle. ``status`` also
+        reaps a share whose processes have died, so this doubles as cleanup.
+        """
+        try:
+            share = web_share.status(self.monitor_cwd)
+        except Exception:
+            share = None
+        tag = "  ·  🌐 web: ON" if share is not None else ""
+        self.sub_title = f"cwd: {self.monitor_cwd}{tag}"
 
     def _tick_spawn_requests(self) -> None:
         """One pass of the spawn-request watcher. Called every 1s.
@@ -1403,6 +1546,20 @@ class MonitorApp(App):
         ok = sum(1 for r in results if r.response and not r.error)
         self.notify(f"Got {ok}/{len(results)} response(s)")
         self.push_screen(AskResultsScreen(question, results))
+
+    def action_share_web(self) -> None:
+        """Toggle remote browser control of this workspace (the `w` key).
+
+        Opens a panel that starts/stops an ephemeral, per-workspace web
+        share: a ttyd bound to loopback serving a dedicated monitor for
+        this cwd, exposed via the configured tunnel + auth. Workspace-level
+        (not row-level), so selection doesn't matter.
+        """
+
+        def _on_close(_: None) -> None:
+            self.refresh_sessions()
+
+        self.push_screen(WebShareScreen(self.monitor_cwd), _on_close)
 
     def action_kill(self) -> None:
         e = self._current_entry()
