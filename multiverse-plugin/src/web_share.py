@@ -345,10 +345,15 @@ def start(
     web_tmux = web_tmux_name(sid)
     launcher = str(Path(plugin_root) / "bin" / "multiverse")
 
-    # ttyd serves xterm.js and runs the inner command as its PTY child.
-    # `tmux new-session -A` attaches-or-creates, so browser reconnects land
-    # back in the same monitor. `-c <cwd>` makes bin/multiverse derive the
-    # right MULTIVERSE_ORIG_CWD. Bound to loopback; basic-auth gates the WS.
+    # ttyd serves xterm.js and runs the monitor DIRECTLY as its PTY child —
+    # deliberately NOT inside a `tmux new-session`. If the monitor ran inside
+    # tmux, its attach path (`with self.suspend(): tmux attach-session`) would
+    # be a NESTED attach ($TMUX set) and tmux would refuse it — the browser
+    # would never attach (UI just refreshes). Running bare makes web attach
+    # behave exactly like local attach (single layer; normal Ctrl-b d detach).
+    # Trade-off: ttyd respawns the monitor on browser reconnect — fine, the
+    # monitor is a stateless viewer and the claude sessions it manages persist.
+    # Bound to loopback; basic-auth (-c) gates the HTTP page and the WS.
     ttyd_cmd = [
         "ttyd",
         "-i", "127.0.0.1",
@@ -358,10 +363,13 @@ def start(
     ]
     if writable:
         ttyd_cmd.append("-W")
-    ttyd_cmd += [
-        "tmux", "new-session", "-A", "-s", web_tmux, "-c", cwd_abs, launcher,
-    ]
+    ttyd_cmd.append(launcher)
 
+    # Scope the in-browser monitor to the shared workspace via env: the ttyd
+    # child's process cwd is the plugin root, not the workspace, so we can't
+    # rely on bin/multiverse's `$PWD` default. (bin/multiverse respects a
+    # pre-set MULTIVERSE_ORIG_CWD.)
+    child_env = {**os.environ, "MULTIVERSE_ORIG_CWD": cwd_abs}
     ttyd_log = open(sdir / "ttyd.log", "ab", buffering=0)
     ttyd_proc = subprocess.Popen(
         ttyd_cmd,
@@ -369,6 +377,7 @@ def start(
         stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
         start_new_session=True,
+        env=child_env,
     )
     # Give ttyd a beat to bind (or fail fast).
     time.sleep(0.3)

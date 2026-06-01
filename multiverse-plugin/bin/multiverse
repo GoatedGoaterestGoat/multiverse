@@ -16,8 +16,11 @@ set -euo pipefail
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Preserve the user's original cwd so the monitor can default new
-# sessions to it (uv run below will cd into the plugin root).
-export MULTIVERSE_ORIG_CWD="$PWD"
+# sessions to it (uv run below will cd into the plugin root). Respect a
+# pre-set value so callers that can't control the process cwd — e.g. the
+# web-share ttyd child, whose cwd is the plugin root — can still scope the
+# monitor to the right workspace by exporting MULTIVERSE_ORIG_CWD.
+export MULTIVERSE_ORIG_CWD="${MULTIVERSE_ORIG_CWD:-$PWD}"
 export MULTIVERSE_PLUGIN_ROOT="$PLUGIN_ROOT"
 
 # Pin the multiverse state dir to one absolute path that the monitor and
