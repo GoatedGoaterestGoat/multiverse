@@ -213,6 +213,15 @@ class NamedCloudflareProvider:
         MULTIVERSE_WEB_LOCAL_PORT   loopback port that hostname routes to;
                                     ttyd binds here so it matches ingress
                                     (default 7681)
+        MULTIVERSE_WEB_TUNNEL_CONFIG  absolute path to cloudflared config.yml,
+                                    passed as ``--config`` (which must precede
+                                    ``run``). Set this where the monitor's HOME
+                                    differs from the shell that ran ``tunnel
+                                    login``/``create`` (e.g. Beaker) — ``run``
+                                    otherwise only auto-discovers
+                                    ~/.cloudflared/config.yml under the
+                                    monitor's HOME. ``credentials-file`` inside
+                                    it must also be an absolute path.
     """
 
     name = "cloudflare"  # named-tunnel + Access; policy (SSO/mTLS) set in CF
@@ -221,6 +230,8 @@ class NamedCloudflareProvider:
         self.tunnel = os.environ.get("MULTIVERSE_WEB_TUNNEL_NAME", "").strip()
         self.hostname = os.environ.get("MULTIVERSE_WEB_HOSTNAME", "").strip()
         self.port = int(os.environ.get("MULTIVERSE_WEB_LOCAL_PORT", "7681"))
+        # Optional absolute config.yml path for HOME-divergent deployments.
+        self.config = os.environ.get("MULTIVERSE_WEB_TUNNEL_CONFIG", "").strip()
 
     def local_port(self) -> Optional[int]:
         # Must match the cloudflared ingress rule, so it's fixed, not random.
@@ -236,8 +247,16 @@ class NamedCloudflareProvider:
                 "docs/remote-access.md)."
             )
         logf = open(log_path, "wb", buffering=0)  # fresh log per share (see Quick)
+        # `cloudflared tunnel run <name>` only auto-discovers config.yml under
+        # the running process's ~/.cloudflared. When the monitor's HOME differs
+        # from the shell that set the tunnel up (the Beaker trap), pass an
+        # absolute --config — which MUST come BEFORE the `run` subcommand.
+        cmd = ["cloudflared", "tunnel"]
+        if self.config:
+            cmd += ["--config", self.config]
+        cmd += ["run", self.tunnel]
         proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "run", self.tunnel],
+            cmd,
             stdout=logf,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -364,6 +383,9 @@ def start(
         "-p", str(port),
         "-c", f"mv:{token}",
         "-t", "titleFixed=multiverse",
+        # Ping every 30s: Cloudflare drops idle WebSockets at ~100s, but ttyd's
+        # default ping is 300s — without this an idle terminal keeps dropping.
+        "-P", "30",
     ]
     if writable:
         ttyd_cmd.append("-W")
