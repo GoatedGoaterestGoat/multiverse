@@ -486,9 +486,9 @@ class WebShareScreen(ModalScreen[None]):
         )
 
     def on_mount(self) -> None:
-        self._render()
+        self._refresh_panel()
 
-    def _render(self) -> None:
+    def _refresh_panel(self) -> None:
         body = self.query_one("#web-body", Static)
         hint = self.query_one("#web-hint", Static)
         share = web_share.status(self.cwd)
@@ -553,7 +553,7 @@ class WebShareScreen(ModalScreen[None]):
             self.query_one("#web-body", Static).update(f"[red]Failed:[/] {err}")
             self.query_one("#web-hint", Static).update("[b]Esc[/] close")
             return
-        self._render()
+        self._refresh_panel()
 
     def action_close(self) -> None:
         if self._busy:
