@@ -466,6 +466,7 @@ class WebShareScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("enter", "start", "Start"),
+        Binding("q", "start_quick", "Quick"),
         Binding("s", "stop", "Stop"),
     ]
 
@@ -501,31 +502,46 @@ class WebShareScreen(ModalScreen[None]):
                 "and auth.\n"
                 "[yellow]⚠ This is a remote shell into a full-tool-access "
                 "agent — keep it short-lived and stop it when done.[/]\n\n"
-                f"Backbone: [bold]{backbone}[/]"
+                f"Default backbone: [bold]{backbone}[/]"
             )
-            hint.update("[b]Enter[/] start share · [b]Esc[/] cancel")
+            if backbone != "quick":
+                hint.update(
+                    f"[b]Enter[/] start ([b]{backbone}[/]) · [b]q[/] start "
+                    "[b]quick[/] (token-only) · [b]Esc[/] cancel"
+                )
+            else:
+                hint.update("[b]Enter[/] start ([b]quick[/]) · [b]Esc[/] cancel")
         else:
+            if share.token:
+                auth = f"User:  [bold]mv[/]\nToken: [bold]{share.token}[/]"
+            else:
+                auth = "Auth:  [bold]edge SSO only[/] (no ttyd token)"
             body.update(
                 "Status: [bold green]ON[/]\n\n"
                 f"URL:   [bold]{share.url}[/]\n"
-                "User:  [bold]mv[/]\n"
-                f"Token: [bold]{share.token}[/]\n"
+                f"{auth}\n"
                 f"Backbone: {share.provider}\n\n"
-                "[dim]Open the URL on an authorized device. The token is the "
-                "second factor; device/SSO auth (if configured) is enforced "
-                "at the tunnel edge before this.[/]"
+                "[dim]Open the URL on an authorized device. Edge auth (SSO / "
+                "device, if configured) is enforced at the tunnel before this.[/]"
             )
             hint.update("[b]s[/] stop share · [b]Esc[/] close (share keeps running)")
 
     def action_start(self) -> None:
+        self._do_start(None)  # default/configured backbone
+
+    def action_start_quick(self) -> None:
+        self._do_start("quick")  # always-available token-only quick tunnel
+
+    def _do_start(self, provider: Optional[str]) -> None:
         if self._busy or web_share.status(self.cwd) is not None:
             return
         self._busy = True
+        label = provider or web_share.configured_provider_name()
         self.query_one("#web-body", Static).update(
-            "[cyan]Starting share… bringing up the tunnel (can take ~10–30s).[/]"
+            f"[cyan]Starting share ({label})… bringing up the tunnel (~10–30s).[/]"
         )
         self.query_one("#web-hint", Static).update("[dim]please wait…[/]")
-        self._change_worker(start=True)
+        self._change_worker(start=True, provider=provider)
 
     def action_stop(self) -> None:
         if self._busy or web_share.status(self.cwd) is None:
@@ -536,11 +552,11 @@ class WebShareScreen(ModalScreen[None]):
         self._change_worker(start=False)
 
     @work(thread=True, group="web_share")
-    def _change_worker(self, start: bool) -> None:
+    def _change_worker(self, start: bool, provider: Optional[str] = None) -> None:
         err: Optional[str] = None
         try:
             if start:
-                web_share.start(self.cwd)
+                web_share.start(self.cwd, provider=provider)
             else:
                 web_share.stop(self.cwd)
         except Exception as exc:  # surface tunnel/ttyd failures to the panel

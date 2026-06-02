@@ -123,6 +123,7 @@ class TunnelProvider(Protocol):
     report the public URL."""
 
     name: str
+    edge_authenticated: bool  # True if the tunnel enforces auth at the edge (Access)
 
     def local_port(self) -> Optional[int]:
         """Fixed loopback port the connector routes to (ttyd must bind it so
@@ -157,6 +158,7 @@ class QuickTunnelProvider:
     """
 
     name = "quick"
+    edge_authenticated = False  # public URL -> the ttyd token is the ONLY gate
 
     def local_port(self) -> Optional[int]:
         return None  # any free port; --url points cloudflared at it
@@ -222,9 +224,15 @@ class NamedCloudflareProvider:
                                     ~/.cloudflared/config.yml under the
                                     monitor's HOME. ``credentials-file`` inside
                                     it must also be an absolute path.
+        MULTIVERSE_WEB_TOKEN        whether this (edge-authenticated) backbone
+                                    ALSO requires a ttyd basic-auth token as a
+                                    second factor: on/1/true to enable; default
+                                    OFF (Access is the gate). The quick backbone
+                                    always uses a token regardless of this.
     """
 
     name = "cloudflare"  # named-tunnel + Access; policy (SSO/mTLS) set in CF
+    edge_authenticated = True  # Cloudflare Access gates every request at the edge
 
     def __init__(self) -> None:
         self.tunnel = os.environ.get("MULTIVERSE_WEB_TUNNEL_NAME", "").strip()
@@ -362,7 +370,17 @@ def start(
     sdir = _share_dir(sid)
     sdir.mkdir(parents=True, exist_ok=True)
 
-    token = secrets.token_urlsafe(18)
+    # Token-as-second-factor policy. For a backbone with NO edge auth (quick),
+    # the ttyd token is the ONLY gate, so it is always on. For an edge-
+    # authenticated backbone (cloudflare/Access), the token is an OPTIONAL
+    # second factor, default OFF — enable with MULTIVERSE_WEB_TOKEN=on/1/true.
+    if getattr(tun, "edge_authenticated", False):
+        use_token = os.environ.get("MULTIVERSE_WEB_TOKEN", "").strip().lower() in (
+            "1", "on", "true", "yes",
+        )
+    else:
+        use_token = True
+    token = secrets.token_urlsafe(18) if use_token else ""
     fixed_port = tun.local_port()
     port = fixed_port if fixed_port is not None else _free_loopback_port()
     web_tmux = web_tmux_name(sid)
@@ -376,17 +394,20 @@ def start(
     # behave exactly like local attach (single layer; normal Ctrl-b d detach).
     # Trade-off: ttyd respawns the monitor on browser reconnect — fine, the
     # monitor is a stateless viewer and the claude sessions it manages persist.
-    # Bound to loopback; basic-auth (-c) gates the HTTP page and the WS.
+    # Bound to loopback; the tunnel is the only ingress. When use_token is set
+    # (always for non-edge-auth backbones; opt-in for cloudflare), ttyd's
+    # basic-auth (-c) gates the HTTP page AND the WS upgrade.
     ttyd_cmd = [
         "ttyd",
         "-i", "127.0.0.1",
         "-p", str(port),
-        "-c", f"mv:{token}",
         "-t", "titleFixed=multiverse",
         # Ping every 30s: Cloudflare drops idle WebSockets at ~100s, but ttyd's
         # default ping is 300s — without this an idle terminal keeps dropping.
         "-P", "30",
     ]
+    if use_token:
+        ttyd_cmd += ["-c", f"mv:{token}"]
     if writable:
         ttyd_cmd.append("-W")
     ttyd_cmd.append(launcher)
