@@ -21,22 +21,29 @@ browser (xterm.js, served by ttyd)
    │  wss, TLS terminated by the tunnel
 tunnel connector (cloudflared, outbound-only)        ← pluggable backbone
    │  http://127.0.0.1:<port>   (loopback only)
-ttyd  -W  -i 127.0.0.1  -c mv:<token>                ← token gates HTTP + WS
-   │  local tmux
-tmux new-session -A -s mvweb-<hash> -c <cwd> bin/multiverse
-   │  a fresh monitor scoped to this workspace
+ttyd  -W  -i 127.0.0.1  -P 30  [-c mv:<token>]       ← token optional (see below)
+   │  PTY — NO wrapping tmux, so attach isn't a nested tmux attach
+bin/multiverse                                       ← a fresh monitor for this cwd
 ```
 
 - **Loopback-bound.** `ttyd` listens only on `127.0.0.1`; the tunnel is the sole
   ingress and always terminates TLS, so the browser gets `https`/`wss` (xterm.js
   secure-context features work).
-- **Per-share token.** Minted at trigger time, shown in the panel, and revoked
-  when you stop the share (the token dies with `ttyd`). Basic-auth covers the
-  WebSocket too, so it gates the terminal stream, not just the page.
+- **Per-share token (optional on `cloudflare`).** For `quick` it's the only gate
+  and always on. For an edge-authenticated backbone (`cloudflare`/Access) it's an
+  opt-in second factor — **default off** (`MULTIVERSE_WEB_TOKEN`, or toggle per
+  share with `t` in the panel). When used, ttyd basic-auth covers the page *and*
+  the WebSocket; it's minted per share and dies with `ttyd`.
 - **Survives the local TUI.** The share runs as detached processes, so you can
   close the local monitor and keep controlling from your laptop. Any later
   monitor for the same cwd shows `🌐 web: ON` and can stop it. State lives at
   `$MULTIVERSE_ROOT/web_shares/<hash>/record.json`.
+- **Live-attach is a single tmux layer.** The monitor runs *directly* under
+  ttyd's PTY (not inside a wrapping tmux), so its attach (`App.suspend()` + `tmux
+  attach-session`) works exactly like local attach — detach with the normal
+  `Ctrl-b d`. Wrapping it in tmux would make attach a *nested* tmux attach, which
+  tmux refuses. ttyd respawns the (stateless) monitor on reconnect; the claude
+  sessions it manages persist regardless.
 - **Co-located by necessity.** All coordination is local tmux + local files, so
   the share must run on the same box as the sessions. It cannot drive sessions
   on a remote host.
@@ -54,7 +61,10 @@ locked-down / outbound-only containers (e.g. Beaker).
 
 ## Backbones
 
-Selected by `MULTIVERSE_WEB_TUNNEL`. The token is always a second factor.
+Selected by `MULTIVERSE_WEB_TUNNEL` (default `quick`); the `w` panel also starts
+`quick` on demand (`q`) even when `cloudflare` is the default. The ttyd token is
+mandatory for `quick` (its only gate) and **optional, default off** for
+`cloudflare` (`MULTIVERSE_WEB_TOKEN`, or `t` in the panel).
 `cloudflare` and the back-compat alias `cloudflare-mtls` are the **same
 connector** — the auth strength is set by the Access *policy* you attach in
 Cloudflare, not by the plugin.
@@ -88,16 +98,23 @@ You need a (free) **Cloudflare account** — there is no "cloudflared account";
 **dash.cloudflare.com → Zero Trust → Settings → Plans**.
 
 1. **Add a domain to Cloudflare** (any domain on a Cloudflare zone; free DNS).
-2. **Create a named tunnel** and a credentials file on the box:
+2. **Create the tunnel.** Keep all cloudflared files in an **absolute, persistent**
+   dir (on Beaker, somewhere under `/weka`; **not** `~/.cloudflared`, which is
+   ephemeral and HOME-dependent):
    ```bash
-   cloudflared tunnel login
-   cloudflared tunnel create multiverse        # prints a tunnel UUID/name
+   export CFDIR=/abs/persistent/cloudflared        # an absolute path you control
+   mkdir -p "$CFDIR"; export TUNNEL_ORIGIN_CERT="$CFDIR/cert.pem"
+   cloudflared tunnel login          # headless: prints a URL — open it on your laptop, pick your zone
+   # `login` writes cert.pem to ~/.cloudflared REGARDLESS of TUNNEL_ORIGIN_CERT, so move it:
+   cp ~/.cloudflared/cert.pem "$CFDIR/cert.pem"
+   cloudflared tunnel create --credentials-file "$CFDIR/multiverse.json" multiverse   # note the UUID
    ```
-3. **Ingress config** — map a hostname to the loopback port `ttyd` will bind.
-   In `~/.cloudflared/config.yml`:
+3. **Ingress config** at `$CFDIR/config.yml` — use **literal absolute paths**. (A
+   *quoted* heredoc leaves a literal `$CFDIR` in the file, which breaks the tunnel
+   — write the real path or use an *unquoted* heredoc so it expands.)
    ```yaml
-   tunnel: multiverse
-   credentials-file: /root/.cloudflared/<TUNNEL_UUID>.json
+   tunnel: <TUNNEL_UUID>
+   credentials-file: /abs/persistent/cloudflared/multiverse.json    # absolute!
    ingress:
      - hostname: mv.yourdomain.com
        service: http://127.0.0.1:7681
@@ -105,6 +122,7 @@ You need a (free) **Cloudflare account** — there is no "cloudflared account";
    ```
    ```bash
    cloudflared tunnel route dns multiverse mv.yourdomain.com
+   cloudflared tunnel --config "$CFDIR/config.yml" ingress validate   # expect: OK
    ```
 4. **Access application + policy** (Cloudflare Zero Trust dashboard) — create a
    **self-hosted Access application** for `mv.yourdomain.com`, then attach a
@@ -124,27 +142,47 @@ You need a (free) **Cloudflare account** — there is no "cloudflared account";
    key) and **import it into your laptop's browser/keychain**. You enroll each
    device once — that's the nature of device-only auth; the token is the
    complement that works anywhere instantly. (SSO policies need no cert import.)
-6. **Point the plugin at it** — create `$MULTIVERSE_ROOT/web-tunnel.env`
-   (sourced automatically by `bin/multiverse`):
+6. **Point the plugin at it** — create `web-tunnel.env` at the **monitor's**
+   `MULTIVERSE_ROOT` (sourced automatically by `bin/multiverse`):
    ```sh
-   export MULTIVERSE_WEB_TUNNEL=cloudflare        # SSO or mTLS — same connector
+   export MULTIVERSE_WEB_TUNNEL=cloudflare          # SSO or mTLS — same connector
    export MULTIVERSE_WEB_TUNNEL_NAME=multiverse
    export MULTIVERSE_WEB_HOSTNAME=mv.yourdomain.com
-   export MULTIVERSE_WEB_LOCAL_PORT=7681          # must match the ingress rule
+   export MULTIVERSE_WEB_LOCAL_PORT=7681            # must match the ingress rule
+   export MULTIVERSE_WEB_TUNNEL_CONFIG=/abs/persistent/cloudflared/config.yml  # absolute --config
+   export MULTIVERSE_WEB_TOKEN=off                  # off = Access-only; on = +ttyd token (or toggle with `t`)
    ```
 
-Relaunch `multiverse` and press `w` → Start. The panel shows the hostname URL +
-the per-share token. Open it on an authorized device: Cloudflare runs your
-Access policy (SSO login or client-cert check), then `ttyd` prompts for `mv` /
-`<token>`.
+   > ⚠️ **HOME-divergence trap — the #1 setup mistake.** `MULTIVERSE_ROOT` is
+   > resolved by the *monitor* (`$MULTIVERSE_ROOT`, else `$HOME/.multiverse`). In
+   > some deployments (e.g. Beaker, where a wrapper sets `HOME=/weka/...` for the
+   > monitor) that is **not** your interactive shell's `$HOME/.multiverse` — so a
+   > `web-tunnel.env` written from your shell can land where the monitor never
+   > looks, and the backbone silently falls back to `quick`. Find the real path
+   > from a running monitor and write the file there:
+   > ```bash
+   > tr '\0' '\n' < /proc/$(pgrep -f src.monitor | head -1)/environ | grep '^MULTIVERSE_ROOT='
+   > ```
+   > `MULTIVERSE_WEB_TUNNEL_CONFIG` solves the same trap for the tunnel: without
+   > it, `cloudflared tunnel run` only auto-discovers `~/.cloudflared/config.yml`
+   > under the *monitor's* `$HOME`. With it, the plugin runs
+   > `cloudflared tunnel --config <abs> run` (the flag must precede `run`).
+
+Relaunch `multiverse` and press `w` → **Enter** to start `cloudflare` (or `q`
+for a one-off `quick` tunnel; `t` toggles the token first). Open the hostname on
+an authorized device: Cloudflare runs your Access policy (SSO login or
+client-cert check). With `MULTIVERSE_WEB_TOKEN=off` that's the whole login; with
+the token on, `ttyd` then prompts once for `mv` / the per-share token shown in
+the panel (skip the dialog by opening `https://mv:<token>@mv.yourdomain.com`).
 
 ## Security model (defense in depth)
 
 1. **Edge auth** (`cloudflare`): only your authorized identity (SSO) or your
    enrolled device (mTLS) reaches the box at all — with mTLS, not even someone
    on your same IP.
-2. **Per-share token** (`ttyd -c`): second factor, covers the WebSocket, rotated
-   every share.
+2. **Per-share token** (`ttyd -c`): mandatory for `quick` (its only gate); an
+   opt-in second factor for `cloudflare` (`MULTIVERSE_WEB_TOKEN` / `t`, default
+   off), covering the WebSocket, rotated every share.
 3. **Loopback bind**: `ttyd` is never publicly reachable; only the tunnel hits
    `127.0.0.1`.
 4. **Ephemeral + visible + revocable**: the share exists only while you want it,
@@ -175,5 +213,14 @@ route.
 - `quick` tunnels don't support client certs and are for non-sensitive use only.
 - Stopping the local monitor does **not** stop the share (by design) — stop it
   explicitly with `w` → `s` when you're done.
-- nested-tmux detach: attaching into a session from the in-browser monitor is
-  tmux-in-tmux; detach with your tmux prefix + `d` to return to the dashboard.
+- **Detach = normal `Ctrl-b d`.** The in-browser monitor runs directly under ttyd
+  (no wrapping tmux), so attaching into a session is a single tmux layer.
+- **Idle keepalive.** ttyd pings every 30s (`-P 30`) because Cloudflare drops
+  idle WebSockets at ~100s; long-lived connections also hit Cloudflare's ~8h cap
+  (reconnect + re-login — the monitor respawns, sessions persist).
+- **Persisting across container restarts.** Only `/weka`-style persistent storage
+  survives; binaries in `/usr/local/bin` don't. Reinstall `ttyd`/`cloudflared`
+  and (re)write `config.yml` + `web-tunnel.env` from your container-init script on
+  each boot (an idempotent helper is the cleanest). The Cloudflare tunnel, DNS
+  route, Access app, and creds persist server-side / in `/weka`, so they need no
+  recreation — only the config + env do.
