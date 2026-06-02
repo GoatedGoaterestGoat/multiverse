@@ -304,6 +304,16 @@ def configured_provider_name() -> str:
     return os.environ.get("MULTIVERSE_WEB_TUNNEL", "quick")
 
 
+def token_default() -> bool:
+    """Default for whether an edge-authenticated backbone (cloudflare) ALSO uses
+    a ttyd token, from MULTIVERSE_WEB_TOKEN. Off unless explicitly enabled. The
+    w-panel toggle overrides this per share; the quick backbone always uses a
+    token regardless (it is the only gate)."""
+    return os.environ.get("MULTIVERSE_WEB_TOKEN", "").strip().lower() in (
+        "1", "on", "true", "yes",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: start / stop / status
 # ---------------------------------------------------------------------------
@@ -335,6 +345,7 @@ def start(
     *,
     provider: Optional[str] = None,
     writable: bool = True,
+    use_token: Optional[bool] = None,
 ) -> WebShare:
     """Bring up the share stack for ``cwd`` and return its record.
 
@@ -372,12 +383,12 @@ def start(
 
     # Token-as-second-factor policy. For a backbone with NO edge auth (quick),
     # the ttyd token is the ONLY gate, so it is always on. For an edge-
-    # authenticated backbone (cloudflare/Access), the token is an OPTIONAL
-    # second factor, default OFF — enable with MULTIVERSE_WEB_TOKEN=on/1/true.
+    # authenticated backbone (cloudflare/Access), the token is an OPTIONAL second
+    # factor: honor an explicit per-share `use_token` (the w-panel toggle), else
+    # fall back to the MULTIVERSE_WEB_TOKEN default (off).
     if getattr(tun, "edge_authenticated", False):
-        use_token = os.environ.get("MULTIVERSE_WEB_TOKEN", "").strip().lower() in (
-            "1", "on", "true", "yes",
-        )
+        if use_token is None:
+            use_token = token_default()
     else:
         use_token = True
     token = secrets.token_urlsafe(18) if use_token else ""

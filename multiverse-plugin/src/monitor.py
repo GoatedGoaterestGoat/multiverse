@@ -467,6 +467,7 @@ class WebShareScreen(ModalScreen[None]):
         Binding("escape", "close", "Close"),
         Binding("enter", "start", "Start"),
         Binding("q", "start_quick", "Quick"),
+        Binding("t", "toggle_token", "Token"),
         Binding("s", "stop", "Stop"),
     ]
 
@@ -474,6 +475,10 @@ class WebShareScreen(ModalScreen[None]):
         super().__init__()
         self.cwd = cwd
         self._busy = False
+        # Per-share ttyd-token toggle for an edge-authenticated backbone
+        # (cloudflare). Seeded from MULTIVERSE_WEB_TOKEN; flip with `t`. Ignored
+        # for the quick backbone, which always uses a token.
+        self._token_on = web_share.token_default()
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -495,6 +500,11 @@ class WebShareScreen(ModalScreen[None]):
         share = web_share.status(self.cwd)
         if share is None:
             backbone = web_share.configured_provider_name()
+            if backbone != "quick":
+                tok = "[green]on[/]" if self._token_on else "[dim]off[/]"
+                extra = f"\nttyd token (for [b]{backbone}[/]): {tok}  ([b]t[/] toggles)"
+            else:
+                extra = ""  # quick always uses a token
             body.update(
                 "Status: [dim]off[/]\n\n"
                 "Starting exposes a browser terminal into a monitor for "
@@ -502,12 +512,12 @@ class WebShareScreen(ModalScreen[None]):
                 "and auth.\n"
                 "[yellow]⚠ This is a remote shell into a full-tool-access "
                 "agent — keep it short-lived and stop it when done.[/]\n\n"
-                f"Default backbone: [bold]{backbone}[/]"
+                f"Default backbone: [bold]{backbone}[/]" + extra
             )
             if backbone != "quick":
                 hint.update(
-                    f"[b]Enter[/] start ([b]{backbone}[/]) · [b]q[/] start "
-                    "[b]quick[/] (token-only) · [b]Esc[/] cancel"
+                    f"[b]Enter[/] start ([b]{backbone}[/]) · [b]t[/] token "
+                    "on/off · [b]q[/] quick · [b]Esc[/] cancel"
                 )
             else:
                 hint.update("[b]Enter[/] start ([b]quick[/]) · [b]Esc[/] cancel")
@@ -532,6 +542,16 @@ class WebShareScreen(ModalScreen[None]):
     def action_start_quick(self) -> None:
         self._do_start("quick")  # always-available token-only quick tunnel
 
+    def action_toggle_token(self) -> None:
+        # Per-share ttyd-token toggle; only meaningful for an edge-auth backbone
+        # (quick always uses a token). No-op while busy or a share is live.
+        if self._busy or web_share.status(self.cwd) is not None:
+            return
+        if web_share.configured_provider_name() == "quick":
+            return
+        self._token_on = not self._token_on
+        self._refresh_panel()
+
     def _do_start(self, provider: Optional[str]) -> None:
         if self._busy or web_share.status(self.cwd) is not None:
             return
@@ -541,7 +561,7 @@ class WebShareScreen(ModalScreen[None]):
             f"[cyan]Starting share ({label})… bringing up the tunnel (~10–30s).[/]"
         )
         self.query_one("#web-hint", Static).update("[dim]please wait…[/]")
-        self._change_worker(start=True, provider=provider)
+        self._change_worker(start=True, provider=provider, use_token=self._token_on)
 
     def action_stop(self) -> None:
         if self._busy or web_share.status(self.cwd) is None:
@@ -552,11 +572,14 @@ class WebShareScreen(ModalScreen[None]):
         self._change_worker(start=False)
 
     @work(thread=True, group="web_share")
-    def _change_worker(self, start: bool, provider: Optional[str] = None) -> None:
+    def _change_worker(
+        self, start: bool, provider: Optional[str] = None,
+        use_token: Optional[bool] = None,
+    ) -> None:
         err: Optional[str] = None
         try:
             if start:
-                web_share.start(self.cwd, provider=provider)
+                web_share.start(self.cwd, provider=provider, use_token=use_token)
             else:
                 web_share.stop(self.cwd)
         except Exception as exc:  # surface tunnel/ttyd failures to the panel
