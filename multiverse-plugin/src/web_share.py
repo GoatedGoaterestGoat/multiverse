@@ -110,6 +110,7 @@ class WebShare:
     web_tmux: str
     url: str
     created_at: float
+    path: str = ""  # cloudflare slot label (URL path segment), "" if none
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +230,13 @@ class NamedCloudflareProvider:
                                     second factor: on/1/true to enable; default
                                     OFF (Access is the gate). The quick backbone
                                     always uses a token regardless of this.
+        MULTIVERSE_WEB_SLOTS        optional "label:port label:port ..." — path
+                                    slots under the one hostname for concurrent
+                                    multi-workspace shares (<host>/<label>/, ttyd
+                                    served with -b /<label>). The cloudflared
+                                    ingress needs a matching rule per slot. Unset
+                                    -> one share at a time on
+                                    MULTIVERSE_WEB_LOCAL_PORT.
     """
 
     name = "cloudflare"  # named-tunnel + Access; policy (SSO/mTLS) set in CF
@@ -314,6 +322,45 @@ def token_default() -> bool:
     )
 
 
+def _slug(s: str) -> str:
+    return re.sub(r"[^a-z0-9-]+", "-", s.lower()).strip("-")
+
+
+def parse_slots() -> list[tuple[str, int]]:
+    """Parse MULTIVERSE_WEB_SLOTS (``label:port label:port ...``) into
+    ``(label, port)`` pairs. Each label is a path segment under the one
+    cloudflare hostname (``https://<host>/<label>/``) routed to a ttyd on
+    ``port``; the cloudflared ingress must have a matching rule per slot.
+    Empty (unset) -> single fixed-port behavior (one cloudflare share)."""
+    raw = os.environ.get("MULTIVERSE_WEB_SLOTS", "").strip()
+    slots: list[tuple[str, int]] = []
+    for tok in raw.split():
+        label, sep, port = tok.rpartition(":")
+        label = _slug(label)
+        if sep and label and port.isdigit():
+            slots.append((label, int(port)))
+    return slots
+
+
+def _active_cloudflare_slot_labels() -> set[str]:
+    """Slot labels currently held by LIVE cloudflare shares (any workspace)."""
+    used: set[str] = set()
+    d = _shares_dir()
+    if not d.is_dir():
+        return used
+    for sub in d.iterdir():
+        rec = _read_record(sub.name)
+        if (
+            rec is not None
+            and rec.provider == "cloudflare"
+            and rec.path
+            and _pid_alive(rec.ttyd_pid)
+            and _pid_alive(rec.tunnel_pid)
+        ):
+            used.add(rec.path.strip("/"))
+    return used
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle: start / stop / status
 # ---------------------------------------------------------------------------
@@ -392,8 +439,39 @@ def start(
     else:
         use_token = True
     token = secrets.token_urlsafe(18) if use_token else ""
+
+    # Slot assignment for the cloudflare backbone (path-based multi-workspace).
+    # MULTIVERSE_WEB_SLOTS="label:port ..." declares path slots under the one
+    # hostname; each live cloudflare share takes one. The path defaults to the
+    # slot named after this workspace, else the first free slot. ttyd then serves
+    # under that base-path (-b /<label>) and the URL is <hostname>/<label>/.
+    # Unset -> single fixed-port behavior (one cloudflare share at a time).
+    base_path = ""
+    slot_label = ""
+    slot_port: Optional[int] = None
+    if getattr(tun, "edge_authenticated", False):
+        slots = parse_slots()
+        if slots:
+            used = _active_cloudflare_slot_labels()
+            free = [(lbl, p) for (lbl, p) in slots if lbl not in used]
+            if not free:
+                raise WebShareError(
+                    f"all {len(slots)} cloudflare web slots are in use "
+                    "(MULTIVERSE_WEB_SLOTS) — stop one first or add a slot."
+                )
+            want = _slug(Path(cwd_abs).name)
+            slot_label, slot_port = next(
+                ((l, p) for (l, p) in free if l == want), free[0]
+            )
+            base_path = "/" + slot_label
+
     fixed_port = tun.local_port()
-    port = fixed_port if fixed_port is not None else _free_loopback_port()
+    if slot_port is not None:
+        port = slot_port            # the slot's port (matches its ingress rule)
+    elif fixed_port is not None:
+        port = fixed_port
+    else:
+        port = _free_loopback_port()
     web_tmux = web_tmux_name(sid)
     launcher = str(Path(plugin_root) / "bin" / "multiverse")
 
@@ -417,6 +495,8 @@ def start(
         # default ping is 300s — without this an idle terminal keeps dropping.
         "-P", "30",
     ]
+    if base_path:
+        ttyd_cmd += ["-b", base_path]  # serve under the slot's sub-path
     if use_token:
         ttyd_cmd += ["-c", f"mv:{token}"]
     if writable:
@@ -451,6 +531,9 @@ def start(
         _kill_tmux(web_tmux)
         raise
 
+    if base_path:
+        url = url.rstrip("/") + base_path + "/"  # <hostname>/<label>/
+
     rec = WebShare(
         share_id=sid,
         cwd=cwd_abs,
@@ -462,6 +545,7 @@ def start(
         web_tmux=web_tmux,
         url=url,
         created_at=time.time(),
+        path=slot_label,
     )
     _write_record(rec)
     return rec
