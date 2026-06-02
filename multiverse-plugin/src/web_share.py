@@ -176,7 +176,8 @@ class QuickTunnelProvider:
         # means the scraper only ever sees this run's URL.
         logf = open(log_path, "wb", buffering=0)
         proc = subprocess.Popen(
-            ["cloudflared", "tunnel", "--url", f"http://127.0.0.1:{local_port}"],
+            ["cloudflared", "tunnel", "--grace-period", "3s",
+             "--url", f"http://127.0.0.1:{local_port}"],
             stdout=logf,
             stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL,
@@ -267,7 +268,9 @@ class NamedCloudflareProvider:
         # the running process's ~/.cloudflared. When the monitor's HOME differs
         # from the shell that set the tunnel up (the Beaker trap), pass an
         # absolute --config — which MUST come BEFORE the `run` subcommand.
-        cmd = ["cloudflared", "tunnel"]
+        # --grace-period shortens cloudflared's drain-on-SIGTERM so stopping a
+        # share releases it promptly (default is 30s). Must precede `run`.
+        cmd = ["cloudflared", "tunnel", "--grace-period", "3s"]
         if self.config:
             cmd += ["--config", self.config]
         cmd += ["run", self.tunnel]
