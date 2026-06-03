@@ -124,6 +124,8 @@ You need a (free) **Cloudflare account** — there is no "cloudflared account";
    cloudflared tunnel route dns multiverse mv.yourdomain.com
    cloudflared tunnel --config "$CFDIR/config.yml" ingress validate   # expect: OK
    ```
+   *(To share several workspaces at once, replace this single rule with **path
+   slots** — see [Multiple workspaces at once](#multiple-workspaces-at-once-path-slots) below.)*
 4. **Access application + policy** (Cloudflare Zero Trust dashboard) — create a
    **self-hosted Access application** for `mv.yourdomain.com`, then attach a
    policy. Either rejects unauthorized requests at the edge (including the
@@ -151,6 +153,8 @@ You need a (free) **Cloudflare account** — there is no "cloudflared account";
    export MULTIVERSE_WEB_LOCAL_PORT=7681            # must match the ingress rule
    export MULTIVERSE_WEB_TUNNEL_CONFIG=/abs/persistent/cloudflared/config.yml  # absolute --config
    export MULTIVERSE_WEB_TOKEN=off                  # off = Access-only; on = +ttyd token (or toggle with `t`)
+   # optional — concurrent multi-workspace shares (see "Multiple workspaces" below):
+   export MULTIVERSE_WEB_SLOTS="proj-a:7681 proj-b:7682 proj-c:7683"
    ```
 
    > ⚠️ **HOME-divergence trap — the #1 setup mistake.** `MULTIVERSE_ROOT` is
@@ -174,6 +178,67 @@ an authorized device: Cloudflare runs your Access policy (SSO login or
 client-cert check). With `MULTIVERSE_WEB_TOKEN=off` that's the whole login; with
 the token on, `ttyd` then prompts once for `mv` / the per-share token shown in
 the panel (skip the dialog by opening `https://mv:<token>@mv.yourdomain.com`).
+
+## Multiple workspaces at once (path slots)
+
+By default the `cloudflare` backbone is **one hostname → one port → one share**:
+the named tunnel routes `mv.yourdomain.com` to a single ttyd, so a second
+concurrent share fails to bind the port. To share several workspaces at once,
+declare **path slots** — each workspace gets its own path under the *same*
+hostname:
+
+```sh
+export MULTIVERSE_WEB_SLOTS="open-vocab:7681 objaverse:7682 misc:7683"
+```
+
+- Each `label:port` is a slot. A cloudflare share takes a free slot and is served
+  at `https://mv.yourdomain.com/<label>/` — the plugin runs ttyd with
+  `-b /<label>` so it serves correctly under the sub-path.
+- **Path = workspace name, or customizable.** On start, the plugin picks the slot
+  whose label matches the workspace's folder name (slugged); if none matches, the
+  first free slot. Name slots after your workspaces and the paths auto-match — or
+  name them anything.
+- **N concurrent** = number of slots. Starting one when all slots are taken gives
+  a clear *"all slots in use"* error.
+
+The cloudflared ingress needs **one rule per slot** — a regex matching the
+label's path, routed to that slot's loopback port:
+
+```yaml
+ingress:
+  - hostname: mv.yourdomain.com
+    path: "^/open-vocab(/.*)?$"
+    service: http://127.0.0.1:7681
+  - hostname: mv.yourdomain.com
+    path: "^/objaverse(/.*)?$"
+    service: http://127.0.0.1:7682
+  - hostname: mv.yourdomain.com
+    path: "^/misc(/.*)?$"
+    service: http://127.0.0.1:7683
+  - service: http_status:404
+```
+
+> **No Cloudflare dashboard change.** Your one self-hosted Access app on
+> `mv.yourdomain.com` already gates *every path* under it — the SSO policy
+> applies to `/open-vocab`, `/objaverse`, … alike. You add **no** Access apps,
+> **no** DNS records, **no** team settings; the only change is this ingress in
+> your own `config.yml`.
+
+Keep the ingress and `MULTIVERSE_WEB_SLOTS` **in sync** (same labels + ports).
+Generating both from one slot list in your init script is the cleanest way (see
+[Persisting across container restarts](#limits--notes)). Verify routing without a
+live request:
+
+```bash
+cloudflared tunnel --config "$CFDIR/config.yml" ingress validate
+cloudflared tunnel --config "$CFDIR/config.yml" ingress rule https://mv.yourdomain.com/open-vocab/
+```
+
+**Boundary:** paths are the **pre-declared slot labels**, so adding a new
+workspace path means editing the slot list + regenerating the ingress. Truly
+arbitrary per-share paths would need an always-on local path-router in front of
+the ttyds instead of static ingress — more moving parts, and unnecessary for a
+known set of workspaces.
 
 ## Security model (defense in depth)
 
@@ -208,8 +273,8 @@ route.
 
 ## Limits / notes
 
-- Multiple workspaces each need their own hostname→port mapping (one ingress
-  rule + Access app per concurrently-shared workspace), or a path-based route.
+- Multiple workspaces can be shared at once via **path slots** under one hostname
+  (one Access app covers all paths) — see [Multiple workspaces at once](#multiple-workspaces-at-once-path-slots). Without slots, `cloudflare` is one share at a time.
 - `quick` tunnels don't support client certs and are for non-sensitive use only.
 - Stopping the local monitor does **not** stop the share (by design) — stop it
   explicitly with `w` → `s` when you're done.

@@ -317,8 +317,17 @@ root+TUN). IP-allowlisting was rejected — only the public egress IP is visible
 (dynamic/NAT-shared/weak). Landed on Cloudflare named tunnel + Access, with the
 ttyd token as a second factor.
 
-**Status**: built + import-checked; not yet run end-to-end (needs `ttyd` +
-`cloudflared` on a box). The one-time Cloudflare setup is user-side.
+**Status**: verified working end-to-end (Ai2 Beaker container → laptop browser,
+`https://mv.silicon23.me` via a named tunnel + Google-SSO Cloudflare Access).
+Enhancements since the MVP: backbone chosen at `w`-time (Enter = configured /
+cloudflare, `q` = always-available token-only quick tunnel); optional ttyd token
+for the cloudflare backbone (`MULTIVERSE_WEB_TOKEN` / `t` toggle, default off —
+Access is the gate); `-P 30` keepalive for Cloudflare's ~100s idle-WS cutoff;
+`--grace-period 3s` for snappy teardown; and **concurrent multi-workspace shares
+via path slots** (`MULTIVERSE_WEB_SLOTS="label:port …"` → `https://<host>/<label>/`
+under one hostname + one Access app, ttyd `-b /<label>`). Setup persists via an
+idempotent script hooked into the container's `env_init`. The one-time Cloudflare
+domain/tunnel/Access setup is user-side; see [`docs/remote-access.md`](remote-access.md).
 
 ## What we learned
 
@@ -604,7 +613,7 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 
 ### Phase 5: UI
 
-- [x] **Remote access — web share (`w`)**: ephemeral per-workspace ttyd-over-monitor + outbound tunnel (Cloudflare named/quick), per-share token + edge auth (Access SSO free / mTLS paid). Built; not yet run end-to-end. See [`docs/remote-access.md`](remote-access.md).
+- [x] **Remote access — web share (`w`)**: ephemeral per-workspace ttyd-over-monitor + outbound tunnel (Cloudflare named/quick), edge auth (Access SSO free / mTLS paid) + optional ttyd token, backbone/token chosen at `w`-time, and concurrent multi-workspace shares via path slots. Verified end-to-end on Beaker. See [`docs/remote-access.md`](remote-access.md).
 - [ ] Web/TUI for timeline visualization
 - [ ] Branch/merge controls
 - [ ] Live tail of agent conversations
