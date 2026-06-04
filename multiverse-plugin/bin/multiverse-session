@@ -40,6 +40,20 @@ fi
 
 CLAUDE_ARGS=("$@")
 
+# Initial-prompt file (set by create_session when called with
+# initial_prompt=...; spawn_agent uses this to hand the new subagent its
+# starting task). Keeping the prompt in a file instead of on a CLI arg
+# avoids shell-escaping, ARG_MAX, and /bin/sh re-parse hazards — the
+# string never gets touched by anything but bash's variable storage and
+# claude's argv. One-shot: removed after the first claude invocation
+# below picks it up.
+INITIAL_ARGS=()
+if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
+  INITIAL_ARGS+=("$(< "$MULTIVERSE_INITIAL_PROMPT_FILE")")
+  rm -f "$MULTIVERSE_INITIAL_PROMPT_FILE" 2>/dev/null || true
+  unset MULTIVERSE_INITIAL_PROMPT_FILE
+fi
+
 # Resolve the canonical multiverse state dir the same way src/paths.py does:
 # explicit MULTIVERSE_ROOT > grandparent of MULTIVERSE_STATUS > $HOME fallback.
 # Used below to find this session's pending inbox files.
@@ -95,9 +109,20 @@ while true; do
   # replaces the old print-mode prime: print mode couldn't handle
   # interactive permission prompts, so a model trying to call any tool
   # while processing the inbox would hang the whole wrapper.
+  # Both an initial-prompt (first iteration only, from spawn_agent) and an
+  # inbox-prompt (any iteration with pending messages) become positional
+  # args to claude. If both are present, concatenate so claude still gets
+  # only one positional arg (its prompt). INITIAL_ARGS is one-shot.
   PROMPT_ARGS=()
   INBOX_PROMPT=$(build_inbox_prompt)
-  if [ -n "$INBOX_PROMPT" ]; then
+  if [ ${#INITIAL_ARGS[@]} -gt 0 ]; then
+    if [ -n "$INBOX_PROMPT" ]; then
+      PROMPT_ARGS=("${INITIAL_ARGS[0]}"$'\n\n'"$INBOX_PROMPT")
+    else
+      PROMPT_ARGS=("${INITIAL_ARGS[0]}")
+    fi
+    INITIAL_ARGS=()
+  elif [ -n "$INBOX_PROMPT" ]; then
     PROMPT_ARGS=("$INBOX_PROMPT")
   fi
 

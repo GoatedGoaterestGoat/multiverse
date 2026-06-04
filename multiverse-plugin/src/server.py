@@ -636,8 +636,15 @@ def spawn_agent(instruction: str, name: str = "") -> str:
         try:
             create_session(
                 cwd=cwd,
-                claude_args=[instruction],
+                claude_args=[],
                 name=chosen,
+                # Pass the instruction off-band via a state-dir file rather
+                # than as a CLI arg. This avoids: shell-escape bloat for
+                # apostrophe-heavy / long instructions, the multi-stage
+                # tmux→sh→multiverse-session re-parse, and any ARG_MAX
+                # surprises. multiverse-session reads the file and hands
+                # the content to claude as a positional argv entry.
+                initial_prompt=instruction,
             )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
             return f"Error: failed to create session: {e}"

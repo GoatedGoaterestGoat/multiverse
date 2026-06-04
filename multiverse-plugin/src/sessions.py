@@ -660,6 +660,7 @@ def create_session(
     claude_args: list[str],
     resumed_from: Optional[str] = None,
     name: Optional[str] = None,
+    initial_prompt: Optional[str] = None,
 ) -> Session:
     """Spawn a multiverse-managed claude session in a detached tmux session.
 
@@ -707,6 +708,17 @@ def create_session(
     (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
     (d / "control.json").write_text("")
 
+    # When a caller (e.g. spawn_agent) wants the new claude session to start
+    # with a specific initial prompt, write the prompt to a file and let
+    # multiverse-session inject it as an argv positional at exec time. This
+    # keeps the (potentially long, apostrophe-heavy, multi-line) prompt off
+    # the tmux/shell command line entirely — no shlex round-trip, no
+    # ARG_MAX risk, no /bin/sh re-parsing.
+    initial_prompt_file: Optional[Path] = None
+    if initial_prompt:
+        initial_prompt_file = d / "initial_prompt.txt"
+        initial_prompt_file.write_text(initial_prompt)
+
     plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
     if not plugin_root:
         raise RuntimeError("MULTIVERSE_PLUGIN_ROOT not set — launch via bin/multiverse")
@@ -743,8 +755,18 @@ def create_session(
 
     if name:
         cmd += ["-e", f"MULTIVERSE_SESSION_NAME={name}"]
+    if initial_prompt_file is not None:
+        cmd += ["-e", f"MULTIVERSE_INITIAL_PROMPT_FILE={initial_prompt_file}"]
     cmd.append(inner_cmd)
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        # tmux's stderr is the real diagnostic — callers (e.g. spawn_agent)
+        # were previously seeing only the CalledProcessError repr, which
+        # makes it nearly impossible to tell `tmux: error connecting…` from
+        # `bin/multiverse-session: not found` from `session already exists`.
+        detail = (e.stderr or "").strip() or (e.stdout or "").strip() or str(e)
+        raise RuntimeError(f"tmux new-session failed: {detail[:600]}") from e
 
     # Per-session mouse mode: scroll wheel scrolls the pane history naturally
     # (no Ctrl-b [ to enter copy mode). Scoped to this session so the user's
