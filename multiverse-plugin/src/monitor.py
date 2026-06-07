@@ -52,7 +52,7 @@ from .full_jsonl import (
     total_turn_count,
 )
 from .paths import multiverse_dir
-from .inbox import pending_inbox_count
+from .inbox import list_pending_messages, pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
     STATE_DIR,
@@ -446,6 +446,67 @@ class AskResultsScreen(ModalScreen[None]):
                 blocks.append(Static(r.response or "[dim](empty)[/]"))
         blocks.append(Static("Esc to go back", id="ask-results-hint"))
         yield VerticalScroll(*blocks, id="ask-results-dialog")
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class InboxViewerScreen(ModalScreen[None]):
+    """Read-only view of an agent's pending inbox.
+
+    Triggered by ``i`` from the dashboard. Shows whatever messages are
+    currently sitting in ``<multiverse_root>/inbox/<encoded-cwd>/<name>/``
+    without consuming them — the agent's hooks (or ``check_inbox`` tool)
+    still get to deliver them normally.
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+        Binding("i", "close", "Close"),
+    ]
+
+    def __init__(self, agent_name: str, messages: list[dict]) -> None:
+        super().__init__()
+        self.agent_name = agent_name
+        # Snapshot — we don't refresh while open. Caller already filtered
+        # for non-empty.
+        self.messages = messages
+
+    def compose(self) -> ComposeResult:
+        n = len(self.messages)
+        plural = "s" if n != 1 else ""
+        blocks: list[Static] = [
+            Static(
+                f"[bold]Inbox for '{self.agent_name}'[/] — {n} pending "
+                f"message{plural}",
+                id="inbox-view-header",
+            ),
+        ]
+        for i, m in enumerate(self.messages, 1):
+            from_name = m.get("from", "?")
+            body = m.get("body", "")
+            ts = m.get("ts", 0)
+            ts_str = (
+                time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+                if ts
+                else "?"
+            )
+            blocks.append(
+                Static(
+                    f"\n[bold yellow]━━━ [{i}/{n}] from {from_name}[/]  "
+                    f"[dim]({ts_str})[/]"
+                )
+            )
+            blocks.append(Static(body or "[dim](empty body)[/]"))
+        blocks.append(
+            Static(
+                "Esc / i / q to close · read-only — messages remain in inbox "
+                "and will be delivered to the agent on its next hook fire",
+                id="inbox-view-hint",
+            )
+        )
+        yield VerticalScroll(*blocks, id="inbox-view-dialog")
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -1097,6 +1158,20 @@ class MonitorApp(App):
         color: $text-muted;
         padding-top: 1;
     }
+    #inbox-view-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #inbox-view-header {
+        padding-bottom: 1;
+    }
+    #inbox-view-hint {
+        color: $text-muted;
+        padding-top: 1;
+    }
     #web-dialog {
         width: 100%;
         height: 100%;
@@ -1196,6 +1271,7 @@ class MonitorApp(App):
         Binding("v", "visualize", "Visualize"),
         Binding("b", "toggle_auto_build", "Build on/off"),
         Binding("a", "ask_all", "Ask all"),
+        Binding("i", "view_inbox", "View inbox"),
         Binding("w", "share_web", "Web share"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
@@ -1585,6 +1661,23 @@ class MonitorApp(App):
         ok = sum(1 for r in results if r.response and not r.error)
         self.notify(f"Got {ok}/{len(results)} response(s)")
         self.push_screen(AskResultsScreen(question, results))
+
+    def action_view_inbox(self) -> None:
+        """Open a read-only viewer for the highlighted agent's pending inbox.
+
+        Snapshot only — pressing ``i`` does not consume the messages.
+        They remain in the inbox to be delivered to the agent on its next
+        ``SessionStart`` / ``UserPromptSubmit`` / ``Stop`` hook (or by
+        ``check_inbox``), so this is purely a "peek" for the user.
+        """
+        e = self._current_entry()
+        if e is None:
+            return
+        messages = list_pending_messages(e.cwd, e.name)
+        if not messages:
+            self.notify(f"No pending messages for '{e.name}'")
+            return
+        self.push_screen(InboxViewerScreen(e.name, messages))
 
     def action_share_web(self) -> None:
         """Toggle remote browser control of this workspace (the `w` key).
