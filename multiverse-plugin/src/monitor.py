@@ -474,12 +474,14 @@ class InboxViewerScreen(ModalScreen[None]):
         self.messages = messages
 
     def compose(self) -> ComposeResult:
+        from rich.markup import escape
+
         n = len(self.messages)
         plural = "s" if n != 1 else ""
         blocks: list[Static] = [
             Static(
-                f"[bold]Inbox for '{self.agent_name}'[/] — {n} pending "
-                f"message{plural}",
+                f"[bold]Inbox for '{escape(self.agent_name)}'[/] — {n} "
+                f"pending message{plural}",
                 id="inbox-view-header",
             ),
         ]
@@ -494,11 +496,19 @@ class InboxViewerScreen(ModalScreen[None]):
             )
             blocks.append(
                 Static(
-                    f"\n[bold yellow]━━━ [{i}/{n}] from {from_name}[/]  "
-                    f"[dim]({ts_str})[/]"
+                    f"\n[bold yellow]━━━ [{i}/{n}] from "
+                    f"{escape(str(from_name))}[/]  [dim]({ts_str})[/]"
                 )
             )
-            blocks.append(Static(body or "[dim](empty body)[/]"))
+            # CRITICAL: render body with markup=False. The message body is
+            # arbitrary text from another agent (LaTeX, code, etc.) and
+            # routinely contains `[...]` sequences that Rich would try to
+            # parse as markup tags — `\linewidth]{...}` style content
+            # crashes with MarkupError. The body is shown as plain text.
+            if body:
+                blocks.append(Static(body, markup=False))
+            else:
+                blocks.append(Static("[dim](empty body)[/]"))
         blocks.append(
             Static(
                 "Esc / i / q to close · read-only — messages remain in inbox "
