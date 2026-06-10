@@ -5,7 +5,6 @@ them via per-session files under ``~/.multiverse/sessions/<id>/``:
 
   meta.json    — cwd, created_at, claude_args (written on spawn)
   status.json  — {"status": ..., "ts": ...} (written by hook scripts)
-  control.json — existing context-fold signaling channel
   claude_uuid  — current claude session UUID (written by SessionStart hook)
 
 The dashboard also surfaces *dormant* claude sessions: claude JSONLs with a

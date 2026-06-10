@@ -1,7 +1,6 @@
 """Multiverse MCP server.
 
 Hosts the agent-facing tools for the multiverse plugin:
-  - context_info / context_fold   — selective context folding
   - list_agents                   — discover other agents in workspace
   - message_agent                 — send a persistent message to another
                                     agent (delivered via inbox + hook
@@ -15,12 +14,13 @@ Hosts the agent-facing tools for the multiverse plugin:
                                     instruction as its first user message
                                     (user confirms+names via a monitor
                                     modal)
+  - check_inbox / monitor_inbox   — read and wait on the calling agent's
+                                    inbox
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -32,8 +32,6 @@ from mcp.server.fastmcp import FastMCP
 # Add parent to path for imports when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.session import find_session_path, parse_jsonl, format_context_info
-from src.rewriter import fold_context
 from src.sessions import (
     create_session,
     existing_names_in_cwd,
@@ -63,146 +61,6 @@ _DEFAULT_ASK_TIMEOUT = 60
 _DEFAULT_SPAWN_TIMEOUT = 300
 _DEFAULT_MONITOR_INBOX_TIMEOUT = 300
 _MONITOR_INBOX_POLL_INTERVAL = 1.0
-
-
-def _write_control_action(action: dict) -> bool:
-    """Write an action to the multiverse wrapper's control file.
-
-    Returns True if running under the wrapper (action was written),
-    False otherwise (manual mode).
-    """
-    control_path = os.environ.get("MULTIVERSE_CONTROL")
-    if not control_path:
-        return False
-    try:
-        with open(control_path, "w") as f:
-            json.dump(action, f)
-        return True
-    except OSError:
-        return False
-
-
-def _record_superseded_uuid(old_uuid: str) -> None:
-    """Append the pre-fold claude UUID to this multiverse session's meta.json.
-
-    Lets the dashboard render the old JSONL as `Name (folded HH:MM)` and
-    keeps it filtered out of the inter-agent registry. No-op when not running
-    under the wrapper (manual `claude --plugin-dir` mode has no meta.json to
-    update — the user resumes the new session id manually).
-    """
-    if not old_uuid:
-        return
-    control_path = os.environ.get("MULTIVERSE_CONTROL")
-    if not control_path:
-        return
-    state_dir = Path(control_path).parent
-    meta_path = state_dir / "meta.json"
-    try:
-        with open(meta_path, "r") as f:
-            meta = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return
-    if not isinstance(meta, dict):
-        return
-    superseded = meta.get("superseded_uuids")
-    if not isinstance(superseded, list):
-        superseded = []
-    superseded.append({"uuid": old_uuid, "folded_at": time.time()})
-    meta["superseded_uuids"] = superseded
-    tmp = meta_path.with_suffix(meta_path.suffix + ".tmp")
-    try:
-        with open(tmp, "w") as f:
-            json.dump(meta, f)
-        os.replace(tmp, meta_path)
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-
-
-@mcp.tool()
-def context_info(session_id: str, cwd: str) -> str:
-    """Get a lightweight table of contents of the current session context.
-
-    Returns a numbered index of all conversation messages with their types,
-    previews, and sizes. Use this to identify which message ranges to fold.
-
-    Args:
-        session_id: The current Claude Code session ID
-        cwd: The current working directory
-    """
-    try:
-        path = find_session_path(session_id, cwd)
-        entries = parse_jsonl(path)
-        return format_context_info(session_id, entries)
-    except FileNotFoundError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        return f"Error reading session: {e}"
-
-
-@mcp.tool()
-def context_fold(
-    summary: str,
-    start: int,
-    end: int,
-    session_id: str,
-    cwd: str,
-) -> str:
-    """Fold (summarize) a range of messages in the current session context.
-
-    Replaces messages from `start` to `end` (inclusive) with your summary.
-    Creates a new session with the folded context. The original session is preserved.
-
-    If running under the multiverse wrapper, the session resumes automatically.
-    Otherwise, inform the user to run: claude --resume <new_session_id>
-
-    Args:
-        summary: Your summary of the folded content. Write this yourself — you know your context.
-        start: Start message index (inclusive). Get indices from context_info. Must be >= 1.
-        end: End message index (inclusive). Must be >= start.
-        session_id: The current Claude Code session ID
-        cwd: The current working directory
-    """
-    try:
-        result = fold_context(
-            session_id=session_id,
-            cwd=cwd,
-            start=start,
-            end=end,
-            summary=summary,
-        )
-
-        # Mark the pre-fold JSONL as a ghost in this session's meta.json
-        # before signaling resume — the dashboard reads meta.json on its
-        # next refresh.
-        _record_superseded_uuid(session_id)
-
-        # Signal the multiverse wrapper to resume with folded context
-        auto_resume = _write_control_action({
-            "action": "resume_folded",
-            "new_session_id": result["new_session_id"],
-        })
-
-        status = (
-            f"Context folded successfully.\n"
-            f"Removed {result['removed_count']} messages "
-            f"(~{result['tokens_before']} tokens -> ~{result['tokens_after']} tokens).\n"
-            f"New session: {result['new_session_id']}"
-        )
-
-        if auto_resume:
-            return status + "\nSession will resume automatically."
-        else:
-            return status + f"\nRun: claude --resume {result['new_session_id']}"
-
-    except ValueError as e:
-        return f"Fold error: {e}"
-    except FileNotFoundError as e:
-        return f"Error: {e}"
-    except Exception as e:
-        return f"Error during fold: {e}"
 
 
 _DEFAULT_MAX_AGENTS = 15

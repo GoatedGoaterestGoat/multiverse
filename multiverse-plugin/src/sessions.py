@@ -233,10 +233,6 @@ class Session:
         return self.dir / "status.json"
 
     @property
-    def control_path(self) -> Path:
-        return self.dir / "control.json"
-
-    @property
     def meta_path(self) -> Path:
         return self.dir / "meta.json"
 
@@ -706,7 +702,6 @@ def create_session(
 
     (d / "meta.json").write_text(json.dumps(meta))
     (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
-    (d / "control.json").write_text("")
 
     # When a caller (e.g. spawn_agent) wants the new claude session to start
     # with a specific initial prompt, write the prompt to a file and let
@@ -734,7 +729,6 @@ def create_session(
         "-e", f"MULTIVERSE_ROOT={MULTIVERSE_DIR}",
         "-e", f"MULTIVERSE_SESSION_ID={sid}",
         "-e", f"MULTIVERSE_SESSION_CWD={cwd_abs}",
-        "-e", f"MULTIVERSE_CONTROL={d / 'control.json'}",
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
     ]

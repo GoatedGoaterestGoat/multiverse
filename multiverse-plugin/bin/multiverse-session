@@ -2,29 +2,22 @@
 # multiverse-session — inner loop that wraps ONE claude process.
 #
 # Launched by the multiverse monitor inside a detached tmux session.
-# Responsible for: running claude, dispatching control-file actions
-# (currently just resume_folded), and exiting cleanly when claude does.
+# Responsible for running claude, building the per-launch positional
+# prompt arg (initial spawn-agent task and/or pending inbox messages),
+# and exiting when claude exits.
 #
 # Required env (set by the monitor on `tmux new-session -e ...`):
 #   MULTIVERSE_SESSION_ID — short id for this multiverse session
-#   MULTIVERSE_CONTROL    — path to control.json for fold/resume signaling
 #   MULTIVERSE_STATUS     — path to status.json (written by hook scripts)
 
 set -euo pipefail
 
-if ! command -v jq &>/dev/null; then
-  echo "[multiverse-session] jq is required (brew install jq)" >&2
-  exit 1
-fi
 if ! command -v claude &>/dev/null; then
   echo "[multiverse-session] claude CLI not found in PATH" >&2
   exit 1
 fi
 
-: "${MULTIVERSE_CONTROL:?multiverse-session must be launched by the monitor}"
 : "${MULTIVERSE_STATUS:?multiverse-session must be launched by the monitor}"
-
-mkdir -p "$(dirname "$MULTIVERSE_CONTROL")"
 
 # Load the multiverse plugin into every claude invocation (dev mode).
 PLUGIN_ARGS=()
@@ -99,92 +92,30 @@ build_inbox_prompt() {
   printf '%s' "You have $count pending inbox $plural from other agents in your workspace. They have just been delivered to your context as a <system-reminder>. Please read them and respond/act on them as appropriate — a user may attach to your session shortly to see the result."
 }
 
-# Bash 3.2 (default on macOS) errors on `"${ARR[@]}"` when ARR is empty under
-# `set -u`. Use `${ARR[@]+"${ARR[@]}"}` — expand only if set — to stay safe.
-while true; do
-  : > "$MULTIVERSE_CONTROL"
-
-  # If the inbox has pending messages, append a prompt as a positional arg
-  # so claude auto-submits it as the first user turn after resume. This
-  # replaces the old print-mode prime: print mode couldn't handle
-  # interactive permission prompts, so a model trying to call any tool
-  # while processing the inbox would hang the whole wrapper.
-  # Both an initial-prompt (first iteration only, from spawn_agent) and an
-  # inbox-prompt (any iteration with pending messages) become positional
-  # args to claude. If both are present, concatenate so claude still gets
-  # only one positional arg (its prompt). INITIAL_ARGS is one-shot.
-  PROMPT_ARGS=()
-  INBOX_PROMPT=$(build_inbox_prompt)
-  if [ ${#INITIAL_ARGS[@]} -gt 0 ]; then
-    if [ -n "$INBOX_PROMPT" ]; then
-      PROMPT_ARGS=("${INITIAL_ARGS[0]}"$'\n\n'"$INBOX_PROMPT")
-    else
-      PROMPT_ARGS=("${INITIAL_ARGS[0]}")
-    fi
-    INITIAL_ARGS=()
-  elif [ -n "$INBOX_PROMPT" ]; then
-    PROMPT_ARGS=("$INBOX_PROMPT")
+# Both an initial-prompt (first iteration only, from spawn_agent) and an
+# inbox-prompt (any iteration with pending messages) become positional
+# args to claude. If both are present, concatenate so claude still gets
+# only one positional arg. INITIAL_ARGS is one-shot.
+#
+# Bash 3.2 (default on macOS) errors on `"${ARR[@]}"` when ARR is empty
+# under `set -u`. Use `${ARR[@]+"${ARR[@]}"}` — expand only if set — to
+# stay safe.
+PROMPT_ARGS=()
+INBOX_PROMPT=$(build_inbox_prompt)
+if [ ${#INITIAL_ARGS[@]} -gt 0 ]; then
+  if [ -n "$INBOX_PROMPT" ]; then
+    PROMPT_ARGS=("${INITIAL_ARGS[0]}"$'\n\n'"$INBOX_PROMPT")
+  else
+    PROMPT_ARGS=("${INITIAL_ARGS[0]}")
   fi
+elif [ -n "$INBOX_PROMPT" ]; then
+  PROMPT_ARGS=("$INBOX_PROMPT")
+fi
 
-  # Run claude as a backgrounded job so we can SIGTERM it from a watcher
-  # when MULTIVERSE_CONTROL gets a control action written (e.g. by
-  # context_fold). Job control is off in scripts, so claude stays in our
-  # process group and shares the controlling TTY normally — no SIGTTIN.
-  #
-  # Why we can't rely on the PostToolUse hook to exit claude: returning
-  # `{"continue":false}` from PostToolUse only sets shouldPreventContinuation
-  # in claude's query loop, which ends the model's current turn and drops
-  # back to the input prompt. The CLI process keeps running. Without this
-  # watcher, the wrapper would block forever in `wait` after a fold.
-  claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
-         ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
-         ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
-         ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} &
-  CLAUDE_PID=$!
-
-  ( while kill -0 "$CLAUDE_PID" 2>/dev/null; do
-      sleep 0.5
-      if [ -s "$MULTIVERSE_CONTROL" ]; then
-        # Give claude a beat to finish writing the tool_result and run
-        # any other PostToolUse hooks before terminating it.
-        sleep 1
-        kill -TERM "$CLAUDE_PID" 2>/dev/null || true
-        exit 0
-      fi
-    done ) &
-  WATCHER_PID=$!
-
-  wait "$CLAUDE_PID" 2>/dev/null || true
-  kill "$WATCHER_PID" 2>/dev/null || true
-  wait "$WATCHER_PID" 2>/dev/null || true
-
-  if [ ! -s "$MULTIVERSE_CONTROL" ]; then
-    break
-  fi
-
-  ACTION=$(jq -r '.action // empty' "$MULTIVERSE_CONTROL" 2>/dev/null || true)
-  [ -z "$ACTION" ] && break
-
-  case "$ACTION" in
-    resume_folded)
-      NEW_SESSION=$(jq -r '.new_session_id' "$MULTIVERSE_CONTROL")
-      echo ""
-      echo "[multiverse] Context folded. Resuming with optimized context..."
-      echo ""
-      # Silence + clear, same reasoning as prime_inbox_if_needed.
-      claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
-             ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
-             -p "Context was folded successfully. Continue with your current task." \
-             --resume "$NEW_SESSION" >/dev/null 2>&1 || true
-      clear || true
-      CLAUDE_ARGS=(--resume "$NEW_SESSION")
-      ;;
-    *)
-      echo "[multiverse-session] Unknown action: $ACTION" >&2
-      break
-      ;;
-  esac
-done
+claude ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+       ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
+       ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
+       ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
 
 # Mark ended so the monitor can reap this entry.
 if [ -n "${MULTIVERSE_STATUS:-}" ]; then
