@@ -19,6 +19,7 @@ Hosts the agent-facing tools for the multiverse plugin:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -42,6 +43,7 @@ from src.sessions import (
 from src.inbox import (
     consume_messages,
     list_pending_messages,
+    pending_inbox_count,
     render_messages_as_tool_result,
     write_message_to_inbox,
 )
@@ -59,6 +61,8 @@ mcp = FastMCP("multiverse")
 
 _DEFAULT_ASK_TIMEOUT = 60
 _DEFAULT_SPAWN_TIMEOUT = 300
+_DEFAULT_MONITOR_INBOX_TIMEOUT = 300
+_MONITOR_INBOX_POLL_INTERVAL = 1.0
 
 
 def _write_control_action(action: dict) -> bool:
@@ -429,6 +433,67 @@ def check_inbox() -> str:
     rendered = render_messages_as_tool_result(messages)
     consume_messages(messages)
     return rendered
+
+
+@mcp.tool()
+async def monitor_inbox(
+    timeout_seconds: int = _DEFAULT_MONITOR_INBOX_TIMEOUT,
+) -> str:
+    """Block until an inbox message arrives, then signal you to read it.
+
+    Use this when you've finished your turn but are expecting replies — e.g.
+    you just sent ``message_agent`` to one or more agents and want to wait
+    for their responses instead of ending your turn blind. This tool parks
+    until the first message lands in your inbox (or the timeout elapses),
+    so you don't have to busy-loop on ``check_inbox``.
+
+    This tool does NOT consume or return the message contents — it only
+    waits and tells you something arrived. After it returns with a new
+    message, call ``check_inbox`` to actually read (and clear) your inbox.
+
+    If you already have pending messages when you call this, it returns
+    immediately telling you to check — it never makes you wait when there's
+    already something to read.
+
+    The user can interrupt this wait at any time (Esc) to prompt you — the
+    call ends and your turn resumes with their input.
+
+    Args:
+        timeout_seconds: Max seconds to wait. Default 300 (5 minutes). On
+            timeout, returns a "no new messages" notice — you can call
+            again to keep waiting, or move on.
+    """
+    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    if not cwd or not name:
+        return (
+            "Error: this tool requires running inside a multiverse-managed "
+            "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
+        )
+
+    if pending_inbox_count(cwd, name) > 0:
+        return (
+            "You already have pending inbox messages. Call check_inbox to "
+            "read them."
+        )
+
+    # Async sleep (not time.sleep) so a user interrupt — which the MCP layer
+    # surfaces as request cancellation — propagates CancelledError through
+    # the await and stops this loop immediately, instead of leaking a worker
+    # thread that keeps polling until the timeout.
+    timeout = max(1, int(timeout_seconds))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        await asyncio.sleep(_MONITOR_INBOX_POLL_INTERVAL)
+        if pending_inbox_count(cwd, name) > 0:
+            return (
+                "You have a new inbox message. Call check_inbox to read it."
+            )
+
+    return (
+        f"No new inbox messages arrived within {timeout}s. Call monitor_inbox "
+        "again to keep waiting, or proceed without a reply."
+    )
 
 
 @mcp.tool()
