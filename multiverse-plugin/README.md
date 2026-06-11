@@ -6,7 +6,7 @@ Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messag
 
 Three things, all designed to scale past the limits of a single `claude` process:
 
-**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `dormant` / `ended` / `compacting`) is driven by hooks and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
+**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `listening` / `dormant` / `ended` / `compacting`) is driven by hooks, the MCP server, and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
 
 **2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
 
@@ -117,7 +117,7 @@ Several MCP tools are available to any agent running under the wrapper. Each is 
 
 **`check_inbox()`** — read your pending inbox messages on demand, mid-turn, without waiting for a hook to fire. Returns the queued messages (plain-text tool result) or `"You have no pending inbox messages."`, and **clears the inbox** just like a hook delivery. Use it when you just sent a `message_agent` and suspect a reply landed, or want to drain anything that piled up during a long task.
 
-**`monitor_inbox(timeout_seconds=300)`** — block until the next inbox message arrives, then signal you to read it. Use it after you've finished work but are expecting replies — park here instead of busy-looping on `check_inbox`. Returns `"You have a new inbox message…"` once one lands (does **not** consume it — call `check_inbox` next), or a timeout notice after the deadline (default 5 min). Returns immediately if messages are already pending. The wait is interruptible: the user can press Esc to prompt you, ending the call cleanly.
+**`monitor_inbox(timeout_seconds=300)`** — block until the next inbox message arrives, then signal you to read it. Use it after you've finished work but are expecting replies — park here instead of busy-looping on `check_inbox`. Returns `"You have a new inbox message…"` once one lands (does **not** consume it — call `check_inbox` next), or a timeout notice after the deadline (default 5 min). Returns immediately if messages are already pending. The wait is interruptible: the user can press Esc to prompt you, ending the call cleanly. While parked, the agent's dashboard status reads `listening` (cyan) — so the user and other agents (via `list_agents`) can tell it's waiting for messages, not busy.
 
 **`spawn_agent(instruction, name="")`** — start a brand-new subagent with a fresh context and hand it a starting task. Use this when you want to delegate to a clean slate, not bother an existing agent.
 
@@ -306,7 +306,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 | `list_agents(max_agents)` | Discover other agents in the workspace |
 | `message_agent(target_name, message)` | Send a durable message (inbox-delivered) |
 | `check_inbox()` | Read + clear pending inbox messages on demand |
-| `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible) |
+| `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible; shows as `listening`) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
 | `spawn_agent(instruction, name)` | Spawn a fresh subagent with the instruction as its first user message; user-brokered naming in the monitor |
 

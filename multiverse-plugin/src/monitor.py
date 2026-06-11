@@ -81,6 +81,7 @@ STATUS_STYLES = {
     "idle": "dim",
     "working": "bold yellow",
     "waiting": "bold red",
+    "listening": "bold cyan",
     "starting": "cyan",
     "ended": "dim strike",
     "dormant": "blue",

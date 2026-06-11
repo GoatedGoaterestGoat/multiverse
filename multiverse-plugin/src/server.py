@@ -21,6 +21,7 @@ Hosts the agent-facing tools for the multiverse plugin:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -62,12 +63,36 @@ _DEFAULT_SPAWN_TIMEOUT = 300
 _DEFAULT_MONITOR_INBOX_TIMEOUT = 300
 _MONITOR_INBOX_POLL_INTERVAL = 1.0
 
+# Status written to this session's status.json while monitor_inbox is parked,
+# so the dashboard and list_agents show the agent as waiting-for-messages
+# rather than busy. Mirrors set-status.sh's JSON shape.
+_LISTENING_STATUS = "listening"
+
+
+def _write_session_status(status: str) -> None:
+    """Write a status value to this session's status.json (best-effort).
+
+    The MCP server inherits MULTIVERSE_STATUS from the claude process the
+    monitor spawned. No-op outside the wrapper (env var unset). Matches the
+    ``{"status": ..., "ts": ...}`` shape set-status.sh writes, so hook-driven
+    and tool-driven status updates are interchangeable.
+    """
+    status_path = os.environ.get("MULTIVERSE_STATUS")
+    if not status_path:
+        return
+    try:
+        with open(status_path, "w") as f:
+            json.dump({"status": status, "ts": int(time.time())}, f)
+    except OSError:
+        pass
+
 
 _DEFAULT_MAX_AGENTS = 15
 
 _STATUS_PRIORITY = {
     "working": 0,
     "waiting": 0,
+    "listening": 1,
     "starting": 1,
     "idle": 1,
     "unknown": 2,
@@ -256,7 +281,11 @@ def message_agent(target_name: str, message: str) -> str:
 
     is_dormant = target.session is None or target.status == "ended"
     suffix = " (dormant; will be delivered when the user resumes)" if is_dormant else ""
-    return f"Message queued for '{target_name}'{suffix}."
+    return (
+        f"Message queued for '{target_name}'{suffix}. If you're expecting a "
+        "reply, call monitor_inbox to wait for it, or check_inbox later to "
+        "see if one arrived."
+    )
 
 
 @mcp.tool()
@@ -335,23 +364,32 @@ async def monitor_inbox(
             "read them."
         )
 
-    # Async sleep (not time.sleep) so a user interrupt — which the MCP layer
-    # surfaces as request cancellation — propagates CancelledError through
-    # the await and stops this loop immediately, instead of leaking a worker
-    # thread that keeps polling until the timeout.
-    timeout = max(1, int(timeout_seconds))
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        await asyncio.sleep(_MONITOR_INBOX_POLL_INTERVAL)
-        if pending_inbox_count(cwd, name) > 0:
-            return (
-                "You have a new inbox message. Call check_inbox to read it."
-            )
+    # Show "listening" while parked so the user (and other agents via
+    # list_agents) can tell this agent is waiting for messages, not busy.
+    # The finally restores "working" — the turn continues after we return
+    # (the agent will call check_inbox / act), and on a user interrupt the
+    # Stop hook follows up with "idle".
+    _write_session_status(_LISTENING_STATUS)
+    try:
+        # Async sleep (not time.sleep) so a user interrupt — which the MCP
+        # layer surfaces as request cancellation — propagates CancelledError
+        # through the await and stops this loop immediately, instead of
+        # leaking a worker thread that keeps polling until the timeout.
+        timeout = max(1, int(timeout_seconds))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            await asyncio.sleep(_MONITOR_INBOX_POLL_INTERVAL)
+            if pending_inbox_count(cwd, name) > 0:
+                return (
+                    "You have a new inbox message. Call check_inbox to read it."
+                )
 
-    return (
-        f"No new inbox messages arrived within {timeout}s. Call monitor_inbox "
-        "again to keep waiting, or proceed without a reply."
-    )
+        return (
+            f"No new inbox messages arrived within {timeout}s. Call "
+            "monitor_inbox again to keep waiting, or proceed without a reply."
+        )
+    finally:
+        _write_session_status("working")
 
 
 @mcp.tool()

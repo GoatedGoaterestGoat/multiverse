@@ -350,6 +350,7 @@ _STATUS_SORT = {
     "compacting": 0,
     "working": 0,
     "waiting": 0,
+    "listening": 1,
     "starting": 1,
     "idle": 1,
     "unknown": 2,
