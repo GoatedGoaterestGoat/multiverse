@@ -37,6 +37,7 @@ from src.sessions import (
     create_session,
     existing_names_in_cwd,
     find_agent_by_name,
+    kill_session,
     list_named_agents_in_cwd,
 )
 from src.inbox import (
@@ -85,6 +86,83 @@ def _write_session_status(status: str) -> None:
             json.dump({"status": status, "ts": int(time.time())}, f)
     except OSError:
         pass
+
+
+# Prompt typed into an idle/working agent's tmux pane to wake it for a
+# push-notified message. The actual message content is injected separately
+# by the recipient's UserPromptSubmit → deliver-inbox.py hook; this is just
+# the trigger that makes the turn happen.
+_WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
+
+
+def _client_attached(tmux_name: str) -> bool:
+    """True if a user is attached to this session's tmux pane.
+
+    We never send-keys into an attached pane (it would clobber whatever the
+    user is typing), so a push notification falls back to normal inbox
+    delivery when this returns True.
+    """
+    try:
+        r = subprocess.run(
+            ["tmux", "list-clients", "-t", tmux_name],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _wake_via_tmux(tmux_name: str) -> bool:
+    """Type the wake prompt + Enter into a session's tmux pane.
+
+    Two send-keys calls: ``-l`` (literal) for the text so no character is
+    interpreted as a tmux key name, then a separate ``Enter`` to submit.
+    Returns False on any tmux error.
+    """
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_name, "-l", _WAKE_PROMPT],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_name, "Enter"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _auto_resume(target, cwd: str) -> None:
+    """Spawn a multiverse session that resumes a dormant/ended target.
+
+    Headless mirror of the monitor's resume flow: reuse the target's name,
+    reaping an ended-but-still-recorded multiverse session first so
+    create_session's name-collision check doesn't fire. SessionStart +
+    bin/multiverse-session's inbox-prime then deliver the pending message
+    without any user action.
+    """
+    if target.claude_uuid is None:
+        raise RuntimeError(
+            f"target '{target.name}' has no tracked claude UUID — "
+            "cannot resume programmatically"
+        )
+    if target.session is not None and target.status == "ended":
+        kill_session(target.session)
+    create_session(
+        cwd=cwd,
+        claude_args=["--resume", target.claude_uuid],
+        resumed_from=target.claude_uuid,
+        name=target.name,
+    )
 
 
 _DEFAULT_MAX_AGENTS = 15
@@ -221,38 +299,58 @@ def list_agents(
 
 
 @mcp.tool()
-def message_agent(target_name: str, message: str) -> str:
+def message_agent(
+    target_name: str,
+    message: str,
+    push_notification: bool = False,
+) -> str:
     """Send a durable message to another named agent in your workspace.
 
     Use this for instructions, in-depth questions, or any communication
     where the recipient should be able to take action — read files, run
     commands, use tools, then reply at their own pace.
 
-    Delivery: the message is dropped into the recipient's inbox and
-    surfaces as a system-reminder injected into their next turn. The
-    message persists in the recipient's conversation history. This is
-    fire-and-forget: the tool returns as soon as the message is queued;
-    you do NOT block on a reply.
+    The message is always dropped into the recipient's inbox and persists
+    in their conversation history once delivered. To reply to a message you
+    received, simply call ``message_agent`` back at the original sender —
+    there is no separate "respond" tool. For a quick fact you don't want to
+    persist in the target's session, use ``ask_agent`` instead.
 
-    Live recipients see the message at their next turn boundary (Stop
-    hook or UserPromptSubmit hook injection). Dormant recipients stay
-    dormant — the inbox file waits on disk and is delivered the moment
-    the user resumes their session from the monitor (the inbox-prime
-    machinery in ``bin/multiverse-session`` fires automatically on
-    resume when the inbox is non-empty). The dashboard shows a 📩 N
-    badge on dormant rows so the user can see who has pending work.
+    DELIVERY TIMING is controlled by ``push_notification``:
 
-    To reply to a message you received, simply call ``message_agent`` back
-    at the original sender — there is no separate "respond" tool.
+    ``push_notification=False`` (default) — passive delivery. The message
+    waits in the inbox and is delivered on the recipient's next natural
+    turn boundary (Stop / UserPromptSubmit / SessionStart hook). A dormant
+    recipient stays dormant — the message sits on disk (dashboard shows a
+    📩 badge) and is delivered only when the USER next resumes that session.
+    Use this for non-urgent messages where it's fine to wait for the
+    recipient (or the user) to get to it.
 
-    For quick one-off questions where you just need a fact and don't want
-    to disturb the target's main session, use ``ask_agent`` instead.
+    ``push_notification=True`` — active delivery: wake the recipient now,
+    no user needed. Behavior depends on the recipient's state:
+      - dormant/ended → the agent is auto-resumed (started for you) and
+        processes the message on startup.
+      - idle or working, with NO user attached to its terminal → it's
+        pinged via its terminal to check its inbox immediately.
+      - idle or working, but a user IS attached to its terminal → falls
+        back to passive delivery (we won't disrupt the attached user); the
+        message still arrives on the recipient's next turn.
+      - listening (parked in ``monitor_inbox``) → it's already watching its
+        inbox and picks the message up within a second; no wake needed.
+    Use this for time-sensitive messages or when you're blocked waiting on
+    the recipient to act.
+
+    The tool result tells you exactly what happened (woke a dormant agent,
+    pinged a live one, fell back to passive delivery, etc.).
 
     Args:
         target_name: Name of the agent to message. Use ``list_agents`` to
             see who's available.
         message: The message text. Can be multi-line, can include
             instructions, code, anything.
+        push_notification: If True, actively wake the recipient to deliver
+            now (see above). If False (default), leave it in the inbox for
+            passive delivery on their next turn / user-initiated resume.
     """
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
@@ -272,6 +370,8 @@ def message_agent(target_name: str, message: str) -> str:
             "Call list_agents to see who's available."
         )
 
+    # Always write the inbox file first — and, critically, BEFORE any
+    # auto-resume, so the resumed agent's SessionStart hook sees it.
     write_message_to_inbox(
         sender_name=self_name,
         recipient_name=target_name,
@@ -280,12 +380,70 @@ def message_agent(target_name: str, message: str) -> str:
     )
 
     is_dormant = target.session is None or target.status == "ended"
-    suffix = " (dormant; will be delivered when the user resumes)" if is_dormant else ""
+
+    reply_hint = (
+        " If you're expecting a reply, finish any other work first, then "
+        "call monitor_inbox to wait for it (it blocks), or check_inbox later."
+    )
+
+    if not push_notification:
+        if is_dormant:
+            return (
+                f"Message queued for '{target_name}' (dormant — it will be "
+                "delivered when the user next resumes that session)." + reply_hint
+            )
+        return (
+            f"Message queued for '{target_name}'. It will be delivered on the "
+            "recipient's next turn." + reply_hint
+        )
+
+    # push_notification=True — actively wake the recipient.
+    if is_dormant:
+        try:
+            _auto_resume(target, cwd)
+        except Exception as e:  # noqa: BLE001 — surface as tool error text
+            return (
+                f"Message queued for '{target_name}', but auto-resume failed "
+                f"({e}). It will be delivered when the session is next "
+                "resumed." + reply_hint
+            )
+        return (
+            f"Woke '{target_name}' (it was dormant) and delivered your "
+            "message — it will process it on startup." + reply_hint
+        )
+
+    status = target.status
+
+    if status == "listening":
+        return (
+            f"Delivered to '{target_name}' — it was already listening on its "
+            "inbox and will pick the message up within a second." + reply_hint
+        )
+
+    if status in ("idle", "working"):
+        tmux_name = target.session.tmux_name
+        if _client_attached(tmux_name):
+            return (
+                f"Message queued for '{target_name}' — a user is attached to "
+                "its terminal, so it falls back to passive delivery (delivered "
+                "on the recipient's next turn) rather than a terminal ping."
+                + reply_hint
+            )
+        if _wake_via_tmux(tmux_name):
+            return (
+                f"Delivered to '{target_name}' and pinged its terminal to "
+                f"check its inbox now (it was {status})." + reply_hint
+            )
+        return (
+            f"Message queued for '{target_name}', but the terminal ping "
+            "failed — it will be delivered on the recipient's next turn."
+            + reply_hint
+        )
+
+    # starting / unknown / other live states — let the normal hooks deliver.
     return (
-        f"Message queued for '{target_name}'{suffix}. If you're expecting a "
-        "reply, finish any other work first, then call monitor_inbox to wait "
-        "for it — monitor_inbox blocks, so you can't do anything else while "
-        "it runs. (Or just check_inbox later to see if one arrived.)"
+        f"Message queued for '{target_name}' (status: {status}). It will be "
+        "delivered on the recipient's next turn." + reply_hint
     )
 
 

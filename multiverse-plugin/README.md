@@ -99,14 +99,25 @@ Several MCP tools are available to any agent running under the wrapper. Each is 
 
 **`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster.
 
-**`message_agent(target_name, message)`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
+**`message_agent(target_name, message, push_notification=False)`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
 - Delivered as a system-reminder injected into the recipient's next turn
 - Recipient has full tool access (Read, Bash, Grep, etc.) and can take their time
 - Persists in the recipient's conversation history
 - Fire-and-forget — the tool returns as soon as the message is queued; you don't block on a reply
 - To reply, the recipient simply calls `message_agent` back at the original sender (no separate respond tool)
-- If the target is dormant, they're auto-resumed in a detached tmux session before delivery
+
+**`push_notification`** controls *when* the message reaches the recipient:
+
+| `push_notification` | Recipient state | What happens |
+|:--------------------|:----------------|:-------------|
+| `False` (default) | any | Passive — message waits in the inbox, delivered on the recipient's next turn (Stop / UserPromptSubmit / SessionStart hook). A **dormant** recipient stays dormant until the **user** resumes it. Use for non-urgent messages. |
+| `True` | dormant / ended | Recipient is **auto-resumed** (started for you) and processes the message on startup — no user needed. |
+| `True` | idle / working, **no user attached** | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately. |
+| `True` | idle / working, **user attached** | Falls back to passive delivery — we don't disrupt the attached user's pane. |
+| `True` | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
+
+The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, fell back to passive, etc.). Use `push_notification=True` for time-sensitive work or when you're blocked on the recipient acting; leave it `False` when it's fine to wait for the recipient (or the user) to get to it.
 
 **`ask_agent(target_name, question, timeout_seconds=60)`** — send a quick ephemeral question. Use this for facts the target already knows.
 
@@ -304,7 +315,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 | Tool | Purpose |
 |:-----|:--------|
 | `list_agents(max_agents)` | Discover other agents in the workspace |
-| `message_agent(target_name, message)` | Send a durable message (inbox-delivered) |
+| `message_agent(target_name, message, push_notification)` | Send a durable message (inbox-delivered); `push_notification=True` actively wakes the recipient |
 | `check_inbox()` | Read + clear pending inbox messages on demand |
 | `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible; shows as `listening`) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
@@ -355,10 +366,15 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 
 ### What happens during a `message_agent` call
 
-1. `message_agent(target, message)` writes `~/.multiverse/inbox/<cwd>/<target>/<id>.json` (atomic tmp+rename)
-2. If the target is dormant, the wrapper auto-resumes them via `tmux new-session -d` + `claude --resume <uuid>` (after the inbox file is written, so SessionStart sees it)
-3. Tool returns immediately with `"Message delivered to '<target>'"`
-4. On the recipient side, the next firing hook (`SessionStart` if just resumed, `Stop` after current turn, or `UserPromptSubmit` on next user input) runs `deliver-inbox.py`, which:
+1. `message_agent(target, message, push_notification=…)` writes `~/.multiverse/inbox/<cwd>/<target>/<id>.json` (atomic tmp+rename). The inbox write always happens first — before any auto-resume — so a resumed recipient's SessionStart hook sees it.
+2. **Routing by `push_notification`:**
+   - `False` → nothing else happens; the message waits for the recipient's next natural hook fire (dormant recipients wait for the *user* to resume them).
+   - `True` + dormant/ended → `_auto_resume` spawns `tmux new-session -d` + `claude --resume <uuid>`; the wakeup-on-resume machinery (below) delivers it on startup.
+   - `True` + idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter` into the pane, triggering a UserPromptSubmit turn.
+   - `True` + idle/working + client attached → no ping (would clobber the user's input); passive delivery.
+   - `True` + listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
+3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive / already listening).
+4. On the recipient side, the next firing hook (`SessionStart` if just resumed, `Stop` after current turn, `UserPromptSubmit` on next input or a push ping) runs `deliver-inbox.py`, which:
    - Reads all pending messages in the recipient's inbox
    - Formats them as one `<system-reminder>` block
    - Returns the right injection JSON for the firing event (`additionalContext` for SessionStart/UserPromptSubmit, `decision: "block"` with the body as `reason` for Stop)
