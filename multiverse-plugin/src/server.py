@@ -283,8 +283,9 @@ def message_agent(target_name: str, message: str) -> str:
     suffix = " (dormant; will be delivered when the user resumes)" if is_dormant else ""
     return (
         f"Message queued for '{target_name}'{suffix}. If you're expecting a "
-        "reply, call monitor_inbox to wait for it, or check_inbox later to "
-        "see if one arrived."
+        "reply, finish any other work first, then call monitor_inbox to wait "
+        "for it — monitor_inbox blocks, so you can't do anything else while "
+        "it runs. (Or just check_inbox later to see if one arrived.)"
     )
 
 
