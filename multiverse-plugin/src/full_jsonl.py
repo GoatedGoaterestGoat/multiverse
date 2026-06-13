@@ -246,6 +246,24 @@ def total_turn_count(claude_uuid: str, cwd: str) -> int:
     return len(_parse_full(claude_uuid, cwd))
 
 
+def live_stats(claude_uuid: str, cwd: str) -> tuple[int, int]:
+    """Return ``(total_tokens, total_turns)`` for the LIVE jsonl — what
+    the live agent currently sees on resume. Reflects any compaction
+    state. Zero/zero if the live file is missing."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    if not live.is_file():
+        return 0, 0
+    from compaction.parser import parse_session  # noqa: E402
+    forest = parse_session(str(live))
+    tokens = 0
+    for turn in forest:
+        if turn.user_prompt is not None:
+            tokens += turn.user_prompt.tokens
+        for leaf in turn.leaves:
+            tokens += leaf.tokens
+    return tokens, len(forest)
+
+
 def per_turn_tokens(claude_uuid: str, cwd: str) -> list[tuple[str, int]]:
     """Return [(turn_id, total_tokens_in_turn), ...] from full.jsonl,
     where total_tokens_in_turn includes the user_prompt leaf."""

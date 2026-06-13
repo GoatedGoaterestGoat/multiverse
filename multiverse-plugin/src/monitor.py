@@ -47,6 +47,7 @@ from .compact_runner import CompactRunner, State as CompactState
 from .full_jsonl import (
     full_jsonl_path,
     live_jsonl_path,
+    live_stats,
     total_token_count,
     total_turn_count,
 )
@@ -777,18 +778,20 @@ class CompactScreen(ModalScreen[None]):
 
     @work(thread=True, exclusive=True, group="compact_stats")
     def _load_stats(self) -> None:
-        """Compute total tokens, total turns, cached-tree count (trees
-        whose turn_id is on the chain forest), and historical per-turn
-        build times from worker.log for ETA seeding."""
+        """Compute full + live token / turn counts, cached-tree count
+        (trees whose turn_id is on the chain forest), and historical
+        per-turn build times from worker.log for ETA seeding."""
         try:
-            toks = total_token_count(self.claude_uuid, self.cwd)
-            turns = total_turn_count(self.claude_uuid, self.cwd)
+            full_toks = total_token_count(self.claude_uuid, self.cwd)
+            full_turns = total_turn_count(self.claude_uuid, self.cwd)
+            live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
             cached, history = self._audit_cache_against_chain()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._stats_failed, repr(e))
             return
         self.app.call_from_thread(
-            self._stats_ready, toks, turns, cached, history
+            self._stats_ready,
+            full_toks, full_turns, live_toks, live_turns, cached, history,
         )
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
@@ -846,6 +849,8 @@ class CompactScreen(ModalScreen[None]):
         self,
         total_tokens: int,
         total_turns: int,
+        live_tokens: int = 0,
+        live_turns: int = 0,
         cached: int = 0,
         history: list[float] | None = None,
     ) -> None:
@@ -856,9 +861,25 @@ class CompactScreen(ModalScreen[None]):
         if history:
             self._build_times = list(history)
         suggested = max(1, total_tokens // 2)
+
+        # Two-line stats: full (uncompacted) above, current live below.
+        # The live line includes a percentage-of-full so the user can
+        # see how much compaction has already happened.
+        if live_tokens == 0:
+            live_suffix = "[dim](no live JSONL on disk)[/]"
+        elif total_tokens == 0:
+            live_suffix = ""
+        elif live_tokens == total_tokens and live_turns == total_turns:
+            live_suffix = "[dim](matches full — no compaction yet)[/]"
+        else:
+            pct = 100.0 * live_tokens / total_tokens
+            live_suffix = f"[dim]({pct:.1f}% of full)[/]"
+
         self.query_one("#compact-stats", Static).update(
-            f"Total: [bold]{total_tokens:,}[/] tokens · "
-            f"[bold]{total_turns}[/] turn(s) (uncompacted)"
+            f"Full: [bold]{total_tokens:,}[/] tokens · "
+            f"[bold]{total_turns}[/] turn(s)  [dim](uncompacted)[/]\n"
+            f"Live: [bold]{live_tokens:,}[/] tokens · "
+            f"[bold]{live_turns}[/] turn(s)  {live_suffix}"
         )
         self._refresh_cached_line()
         budget = self.query_one("#compact-budget", Input)
