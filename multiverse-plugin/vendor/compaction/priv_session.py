@@ -34,10 +34,26 @@ import os
 import re
 import uuid as uuidlib
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from .render import render_frontier_as_message_blocks
 from .types import Frontier, Leaf, Turn
+
+
+def _frontier_leaf_images(frontier: Frontier) -> list[dict]:
+    """Collect verbatim image blocks from every Leaf still on the frontier.
+
+    Used to surface images to the merge agent on rebuild steps (step >= 1),
+    where the frontier is flattened into synthetic message rows that would
+    otherwise be text-only. Nodes (already-merged spans) carry no images —
+    their content has been summarized into text — so only Leaves contribute.
+    Images are returned in frontier order.
+    """
+    images: list[dict] = []
+    for entry in frontier:
+        if isinstance(entry, Leaf) and entry.images:
+            images.extend(entry.images)
+    return images
 
 
 # Match the model that produced the original session, so signatures validate
@@ -200,6 +216,7 @@ def build_synthetic_jsonl_from_frontier(
     frontier: Frontier,
     session_id: str,
     cwd: str,
+    user_images: list[dict] | None = None,
 ) -> str:
     """Build a session JSONL where the assistant message contains one
     content block per frontier entry. Use this for merge steps AFTER the
@@ -214,9 +231,29 @@ def build_synthetic_jsonl_from_frontier(
     `render_frontier_as_message_blocks(frontier)` provides the content
     blocks: thinking leaves verbatim with signatures; other leaves as
     descriptive text; summary nodes as text wrapped in <compacted-context>.
+
+    `user_images` are the originating user prompt's image blocks (hoisted
+    out of the frontier, so not found by scanning frontier leaves). Together
+    with any image-bearing leaves still on the frontier, they ride the
+    user-role row — the only API-legal home for image blocks — so the merge
+    agent can actually see the screenshots it's summarizing around.
     """
     user_uuid = str(uuidlib.uuid4())
     msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
+
+    # Surface images to the merge agent: the user prompt's own images plus
+    # any carried by surviving frontier leaves (e.g. a tool_result screenshot
+    # still on the frontier). Images are only API-legal in a user-role
+    # message, so they ride the user row here (not the assistant frontier
+    # blocks below). When present, content becomes a block list: prompt text
+    # first, then the image blocks verbatim.
+    images = list(user_images or []) + _frontier_leaf_images(frontier)
+    if images:
+        user_content: Any = (
+            [{"type": "text", "text": user_prompt_text}] + images
+        )
+    else:
+        user_content = user_prompt_text
 
     rows = [_metadata_row(session_id)]
     rows.append({
@@ -227,7 +264,7 @@ def build_synthetic_jsonl_from_frontier(
         "timestamp": SYNTHETIC_TIMESTAMP,
         "cwd": cwd,
         "userType": "external",
-        "message": {"role": "user", "content": user_prompt_text},
+        "message": {"role": "user", "content": user_content},
     })
 
     blocks = render_frontier_as_message_blocks(frontier)
@@ -286,11 +323,20 @@ def _user_row(
     parent_uuid: str | None,
     prompt_id: str | None = None,
     timestamp: str = SYNTHETIC_TIMESTAMP,
+    images: list[dict] | None = None,
 ) -> dict:
     """Build a user-role row. `prompt_id`, when set, marks this as the
     start of a new turn — our parser uses promptId changes to detect turn
     boundaries, so user-prompt rows in multi-turn synthetic sessions need
-    one for the JSONL to round-trip cleanly."""
+    one for the JSONL to round-trip cleanly.
+
+    When `images` is non-empty, the user prompt's image blocks are preserved
+    verbatim alongside the text (content becomes a block list). User-message
+    images are part of the verbatim separator and are never compacted away."""
+    if images:
+        content: Any = [{"type": "text", "text": text}] + list(images)
+    else:
+        content = text
     row = {
         "parentUuid": parent_uuid,
         "uuid": str(uuidlib.uuid4()),
@@ -299,7 +345,7 @@ def _user_row(
         "timestamp": timestamp,
         "cwd": cwd,
         "userType": "external",
-        "message": {"role": "user", "content": text},
+        "message": {"role": "user", "content": content},
     }
     if prompt_id is not None:
         row["promptId"] = prompt_id
@@ -365,9 +411,11 @@ def turn_to_rows(
     rows: list[dict] = []
 
     user_text = ""
+    user_images: list[dict] = []
     if turn.user_prompt is not None:
         user_text = turn.user_prompt.content.get("text", "") or ""
-    if not user_text:
+        user_images = turn.user_prompt.images or []
+    if not user_text and not user_images:
         # Plain text — angle-bracket-only placeholders get parsed as
         # raw HTML by claude code's markdown lexer and discarded.
         user_text = "_(no user prompt for this turn)_"
@@ -376,7 +424,10 @@ def turn_to_rows(
     # (it usually is — turn_id originates from the source JSONL's promptId);
     # fall back to a fresh UUID otherwise (orphan turns, etc.).
     prompt_id = turn.turn_id if _looks_like_uuid(turn.turn_id) else str(uuidlib.uuid4())
-    user_row = _user_row(user_text, session_id, cwd, parent_uuid, prompt_id=prompt_id)
+    user_row = _user_row(
+        user_text, session_id, cwd, parent_uuid,
+        prompt_id=prompt_id, images=user_images,
+    )
     rows.append(user_row)
     prev_uuid: str = user_row["uuid"]
 

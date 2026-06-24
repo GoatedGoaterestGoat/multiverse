@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from typing import Any, Iterator
 
-from .tokenize import count_tokens
+from .tokenize import count_image_tokens, count_tokens
 from .types import Forest, Leaf, Turn
 
 # Top-level `type` values that carry no compactable content.
@@ -182,6 +182,15 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
 
     # user/<list>: tool_result, or rare user text-in-list
     if t == "user" and isinstance(content, list):
+        # Top-level image blocks (a user message that attaches screenshots
+        # alongside its text). Collected verbatim so the merge agent can see
+        # them and the output renderer can re-emit them. count_image_tokens
+        # captures their (substantial) cost.
+        top_images = [
+            b for b in content
+            if isinstance(b, dict) and b.get("type") == "image"
+        ]
+        img_tokens = sum(count_image_tokens(b) for b in top_images)
         for block in content:
             if not isinstance(block, dict):
                 continue
@@ -189,13 +198,21 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
             if btype == "tool_result":
                 result_content = block.get("content")
                 # `content` may be a string or a list of {type:text,text:...}
+                # and/or {type:image,source:...}. Pull text for the summary
+                # and carry image sub-blocks verbatim on the leaf.
+                result_images: list[dict] = []
                 if isinstance(result_content, list):
                     text = "\n".join(
                         b.get("text", "") for b in result_content
                         if isinstance(b, dict) and b.get("type") == "text"
                     )
+                    result_images = [
+                        b for b in result_content
+                        if isinstance(b, dict) and b.get("type") == "image"
+                    ]
                 else:
                     text = str(result_content) if result_content is not None else ""
+                images = top_images + result_images
                 return Leaf(
                     kind="tool_result",
                     content={
@@ -203,19 +220,35 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
                         "text": text,
                         "is_error": block.get("is_error", False),
                     },
-                    tokens=count_tokens(text),
+                    tokens=count_tokens(text)
+                    + img_tokens
+                    + sum(count_image_tokens(b) for b in result_images),
                     preview=_preview(text, "tool_result"),
                     source_uuids=[uuid],
+                    images=images,
                 )
             if btype == "text":
                 text = block.get("text", "")
                 return Leaf(
                     kind="user_text",
                     content={"text": text},
-                    tokens=count_tokens(text),
+                    tokens=count_tokens(text) + img_tokens,
                     preview=_preview(text, "user"),
                     source_uuids=[uuid],
+                    images=top_images,
                 )
+        # No text/tool_result block, but the message may be image-only
+        # (e.g. a user message whose entire content is a screenshot). Emit a
+        # user_text leaf so the images are captured rather than dropped.
+        if top_images:
+            return Leaf(
+                kind="user_text",
+                content={"text": ""},
+                tokens=img_tokens,
+                preview=f"<{len(top_images)} image(s)>",
+                source_uuids=[uuid],
+                images=top_images,
+            )
         return None
 
     # assistant/<list>: one content block per row in this format

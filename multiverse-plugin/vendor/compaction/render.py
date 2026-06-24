@@ -285,10 +285,19 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     "is_error": bool(entry.content.get("is_error", False)),
                 })
             elif kind == "user_text":
-                append("user", {
-                    "type": "text",
-                    "text": entry.content.get("text", "") or "",
-                })
+                text = entry.content.get("text", "") or ""
+                # Emit a text block unless the message was image-only (no
+                # text), then append the user message's images verbatim.
+                # User-message images are kept (not summarized away); a
+                # surviving user_text leaf carries them into the output. Note
+                # tool_result images are intentionally NOT re-emitted — those
+                # live in the compactable region and their information is
+                # folded into summaries instead.
+                imgs = getattr(entry, "images", None) or []
+                if text or not imgs:
+                    append("user", {"type": "text", "text": text})
+                for img in imgs:
+                    append("user", img)
             elif kind == "tool_exchange":
                 # Combined tool_use + tool_result leaf (auto-merge
                 # preprocessing). Emit as a native pair across two

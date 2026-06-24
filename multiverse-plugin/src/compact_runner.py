@@ -620,6 +620,7 @@ def _reconstruct_tree(d: dict):
             tokens=d["tokens"],
             preview=d.get("preview", ""),
             source_uuids=d.get("source_uuids", []),
+            images=d.get("images", []),
         )
     if d.get("type") == "node":
         return Node(

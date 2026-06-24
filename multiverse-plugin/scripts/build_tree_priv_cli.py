@@ -36,6 +36,7 @@ def serialize(node):
             "preview": node.preview,
             "content": node.content,
             "source_uuids": node.source_uuids,
+            "images": node.images,
         }
     if isinstance(node, Node):
         return {

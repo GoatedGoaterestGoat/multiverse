@@ -48,6 +48,16 @@ class Leaf:
                                # survives in the structured-rendered output
     preview: str               # short rendering used in agent prompts
     source_uuids: list[str] = field(default_factory=list)
+    # Verbatim Anthropic image content blocks ({"type":"image","source":...})
+    # carried by this leaf's source row. Populated by the parser for user
+    # prompts (top-level image blocks) and tool_results (image sub-blocks).
+    # Images are NOT representable as text, so they live here rather than in
+    # `content`. `tokens` already includes their estimated cost. Consumers:
+    # the synthetic-session builders surface them to the merge agent, and the
+    # output renderer re-emits user-prompt images verbatim (tool_result images
+    # are dropped — they're in the compactable region and their information is
+    # folded into the summary instead).
+    images: list[dict] = field(default_factory=list)
 
 
 @dataclass

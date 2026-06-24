@@ -129,6 +129,10 @@ def _make_tool_exchange(call: Leaf, result: Leaf, max_preview: int) -> Leaf:
         tokens=tokens,
         preview=full_preview,
         source_uuids=list(call.source_uuids) + list(result.source_uuids),
+        # Carry the tool_result's images onto the merged leaf so they still
+        # reach the merge agent (surfaced via the synthetic user row). They
+        # are dropped from the compacted OUTPUT like any tool_result image.
+        images=list(call.images) + list(result.images),
     )
 
 
@@ -200,6 +204,7 @@ def collapse_consecutive(leaves: list[Leaf], kind: str, max_preview: int = 120) 
 def _concat_run(run: list[Leaf], max_preview: int) -> Leaf:
     texts = []
     sources = []
+    images: list[dict] = []
     tokens = 0
     for leaf in run:
         t = leaf.content.get("text", "")
@@ -207,6 +212,7 @@ def _concat_run(run: list[Leaf], max_preview: int) -> Leaf:
             texts.append(t)
         tokens += leaf.tokens
         sources.extend(leaf.source_uuids)
+        images.extend(leaf.images)
     joined = "\n\n".join(texts)
     preview = " ".join(joined.split())
     if len(preview) > max_preview:
@@ -217,4 +223,5 @@ def _concat_run(run: list[Leaf], max_preview: int) -> Leaf:
         tokens=tokens,
         preview=preview,
         source_uuids=sources,
+        images=images,
     )

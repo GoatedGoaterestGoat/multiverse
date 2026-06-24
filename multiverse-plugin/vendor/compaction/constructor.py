@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .priv_session import (
+    _frontier_leaf_images,
     build_synthetic_jsonl_from_frontier,
     build_synthetic_jsonl_from_source,
     cwd_slug,
@@ -405,8 +406,22 @@ def _build_priv_messages(turn: Turn, frontier: Frontier) -> list[dict]:
         frontier_index=_render_priv_frontier_index(frontier),
     )
 
+    # Surface images to the merge agent: the user prompt's own images plus
+    # any carried by surviving frontier leaves. Images are only API-legal in
+    # a user message, so they ride the leading user row (with the prompt
+    # text) rather than the assistant frontier blocks. Mirrors the CLI path's
+    # build_synthetic_jsonl_from_frontier.
+    user_prompt_images = turn.user_prompt.images if turn.user_prompt else []
+    frontier_images = list(user_prompt_images or []) + _frontier_leaf_images(frontier)
+    if frontier_images:
+        first_user_content: Any = (
+            [{"type": "text", "text": user_text}] + frontier_images
+        )
+    else:
+        first_user_content = user_text
+
     return [
-        {"role": "user", "content": user_text},
+        {"role": "user", "content": first_user_content},
         {"role": "assistant", "content": assistant_blocks},
         {"role": "user", "content": instruction},
     ]
@@ -769,7 +784,8 @@ def construct_turn_priv_cli(
             )
         else:
             jsonl_text = build_synthetic_jsonl_from_frontier(
-                user_prompt_text, frontier, session_id, cwd
+                user_prompt_text, frontier, session_id, cwd,
+                user_images=(turn.user_prompt.images if turn.user_prompt else None),
             )
 
         sp = session_path(session_id, cwd)
