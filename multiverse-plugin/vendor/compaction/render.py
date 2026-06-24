@@ -14,9 +14,34 @@ Two distinct rendering jobs:
 from __future__ import annotations
 
 import json as _json
+import re as _re
 import uuid as _uuidlib
 
 from .types import Frontier, Leaf, Node
+
+
+# Anthropic / Bedrock require tool_use.name to match this pattern; an output
+# containing any non-conforming name gets the WHOLE request rejected with a
+# 400 ValidationException on resume. Synthetic placeholders we emit for orphan
+# tool calls (and any real tool whose name somehow carries odd chars) must be
+# sanitized to satisfy it.
+_TOOL_NAME_RE = _re.compile(r"[^a-zA-Z0-9_-]")
+
+# Placeholder name for a synthetic tool_use we fabricate when a tool_result's
+# matching tool_use was summarized away. Regex-safe (no parens/spaces).
+_SUMMARIZED_TOOL_NAME = "summarized_tool"
+
+
+def _safe_tool_name(name: str | None) -> str:
+    """Coerce a tool name into the API-required ``[a-zA-Z0-9_-]+`` shape.
+
+    Replaces any disallowed char with ``_`` and falls back to a non-empty
+    placeholder. Compacted output is fed back via ``claude --resume``; a
+    single bad ``toolUse.name`` (e.g. ``"(summarized)"`` or ``"?"``) makes
+    the provider reject the entire request, so every emitted name must pass.
+    """
+    cleaned = _TOOL_NAME_RE.sub("_", str(name or "")).strip("_")
+    return cleaned or "tool"
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +287,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                 append("assistant", {
                     "type": "tool_use",
                     "id": tu_id,
-                    "name": entry.content.get("name", "?"),
+                    "name": _safe_tool_name(entry.content.get("name")),
                     "input": entry.content.get("input", {}) or {},
                 })
                 pending_tool_uses.add(tu_id)
@@ -274,7 +299,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     append("assistant", {
                         "type": "tool_use",
                         "id": tu_id,
-                        "name": "(summarized)",
+                        "name": _SUMMARIZED_TOOL_NAME,
                         "input": {},
                     })
                 pending_tool_uses.discard(tu_id)
@@ -306,7 +331,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                 append("assistant", {
                     "type": "tool_use",
                     "id": tu_id,
-                    "name": entry.content.get("name", "?"),
+                    "name": _safe_tool_name(entry.content.get("name")),
                     "input": entry.content.get("input", {}) or {},
                 })
                 append("user", {
