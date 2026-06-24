@@ -449,7 +449,7 @@ class CompactRunner:
         Returns the number of rows written to live.
         """
         # Lazy imports — vendor is on sys.path.
-        from compaction.compactor import proportional  # noqa: E402
+        from compaction.compactor import allocate_budget, proportional  # noqa: E402
         from compaction.parser import parse_session  # noqa: E402
         from compaction.priv_session import (  # noqa: E402
             compact_forest_to_session_jsonl,
@@ -465,7 +465,23 @@ class CompactRunner:
             f"will fall back to greedy-from-start.",
         )
 
-        per_turn = proportional(forest, self.total_budget)
+        # Whole-output allocation: reserves the verbatim user-prompt text
+        # floor, keeps as many user-prompt images as fit a sub-budget
+        # (newest first), and divides the rest across turns for assistant
+        # content. Without this, verbatim user images ride along outside the
+        # budget and a 400k compaction can still emit 800k+ tokens.
+        per_turn, keep_image_turn_ids = allocate_budget(
+            forest, self.total_budget, scheduler=proportional
+        )
+        n_img_turns = sum(
+            1 for t in forest if t.user_prompt and t.user_prompt.images
+        )
+        if n_img_turns:
+            on_log(
+                f"User-prompt images: keeping {len(keep_image_turn_ids)} of "
+                f"{n_img_turns} image-bearing turn(s) within budget; the rest "
+                f"are replaced by a placeholder."
+            )
         # Log per-turn budget allocation. Cap output at first 10 turns to
         # keep the log readable on long sessions; full mapping is in the
         # rendered JSONL via the rows themselves.
@@ -494,6 +510,7 @@ class CompactRunner:
             session_id=self.claude_uuid,
             cwd=self.cwd,
             title=title,
+            keep_image_turn_ids=keep_image_turn_ids,
         )
 
         # Atomic replace: temp file in the same directory, then os.replace.

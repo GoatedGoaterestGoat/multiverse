@@ -42,7 +42,7 @@ from src.full_jsonl import (  # noqa: E402
     write_marker,
 )
 from src.paths import multiverse_dir  # noqa: E402
-from compaction.compactor import proportional  # noqa: E402
+from compaction.compactor import allocate_budget, proportional  # noqa: E402
 from compaction.parser import parse_session  # noqa: E402
 from compaction.priv_session import compact_forest_to_session_jsonl  # noqa: E402
 
@@ -141,8 +141,10 @@ def main() -> int:
           f"{time.time()-t0:.1f}s", file=sys.stderr)
 
     t0 = time.time()
-    per_turn = proportional(forest, budget)
-    print(f"[scheduler] proportional in {time.time()-t0:.2f}s", file=sys.stderr)
+    per_turn, keep_image_turn_ids = allocate_budget(
+        forest, budget, scheduler=proportional
+    )
+    print(f"[scheduler] allocate_budget in {time.time()-t0:.2f}s", file=sys.stderr)
 
     title = _read_existing_title(live_jsonl_path(uuid, cwd)) or "compacted"
 
@@ -150,6 +152,7 @@ def main() -> int:
     jsonl_text = compact_forest_to_session_jsonl(
         forest, per_turn,
         session_id=uuid, cwd=cwd, title=title,
+        keep_image_turn_ids=keep_image_turn_ids,
     )
     print(f"[render] {jsonl_text.count(chr(10))} rows / "
           f"{len(jsonl_text):,}B in {time.time()-t0:.1f}s", file=sys.stderr)

@@ -19,9 +19,38 @@ from __future__ import annotations
 
 from typing import Callable, Iterable
 
+from .tokenize import count_image_tokens, count_tokens
 from .types import Forest, Frontier, Leaf, Node, Turn
 
 Scheduler = Callable[[Forest, int], dict[str, int]]
+
+
+# ---------------------------------------------------------------------------
+# Verbatim user-prompt accounting
+# ---------------------------------------------------------------------------
+#
+# A turn's user prompt is a verbatim separator: its TEXT is never compacted
+# (and is tiny). Its IMAGES, however, can be large — and historically rode
+# along for free, outside the budget entirely, so a 400k-budget compaction of
+# an image-heavy session could still emit 800k+ tokens. The budget must bound
+# the whole output, so user-prompt images are now droppable: we keep as many
+# as fit a reserved image sub-budget (newest turns first) and replace the rest
+# with a short text placeholder. User-prompt text is always kept (mandatory
+# floor); assistant content gets whatever remains.
+
+def _user_prompt_text_tokens(turn: Turn) -> int:
+    """Token cost of a turn's verbatim user-prompt TEXT (images excluded).
+    This is the un-droppable floor — the turn separator always keeps it."""
+    if turn.user_prompt is None:
+        return 0
+    return count_tokens(turn.user_prompt.content.get("text", "") or "")
+
+
+def _user_prompt_image_tokens(turn: Turn) -> int:
+    """Token cost of a turn's verbatim user-prompt IMAGES."""
+    if turn.user_prompt is None:
+        return 0
+    return sum(count_image_tokens(im) for im in (turn.user_prompt.images or []))
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +239,70 @@ SCHEDULERS: dict[str, Callable] = {
     "proportional": proportional,
     "last_k_raw": last_k_raw,
 }
+
+
+# ---------------------------------------------------------------------------
+# Whole-output budget allocation (text floor + droppable images + assistant)
+# ---------------------------------------------------------------------------
+
+# Fraction of the post-text budget the kept user-prompt images may consume.
+# The rest is reserved for assistant content so a single huge screenshot
+# can't starve the actual conversation summary. Kept images are chosen
+# newest-turn-first (recency); within the budget all-or-nothing per turn.
+DEFAULT_IMAGE_BUDGET_FRACTION = 0.5
+
+
+def allocate_budget(
+    forest: Forest,
+    total_budget: int,
+    scheduler: Scheduler = proportional,
+    image_budget_fraction: float = DEFAULT_IMAGE_BUDGET_FRACTION,
+) -> tuple[dict[str, int], set[str]]:
+    """Split ``total_budget`` across the WHOLE compacted output.
+
+    Unlike a bare scheduler (which only sizes the compactable assistant
+    leaves), this accounts for the verbatim user-prompt cost that the
+    renderer always emits on top:
+
+      1. User-prompt TEXT is a mandatory floor — summed and subtracted off
+         the top. (Tiny; it's the turn separator.)
+      2. User-prompt IMAGES are droppable. Up to
+         ``image_budget_fraction`` of the remaining budget is spent keeping
+         them, newest turn first, all-or-nothing per turn. Turns not in the
+         returned keep-set have their images replaced by a placeholder.
+      3. Whatever remains funds the assistant content, divided by
+         ``scheduler``.
+
+    Returns ``(per_turn_assistant_budget, keep_image_turn_ids)``. Both are
+    consumed by the renderer (``compact_forest_to_session_jsonl``).
+
+    The result guarantees the rendered output is approximately bounded by
+    ``total_budget`` (within summary/rendering slack), instead of letting
+    un-budgeted user images blow past it.
+    """
+    if not forest:
+        return {}, set()
+
+    # 1. Mandatory user-prompt text floor.
+    text_floor = sum(_user_prompt_text_tokens(t) for t in forest)
+    remaining = max(0, total_budget - text_floor)
+
+    # 2. Keep user-prompt images newest-first within the image sub-budget.
+    image_budget = int(remaining * image_budget_fraction)
+    keep_images: set[str] = set()
+    spent_on_images = 0
+    for turn in reversed(forest):  # newest first
+        cost = _user_prompt_image_tokens(turn)
+        if cost <= 0:
+            continue
+        if spent_on_images + cost <= image_budget:
+            keep_images.add(turn.turn_id)
+            spent_on_images += cost
+
+    # 3. Assistant content gets the rest.
+    assistant_budget = max(0, remaining - spent_on_images)
+    per_turn = scheduler(forest, assistant_budget)
+    return per_turn, keep_images
 
 
 # ---------------------------------------------------------------------------

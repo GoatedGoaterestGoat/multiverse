@@ -388,6 +388,7 @@ def turn_to_rows(
     session_id: str,
     cwd: str,
     parent_uuid: str | None,
+    keep_user_images: bool = True,
 ) -> tuple[list[dict], str | None]:
     """Render one turn's compacted output as session JSONL rows.
 
@@ -415,6 +416,17 @@ def turn_to_rows(
     if turn.user_prompt is not None:
         user_text = turn.user_prompt.content.get("text", "") or ""
         user_images = turn.user_prompt.images or []
+
+    # When this turn's images weren't selected to fit the budget, drop them
+    # and leave a short marker in the prompt text so the agent knows an image
+    # was present but omitted. User-prompt text itself is always preserved.
+    if user_images and not keep_user_images:
+        marker = (
+            f"\n\n_[{len(user_images)} image(s) omitted to fit compaction budget]_"
+        )
+        user_text = (user_text + marker) if user_text else marker.strip()
+        user_images = []
+
     if not user_text and not user_images:
         # Plain text — angle-bracket-only placeholders get parsed as
         # raw HTML by claude code's markdown lexer and discarded.
@@ -527,6 +539,7 @@ def compact_forest_to_session_jsonl(
     session_id: str | None = None,
     cwd: str | None = None,
     title: str = "compacted_forest",
+    keep_image_turn_ids: set[str] | None = None,
 ) -> str:
     """Render a compacted forest as one synthetic Claude Code session JSONL.
 
@@ -535,8 +548,14 @@ def compact_forest_to_session_jsonl(
     assistant rows, chain parentUuid continuously across turns. All rows
     share one sessionId. Result is loadable via `claude --resume`.
 
-    `per_turn_budget` is the output of one of the schedulers in
-    `compactor.py` (e.g. `recency_decay`, `last_k_raw`, `proportional`).
+    `per_turn_budget` is the assistant-content allocation from
+    ``compactor.allocate_budget`` (or a bare scheduler).
+
+    `keep_image_turn_ids` is the set of turn_ids whose verbatim user-prompt
+    images fit the budget and should be preserved; turns not in the set have
+    their user-prompt images dropped (replaced by a placeholder marker). When
+    None, ALL user-prompt images are kept — the legacy behavior, used by
+    callers that haven't opted into image budgeting.
     """
     session_id = session_id or str(uuidlib.uuid4())
     cwd = cwd or os.getcwd()
@@ -547,8 +566,12 @@ def compact_forest_to_session_jsonl(
     for turn in forest:
         budget = per_turn_budget.get(turn.turn_id, 0)
         frontier = _expand_turn_frontier(turn, budget)
+        keep_imgs = (
+            keep_image_turn_ids is None or turn.turn_id in keep_image_turn_ids
+        )
         rows, parent_uuid = turn_to_rows(
-            turn, frontier, session_id, cwd, parent_uuid
+            turn, frontier, session_id, cwd, parent_uuid,
+            keep_user_images=keep_imgs,
         )
         out_rows.extend(rows)
 
