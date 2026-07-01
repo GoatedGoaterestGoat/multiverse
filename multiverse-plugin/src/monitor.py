@@ -347,6 +347,10 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
                 pass
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        # Stop the event so it doesn't bubble to MonitorApp's own
+        # on_data_table_row_selected, which would call action_primary()
+        # on the dashboard-focused row and double-attach.
+        event.stop()
         key = event.row_key.value if event.row_key is not None else None
         if not key:
             return
@@ -1194,9 +1198,12 @@ class RestoreScreen(ModalScreen[Optional[tuple[str, str]]]):
         self, event: DataTable.RowSelected
     ) -> None:
         """Fired by the DataTable when Enter is pressed on a focused row.
-        Using this event (rather than a raw ``enter`` binding) so the
-        modal consumes the key press instead of letting it fall through
-        to the dashboard's own ``enter`` = ``attach`` action."""
+        Must call ``event.stop()`` — the event bubbles up otherwise,
+        and MonitorApp has its own ``on_data_table_row_selected`` that
+        calls ``action_primary()`` on the dashboard-focused row, so
+        selecting an orphan to restore would also attach whatever the
+        user was hovered on."""
+        event.stop()
         key = event.row_key.value if event.row_key is not None else None
         if not key:
             return
