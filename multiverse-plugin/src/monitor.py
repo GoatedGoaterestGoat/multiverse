@@ -2011,7 +2011,7 @@ class MonitorApp(App):
                 _on_close,
             )
 
-        self.push_screen(RestoreScreen(cwd=self.cwd, live_titles=live_titles), _on_pick)
+        self.push_screen(RestoreScreen(cwd=self.monitor_cwd, live_titles=live_titles), _on_pick)
 
     def action_toggle_auto_build(self) -> None:
         """Flip the per-session auto tree-build gate for the highlighted
