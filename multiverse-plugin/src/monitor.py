@@ -1113,15 +1113,14 @@ class RestoreScreen(ModalScreen[Optional[tuple[str, str]]]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "select", "Restore"),
     ]
 
     def __init__(self, cwd: str, live_titles: set[str]) -> None:
         super().__init__()
         self.cwd = cwd
         self.live_titles = live_titles
-        # Populated by the background worker.
-        self._orphans: list[dict] = []
+        # uuid → orphan dict lookup for the DataTable's RowSelected handler.
+        self._by_uuid: dict[str, dict] = {}
 
     def compose(self) -> ComposeResult:
         yield Vertical(
@@ -1162,8 +1161,8 @@ class RestoreScreen(ModalScreen[Optional[tuple[str, str]]]):
         )
 
     def _orphans_ready(self, orphans: list[dict]) -> None:
-        self._orphans = orphans
         status = self.query_one("#restore-status", Static)
+        self._by_uuid = {o["uuid"]: o for o in orphans}
         if not orphans:
             status.update(
                 "[dim]No orphan full JSONLs for this workspace. "
@@ -1184,20 +1183,26 @@ class RestoreScreen(ModalScreen[Optional[tuple[str, str]]]):
             trees = str(o.get("trees_cached", 0))
             title = o.get("title", "(no title)")
             msg = _summarize_msg(o.get("last_user_msg", ""), max_chars=80)
-            table.add_row(age, turns, trees, title, msg)
+            table.add_row(age, turns, trees, title, msg, key=o["uuid"])
         table.focus()
-
-    def action_select(self) -> None:
-        table = self.query_one("#restore-table", DataTable)
-        if not self._orphans:
-            return
         try:
-            row = table.cursor_row
+            table.move_cursor(row=0)
         except Exception:  # noqa: BLE001
+            pass
+
+    def on_data_table_row_selected(
+        self, event: DataTable.RowSelected
+    ) -> None:
+        """Fired by the DataTable when Enter is pressed on a focused row.
+        Using this event (rather than a raw ``enter`` binding) so the
+        modal consumes the key press instead of letting it fall through
+        to the dashboard's own ``enter`` = ``attach`` action."""
+        key = event.row_key.value if event.row_key is not None else None
+        if not key:
             return
-        if row is None or row < 0 or row >= len(self._orphans):
+        o = self._by_uuid.get(str(key))
+        if o is None:
             return
-        o = self._orphans[row]
         self.dismiss((o["uuid"], o.get("cwd") or self.cwd))
 
     def action_cancel(self) -> None:
