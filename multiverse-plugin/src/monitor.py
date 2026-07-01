@@ -46,6 +46,7 @@ from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_t
 from .compact_runner import CompactRunner, State as CompactState
 from .full_jsonl import (
     full_jsonl_path,
+    list_orphan_fulls,
     live_jsonl_path,
     live_stats,
     total_token_count,
@@ -1094,6 +1095,166 @@ class CompactScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class RestoreScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Pick a session to restore from the orphan full JSONLs.
+
+    "Orphans" are full JSONLs whose live JSONL no longer exists on
+    disk — usually because claude code's ``cleanupPeriodDays`` reaped
+    the live but our mirror persists independently.
+
+    Filtered to orphans whose recorded cwd matches the current
+    workspace, sorted newest-first. Titles that overlap an existing
+    live session are hidden (the user already has that name active).
+
+    Returns ``(claude_uuid, cwd)`` on Enter; ``None`` on Esc / no
+    selection. The caller hands off to CompactScreen, which
+    materializes the new live JSONL by expanding the full to a budget.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "select", "Restore"),
+    ]
+
+    def __init__(self, cwd: str, live_titles: set[str]) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self.live_titles = live_titles
+        # Populated by the background worker.
+        self._orphans: list[dict] = []
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static("Restore lost session", id="restore-title"),
+            Static(f"[dim]cwd {self.cwd}[/]", id="restore-meta"),
+            Static(
+                "[dim]Loading orphan full JSONLs…[/]",
+                id="restore-status",
+            ),
+            DataTable(id="restore-table", cursor_type="row"),
+            Static(
+                "[dim]Enter to restore, Esc to cancel[/]",
+                id="restore-hint",
+            ),
+            id="restore-dialog",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#restore-table", DataTable)
+        table.add_columns("Age", "Turns", "Trees", "Title", "Last user message")
+        self._load_orphans()
+
+    @work(thread=True)
+    def _load_orphans(self) -> None:
+        try:
+            orphans = list_orphan_fulls(cwd_filter=self.cwd)
+        except Exception as e:  # noqa: BLE001
+            self.app.call_from_thread(self._orphans_failed, repr(e))
+            return
+        # Drop orphans whose title collides with a currently-live
+        # session in this workspace — the user already has that name.
+        orphans = [o for o in orphans if o.get("title") not in self.live_titles]
+        self.app.call_from_thread(self._orphans_ready, orphans)
+
+    def _orphans_failed(self, err: str) -> None:
+        self.query_one("#restore-status", Static).update(
+            f"[red]Failed to enumerate orphans: {err}[/]"
+        )
+
+    def _orphans_ready(self, orphans: list[dict]) -> None:
+        self._orphans = orphans
+        status = self.query_one("#restore-status", Static)
+        if not orphans:
+            status.update(
+                "[dim]No orphan full JSONLs for this workspace. "
+                "Nothing to restore.[/]"
+            )
+            return
+        status.update(
+            f"[dim]{len(orphans)} orphan session(s) — newest first. "
+            f"Same-name orphans differentiated by turns + last user "
+            f"message.[/]"
+        )
+        table = self.query_one("#restore-table", DataTable)
+        table.clear()
+        now = time.time()
+        for o in orphans:
+            age = _fmt_age(now - o.get("mtime", now))
+            turns = str(o.get("turns", 0))
+            trees = str(o.get("trees_cached", 0))
+            title = o.get("title", "(no title)")
+            msg = _summarize_msg(o.get("last_user_msg", ""), max_chars=80)
+            table.add_row(age, turns, trees, title, msg)
+        table.focus()
+
+    def action_select(self) -> None:
+        table = self.query_one("#restore-table", DataTable)
+        if not self._orphans:
+            return
+        try:
+            row = table.cursor_row
+        except Exception:  # noqa: BLE001
+            return
+        if row is None or row < 0 or row >= len(self._orphans):
+            return
+        o = self._orphans[row]
+        self.dismiss((o["uuid"], o.get("cwd") or self.cwd))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+def _fmt_age(seconds: float) -> str:
+    """Compact age string: '3d', '4h', '17m', '25s'."""
+    seconds = max(0, int(seconds))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    if seconds < 86400:
+        return f"{seconds // 3600}h"
+    return f"{seconds // 86400}d"
+
+
+def _summarize_msg(text: str, max_chars: int = 80) -> str:
+    """Flatten a possibly-multi-line message to a single truncated line
+    suitable for a table cell."""
+    if not text:
+        return ""
+    single = " ".join(text.split())
+    if len(single) <= max_chars:
+        return single
+    return single[: max_chars - 1] + "…"
+
+
+def _read_title_from_full(claude_uuid: str) -> Optional[str]:
+    """Grab the last ``custom-title`` from a full JSONL (for the
+    restore path, where live doesn't exist and we still want a
+    meaningful header on the CompactScreen)."""
+    import json
+    full = full_jsonl_path(claude_uuid)
+    if not full.is_file():
+        return None
+    title: Optional[str] = None
+    try:
+        with full.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if d.get("type") == "custom-title":
+                    ct = d.get("customTitle")
+                    if isinstance(ct, str) and ct:
+                        title = ct
+    except OSError:
+        return None
+    return title
+
+
 class MonitorApp(App):
     CSS = """
     Screen {
@@ -1293,12 +1454,29 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #restore-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #restore-title { height: auto; }
+    #restore-meta { height: auto; padding-bottom: 1; }
+    #restore-status { height: auto; padding-bottom: 1; }
+    #restore-table { height: 1fr; }
+    #restore-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     """
 
     BINDINGS = [
         Binding("n", "new_session", "New"),
         Binding("R", "resume_session", "Resume"),
         Binding("c", "compact", "Compact"),
+        Binding("x", "restore", "Restore"),
         Binding("v", "visualize", "Visualize"),
         Binding("b", "toggle_auto_build", "Build on/off"),
         Binding("a", "ask_all", "Ask all"),
@@ -1777,6 +1955,63 @@ class MonitorApp(App):
             ),
             _on_close,
         )
+
+    def action_restore(self) -> None:
+        """Restore a lost session from an orphan full JSONL.
+
+        Opens a picker of full JSONLs in this workspace whose live
+        counterpart no longer exists (typically because claude code's
+        ``cleanupPeriodDays`` reaped them; our mirror kept them). The
+        user picks one and it goes into the standard compaction flow
+        which will (build any missing trees and then) render a fresh
+        live JSONL from the picked full according to the chosen
+        budget.
+        """
+        # Collect currently-live titles in this workspace so we can
+        # skip orphans with a duplicate name — the user is already
+        # working under that name.
+        live_titles: set[str] = set()
+        for row in self.entries:
+            if not row.is_ghost and row.name:
+                live_titles.add(row.name)
+
+        def _on_pick(result: Optional[tuple[str, str]]) -> None:
+            if result is None:
+                return
+            uuid, cwd = result
+
+            # Guard: if we get back a uuid whose live now magically
+            # exists (raced with an active session), don't clobber.
+            live_path = live_jsonl_path(uuid, cwd)
+            if live_path.is_file():
+                self.notify(
+                    f"Live JSONL now exists at {live_path.name}; "
+                    f"refusing to overwrite. Refresh and try again.",
+                    severity="warning",
+                )
+                return
+
+            # Read the title from the full so the CompactScreen
+            # header shows a meaningful name.
+            title = _read_title_from_full(uuid) or uuid[:8]
+
+            def _on_close(_: None) -> None:
+                self.refresh_sessions()
+
+            self.push_screen(
+                CompactScreen(
+                    claude_uuid=uuid,
+                    cwd=cwd,
+                    display_name=f"{title} (restore)",
+                    # No mv_session — this uuid doesn't have an active
+                    # multiverse wrapper. The runner's kill step is a
+                    # no-op when kill_session_fn is None.
+                    mv_session=None,
+                ),
+                _on_close,
+            )
+
+        self.push_screen(RestoreScreen(cwd=self.cwd, live_titles=live_titles), _on_pick)
 
     def action_toggle_auto_build(self) -> None:
         """Flip the per-session auto tree-build gate for the highlighted

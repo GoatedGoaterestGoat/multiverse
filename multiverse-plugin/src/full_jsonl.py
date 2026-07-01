@@ -264,6 +264,123 @@ def live_stats(claude_uuid: str, cwd: str) -> tuple[int, int]:
     return tokens, len(forest)
 
 
+def list_orphan_fulls(cwd_filter: str | None = None) -> list[dict]:
+    """Enumerate full_jsonls with no matching live JSONL.
+
+    An "orphan" is a full.jsonl whose corresponding live JSONL
+    (``$CLAUDE_HOME/projects/<slug(cwd)>/<uuid>.jsonl``) does not exist
+    on disk — typically because claude code's ``cleanupPeriodDays``
+    auto-reap deleted the live but our mirror persists independently.
+
+    Returns a list of dicts, one per orphan:
+      {uuid, title, cwd, size_bytes, mtime, turns, last_user_msg,
+       trees_cached}
+
+    ``cwd_filter`` (if given) restricts to orphans whose recorded cwd
+    matches exactly. The RestoreScreen uses this to scope to the current
+    monitor's workspace.
+    """
+    full_dir = _full_dir()
+    if not full_dir.is_dir():
+        return []
+
+    # Build set of currently-live uuids, from every project slug under
+    # $CLAUDE_HOME/projects — cheap enough to enumerate on demand and
+    # avoids stale caching.
+    live_uuids: set[str] = set()
+    proj_root = claude_projects_dir()
+    if proj_root.is_dir():
+        try:
+            for slug_dir in proj_root.iterdir():
+                if not slug_dir.is_dir():
+                    continue
+                for f in slug_dir.iterdir():
+                    if f.suffix == ".jsonl":
+                        live_uuids.add(f.stem)
+        except OSError:
+            pass
+
+    trees_dir = multiverse_dir() / "trees"
+
+    orphans: list[dict] = []
+    for f in full_dir.iterdir():
+        if f.suffix != ".jsonl":
+            continue
+        uuid = f.stem
+        if uuid in live_uuids:
+            continue
+        try:
+            meta = _extract_full_meta(f)
+        except OSError:
+            continue
+        if cwd_filter is not None and meta.get("cwd") != cwd_filter:
+            continue
+        n_trees = 0
+        session_trees = trees_dir / uuid
+        if session_trees.is_dir():
+            try:
+                n_trees = sum(
+                    1 for p in session_trees.iterdir() if p.suffix == ".json"
+                )
+            except OSError:
+                pass
+        meta["trees_cached"] = n_trees
+        orphans.append(meta)
+    # Newest first.
+    orphans.sort(key=lambda m: m.get("mtime", 0.0), reverse=True)
+    return orphans
+
+
+def _extract_full_meta(path: Path) -> dict:
+    """Return metadata for one full JSONL — title, cwd, size, mtime,
+    chain-turn count, last user message. One forward pass.
+    """
+    from compaction.parser import parse_session  # noqa: E402
+
+    title: str | None = None
+    cwd: str | None = None
+    with path.open() as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                d = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if d.get("type") == "custom-title":
+                ct = d.get("customTitle")
+                if isinstance(ct, str) and ct:
+                    title = ct
+            if not cwd:
+                v = d.get("cwd")
+                if isinstance(v, str) and v:
+                    cwd = v
+
+    # Chain-walk once for turns + last user message (skip synthetic
+    # user rows the parser drops on the floor).
+    forest = parse_session(str(path))
+    turns = len(forest)
+    last_user_msg = ""
+    for turn in reversed(forest):
+        if turn.user_prompt is not None:
+            txt = turn.user_prompt.content.get("text", "") or ""
+            if txt:
+                last_user_msg = txt.strip()
+                break
+
+    stat = path.stat()
+    return {
+        "uuid": path.stem,
+        "title": title or "(no title)",
+        "cwd": cwd or "",
+        "size_bytes": stat.st_size,
+        "mtime": stat.st_mtime,
+        "turns": turns,
+        "last_user_msg": last_user_msg,
+    }
+
+
 def per_turn_tokens(claude_uuid: str, cwd: str) -> list[tuple[str, int]]:
     """Return [(turn_id, total_tokens_in_turn), ...] from full.jsonl,
     where total_tokens_in_turn includes the user_prompt leaf."""

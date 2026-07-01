@@ -582,29 +582,38 @@ class CompactRunner:
 
     def _read_existing_title(self) -> Optional[str]:
         """Return the last ``custom-title`` value from the existing live
-        JSONL, so the compacted replacement keeps the same name."""
+        JSONL, so the compacted replacement keeps the same name. Falls
+        back to full.jsonl if live is missing — this is the restore
+        path where we're re-materializing a live from an orphaned full.
+        """
         import json  # local — narrow blast radius
-        live = live_jsonl_path(self.claude_uuid, self.cwd)
-        if not live.is_file():
-            return None
-        title: Optional[str] = None
-        try:
-            with live.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        d = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if d.get("type") == "custom-title":
-                        ct = d.get("customTitle")
-                        if isinstance(ct, str) and ct:
-                            title = ct
-        except OSError:
-            return None
-        return title
+        candidates = [
+            live_jsonl_path(self.claude_uuid, self.cwd),
+            full_jsonl_path(self.claude_uuid),
+        ]
+        for path in candidates:
+            if not path.is_file():
+                continue
+            title: Optional[str] = None
+            try:
+                with path.open() as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if d.get("type") == "custom-title":
+                            ct = d.get("customTitle")
+                            if isinstance(ct, str) and ct:
+                                title = ct
+            except OSError:
+                continue
+            if title:
+                return title
+        return None
 
 
 def _is_aborted_stub(td: dict) -> bool:
