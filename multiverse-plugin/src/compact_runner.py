@@ -380,17 +380,29 @@ class CompactRunner:
         return len(forest)
 
     def _count_cached_trees(self) -> int:
-        """Count cached tree files that belong to the CURRENT chain.
+        """Count VALID cached tree files for the CURRENT chain.
 
-        Tree JSON filenames are ``<turn_id>.json`` — the worker writes
-        them that way, so we can filter without opening each file. If
-        the chain set isn't populated yet (edge case: hit before
-        _count_total_turns runs), fall back to the total file count
-        so progress numbers still exist.
+        A file counts only if:
+        - its filename (``<turn_id>.json``) is a turn_id in the chain
+          (or the chain set hasn't been populated yet — edge case
+          before ``_count_total_turns`` runs);
+        - it opens cleanly as JSON with a dict ``tree`` field;
+        - the tree isn't an aborted-construction stub (constructor's
+          synthetic wrapper for turns whose build failed at step 0).
+
+        Aborted stubs are the gotcha: ``_attach_trees_from_cache``
+        treats them as "no tree" and the turn falls back to
+        greedy-leaves-from-start at expansion time. If those stubs
+        counted as built here, the runner's ``if built >= total_turns``
+        gate would skip spawning the worker — leaving those turns
+        forever stuck in the greedy fallback, whose first-leaf
+        verbatim behaviour balloons any turn whose first leaf is a
+        big tool_result.
         """
         if not self.paths.cache_root.is_dir():
             return 0
         valid = self._chain_turn_ids
+        import json  # local; we now open each candidate file
         n = 0
         for p in self.paths.cache_root.glob("*.json"):
             try:
@@ -398,8 +410,18 @@ class CompactRunner:
                     continue
             except OSError:
                 continue
-            if valid is None or p.stem in valid:
-                n += 1
+            if valid is not None and p.stem not in valid:
+                continue
+            try:
+                data = json.loads(p.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            tree = data.get("tree")
+            if not isinstance(tree, dict):
+                continue
+            if _is_aborted_stub(tree):
+                continue
+            n += 1
         return n
 
     def _read_lock_pid(self) -> Optional[int]:
