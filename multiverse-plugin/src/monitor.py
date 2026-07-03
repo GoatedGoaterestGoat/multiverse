@@ -37,6 +37,8 @@ from textual.widgets import (
     Header,
     Input,
     ProgressBar,
+    RadioButton,
+    RadioSet,
     RichLog,
     Static,
 )
@@ -678,6 +680,266 @@ class WebShareScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+_SPARK_LEVELS = "▁▂▃▄▅▆▇█"
+
+
+def _sparkline(values: list[int], width: int = 80) -> str:
+    """Compact per-turn sparkline. Bins ``values`` into ``width`` buckets
+    (mean per bucket), normalizes to 8 Unicode block heights."""
+    if not values:
+        return ""
+    n = len(values)
+    if n <= width:
+        # One column per turn.
+        m = max(values) or 1
+        return "".join(_SPARK_LEVELS[min(7, int(7 * v / m))] for v in values)
+    # Bin down: average per bucket.
+    binned: list[float] = []
+    for i in range(width):
+        lo = int(i * n / width)
+        hi = int((i + 1) * n / width)
+        if hi <= lo:
+            hi = lo + 1
+        chunk = values[lo:hi]
+        binned.append(sum(chunk) / len(chunk))
+    m = max(binned) or 1.0
+    return "".join(_SPARK_LEVELS[min(7, int(7 * v / m))] for v in binned)
+
+
+class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
+    """Post-summarize picker: scheduler + budget + live histogram.
+
+    Dismissed with the chosen config or ``None`` (Esc — leaves the
+    session summarize-only, no live rewrite).
+
+    Config shape returned:
+      {"scheduler": "proportional" | "recency_decay" | "last_k_raw",
+       "budget": <int tokens>,
+       # optional, present only for the parameterized schedulers:
+       "k": <int>,        # last_k_raw
+       "half_life": <float>,  # recency_decay
+      }
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Summarize-only exit")]
+
+    # Reasonable defaults. The Input placeholders show them.
+    _DEFAULT_K = 3
+    _DEFAULT_HALF_LIFE = 5.0
+
+    def __init__(
+        self,
+        claude_uuid: str,
+        cwd: str,
+        display_name: str,
+        forest_sizes: list[tuple[str, int]],
+        default_budget: int,
+    ) -> None:
+        super().__init__()
+        self.claude_uuid = claude_uuid
+        self.cwd = cwd
+        self.display_name = display_name
+        # ``forest_sizes``: [(turn_id, full_tokens), ...] in chain order.
+        # Used both to compute the live preview and (implicitly) to
+        # bound the sparkline count.
+        self.forest_sizes = forest_sizes
+        self.default_budget = max(1, default_budget)
+        self._scheduler = "proportional"
+        self._k = self._DEFAULT_K
+        self._half_life = self._DEFAULT_HALF_LIFE
+
+    def compose(self) -> ComposeResult:
+        n_turns = len(self.forest_sizes)
+        total = sum(s for _, s in self.forest_sizes)
+        yield Vertical(
+            Static(
+                f"Compact: [bold]{self.display_name}[/]  "
+                f"[dim]({n_turns} turn(s), {total:,}t full)[/]",
+                id="choose-title",
+            ),
+            Static("Scheduler:", id="choose-sched-label"),
+            RadioSet(
+                RadioButton("proportional", value=True, id="sched-proportional"),
+                RadioButton("recency_decay", id="sched-recency_decay"),
+                RadioButton("last_k_raw", id="sched-last_k_raw"),
+                id="choose-scheduler",
+            ),
+            Static(
+                "[dim]k (last_k_raw — verbatim tail size)[/]",
+                id="choose-k-label",
+            ),
+            Input(
+                value=str(self._DEFAULT_K),
+                id="choose-k",
+                placeholder=f"integer, default {self._DEFAULT_K}",
+            ),
+            Static(
+                "[dim]half_life (recency_decay — turns until 50% weight)[/]",
+                id="choose-hl-label",
+            ),
+            Input(
+                value=str(self._DEFAULT_HALF_LIFE),
+                id="choose-hl",
+                placeholder=f"float, default {self._DEFAULT_HALF_LIFE}",
+            ),
+            Static("Budget (tokens):", id="choose-budget-label"),
+            Input(
+                value=str(self.default_budget),
+                id="choose-budget",
+                placeholder=f"e.g. {self.default_budget:,} for ~50% of full",
+            ),
+            Static("", id="choose-preview"),
+            Static(
+                "[dim]Enter (or click) in Budget to compact  ·  "
+                "Esc to exit without compacting (session stays "
+                "summarize-only)[/]",
+                id="choose-hint",
+            ),
+            id="choose-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self._refresh_preview()
+        try:
+            self.query_one("#choose-budget", Input).focus()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ------ live preview -------------------------------------------------
+
+    def _current_budget(self) -> int:
+        try:
+            raw = self.query_one("#choose-budget", Input).value
+            return max(1, int(raw.replace(",", "").replace("_", "").strip()))
+        except (ValueError, AttributeError):
+            return self.default_budget
+
+    def _current_k(self) -> int:
+        try:
+            raw = self.query_one("#choose-k", Input).value
+            return max(1, int(raw.strip()))
+        except (ValueError, AttributeError):
+            return self._DEFAULT_K
+
+    def _current_half_life(self) -> float:
+        try:
+            raw = self.query_one("#choose-hl", Input).value
+            v = float(raw.strip())
+            return v if v > 0 else self._DEFAULT_HALF_LIFE
+        except (ValueError, AttributeError):
+            return self._DEFAULT_HALF_LIFE
+
+    def _compute_allocation(self) -> list[int]:
+        """Recompute per-turn allocation with current scheduler/params.
+        Returned in chain order matching ``self.forest_sizes``."""
+        from compaction.compactor import (  # noqa: E402
+            last_k_raw,
+            proportional,
+            recency_decay,
+        )
+        # Build lightweight Turn-like shims — SCHEDULERS only touches
+        # turn.turn_id and _full_tokens(turn), so a dataclass with the
+        # right shape suffices. But easier: rebuild the parse forest,
+        # or just pre-compute here.
+        turn_ids = [tid for tid, _ in self.forest_sizes]
+        sizes_by_id = dict(self.forest_sizes)
+        budget = self._current_budget()
+
+        if self._scheduler == "proportional":
+            total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+            alloc = {
+                tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                for tid in turn_ids
+            }
+        elif self._scheduler == "recency_decay":
+            half_life = self._current_half_life()
+            weights = {}
+            for k, tid in enumerate(reversed(turn_ids)):
+                weights[tid] = 0.5 ** (k / half_life)
+            total_w = sum(weights.values()) or 1.0
+            alloc = {
+                tid: int(budget * weights[tid] / total_w) for tid in turn_ids
+            }
+        elif self._scheduler == "last_k_raw":
+            k = self._current_k()
+            if k >= len(turn_ids):
+                total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+                alloc = {
+                    tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                    for tid in turn_ids
+                }
+            else:
+                last_ids = turn_ids[-k:]
+                rest_ids = turn_ids[:-k]
+                raw_cost = sum(sizes_by_id[tid] for tid in last_ids)
+                if raw_cost >= budget:
+                    total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+                    alloc = {
+                        tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                        for tid in turn_ids
+                    }
+                else:
+                    remaining = budget - raw_cost
+                    alloc = {tid: sizes_by_id[tid] for tid in last_ids}
+                    if rest_ids:
+                        rest_total = sum(max(1, sizes_by_id[tid]) for tid in rest_ids) or 1
+                        for tid in rest_ids:
+                            alloc[tid] = int(remaining * max(1, sizes_by_id[tid]) / rest_total)
+        else:
+            alloc = {tid: 0 for tid in turn_ids}
+
+        return [alloc.get(tid, 0) for tid in turn_ids]
+
+    def _refresh_preview(self) -> None:
+        try:
+            preview = self.query_one("#choose-preview", Static)
+        except Exception:  # noqa: BLE001
+            return
+        alloc = self._compute_allocation()
+        allocated_total = sum(alloc)
+        max_alloc = max(alloc) if alloc else 0
+        min_alloc = min(alloc) if alloc else 0
+        spark = _sparkline(alloc, width=80)
+        preview.update(
+            f"[dim]Budget preview (one column per turn / bucket):[/]\n"
+            f"[cyan]{spark}[/]\n"
+            f"[dim]Σ allocated = {allocated_total:,}t  ·  "
+            f"per-turn max = {max_alloc:,}t  ·  min = {min_alloc:,}t[/]"
+        )
+
+    def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
+        pressed_id = event.pressed.id if event.pressed else ""
+        if pressed_id.startswith("sched-"):
+            self._scheduler = pressed_id[len("sched-"):]
+        self._refresh_preview()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        # Re-preview on any parameter tweak.
+        self._refresh_preview()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        # Enter in the budget field commits.
+        if event.input.id != "choose-budget":
+            return
+        try:
+            budget = int(event.value.replace(",", "").replace("_", "").strip())
+        except ValueError:
+            self.notify("Enter an integer budget", severity="warning")
+            return
+        if budget <= 0:
+            self.notify("Budget must be positive", severity="warning")
+            return
+        config = {"scheduler": self._scheduler, "budget": budget}
+        if self._scheduler == "last_k_raw":
+            config["k"] = self._current_k()
+        elif self._scheduler == "recency_decay":
+            config["half_life"] = self._current_half_life()
+        self.dismiss(config)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class CompactScreen(ModalScreen[None]):
     """Drive a manual compaction for one session.
 
@@ -700,23 +962,7 @@ class CompactScreen(ModalScreen[None]):
     rewrite the live JSONL.
     """
 
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        # Plain `s` for summarize-only. Only fires when the budget
-        # Input isn't focused — Input consumes typing keys as text
-        # first, and screen-level bindings run only if the focused
-        # widget didn't handle the key. Tab (below) blurs the Input;
-        # click-outside also blurs (see on_click).
-        Binding("s", "summarize_only", "Summarize"),
-        # F2 kept as a focus-agnostic alternative (F-keys aren't
-        # consumed by Input).
-        Binding("f2", "summarize_only", "Summarize (F2)", show=False),
-        # Tab toggles Input focus. Default Textual Tab cycles focus,
-        # but Input is the only focusable widget on this modal so the
-        # cycle is trivial — replacing it with an explicit blur/focus
-        # toggle is more useful.
-        Binding("tab", "toggle_input_focus", "Toggle input focus"),
-    ]
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
     # Match the worker.log lines that report a single turn's build time:
     #   "[HH:MM:SS]   turn N done (X.Ys)"
@@ -737,11 +983,15 @@ class CompactScreen(ModalScreen[None]):
         self.mv_session = mv_session
         self.total_tokens = 0
         self.total_turns = 0
+        # Per-turn (turn_id, full_tokens) pairs — populated during
+        # stats load, used to seed the scheduler picker's histogram.
+        self._forest_sizes: list[tuple[str, int]] = []
         self.budget = 0
-        # False = compact-to-budget (default). True = summarize-only:
-        # build trees for every turn, skip expansion, don't touch live.
-        self._summarize_only = False
-        self.phase = "input"  # input | running | done | failed
+        self._scheduler_config: Optional[dict] = None
+        # Phases: input → summarizing → (Choose picker) → expanding → done.
+        # "input" no longer takes a budget — it just displays stats and
+        # prompts to start summarization.
+        self.phase = "input"  # input | summarizing | choosing | expanding | done | failed
         self._runner: Optional[CompactRunner] = None
         # Per-turn build elapsed times collected from worker.log; powers
         # the ETA estimate. Bounded — only the most-recent N are used so
@@ -764,8 +1014,12 @@ class CompactScreen(ModalScreen[None]):
                 "[dim]Loading uncompacted session stats from full.jsonl…[/]",
                 id="compact-stats",
             ),
+            # No longer collects a budget — kept as a hidden zero-height
+            # placeholder so downstream widget queries (that used to
+            # reference it) don't crash. Budget is entered on the
+            # ChooseSchedulerScreen after summarization.
             Input(
-                placeholder="Token budget (e.g. 32000)",
+                placeholder="(unused)",
                 id="compact-budget",
                 disabled=True,
             ),
@@ -780,8 +1034,7 @@ class CompactScreen(ModalScreen[None]):
                 max_lines=2000,
             ),
             Static(
-                "[dim]Enter: compact to budget · S (blur input first, "
-                "via Tab or click) or F2: summarize only · Esc: cancel[/]",
+                "[dim]Enter to start summarizing · Esc to cancel[/]",
                 id="compact-hint",
             ),
             id="compact-dialog",
@@ -806,8 +1059,9 @@ class CompactScreen(ModalScreen[None]):
     def _load_stats(self) -> None:
         """Compute full + live token / turn counts, cached-tree count
         (trees whose turn_id is on the chain forest), the "minimum
-        compacted tokens" estimate, and historical per-turn build times
-        from worker.log for ETA seeding."""
+        compacted tokens" estimate, per-turn (turn_id, full_tokens)
+        for the scheduler picker's histogram, and historical per-turn
+        build times from worker.log for ETA seeding."""
         try:
             full_toks = total_token_count(self.claude_uuid, self.cwd)
             full_turns = total_turn_count(self.claude_uuid, self.cwd)
@@ -816,6 +1070,7 @@ class CompactScreen(ModalScreen[None]):
                 self.claude_uuid, self.cwd
             )
             cached, history = self._audit_cache_against_chain()
+            forest_sizes = self._per_turn_full_tokens()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._stats_failed, repr(e))
             return
@@ -823,8 +1078,24 @@ class CompactScreen(ModalScreen[None]):
             self._stats_ready,
             full_toks, full_turns, live_toks, live_turns,
             min_toks, min_cached, min_total,
-            cached, history,
+            cached, history, forest_sizes,
         )
+
+    def _per_turn_full_tokens(self) -> list[tuple[str, int]]:
+        """Return ``[(turn_id, leaves_tokens), ...]`` in chain order.
+        Matches the scheduler's ``_full_tokens(turn)`` — leaves only,
+        no user_prompt (user_prompt is subtracted from budget as a
+        floor before the scheduler runs, so it's not part of the
+        proportional split)."""
+        full = full_jsonl_path(self.claude_uuid)
+        if not full.is_file():
+            return []
+        try:
+            from compaction.parser import parse_session  # noqa: E402
+            forest = parse_session(str(full))
+        except Exception:  # noqa: BLE001
+            return []
+        return [(t.turn_id, sum(l.tokens for l in t.leaves)) for t in forest]
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
         """Return (n_trees_matching_chain, recent_build_times)."""
@@ -888,6 +1159,7 @@ class CompactScreen(ModalScreen[None]):
         min_total: int = 0,
         cached: int = 0,
         history: list[float] | None = None,
+        forest_sizes: list[tuple[str, int]] | None = None,
     ) -> None:
         self.total_tokens = total_tokens
         self.total_turns = total_turns
@@ -895,6 +1167,8 @@ class CompactScreen(ModalScreen[None]):
         self._last_total = total_turns
         if history:
             self._build_times = list(history)
+        if forest_sizes is not None:
+            self._forest_sizes = forest_sizes
         suggested = max(1, total_tokens // 2)
 
         # Two-line stats: full (uncompacted) above, current live below.
@@ -937,117 +1211,41 @@ class CompactScreen(ModalScreen[None]):
             f"{min_line}"
         )
         self._refresh_cached_line()
-        budget = self.query_one("#compact-budget", Input)
-        budget.disabled = False
-        budget.placeholder = f"Token budget (e.g. {suggested:,} for ~50%)"
-        budget.focus()
+        # Auto-start summarize as soon as stats are loaded — the two-
+        # phase flow has no budget input up-front (the user picks
+        # scheduler + budget on ChooseSchedulerScreen after trees
+        # finish). This makes "open compact widget" == "start
+        # summarizing" which is what the user wants.
+        self._enter_summarizing_phase()
 
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        if self.phase != "input":
-            return
-        raw = event.value.replace(",", "").replace("_", "").strip()
-        try:
-            b = int(raw)
-        except ValueError:
-            self.notify("Enter an integer token budget", severity="warning")
-            return
-        if b <= 0:
-            self.notify("Budget must be positive", severity="warning")
-            return
-        if self.total_tokens == 0:
-            self.notify("Stats still loading — wait a moment", severity="warning")
-            return
-        self.budget = b
-        self._summarize_only = False
-        self._enter_running_phase()
+    # The budget Input widget is a leftover placeholder — no submit
+    # handler needed. Enter to start summarizing is handled by the
+    # auto-start in _stats_ready.
 
-    def action_summarize_only(self) -> None:
-        """Enter summarize-only mode: run the whole pipeline up to
-        tree-build, then stop before rewriting live. The compacting
-        lock still gates the session so no new turns land mid-build."""
-        if self.phase != "input":
-            return
-        if self.total_tokens == 0:
-            self.notify("Stats still loading — wait a moment", severity="warning")
-            return
-        self._summarize_only = True
-        # No budget used in this path; keep 0 as a sentinel.
-        self.budget = 0
-        self._enter_running_phase()
+    # ----- Phase 2: summarizing --------------------------------------------
 
-    def action_toggle_input_focus(self) -> None:
-        """Blur/focus the budget Input so screen-level letter bindings
-        (like ``s`` for summarize) become reachable. Bound to Tab."""
-        if self.phase != "input":
-            return
-        try:
-            inp = self.query_one("#compact-budget", Input)
-        except Exception:  # noqa: BLE001
-            return
-        if inp.has_focus:
-            # Blur — leave focus on the screen so bindings still work.
-            self.set_focus(None)
-        else:
-            inp.focus()
-
-    def on_click(self, event: events.Click) -> None:
-        """Blur the budget Input when the user clicks anywhere outside
-        it — matches the intuitive "click elsewhere = defocus" pattern
-        that most GUI text fields use. Without this, focus sticks to
-        Input until another focusable widget is clicked, and the
-        screen-level ``s`` binding stays unreachable."""
-        if self.phase != "input":
-            return
-        try:
-            inp = self.query_one("#compact-budget", Input)
-        except Exception:  # noqa: BLE001
-            return
-        if not inp.has_focus:
-            return
-        target = getattr(event, "widget", None) or getattr(event, "control", None)
-        # If we can't determine the click target, do nothing rather than
-        # risk blurring on a legit click into Input.
-        if target is None:
-            return
-        # Walk up: if the target IS the Input or lives inside it, keep
-        # focus; otherwise blur.
-        node = target
-        while node is not None:
-            if node is inp:
-                return
-            node = getattr(node, "parent", None)
-        self.set_focus(None)
-
-    # ----- Phase 2: running ------------------------------------------------
-
-    def _enter_running_phase(self) -> None:
-        self.phase = "running"
+    def _enter_summarizing_phase(self) -> None:
+        """Kick off tree-build for every completed turn. No expansion —
+        after this finishes we push the scheduler picker."""
+        self.phase = "summarizing"
 
         budget = self.query_one("#compact-budget", Input)
         budget.disabled = True
         budget.display = False
 
         stats = self.query_one("#compact-stats", Static)
-        if self._summarize_only:
-            stats.update(
-                f"Total: [bold]{self.total_tokens:,}[/]t  ·  "
-                f"[bold]{self.total_turns}[/] turn(s)  "
-                f"[dim](summarize-only — live untouched)[/]"
-            )
-        else:
-            stats.update(
-                f"Total: [bold]{self.total_tokens:,}[/]t  →  "
-                f"Budget: [bold]{self.budget:,}[/]t  ·  "
-                f"[bold]{self.total_turns}[/] turn(s)"
-            )
+        stats.update(
+            f"Total: [bold]{self.total_tokens:,}[/]t  ·  "
+            f"[bold]{self.total_turns}[/] turn(s)  "
+            f"[dim](summarizing — scheduler picker comes next)[/]"
+        )
 
-        for wid in ("compact-state", "compact-progress", "compact-cached", "compact-log"):
+        for wid in ("compact-state", "compact-progress",
+                    "compact-cached", "compact-log"):
             self.query_one(f"#{wid}").display = True
 
         self.query_one("#compact-state", Static).update(
             "[cyan]Starting summarization…[/]"
-            if self._summarize_only
-            else "[cyan]Starting compaction…[/]"
         )
         progress = self.query_one("#compact-progress", ProgressBar)
         progress.update(total=max(1, self.total_turns), progress=0)
@@ -1057,9 +1255,14 @@ class CompactScreen(ModalScreen[None]):
             "[dim]Esc to abort (won't kill in-flight build subprocess)[/]"
         )
 
-        self._start_runner()
+        # Ensure forest_sizes is populated even if the initial stats
+        # load raced or missed something (e.g. some turns just built).
+        if not self._forest_sizes:
+            self._forest_sizes = self._per_turn_full_tokens()
 
-    def _start_runner(self) -> None:
+        self._start_summarize_runner()
+
+    def _start_summarize_runner(self) -> None:
         live = live_jsonl_path(self.claude_uuid, self.cwd)
         if self.mv_session is not None:
             kill_fn = self._make_kill_fn(self.mv_session)
@@ -1069,9 +1272,52 @@ class CompactScreen(ModalScreen[None]):
             claude_uuid=self.claude_uuid,
             cwd=self.cwd,
             live_jsonl=live,
-            total_budget=self.budget,
+            total_budget=0,
             kill_session_fn=kill_fn,
-            summarize_only=self._summarize_only,
+            summarize_only=True,
+        )
+        self._run_in_thread()
+
+    # ----- Phase 3: expanding (after ChooseSchedulerScreen) ---------------
+
+    def _enter_expanding_phase(self, config: dict) -> None:
+        """Called on the UI thread after the picker screen returns a
+        config. Starts the expansion runner (skips kill/sync/build)."""
+        self.phase = "expanding"
+        self._scheduler_config = config
+        self.budget = int(config.get("budget", 0))
+
+        stats = self.query_one("#compact-stats", Static)
+        stats.update(
+            f"Total: [bold]{self.total_tokens:,}[/]t  →  "
+            f"Budget: [bold]{self.budget:,}[/]t  ·  "
+            f"[dim]scheduler: {config['scheduler']}[/]"
+        )
+        self.query_one("#compact-state", Static).update(
+            "[cyan]Expanding + rewriting live…[/]"
+        )
+        # Reset progress: expansion writes rows, not builds turns; we
+        # don't have a meaningful per-turn bar here, but keep it visible.
+        progress = self.query_one("#compact-progress", ProgressBar)
+        progress.update(total=1, progress=0)
+
+        self._start_expand_runner(config)
+
+    def _start_expand_runner(self, config: dict) -> None:
+        live = live_jsonl_path(self.claude_uuid, self.cwd)
+        params: dict = {}
+        for pk in ("k", "half_life"):
+            if pk in config:
+                params[pk] = config[pk]
+        self._runner = CompactRunner(
+            claude_uuid=self.claude_uuid,
+            cwd=self.cwd,
+            live_jsonl=live,
+            total_budget=self.budget,
+            kill_session_fn=None,  # session already dormant post-summarize
+            expand_only=True,
+            scheduler_name=config["scheduler"],
+            scheduler_params=params,
         )
         self._run_in_thread()
 
@@ -1194,20 +1440,58 @@ class CompactScreen(ModalScreen[None]):
         return styled
 
     def _on_done(self, ok: bool, msg: str) -> None:
-        self.phase = "done" if ok else "failed"
         self._append_log("─" * 56)
         self._append_log(("[OK] " if ok else "[FAIL] ") + msg)
+
+        # Post-summarize hand-off: push ChooseSchedulerScreen.
+        if ok and self.phase == "summarizing":
+            self.phase = "choosing"
+            self.query_one("#compact-hint", Static).update(
+                "[dim]Trees built. Choose scheduler + budget…[/]"
+            )
+            picker = ChooseSchedulerScreen(
+                claude_uuid=self.claude_uuid,
+                cwd=self.cwd,
+                display_name=self.display_name,
+                forest_sizes=self._forest_sizes
+                or self._per_turn_full_tokens(),
+                default_budget=max(1, self.total_tokens // 2),
+            )
+            self.app.push_screen(picker, self._on_config_chosen)
+            return
+
+        # Terminal state — either summarize failed, or expansion done.
+        self.phase = "done" if ok else "failed"
         verdict_color = "green" if ok else "red"
+        if self.phase == "done":
+            verdict = "Compaction done. "
+        else:
+            verdict = "Compaction failed. "
         self.query_one("#compact-hint", Static).update(
-            f"[bold {verdict_color}]"
-            + ("Trees built. " if ok else "Compaction failed. ")
-            + "Esc to close.[/]"
+            f"[bold {verdict_color}]{verdict}Esc to close.[/]"
         )
+
+    def _on_config_chosen(self, config: Optional[dict]) -> None:
+        """Callback from ChooseSchedulerScreen. None → user exited to
+        summarize-only; dict → run expansion with the picked config."""
+        if config is None:
+            self.phase = "done"
+            self._append_log("[user] exited at scheduler picker — "
+                             "summarize-only.")
+            self.query_one("#compact-hint", Static).update(
+                "[bold green]Trees built. Live untouched. "
+                "Esc to close.[/]"
+            )
+            return
+        self._enter_expanding_phase(config)
 
     # ----- Cancel / dismiss -----------------------------------------------
 
     def action_cancel(self) -> None:
-        if self.phase == "running" and self._runner is not None:
+        if (
+            self.phase in ("summarizing", "expanding")
+            and self._runner is not None
+        ):
             # First Esc: signal abort (clean stop at next checkpoint).
             if not self._runner.cancelled:
                 self._runner.cancel()
@@ -1580,6 +1864,28 @@ class MonitorApp(App):
         background: $surface-darken-1;
     }
     #compact-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
+    #choose-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $accent;
+        background: $surface;
+    }
+    #choose-title { height: auto; padding-bottom: 1; }
+    #choose-sched-label { height: auto; }
+    #choose-scheduler { height: auto; }
+    #choose-k-label { height: auto; padding-top: 1; }
+    #choose-k { height: 3; }
+    #choose-hl-label { height: auto; padding-top: 1; }
+    #choose-hl { height: 3; }
+    #choose-budget-label { height: auto; padding-top: 1; }
+    #choose-budget { height: 3; }
+    #choose-preview { height: auto; padding-top: 1; }
+    #choose-hint {
         color: $text-muted;
         padding-top: 1;
         height: auto;

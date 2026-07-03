@@ -117,6 +117,9 @@ class CompactRunner:
         total_budget: int,
         kill_session_fn: Optional[Callable[[], None]] = None,
         summarize_only: bool = False,
+        expand_only: bool = False,
+        scheduler_name: str = "proportional",
+        scheduler_params: Optional[dict] = None,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
@@ -128,6 +131,18 @@ class CompactRunner:
         # the tree cache before an eventual compaction. The compacting
         # lock still gates the session (so no new turns land mid-build).
         self.summarize_only = summarize_only
+        # Expand-only mode: skip kill / sync / tree-build entirely.
+        # Assumes trees are already cached (typically because a prior
+        # summarize-only run just built them) and jumps straight to
+        # expansion + live rewrite. Two-phase compaction flow calls
+        # this after the user has picked a scheduler + budget.
+        self.expand_only = expand_only
+        # Scheduler selection for the expansion phase. proportional /
+        # recency_decay / last_k_raw; params dict carries scheduler-
+        # specific args (``k`` for last_k_raw, ``half_life`` for
+        # recency_decay). Ignored for schedulers that take no params.
+        self.scheduler_name = scheduler_name
+        self.scheduler_params = dict(scheduler_params or {})
         self.paths = CompactPaths.for_session(claude_uuid)
         self._cancelled = threading.Event()
         self._log_offset = 0  # bytes already streamed to UI
@@ -172,6 +187,31 @@ class CompactRunner:
             return
 
         try:
+            # Expand-only fast path: trees already built, session already
+            # dormant (a prior summarize-only run left it that way), just
+            # jump to expansion. Skips kill / sync / count / build.
+            if self.expand_only:
+                full = full_jsonl_path(self.claude_uuid)
+                if not full.is_file():
+                    on_state(State.FAILED)
+                    on_done(False, f"full.jsonl missing at {full}")
+                    return
+                on_state(State.EXPANDING)
+                try:
+                    rendered = self._expand_and_render(full, on_log)
+                except Exception as e:  # noqa: BLE001
+                    on_state(State.FAILED)
+                    on_done(False, f"expansion failed: {e}")
+                    return
+                total_turns = self._count_total_turns(full)
+                on_state(State.DONE)
+                on_done(
+                    True,
+                    f"Compacted to budget {self.total_budget:,}t across "
+                    f"{total_turns} turn(s); wrote {rendered} row(s) to live.",
+                )
+                return
+
             # 1. Kill the live session if any. Any tmux session backing it
             # disappears; the multiverse state dir is reaped. The compacting
             # lock lives outside that dir, so it survives.
@@ -470,7 +510,11 @@ class CompactRunner:
         Returns the number of rows written to live.
         """
         # Lazy imports — vendor is on sys.path.
-        from compaction.compactor import allocate_budget, proportional  # noqa: E402
+        from compaction.compactor import (  # noqa: E402
+            SCHEDULERS,
+            allocate_budget,
+            proportional,
+        )
         from compaction.parser import parse_session  # noqa: E402
         from compaction.priv_session import (  # noqa: E402
             compact_forest_to_session_jsonl,
@@ -486,13 +530,26 @@ class CompactRunner:
             f"will fall back to greedy-from-start.",
         )
 
+        # Resolve the scheduler by name (falls back to proportional).
+        # scheduler_params carries any scheduler-specific extras (``k``
+        # for last_k_raw, ``half_life`` for recency_decay); we bind them
+        # by wrapping in a lambda so allocate_budget's call signature
+        # stays uniform.
+        base_scheduler = SCHEDULERS.get(self.scheduler_name, proportional)
+        params = self.scheduler_params
+        if params:
+            def scheduler(forest_, budget_, _fn=base_scheduler, _p=params):
+                return _fn(forest_, budget_, **_p)
+        else:
+            scheduler = base_scheduler
+
         # Whole-output allocation: reserves the verbatim user-prompt text
         # floor, keeps as many user-prompt images as fit a sub-budget
         # (newest first), and divides the rest across turns for assistant
         # content. Without this, verbatim user images ride along outside the
         # budget and a 400k compaction can still emit 800k+ tokens.
         per_turn, keep_image_turn_ids = allocate_budget(
-            forest, self.total_budget, scheduler=proportional
+            forest, self.total_budget, scheduler=scheduler
         )
         n_img_turns = sum(
             1 for t in forest if t.user_prompt and t.user_prompt.images
@@ -508,7 +565,7 @@ class CompactRunner:
         # rendered JSONL via the rows themselves.
         on_log(
             f"Allocated {self.total_budget:,}t across {len(forest)} "
-            f"turn(s) by proportional scheduler:"
+            f"turn(s) by {self.scheduler_name} scheduler{f' {self.scheduler_params}' if self.scheduler_params else ''}:"
         )
         preview_turns = forest[:10]
         for turn in preview_turns:

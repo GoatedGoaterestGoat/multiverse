@@ -194,24 +194,31 @@ def proportional(forest: Forest, budget: int) -> dict[str, int]:
 
 
 def last_k_raw(forest: Forest, budget: int, k: int = 3) -> dict[str, int]:
-    """Last k turns get unlimited budget (the renderer will use root or
-    full leaves as available); the rest share the remainder uniformly.
+    """Last ``k`` turns kept verbatim (allocated their full raw token
+    cost); the remaining budget is divided across the earlier turns
+    proportionally to each turn's own full token count.
 
-    If the last k turns alone exceed the budget, falls back to uniform
-    allocation across the whole forest.
+    Fallback: if the last-k raw cost alone exceeds the budget, defer to
+    plain ``proportional`` across the whole forest — trying to keep the
+    tail verbatim under an already-blown budget would starve the rest
+    entirely.
     """
     if not forest:
         return {}
     if k >= len(forest):
-        return uniform(forest, budget)
+        return proportional(forest, budget)
     last = forest[-k:]
     rest = forest[:-k]
     raw_cost = sum(_full_tokens(t) for t in last)
     if raw_cost >= budget:
-        return uniform(forest, budget)
-    per_rest = (budget - raw_cost) // max(1, len(rest))
-    out = {t.turn_id: _full_tokens(t) for t in last}
-    out.update({t.turn_id: per_rest for t in rest})
+        return proportional(forest, budget)
+    remaining = budget - raw_cost
+    out: dict[str, int] = {t.turn_id: _full_tokens(t) for t in last}
+    if rest:
+        rest_sizes = {t.turn_id: max(1, _full_tokens(t)) for t in rest}
+        rest_total = sum(rest_sizes.values())
+        for tid, size in rest_sizes.items():
+            out[tid] = int(remaining * size / rest_total)
     return out
 
 
