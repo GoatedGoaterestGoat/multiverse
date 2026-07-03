@@ -1041,30 +1041,29 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 tid: int(budget * weights[tid] / total_w) for tid in turn_ids
             }
         elif self._scheduler == "last_k_raw":
-            k = self._current_k()
-            if k >= len(turn_ids):
+            # Clamp k at the turn count. When k == n, the whole forest
+            # is "verbatim tail": each turn gets its leaves count as
+            # its allocation, bounded and budget-invariant. Without
+            # this clamp, k > n fell through to plain proportional-of-
+            # budget which grew unboundedly at high budgets and made
+            # one turn appear to eat everything.
+            k = min(max(1, self._current_k()), len(turn_ids))
+            last_ids = turn_ids[-k:]
+            rest_ids = turn_ids[:-k]  # empty when k == n
+            raw_cost = sum(leaves_by_id[tid] for tid in last_ids)
+            if raw_cost >= budget and rest_ids:
                 total = sum(max(1, s) for s in leaves_by_id.values()) or 1
                 alloc = {
                     tid: int(budget * max(1, leaves_by_id[tid]) / total)
                     for tid in turn_ids
                 }
             else:
-                last_ids = turn_ids[-k:]
-                rest_ids = turn_ids[:-k]
-                raw_cost = sum(leaves_by_id[tid] for tid in last_ids)
-                if raw_cost >= budget:
-                    total = sum(max(1, s) for s in leaves_by_id.values()) or 1
-                    alloc = {
-                        tid: int(budget * max(1, leaves_by_id[tid]) / total)
-                        for tid in turn_ids
-                    }
-                else:
-                    remaining = budget - raw_cost
-                    alloc = {tid: leaves_by_id[tid] for tid in last_ids}
-                    if rest_ids:
-                        rest_total = sum(max(1, leaves_by_id[tid]) for tid in rest_ids) or 1
-                        for tid in rest_ids:
-                            alloc[tid] = int(remaining * max(1, leaves_by_id[tid]) / rest_total)
+                remaining = max(0, budget - raw_cost)
+                alloc = {tid: leaves_by_id[tid] for tid in last_ids}
+                if rest_ids:
+                    rest_total = sum(max(1, leaves_by_id[tid]) for tid in rest_ids) or 1
+                    for tid in rest_ids:
+                        alloc[tid] = int(remaining * max(1, leaves_by_id[tid]) / rest_total)
         else:
             alloc = {tid: 0 for tid in turn_ids}
 
@@ -1104,20 +1103,24 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         alloc = self._compute_allocation()  # per-turn OUTPUT allocation
         input_floor, text_floor, image_floor = self._compute_input_floor()
 
-        # Per-turn OUTPUT projection: max(scheduler alloc, root.tokens).
-        # expand_to_budget always keeps at least the root, so no turn
-        # can emit less output than its root token count.
+        # Per-turn OUTPUT projection is bounded on both ends:
+        # - lower bound: root.tokens (expand_to_budget always keeps
+        #   the root)
+        # - upper bound: sum of leaves (fully-expanded tree = raw)
+        # Without the leaves cap, huge budgets would show alloc
+        # values well above any turn's actual capacity, especially
+        # for last_k_raw where the rest bucket can over-allocate.
         output_per_turn: list[int] = []
         breakdowns: list[tuple[int, int, int]] = []  # (text, img_out, out)
         for i, a in enumerate(alloc):
-            tid, _leaves, text, img_tok, min_tok = self.forest_stats[i]
+            tid, leaves, text, img_tok, min_tok = self.forest_stats[i]
             if img_tok > 0 and not self._include_images:
                 img_out = self._IMAGE_OMISSION_MARKER_TOKENS
             elif img_tok > 0:
                 img_out = img_tok
             else:
                 img_out = 0
-            out_val = max(a, min_tok)
+            out_val = min(max(a, min_tok), leaves)
             output_per_turn.append(out_val)
             breakdowns.append((text, img_out, out_val))
 

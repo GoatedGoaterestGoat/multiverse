@@ -223,21 +223,27 @@ def last_k_raw(forest: Forest, budget: int, k: int = 3) -> dict[str, int]:
     cost); the remaining budget is divided across the earlier turns
     proportionally to each turn's own full token count.
 
-    Fallback: if the last-k raw cost alone exceeds the budget, defer to
+    ``k`` is clamped to ``len(forest)`` — when it meets or exceeds the
+    turn count, every turn is in the "verbatim tail", each turn gets
+    its own full leaves cost, and the sum stays bounded by the raw
+    forest cost regardless of how large ``budget`` is. This is what
+    lets the picker's ``k = huge`` mode show the true full-turn
+    distribution.
+
+    Fallback: if the last-k raw cost alone exceeds ``budget``, defer to
     plain ``proportional`` across the whole forest — trying to keep the
     tail verbatim under an already-blown budget would starve the rest
     entirely.
     """
     if not forest:
         return {}
-    if k >= len(forest):
-        return proportional(forest, budget)
-    last = forest[-k:]
-    rest = forest[:-k]
+    k_eff = min(max(1, k), len(forest))
+    last = forest[-k_eff:]
+    rest = forest[:-k_eff]  # empty when k_eff == len(forest)
     raw_cost = sum(_full_tokens(t) for t in last)
-    if raw_cost >= budget:
+    if raw_cost >= budget and rest:
         return proportional(forest, budget)
-    remaining = budget - raw_cost
+    remaining = max(0, budget - raw_cost)
     out: dict[str, int] = {t.turn_id: _full_tokens(t) for t in last}
     if rest:
         rest_sizes = {t.turn_id: max(1, _full_tokens(t)) for t in rest}
