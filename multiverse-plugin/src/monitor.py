@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -702,10 +702,20 @@ class CompactScreen(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        # F2 (rather than ctrl+s: terminal XOFF eats it, and single 's'
-        # would land in the budget Input as text) triggers summarize-only
-        # mode — build every turn's tree, then stop before expansion.
-        Binding("f2", "summarize_only", "Summarize only"),
+        # Plain `s` for summarize-only. Only fires when the budget
+        # Input isn't focused — Input consumes typing keys as text
+        # first, and screen-level bindings run only if the focused
+        # widget didn't handle the key. Tab (below) blurs the Input;
+        # click-outside also blurs (see on_click).
+        Binding("s", "summarize_only", "Summarize"),
+        # F2 kept as a focus-agnostic alternative (F-keys aren't
+        # consumed by Input).
+        Binding("f2", "summarize_only", "Summarize (F2)", show=False),
+        # Tab toggles Input focus. Default Textual Tab cycles focus,
+        # but Input is the only focusable widget on this modal so the
+        # cycle is trivial — replacing it with an explicit blur/focus
+        # toggle is more useful.
+        Binding("tab", "toggle_input_focus", "Toggle input focus"),
     ]
 
     # Match the worker.log lines that report a single turn's build time:
@@ -770,8 +780,8 @@ class CompactScreen(ModalScreen[None]):
                 max_lines=2000,
             ),
             Static(
-                "[dim]Enter: compact to budget · F2: summarize only "
-                "(build trees, don't touch live) · Esc: cancel[/]",
+                "[dim]Enter: compact to budget · S (blur input first, "
+                "via Tab or click) or F2: summarize only · Esc: cancel[/]",
                 id="compact-hint",
             ),
             id="compact-dialog",
@@ -964,6 +974,49 @@ class CompactScreen(ModalScreen[None]):
         # No budget used in this path; keep 0 as a sentinel.
         self.budget = 0
         self._enter_running_phase()
+
+    def action_toggle_input_focus(self) -> None:
+        """Blur/focus the budget Input so screen-level letter bindings
+        (like ``s`` for summarize) become reachable. Bound to Tab."""
+        if self.phase != "input":
+            return
+        try:
+            inp = self.query_one("#compact-budget", Input)
+        except Exception:  # noqa: BLE001
+            return
+        if inp.has_focus:
+            # Blur — leave focus on the screen so bindings still work.
+            self.set_focus(None)
+        else:
+            inp.focus()
+
+    def on_click(self, event: events.Click) -> None:
+        """Blur the budget Input when the user clicks anywhere outside
+        it — matches the intuitive "click elsewhere = defocus" pattern
+        that most GUI text fields use. Without this, focus sticks to
+        Input until another focusable widget is clicked, and the
+        screen-level ``s`` binding stays unreachable."""
+        if self.phase != "input":
+            return
+        try:
+            inp = self.query_one("#compact-budget", Input)
+        except Exception:  # noqa: BLE001
+            return
+        if not inp.has_focus:
+            return
+        target = getattr(event, "widget", None) or getattr(event, "control", None)
+        # If we can't determine the click target, do nothing rather than
+        # risk blurring on a legit click into Input.
+        if target is None:
+            return
+        # Walk up: if the target IS the Input or lives inside it, keep
+        # focus; otherwise blur.
+        node = target
+        while node is not None:
+            if node is inp:
+                return
+            node = getattr(node, "parent", None)
+        self.set_focus(None)
 
     # ----- Phase 2: running ------------------------------------------------
 
