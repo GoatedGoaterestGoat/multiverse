@@ -52,6 +52,7 @@ from .full_jsonl import (
     list_orphan_fulls,
     live_jsonl_path,
     live_stats,
+    live_stats_cached,
     minimum_compacted_tokens,
     total_token_count,
     total_turn_count,
@@ -2346,7 +2347,7 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
-        table.add_columns("ID", "Name", "Inbox", "Build", "Status", "Updated", "Preview")
+        table.add_columns("ID", "Name", "Inbox", "Build", "Status", "Tokens", "Updated", "Preview")
         yield table
         yield Footer()
 
@@ -2515,11 +2516,17 @@ class MonitorApp(App):
                 build_cell = "[bold green]on[/]"
             else:
                 build_cell = "[dim]off[/]"
+            if e.claude_uuid:
+                live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
+                tokens_cell = f"{live_toks:,}"
+            else:
+                tokens_cell = "[dim]-[/]"
             preview = e.preview or "[dim](empty)[/]"
             if len(preview) > 60:
                 preview = preview[:59] + "…"
             table.add_row(
-                id_cell, e.name, inbox_cell, build_cell, status_cell, updated, preview,
+                id_cell, e.name, inbox_cell, build_cell, status_cell, tokens_cell,
+                updated, preview,
                 key=e.row_key,
             )
         if self.entries:

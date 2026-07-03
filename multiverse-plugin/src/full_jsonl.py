@@ -264,6 +264,29 @@ def live_stats(claude_uuid: str, cwd: str) -> tuple[int, int]:
     return tokens, len(forest)
 
 
+# mtime-keyed cache of live_stats results, per live jsonl path. The
+# dashboard's 1-second refresh calls live_stats_cached once per row; without
+# caching that's a full chain-walk parse of every live jsonl every tick.
+_LIVE_STATS_CACHE: dict[str, tuple[float, tuple[int, int]]] = {}
+
+
+def live_stats_cached(claude_uuid: str, cwd: str) -> tuple[int, int]:
+    """mtime-cached wrapper around ``live_stats``. Same return value; skips
+    the parse when the live jsonl hasn't changed since the last call."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    try:
+        mtime = live.stat().st_mtime
+    except OSError:
+        return 0, 0
+    key = str(live)
+    cached = _LIVE_STATS_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = live_stats(claude_uuid, cwd)
+    _LIVE_STATS_CACHE[key] = (mtime, result)
+    return result
+
+
 def minimum_compacted_tokens(claude_uuid: str, cwd: str) -> tuple[int, int, int]:
     """Return ``(min_tokens, n_cached, n_total)`` — the smallest possible
     live-JSONL cost if every turn compacted to its most-collapsed frontier
