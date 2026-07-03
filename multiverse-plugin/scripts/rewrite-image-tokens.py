@@ -33,6 +33,12 @@ sys.path.insert(0, str(_PLUGIN / "vendor"))
 from compaction.tokenize import count_image_tokens  # noqa: E402
 
 
+# Bump when the image-token formula changes again. Trees carrying a
+# marker >= this value are treated as already migrated.
+_SCHEMA_VERSION = 2
+_SCHEMA_KEY = "image_tokens_schema_version"
+
+
 def _multiverse_dir() -> Path:
     explicit = os.environ.get("MULTIVERSE_ROOT")
     if explicit:
@@ -70,6 +76,16 @@ def _patch_leaf(leaf: dict, stats: dict) -> None:
     old_tokens = leaf.get("tokens", 0)
     if not isinstance(old_tokens, int):
         return
+    # Guard against double-migration. Under the pre-fix formula the leaf
+    # was sized ``tokens = text_tokens + old_img``, so ``tokens`` had to
+    # be strictly greater than ``old_img``. If the stored value has
+    # already dropped below ``old_img``, the image tokens can't still
+    # be in there under the old formula — the leaf must have been
+    # migrated already. Skip to keep this script idempotent even on
+    # files that predate the schema-version marker.
+    if old_tokens <= old_img:
+        stats["leaves_skipped_already_migrated"] += 1
+        return
     new_tokens = max(1, old_tokens - old_img + new_img)
     if new_tokens != old_tokens:
         leaf["tokens"] = new_tokens
@@ -94,14 +110,21 @@ def _migrate_one_file(path: Path, dry_run: bool) -> dict:
     stats = {
         "leaves_seen": 0,
         "leaves_patched": 0,
+        "leaves_skipped_already_migrated": 0,
         "nodes_seen": 0,
         "tokens_delta": 0,
         "error": None,
+        "already_marked": False,
     }
     try:
         data = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as e:
         stats["error"] = str(e)
+        return stats
+
+    # Idempotency guard 1: version marker on the file itself.
+    if data.get(_SCHEMA_KEY, 0) >= _SCHEMA_VERSION:
+        stats["already_marked"] = True
         return stats
 
     # user_prompt is stored in leaf-shape at the top level.
@@ -118,8 +141,13 @@ def _migrate_one_file(path: Path, dry_run: bool) -> dict:
     if isinstance(tree, dict):
         _walk_tree(tree, stats)
 
-    if stats["leaves_patched"] == 0 or dry_run:
+    if dry_run:
         return stats
+
+    # Always stamp the version marker, even if nothing was patched.
+    # That way a file we've inspected once will short-circuit on any
+    # future run under the same schema version.
+    data[_SCHEMA_KEY] = _SCHEMA_VERSION
 
     fd, tmp = tempfile.mkstemp(prefix=".rewrite_", suffix=".json",
                                dir=str(path.parent))
@@ -149,23 +177,37 @@ def _migrate_session(session_uuid: str, dry_run: bool) -> tuple[int, int, int]:
     total_leaves = total_patched = total_delta = 0
     total_nodes = 0
     n_touched = 0
+    n_already_marked = 0
+    n_skipped_leaves = 0
     for p in trees:
         s = _migrate_one_file(p, dry_run)
         if s["error"]:
             print(f"    {p.name[:12]}…: {s['error']}")
             continue
+        if s.get("already_marked"):
+            n_already_marked += 1
+            continue
         total_leaves += s["leaves_seen"]
         total_patched += s["leaves_patched"]
         total_delta += s["tokens_delta"]
         total_nodes += s["nodes_seen"]
+        n_skipped_leaves += s.get("leaves_skipped_already_migrated", 0)
         if s["leaves_patched"] > 0:
             n_touched += 1
     verb = "would patch" if dry_run else "patched"
+    extra = ""
+    if n_already_marked:
+        extra += f", {n_already_marked} file(s) already marked, skipped"
+    if n_skipped_leaves:
+        extra += (
+            f", {n_skipped_leaves} leaf/leaves skipped (tokens < old_img → "
+            f"already migrated)"
+        )
     print(
         f"  {session_uuid[:8]}: {len(trees)} tree file(s), "
         f"{total_leaves:,} leaves, {total_nodes:,} nodes; "
         f"{verb} {total_patched:,} image leaf(s) across {n_touched} "
-        f"file(s) ({total_delta:+,} tokens delta)"
+        f"file(s) ({total_delta:+,} tokens delta){extra}"
     )
     return n_touched, total_patched, total_delta
 
