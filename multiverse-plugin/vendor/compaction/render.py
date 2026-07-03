@@ -244,26 +244,40 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
         across turn boundaries — the next turn always starts with the
         user_prompt row.
 
-    Each message dict is ``{"role": "user"|"assistant", "content": [...]}``.
+    Each message dict is ``{"role": "user"|"assistant", "content": [...],
+    "source_leaves": [...]}``. ``source_leaves`` is a parallel list to
+    ``content``: ``source_leaves[i]`` is the ``Leaf`` that produced
+    ``content[i]``, or ``None`` for synthetic blocks (Node summaries,
+    orphan-pair placeholders, first/last role-forcing filler). The
+    per-message usage stamper in ``turn_to_rows`` needs this to sum
+    thinking-leaf costs into ``usage.output_tokens``; keeping the same
+    length as ``content`` avoids drift.
     """
     messages: list[dict] = []
     current_role: str | None = None
     current_blocks: list[dict] = []
+    current_sources: list[Leaf | None] = []
     pending_tool_uses: set[str] = set()
 
     def flush() -> None:
-        nonlocal current_blocks, current_role
+        nonlocal current_blocks, current_sources, current_role
         if current_blocks:
-            messages.append({"role": current_role, "content": current_blocks})
+            messages.append({
+                "role": current_role,
+                "content": current_blocks,
+                "source_leaves": current_sources,
+            })
             current_blocks = []
+            current_sources = []
             current_role = None
 
-    def append(role: str, block: dict) -> None:
+    def append(role: str, block: dict, source: Leaf | None = None) -> None:
         nonlocal current_role
         if current_role is not None and role != current_role:
             flush()
         current_role = role
         current_blocks.append(block)
+        current_sources.append(source)
 
     def synth_tu_id() -> str:
         return f"toolu_synth_{_uuidlib.uuid4().hex[:16]}"
@@ -276,12 +290,12 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     "type": "thinking",
                     "thinking": entry.content.get("text", ""),
                     "signature": entry.content.get("signature", ""),
-                })
+                }, source=entry)
             elif kind == "asst_text":
                 append("assistant", {
                     "type": "text",
                     "text": entry.content.get("text", ""),
-                })
+                }, source=entry)
             elif kind == "tool_use":
                 tu_id = entry.content.get("tool_use_id") or synth_tu_id()
                 append("assistant", {
@@ -289,13 +303,14 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     "id": tu_id,
                     "name": _safe_tool_name(entry.content.get("name")),
                     "input": entry.content.get("input", {}) or {},
-                })
+                }, source=entry)
                 pending_tool_uses.add(tu_id)
             elif kind == "tool_result":
                 tu_id = entry.content.get("tool_use_id") or synth_tu_id()
                 if tu_id not in pending_tool_uses:
                     # Orphan tool_result — synthesize matching tool_use
-                    # in an assistant message right before it.
+                    # in an assistant message right before it. Synthetic
+                    # placeholder, no originating leaf.
                     append("assistant", {
                         "type": "tool_use",
                         "id": tu_id,
@@ -308,7 +323,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     "tool_use_id": tu_id,
                     "content": entry.content.get("text", "") or "",
                     "is_error": bool(entry.content.get("is_error", False)),
-                })
+                }, source=entry)
             elif kind == "user_text":
                 text = entry.content.get("text", "") or ""
                 # Emit a text block unless the message was image-only (no
@@ -320,9 +335,9 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                 # folded into summaries instead.
                 imgs = getattr(entry, "images", None) or []
                 if text or not imgs:
-                    append("user", {"type": "text", "text": text})
+                    append("user", {"type": "text", "text": text}, source=entry)
                 for img in imgs:
-                    append("user", img)
+                    append("user", img, source=entry)
             elif kind == "tool_exchange":
                 # Combined tool_use + tool_result leaf (auto-merge
                 # preprocessing). Emit as a native pair across two
@@ -333,22 +348,25 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
                     "id": tu_id,
                     "name": _safe_tool_name(entry.content.get("name")),
                     "input": entry.content.get("input", {}) or {},
-                })
+                }, source=entry)
                 append("user", {
                     "type": "tool_result",
                     "tool_use_id": tu_id,
                     "content": entry.content.get("result_text", "") or "",
                     "is_error": bool(entry.content.get("is_error", False)),
-                })
+                }, source=entry)
             else:
                 # Defensive — unknown leaf kind. Render as a labeled
                 # paragraph so it's at least visible.
                 append("assistant", {
                     "type": "text",
                     "text": f"**[{kind}]** {entry.content!r}",
-                })
+                }, source=entry)
         else:  # Node summary — markdown blockquote in an assistant message
             n = _span_size(entry)
+            # Node.summary is text; no thinking cost to preserve, so
+            # source_leaf is None (Node isn't a Leaf and doesn't
+            # contribute to the round-trip usage stamp).
             append("assistant", {
                 "type": "text",
                 "text": _render_summary_block(entry.summary.strip(), n),
@@ -359,7 +377,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
     # Resolve any remaining unresolved tool_uses with a final user
     # message of synthetic tool_results.
     if pending_tool_uses:
-        synthetic = [
+        synthetic_blocks = [
             {
                 "type": "tool_result",
                 "tool_use_id": tu_id,
@@ -368,10 +386,16 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
             }
             for tu_id in pending_tool_uses
         ]
+        synthetic_sources = [None] * len(synthetic_blocks)
         if messages and messages[-1]["role"] == "user":
-            messages[-1]["content"].extend(synthetic)
+            messages[-1]["content"].extend(synthetic_blocks)
+            messages[-1]["source_leaves"].extend(synthetic_sources)
         else:
-            messages.append({"role": "user", "content": synthetic})
+            messages.append({
+                "role": "user",
+                "content": synthetic_blocks,
+                "source_leaves": synthetic_sources,
+            })
 
     # Force the FIRST message to be assistant-role: the surrounding
     # turn renderer always emits a user_prompt user-role row before
@@ -382,6 +406,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
             "content": [
                 {"type": "text", "text": "_(no preceding assistant content)_"}
             ],
+            "source_leaves": [None],
         })
 
     # Force the LAST message to be assistant-role: the next turn
@@ -393,6 +418,7 @@ def render_frontier_as_messages(frontier: Frontier) -> list[dict]:
             "content": [
                 {"type": "text", "text": "_(continuing)_"}
             ],
+            "source_leaves": [None],
         })
 
     return messages

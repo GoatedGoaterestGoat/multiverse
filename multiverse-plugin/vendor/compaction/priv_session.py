@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .render import render_frontier_as_message_blocks
+from .tokenize import count_tokens
 from .types import Frontier, Leaf, Turn
 
 
@@ -360,7 +361,26 @@ def _assistant_block_row(
     parent_uuid: str,
     is_final: bool,
     timestamp: str = SYNTHETIC_TIMESTAMP,
+    usage_output_tokens: int | None = None,
 ) -> dict:
+    """Serialize one assistant content block as its own JSONL row.
+
+    ``usage_output_tokens`` — when set, stamped as
+    ``usage.output_tokens`` on the message. Every row of the same
+    ``msg_id`` should carry the same value so a partial file read
+    still yields a usable usage entry (matches real Claude Code
+    behaviour where every row of a multi-block message replicates
+    ``usage``).
+
+    Critical for thinking cost round-trip: at parse time
+    ``_build_usage_index`` reconstructs a thinking leaf's cost as
+    ``output_tokens - visible_tokens``. If we emit ``usage={}`` here,
+    ``output_tokens`` is missing and every preserved thinking leaf's
+    cost silently collapses to 0 on the next parse.
+    """
+    usage: dict = {}
+    if usage_output_tokens is not None:
+        usage["output_tokens"] = usage_output_tokens
     return {
         "parentUuid": parent_uuid,
         "uuid": str(uuidlib.uuid4()),
@@ -377,9 +397,46 @@ def _assistant_block_row(
             "content": [block],
             "stop_reason": "end_turn" if is_final else None,
             "stop_sequence": None,
-            "usage": {},
+            "usage": usage,
         },
     }
+
+
+def _usage_output_tokens_for_message(
+    blocks: list[dict], sources: list
+) -> int:
+    """Compute ``usage.output_tokens`` for one assistant message so it
+    round-trips through ``parser._build_usage_index``.
+
+    The parser will independently reconstruct visible-token cost as
+    ``count_tokens(text)`` for text blocks plus
+    ``count_tokens(name + json.dumps(input))`` for tool_use blocks —
+    we mirror that formula EXACTLY here. Thinking cost comes from
+    each source leaf's own ``tokens`` field (itself derived from the
+    original session's ``output_tokens - visible_tokens``).
+
+    On next parse:
+      new_output_tokens = visible + Σ thinking_leaf.tokens
+      new_thinking_cost = new_output_tokens - new_visible
+                        = Σ thinking_leaf.tokens   (visible cancels)
+    so each preserved thinking leaf's original cost survives.
+    """
+    visible = 0
+    for b in blocks:
+        if not isinstance(b, dict):
+            continue
+        bt = b.get("type")
+        if bt == "text":
+            visible += count_tokens(b.get("text", "") or "")
+        elif bt == "tool_use":
+            nm = b.get("name", "") or ""
+            inp = json.dumps(b.get("input", {}) or {})
+            visible += count_tokens(nm + inp)
+    thinking_cost = 0
+    for src in sources:
+        if isinstance(src, Leaf) and src.kind == "thinking":
+            thinking_cost += int(src.tokens)
+    return visible + thinking_cost
 
 
 def turn_to_rows(
@@ -462,6 +519,7 @@ def turn_to_rows(
     for msg_idx, msg in enumerate(messages):
         role = msg["role"]
         blocks = msg["content"]
+        sources = msg.get("source_leaves") or [None] * len(blocks)
         if role == "assistant":
             msg_id = f"msg_priv{uuidlib.uuid4().hex[:24]}"
             # Pick a stop_reason that matches the message's content. The
@@ -479,10 +537,15 @@ def turn_to_rows(
                 "tool_use" if has_tool_use and not is_last_msg
                 else "end_turn"
             )
+            # Per-message usage stamp so thinking-leaf costs round-trip.
+            # See ``_usage_output_tokens_for_message`` for the parser
+            # invariant this preserves.
+            usage_out = _usage_output_tokens_for_message(blocks, sources)
             for i, block in enumerate(blocks):
                 row = _assistant_block_row(
                     block, msg_id, session_id, cwd, prev_uuid,
                     is_final=is_last_msg and i == len(blocks) - 1,
+                    usage_output_tokens=usage_out,
                 )
                 # Override stop_reason from the simple end_turn-only
                 # default to whatever is correct for this message's
