@@ -15,7 +15,7 @@ Usage:
     python3 scripts/visualize_forest.py \\
         --tree 0=/tmp/tree_turn0_priv.json \\
         --tree 1=/tmp/tree_turn1_priv.json \\
-        [--budget 15000 --scheduler recency_decay] \\
+        [--budget 15000 --scheduler recency_boosted] \\
         --out /tmp/forest.html
 """
 
@@ -30,7 +30,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
 
 from compaction.compactor import (
-    SCHEDULERS, expand_to_budget, last_k_raw, recency_decay,
+    SCHEDULERS, expand_to_budget, last_k_raw, recency_boosted,
 )
 from compaction.types import Leaf, Node
 
@@ -55,9 +55,14 @@ def parse_tree_arg(s: str) -> tuple[int, str]:
     return int(idx_s), path
 
 
-def resolve_scheduler(name: str, half_life: float, last_k: int):
-    if name == "recency_decay":
-        return lambda f, b: recency_decay(f, b, half_life=half_life)
+def resolve_scheduler(name: str, recency_ratio: float,
+                      recency_half_life: float, last_k: int):
+    if name == "recency_boosted":
+        return lambda f, b: recency_boosted(
+            f, b,
+            recency_ratio=recency_ratio,
+            recency_half_life=recency_half_life,
+        )
     if name == "last_k_raw":
         return lambda f, b: last_k_raw(f, b, k=last_k)
     return SCHEDULERS[name]
@@ -356,8 +361,9 @@ def main():
     p.add_argument("--budget", type=int, default=None,
                    help="if set, also show per-turn budget allocation")
     p.add_argument("--scheduler", choices=sorted(SCHEDULERS.keys()),
-                   default="recency_decay")
-    p.add_argument("--half-life", type=float, default=5.0)
+                   default="recency_boosted")
+    p.add_argument("--recency-ratio", type=float, default=3.0)
+    p.add_argument("--recency-half-life", type=float, default=10.0)
     p.add_argument("--last-k", type=int, default=3)
     p.add_argument("--out", default="/tmp/forest.html")
     args = p.parse_args()
@@ -385,7 +391,10 @@ def main():
             turns.append(t)
             live_roots.append(t.root)
 
-        sched = resolve_scheduler(args.scheduler, args.half_life, args.last_k)
+        sched = resolve_scheduler(
+            args.scheduler, args.recency_ratio,
+            args.recency_half_life, args.last_k,
+        )
         alloc = sched(turns, args.budget)
         frontier_sizes = {}
         for (idx, td), turn, live_root in zip(trees, turns, live_roots):

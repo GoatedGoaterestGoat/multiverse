@@ -724,19 +724,21 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
     session summarize-only, no live rewrite).
 
     Config shape returned:
-      {"scheduler": "proportional" | "recency_decay" | "last_k_raw",
+      {"scheduler": "proportional" | "recency_boosted" | "last_k_raw",
        "budget": <int tokens>,
        # optional, present only for the parameterized schedulers:
-       "k": <int>,        # last_k_raw
-       "half_life": <float>,  # recency_decay
+       "k": <int>,                       # last_k_raw
+       "recency_ratio": <float>,         # recency_boosted
+       "recency_half_life": <float>,     # recency_boosted
       }
     """
 
     BINDINGS = [Binding("escape", "cancel", "Summarize-only exit")]
 
-    # Reasonable defaults. The Input placeholders show them.
+    # Reasonable defaults for scheduler params. Placeholders reflect these.
     _DEFAULT_K = 3
-    _DEFAULT_HALF_LIFE = 5.0
+    _DEFAULT_RATIO = 3.0
+    _DEFAULT_HALF_LIFE = 10.0
 
     def __init__(
         self,
@@ -756,6 +758,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.default_budget = max(1, default_budget)
         self._scheduler = "proportional"
         self._k = self._DEFAULT_K
+        self._ratio = self._DEFAULT_RATIO
         self._half_life = self._DEFAULT_HALF_LIFE
 
     def compose(self) -> ComposeResult:
@@ -770,28 +773,60 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             Static("Scheduler:", id="choose-sched-label"),
             RadioSet(
                 RadioButton("proportional", value=True, id="sched-proportional"),
-                RadioButton("recency_decay", id="sched-recency_decay"),
+                RadioButton("recency_boosted", id="sched-recency_boosted"),
                 RadioButton("last_k_raw", id="sched-last_k_raw"),
                 id="choose-scheduler",
             ),
-            Static(
-                "[dim]k (last_k_raw — verbatim tail size)[/]",
-                id="choose-k-label",
-            ),
+
+            # last_k_raw params — hidden unless that scheduler is picked.
+            Static("k", id="choose-k-label"),
             Input(
                 value=str(self._DEFAULT_K),
                 id="choose-k",
                 placeholder=f"integer, default {self._DEFAULT_K}",
             ),
             Static(
-                "[dim]half_life (recency_decay — turns until 50% weight)[/]",
-                id="choose-hl-label",
+                "[dim]How many most-recent turns keep their full raw "
+                "content (verbatim). Everything before that is "
+                "compacted, with the remaining budget split "
+                "proportionally by turn size.[/]",
+                id="choose-k-desc",
             ),
+
+            # recency_boosted params — hidden unless that scheduler is picked.
+            Static("recency_ratio", id="choose-ratio-label"),
+            Input(
+                value=str(self._DEFAULT_RATIO),
+                id="choose-ratio",
+                placeholder=f"float, default {self._DEFAULT_RATIO}",
+            ),
+            Static(
+                "[dim]Peak recency boost applied to the newest turn "
+                "(vs the pure-proportional baseline). 1.0 = no "
+                "boost. 3.0 = newest turn's tokens count up to 3× "
+                "as heavily per-token as very old ones; older turns "
+                "settle smoothly toward the baseline. In shorter "
+                "sessions the effective newest-vs-oldest ratio is "
+                "a bit under this value. Big-but-old turns still "
+                "outweigh tiny recent ones because proportional "
+                "stays as the floor.[/]",
+                id="choose-ratio-desc",
+            ),
+
+            Static("recency_half_life", id="choose-hl-label"),
             Input(
                 value=str(self._DEFAULT_HALF_LIFE),
                 id="choose-hl",
                 placeholder=f"float, default {self._DEFAULT_HALF_LIFE}",
             ),
+            Static(
+                "[dim]Turns from newest where the recency boost has "
+                "decayed halfway toward pure proportional. Larger "
+                "values mean the boost persists further back "
+                "through the conversation.[/]",
+                id="choose-hl-desc",
+            ),
+
             Static("Budget (tokens):", id="choose-budget-label"),
             Input(
                 value=str(self.default_budget),
@@ -800,7 +835,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             ),
             Static("", id="choose-preview"),
             Static(
-                "[dim]Enter (or click) in Budget to compact  ·  "
+                "[dim]Enter (in Budget) to compact  ·  "
                 "Esc to exit without compacting (session stays "
                 "summarize-only)[/]",
                 id="choose-hint",
@@ -809,11 +844,38 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         )
 
     def on_mount(self) -> None:
+        self._apply_param_visibility()
         self._refresh_preview()
         try:
             self.query_one("#choose-budget", Input).focus()
         except Exception:  # noqa: BLE001
             pass
+
+    # ---------------- scheduler-driven param visibility -----------------
+
+    # Which param triples belong to each scheduler. Anything not in the
+    # current scheduler's set gets its display flag flipped off.
+    _PARAM_WIDGETS: dict[str, tuple[str, ...]] = {
+        "k": ("#choose-k-label", "#choose-k", "#choose-k-desc"),
+        "ratio": ("#choose-ratio-label", "#choose-ratio",
+                  "#choose-ratio-desc"),
+        "hl": ("#choose-hl-label", "#choose-hl", "#choose-hl-desc"),
+    }
+    _SCHED_PARAMS: dict[str, set[str]] = {
+        "proportional": set(),
+        "recency_boosted": {"ratio", "hl"},
+        "last_k_raw": {"k"},
+    }
+
+    def _apply_param_visibility(self) -> None:
+        needed = self._SCHED_PARAMS.get(self._scheduler, set())
+        for key, wids in self._PARAM_WIDGETS.items():
+            show = key in needed
+            for wid in wids:
+                try:
+                    self.query_one(wid).display = show
+                except Exception:  # noqa: BLE001
+                    pass
 
     # ------ live preview -------------------------------------------------
 
@@ -839,6 +901,15 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         except (ValueError, AttributeError):
             return self._DEFAULT_HALF_LIFE
 
+    def _current_ratio(self) -> float:
+        try:
+            raw = self.query_one("#choose-ratio", Input).value
+            v = float(raw.strip())
+            # ratio must be >= 1.0 (1.0 = pure proportional); clamp.
+            return max(1.0, v)
+        except (ValueError, AttributeError):
+            return self._DEFAULT_RATIO
+
     def _compute_allocation(self) -> list[int]:
         """Recompute per-turn assistant-side allocation with current
         scheduler / params. Returned in chain order matching
@@ -858,11 +929,13 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 tid: int(budget * max(1, leaves_by_id[tid]) / total)
                 for tid in turn_ids
             }
-        elif self._scheduler == "recency_decay":
-            half_life = self._current_half_life()
+        elif self._scheduler == "recency_boosted":
+            ratio = self._current_ratio()
+            hl = max(1e-6, self._current_half_life())
             weights = {}
             for k, tid in enumerate(reversed(turn_ids)):
-                weights[tid] = 0.5 ** (k / half_life)
+                multiplier = 1.0 + (ratio - 1.0) / (1.0 + k / hl)
+                weights[tid] = max(1, leaves_by_id[tid]) * multiplier
             total_w = sum(weights.values()) or 1.0
             alloc = {
                 tid: int(budget * weights[tid] / total_w) for tid in turn_ids
@@ -901,7 +974,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         """Session-wide floor: total tokens that must survive no matter
         how small the budget is. Per-scheduler:
 
-        - proportional / recency_decay: each turn survives as at least
+        - proportional / recency_boosted: each turn survives as at least
           (user_prompt + root.tokens). Sum across all turns.
         - last_k_raw with k: last k turns kept verbatim (user_prompt +
           leaves), rest at (user_prompt + root.tokens). Grows with k
@@ -967,6 +1040,9 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         pressed_id = event.pressed.id if event.pressed else ""
         if pressed_id.startswith("sched-"):
             self._scheduler = pressed_id[len("sched-"):]
+        # Hide/show the param inputs for the new scheduler, then
+        # recompute the preview under the new params.
+        self._apply_param_visibility()
         self._refresh_preview()
 
     # Explicit per-Input handlers via @on decorator. The generic
@@ -980,6 +1056,10 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
 
     @on(Input.Changed, "#choose-k")
     def _k_changed(self, event: Input.Changed) -> None:
+        self._refresh_preview()
+
+    @on(Input.Changed, "#choose-ratio")
+    def _ratio_changed(self, event: Input.Changed) -> None:
         self._refresh_preview()
 
     @on(Input.Changed, "#choose-hl")
@@ -998,11 +1078,12 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         if budget <= 0:
             self.notify("Budget must be positive", severity="warning")
             return
-        config = {"scheduler": self._scheduler, "budget": budget}
+        config: dict = {"scheduler": self._scheduler, "budget": budget}
         if self._scheduler == "last_k_raw":
             config["k"] = self._current_k()
-        elif self._scheduler == "recency_decay":
-            config["half_life"] = self._current_half_life()
+        elif self._scheduler == "recency_boosted":
+            config["recency_ratio"] = self._current_ratio()
+            config["recency_half_life"] = self._current_half_life()
         self.dismiss(config)
 
     def action_cancel(self) -> None:
@@ -1428,7 +1509,7 @@ class CompactScreen(ModalScreen[None]):
     def _start_expand_runner(self, config: dict) -> None:
         live = live_jsonl_path(self.claude_uuid, self.cwd)
         params: dict = {}
-        for pk in ("k", "half_life"):
+        for pk in ("k", "recency_ratio", "recency_half_life"):
             if pk in config:
                 params[pk] = config[pk]
         self._runner = CompactRunner(
@@ -2003,8 +2084,13 @@ class MonitorApp(App):
     #choose-scheduler { height: auto; }
     #choose-k-label { height: auto; padding-top: 1; }
     #choose-k { height: 3; }
+    #choose-k-desc { height: auto; padding-bottom: 1; }
+    #choose-ratio-label { height: auto; padding-top: 1; }
+    #choose-ratio { height: 3; }
+    #choose-ratio-desc { height: auto; padding-bottom: 1; }
     #choose-hl-label { height: auto; padding-top: 1; }
     #choose-hl { height: 3; }
+    #choose-hl-desc { height: auto; padding-bottom: 1; }
     #choose-budget-label { height: auto; padding-top: 1; }
     #choose-budget { height: 3; }
     #choose-preview { height: auto; padding-top: 1; }

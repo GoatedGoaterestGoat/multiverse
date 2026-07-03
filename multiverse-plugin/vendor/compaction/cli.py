@@ -27,7 +27,7 @@ from .compactor import (
     compact,
     last_k_raw,
     proportional,
-    recency_decay,
+    recency_boosted,
     uniform,
 )
 from .parser import parse_session
@@ -44,11 +44,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--scheduler",
         choices=sorted(SCHEDULERS.keys()),
-        default="recency_decay",
+        default="recency_boosted",
     )
     p.add_argument(
-        "--half-life", type=float, default=5.0,
-        help="half-life for recency_decay (turns)",
+        "--recency-ratio", type=float, default=3.0,
+        help="newest-vs-oldest weight-per-token ratio for recency_boosted",
+    )
+    p.add_argument(
+        "--recency-half-life", type=float, default=10.0,
+        help="turns from newest where the boost fades halfway",
     )
     p.add_argument(
         "--last-k", type=int, default=3,
@@ -121,8 +125,12 @@ def main(argv: list[str] | None = None) -> int:
 
 def _resolve_scheduler(args):
     name = args.scheduler
-    if name == "recency_decay":
-        return lambda f, b: recency_decay(f, b, half_life=args.half_life)
+    if name == "recency_boosted":
+        return lambda f, b: recency_boosted(
+            f, b,
+            recency_ratio=args.recency_ratio,
+            recency_half_life=args.recency_half_life,
+        )
     if name == "last_k_raw":
         return lambda f, b: last_k_raw(f, b, k=args.last_k)
     return SCHEDULERS[name]

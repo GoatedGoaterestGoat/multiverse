@@ -138,9 +138,10 @@ class CompactRunner:
         # this after the user has picked a scheduler + budget.
         self.expand_only = expand_only
         # Scheduler selection for the expansion phase. proportional /
-        # recency_decay / last_k_raw; params dict carries scheduler-
-        # specific args (``k`` for last_k_raw, ``half_life`` for
-        # recency_decay). Ignored for schedulers that take no params.
+        # recency_boosted / last_k_raw; params dict carries scheduler-
+        # specific args (``k`` for last_k_raw; ``recency_ratio`` +
+        # ``recency_half_life`` for recency_boosted). Ignored for
+        # schedulers that take no params.
         self.scheduler_name = scheduler_name
         self.scheduler_params = dict(scheduler_params or {})
         self.paths = CompactPaths.for_session(claude_uuid)
@@ -532,7 +533,8 @@ class CompactRunner:
 
         # Resolve the scheduler by name (falls back to proportional).
         # scheduler_params carries any scheduler-specific extras (``k``
-        # for last_k_raw, ``half_life`` for recency_decay); we bind them
+        # for last_k_raw, ``recency_ratio``/``recency_half_life`` for
+        # recency_boosted); we bind them
         # by wrapping in a lambda so allocate_budget's call signature
         # stays uniform.
         base_scheduler = SCHEDULERS.get(self.scheduler_name, proportional)

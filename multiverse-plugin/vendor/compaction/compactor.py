@@ -169,18 +169,43 @@ def uniform(forest: Forest, budget: int) -> dict[str, int]:
     return {t.turn_id: per for t in forest}
 
 
-def recency_decay(forest: Forest, budget: int, half_life: float = 5.0) -> dict[str, int]:
-    """Exponential decay: most-recent turn gets the most budget.
+def recency_boosted(
+    forest: Forest,
+    budget: int,
+    recency_ratio: float = 3.0,
+    recency_half_life: float = 10.0,
+) -> dict[str, int]:
+    """Recency-boosted proportional.
 
-    Weight for the kth-most-recent turn is 0.5 ** (k / half_life).
-    Total budget is split proportionally.
+    Each turn's weight is its leaves-token count multiplied by a
+    recency multiplier that ranges from ``recency_ratio`` (newest
+    turn) down toward ``1.0`` (oldest). After normalization, the
+    newest turn's tokens count ``recency_ratio`` times as heavily
+    per-token as the oldest — a large old turn still outweighs a
+    tiny recent one because proportional stays as the floor.
+
+    Formula:
+      multiplier[k] = 1 + (recency_ratio - 1) / (1 + k / recency_half_life)
+      weight[t]     = leaves_tokens[t] * multiplier[k(t)]
+
+    where ``k`` is position from newest (0-indexed). At
+    ``k == recency_half_life`` the multiplier equals
+    ``(recency_ratio + 1) / 2`` — exactly halfway between max and
+    baseline. Never drops below 1.0, so ancient content keeps at
+    least its proportional share.
+
+    Setting ``recency_ratio=1.0`` reduces to pure proportional.
     """
     if not forest:
         return {}
+    ratio = max(1.0, recency_ratio)
+    hl = max(1e-6, recency_half_life)
     weights: dict[str, float] = {}
     for k, t in enumerate(reversed(forest)):
-        weights[t.turn_id] = 0.5 ** (k / half_life)
-    total_w = sum(weights.values())
+        leaves = max(1, _full_tokens(t))
+        multiplier = 1.0 + (ratio - 1.0) / (1.0 + k / hl)
+        weights[t.turn_id] = leaves * multiplier
+    total_w = sum(weights.values()) or 1.0
     return {tid: int(budget * w / total_w) for tid, w in weights.items()}
 
 
@@ -242,7 +267,7 @@ def cap(scheduler: Scheduler, max_per_turn: int) -> Scheduler:
 # Registry for config-driven instantiation.
 SCHEDULERS: dict[str, Callable] = {
     "uniform": uniform,
-    "recency_decay": recency_decay,
+    "recency_boosted": recency_boosted,
     "proportional": proportional,
     "last_k_raw": last_k_raw,
 }
