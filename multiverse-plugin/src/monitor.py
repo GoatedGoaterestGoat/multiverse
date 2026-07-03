@@ -49,6 +49,7 @@ from .full_jsonl import (
     list_orphan_fulls,
     live_jsonl_path,
     live_stats,
+    minimum_compacted_tokens,
     total_token_count,
     total_turn_count,
 )
@@ -699,7 +700,13 @@ class CompactScreen(ModalScreen[None]):
     rewrite the live JSONL.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        # F2 (rather than ctrl+s: terminal XOFF eats it, and single 's'
+        # would land in the budget Input as text) triggers summarize-only
+        # mode — build every turn's tree, then stop before expansion.
+        Binding("f2", "summarize_only", "Summarize only"),
+    ]
 
     # Match the worker.log lines that report a single turn's build time:
     #   "[HH:MM:SS]   turn N done (X.Ys)"
@@ -721,6 +728,9 @@ class CompactScreen(ModalScreen[None]):
         self.total_tokens = 0
         self.total_turns = 0
         self.budget = 0
+        # False = compact-to-budget (default). True = summarize-only:
+        # build trees for every turn, skip expansion, don't touch live.
+        self._summarize_only = False
         self.phase = "input"  # input | running | done | failed
         self._runner: Optional[CompactRunner] = None
         # Per-turn build elapsed times collected from worker.log; powers
@@ -760,7 +770,8 @@ class CompactScreen(ModalScreen[None]):
                 max_lines=2000,
             ),
             Static(
-                "[dim]Enter to start once stats load · Esc to cancel[/]",
+                "[dim]Enter: compact to budget · F2: summarize only "
+                "(build trees, don't touch live) · Esc: cancel[/]",
                 id="compact-hint",
             ),
             id="compact-dialog",
@@ -784,19 +795,25 @@ class CompactScreen(ModalScreen[None]):
     @work(thread=True, exclusive=True, group="compact_stats")
     def _load_stats(self) -> None:
         """Compute full + live token / turn counts, cached-tree count
-        (trees whose turn_id is on the chain forest), and historical
-        per-turn build times from worker.log for ETA seeding."""
+        (trees whose turn_id is on the chain forest), the "minimum
+        compacted tokens" estimate, and historical per-turn build times
+        from worker.log for ETA seeding."""
         try:
             full_toks = total_token_count(self.claude_uuid, self.cwd)
             full_turns = total_turn_count(self.claude_uuid, self.cwd)
             live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
+            min_toks, min_cached, min_total = minimum_compacted_tokens(
+                self.claude_uuid, self.cwd
+            )
             cached, history = self._audit_cache_against_chain()
         except Exception as e:  # noqa: BLE001
             self.app.call_from_thread(self._stats_failed, repr(e))
             return
         self.app.call_from_thread(
             self._stats_ready,
-            full_toks, full_turns, live_toks, live_turns, cached, history,
+            full_toks, full_turns, live_toks, live_turns,
+            min_toks, min_cached, min_total,
+            cached, history,
         )
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
@@ -856,6 +873,9 @@ class CompactScreen(ModalScreen[None]):
         total_turns: int,
         live_tokens: int = 0,
         live_turns: int = 0,
+        min_tokens: int = 0,
+        min_cached: int = 0,
+        min_total: int = 0,
         cached: int = 0,
         history: list[float] | None = None,
     ) -> None:
@@ -880,11 +900,31 @@ class CompactScreen(ModalScreen[None]):
             pct = 100.0 * live_tokens / total_tokens
             live_suffix = f"[dim]({pct:.1f}% of full)[/]"
 
+        # Third line: minimum-compacted tokens — what live would cost if
+        # every turn collapsed to its Node root plus verbatim user
+        # prompt. Only trustworthy when every turn has a real cached
+        # tree; note completeness when incomplete.
+        if min_total == 0:
+            min_line = ""
+        elif min_cached >= min_total:
+            min_line = (
+                f"\nMin:  [bold]{min_tokens:,}[/] tokens  "
+                f"[dim](if fully collapsed — all {min_total} trees cached)[/]"
+            )
+        else:
+            missing = min_total - min_cached
+            min_line = (
+                f"\nMin:  [bold]{min_tokens:,}[/] tokens  "
+                f"[dim](over-estimate — {missing} of {min_total} turn(s) "
+                f"lack a real cached tree)[/]"
+            )
+
         self.query_one("#compact-stats", Static).update(
             f"Full: [bold]{total_tokens:,}[/] tokens · "
             f"[bold]{total_turns}[/] turn(s)  [dim](uncompacted)[/]\n"
             f"Live: [bold]{live_tokens:,}[/] tokens · "
             f"[bold]{live_turns}[/] turn(s)  {live_suffix}"
+            f"{min_line}"
         )
         self._refresh_cached_line()
         budget = self.query_one("#compact-budget", Input)
@@ -908,6 +948,21 @@ class CompactScreen(ModalScreen[None]):
             self.notify("Stats still loading — wait a moment", severity="warning")
             return
         self.budget = b
+        self._summarize_only = False
+        self._enter_running_phase()
+
+    def action_summarize_only(self) -> None:
+        """Enter summarize-only mode: run the whole pipeline up to
+        tree-build, then stop before rewriting live. The compacting
+        lock still gates the session so no new turns land mid-build."""
+        if self.phase != "input":
+            return
+        if self.total_tokens == 0:
+            self.notify("Stats still loading — wait a moment", severity="warning")
+            return
+        self._summarize_only = True
+        # No budget used in this path; keep 0 as a sentinel.
+        self.budget = 0
         self._enter_running_phase()
 
     # ----- Phase 2: running ------------------------------------------------
@@ -920,17 +975,26 @@ class CompactScreen(ModalScreen[None]):
         budget.display = False
 
         stats = self.query_one("#compact-stats", Static)
-        stats.update(
-            f"Total: [bold]{self.total_tokens:,}[/]t  →  "
-            f"Budget: [bold]{self.budget:,}[/]t  ·  "
-            f"[bold]{self.total_turns}[/] turn(s)"
-        )
+        if self._summarize_only:
+            stats.update(
+                f"Total: [bold]{self.total_tokens:,}[/]t  ·  "
+                f"[bold]{self.total_turns}[/] turn(s)  "
+                f"[dim](summarize-only — live untouched)[/]"
+            )
+        else:
+            stats.update(
+                f"Total: [bold]{self.total_tokens:,}[/]t  →  "
+                f"Budget: [bold]{self.budget:,}[/]t  ·  "
+                f"[bold]{self.total_turns}[/] turn(s)"
+            )
 
         for wid in ("compact-state", "compact-progress", "compact-cached", "compact-log"):
             self.query_one(f"#{wid}").display = True
 
         self.query_one("#compact-state", Static).update(
-            "[cyan]Starting compaction…[/]"
+            "[cyan]Starting summarization…[/]"
+            if self._summarize_only
+            else "[cyan]Starting compaction…[/]"
         )
         progress = self.query_one("#compact-progress", ProgressBar)
         progress.update(total=max(1, self.total_turns), progress=0)
@@ -954,6 +1018,7 @@ class CompactScreen(ModalScreen[None]):
             live_jsonl=live,
             total_budget=self.budget,
             kill_session_fn=kill_fn,
+            summarize_only=self._summarize_only,
         )
         self._run_in_thread()
 

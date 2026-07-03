@@ -264,6 +264,65 @@ def live_stats(claude_uuid: str, cwd: str) -> tuple[int, int]:
     return tokens, len(forest)
 
 
+def minimum_compacted_tokens(claude_uuid: str, cwd: str) -> tuple[int, int, int]:
+    """Return ``(min_tokens, n_cached, n_total)`` — the smallest possible
+    live-JSONL cost if every turn compacted to its most-collapsed frontier
+    (Node root alone) plus its verbatim user-prompt text.
+
+    For turns with a cached tree, the minimum per turn is
+    ``user_prompt.tokens + root_tree.tokens``. Turns without a cached
+    tree contribute their full leaf sum (over-estimate — an actual
+    build would reduce them further). The caller inspects
+    ``n_cached / n_total`` to know how tight the estimate is.
+
+    Skips aborted-stub trees the same way ``compact_runner`` does —
+    they aren't real summaries so their root tokens equal the leaf
+    sum anyway; treating them as no-tree keeps the semantics honest.
+    """
+    forest = _parse_full(claude_uuid, cwd)
+    if not forest:
+        return 0, 0, 0
+
+    cache_root = multiverse_dir() / "trees" / claude_uuid
+    total_min = 0
+    n_cached = 0
+    for turn in forest:
+        prompt_tokens = turn.user_prompt.tokens if turn.user_prompt else 0
+        turn_min: int | None = None
+        tree_path = cache_root / f"{turn.turn_id}.json"
+        if tree_path.is_file():
+            try:
+                data = json.loads(tree_path.read_text())
+                tree = data.get("tree")
+                if isinstance(tree, dict) and not _is_aborted_stub(tree):
+                    tok = tree.get("tokens")
+                    if isinstance(tok, int):
+                        turn_min = tok
+                        n_cached += 1
+            except (OSError, json.JSONDecodeError):
+                pass
+        if turn_min is None:
+            # Fallback: sum of leaf tokens (what the turn would cost
+            # uncompacted). Not the "true" minimum but the best
+            # estimate we can give without a tree.
+            turn_min = sum(l.tokens for l in turn.leaves)
+        total_min += prompt_tokens + turn_min
+    return total_min, n_cached, len(forest)
+
+
+def _is_aborted_stub(tree: dict) -> bool:
+    """A node whose sole 'summary' is the constructor's aborted-stub
+    placeholder — its children ARE its leaves (nothing was really merged),
+    so the root's tokens equal the leaf sum and the tree is functionally
+    equivalent to no tree at all."""
+    if tree.get("type") != "node":
+        return False
+    summary = tree.get("summary", "")
+    if not isinstance(summary, str):
+        return False
+    return "aborted; uncollapsed" in summary
+
+
 def list_orphan_fulls(cwd_filter: str | None = None) -> list[dict]:
     """Enumerate full_jsonls with no matching live JSONL.
 

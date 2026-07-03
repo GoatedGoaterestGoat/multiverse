@@ -116,12 +116,18 @@ class CompactRunner:
         live_jsonl: Path,
         total_budget: int,
         kill_session_fn: Optional[Callable[[], None]] = None,
+        summarize_only: bool = False,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.live_jsonl = live_jsonl
         self.total_budget = total_budget
         self.kill_session_fn = kill_session_fn
+        # Summarize-only mode: run every step through tree-build, then
+        # STOP — do not expand + rewrite live. Useful for pre-warming
+        # the tree cache before an eventual compaction. The compacting
+        # lock still gates the session (so no new turns land mid-build).
+        self.summarize_only = summarize_only
         self.paths = CompactPaths.for_session(claude_uuid)
         self._cancelled = threading.Event()
         self._log_offset = 0  # bytes already streamed to UI
@@ -267,6 +273,21 @@ class CompactRunner:
             # 6. Expansion: load trees from cache, allocate budget
             # proportionally, render the new compacted live JSONL, replace
             # live atomically, update marker. Fast (no API calls).
+            # Skipped entirely in summarize-only mode — the trees are the
+            # deliverable there; live stays untouched.
+            if self.summarize_only:
+                on_state(State.DONE)
+                on_log(
+                    "Summarize-only: skipping expansion; live JSONL "
+                    "unchanged."
+                )
+                on_done(
+                    True,
+                    f"Built trees for {total_turns} turn(s). Live JSONL "
+                    f"unchanged (summarize-only mode).",
+                )
+                return
+
             if self._abort_check(on_state, on_done, "before expansion"):
                 return
             on_state(State.EXPANDING)
