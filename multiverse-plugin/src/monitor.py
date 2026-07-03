@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from textual import events, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -683,6 +683,17 @@ class WebShareScreen(ModalScreen[None]):
 _SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 
+def _stub_summary(tree: dict) -> bool:
+    """True if this cached tree is a constructor 'aborted' stub — the
+    root wraps the un-merged leaves as-is, so root.tokens ≈ leaf sum
+    and treating it as a real summary would inflate the session-wide
+    'min' estimate."""
+    if tree.get("type") != "node":
+        return False
+    summary = tree.get("summary", "")
+    return isinstance(summary, str) and "aborted; uncollapsed" in summary
+
+
 def _sparkline(values: list[int], width: int = 80) -> str:
     """Compact per-turn sparkline. Bins ``values`` into ``width`` buckets
     (mean per bucket), normalizes to 8 Unicode block heights."""
@@ -732,25 +743,24 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         claude_uuid: str,
         cwd: str,
         display_name: str,
-        forest_sizes: list[tuple[str, int]],
+        forest_stats: list[tuple[str, int, int, int]],
         default_budget: int,
     ) -> None:
         super().__init__()
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.display_name = display_name
-        # ``forest_sizes``: [(turn_id, full_tokens), ...] in chain order.
-        # Used both to compute the live preview and (implicitly) to
-        # bound the sparkline count.
-        self.forest_sizes = forest_sizes
+        # forest_stats: [(turn_id, leaves_tokens, prompt_tokens,
+        # min_tokens_root_or_leaves), ...] in chain order.
+        self.forest_stats = forest_stats
         self.default_budget = max(1, default_budget)
         self._scheduler = "proportional"
         self._k = self._DEFAULT_K
         self._half_life = self._DEFAULT_HALF_LIFE
 
     def compose(self) -> ComposeResult:
-        n_turns = len(self.forest_sizes)
-        total = sum(s for _, s in self.forest_sizes)
+        n_turns = len(self.forest_stats)
+        total = sum(leaves + prompt for _, leaves, prompt, _ in self.forest_stats)
         yield Vertical(
             Static(
                 f"Compact: [bold]{self.display_name}[/]  "
@@ -830,25 +840,22 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             return self._DEFAULT_HALF_LIFE
 
     def _compute_allocation(self) -> list[int]:
-        """Recompute per-turn allocation with current scheduler/params.
-        Returned in chain order matching ``self.forest_sizes``."""
-        from compaction.compactor import (  # noqa: E402
-            last_k_raw,
-            proportional,
-            recency_decay,
-        )
-        # Build lightweight Turn-like shims — SCHEDULERS only touches
-        # turn.turn_id and _full_tokens(turn), so a dataclass with the
-        # right shape suffices. But easier: rebuild the parse forest,
-        # or just pre-compute here.
-        turn_ids = [tid for tid, _ in self.forest_sizes]
-        sizes_by_id = dict(self.forest_sizes)
+        """Recompute per-turn assistant-side allocation with current
+        scheduler / params. Returned in chain order matching
+        ``self.forest_stats``.
+
+        This is the scheduler's view — leaves-only, does NOT include
+        the user_prompt floor (that's added on top of every turn by
+        ``allocate_budget`` at expansion time, outside the scheduler).
+        """
+        turn_ids = [tid for tid, _, _, _ in self.forest_stats]
+        leaves_by_id = {tid: leaves for tid, leaves, _, _ in self.forest_stats}
         budget = self._current_budget()
 
         if self._scheduler == "proportional":
-            total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+            total = sum(max(1, s) for s in leaves_by_id.values()) or 1
             alloc = {
-                tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                tid: int(budget * max(1, leaves_by_id[tid]) / total)
                 for tid in turn_ids
             }
         elif self._scheduler == "recency_decay":
@@ -863,32 +870,63 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         elif self._scheduler == "last_k_raw":
             k = self._current_k()
             if k >= len(turn_ids):
-                total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+                total = sum(max(1, s) for s in leaves_by_id.values()) or 1
                 alloc = {
-                    tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                    tid: int(budget * max(1, leaves_by_id[tid]) / total)
                     for tid in turn_ids
                 }
             else:
                 last_ids = turn_ids[-k:]
                 rest_ids = turn_ids[:-k]
-                raw_cost = sum(sizes_by_id[tid] for tid in last_ids)
+                raw_cost = sum(leaves_by_id[tid] for tid in last_ids)
                 if raw_cost >= budget:
-                    total = sum(max(1, s) for s in sizes_by_id.values()) or 1
+                    total = sum(max(1, s) for s in leaves_by_id.values()) or 1
                     alloc = {
-                        tid: int(budget * max(1, sizes_by_id[tid]) / total)
+                        tid: int(budget * max(1, leaves_by_id[tid]) / total)
                         for tid in turn_ids
                     }
                 else:
                     remaining = budget - raw_cost
-                    alloc = {tid: sizes_by_id[tid] for tid in last_ids}
+                    alloc = {tid: leaves_by_id[tid] for tid in last_ids}
                     if rest_ids:
-                        rest_total = sum(max(1, sizes_by_id[tid]) for tid in rest_ids) or 1
+                        rest_total = sum(max(1, leaves_by_id[tid]) for tid in rest_ids) or 1
                         for tid in rest_ids:
-                            alloc[tid] = int(remaining * max(1, sizes_by_id[tid]) / rest_total)
+                            alloc[tid] = int(remaining * max(1, leaves_by_id[tid]) / rest_total)
         else:
             alloc = {tid: 0 for tid in turn_ids}
 
         return [alloc.get(tid, 0) for tid in turn_ids]
+
+    def _session_min_tokens(self) -> int:
+        """Session-wide floor: total tokens that must survive no matter
+        how small the budget is. Per-scheduler:
+
+        - proportional / recency_decay: each turn survives as at least
+          (user_prompt + root.tokens). Sum across all turns.
+        - last_k_raw with k: last k turns kept verbatim (user_prompt +
+          leaves), rest at (user_prompt + root.tokens). Grows with k
+          — the user picking a bigger k is picking a bigger floor.
+
+        These are the numbers ``expand_to_budget`` protects: even if
+        you set the total budget below this, each turn still emits at
+        least this much.
+        """
+        n = len(self.forest_stats)
+        if n == 0:
+            return 0
+        # Default: every turn compacted to root.
+        totals = [
+            prompt + min_tok
+            for _, _, prompt, min_tok in self.forest_stats
+        ]
+        if self._scheduler == "last_k_raw":
+            k = self._current_k()
+            k_eff = min(k, n)
+            # Promote the last k turns to their raw (leaves) cost.
+            for i in range(n - k_eff, n):
+                _, leaves, prompt, _ = self.forest_stats[i]
+                totals[i] = prompt + leaves
+        return sum(totals)
 
     def _refresh_preview(self) -> None:
         try:
@@ -896,25 +934,56 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         except Exception:  # noqa: BLE001
             return
         alloc = self._compute_allocation()
-        allocated_total = sum(alloc)
-        max_alloc = max(alloc) if alloc else 0
-        min_alloc = min(alloc) if alloc else 0
+        assist_total = sum(alloc)
+        biggest = max(alloc) if alloc else 0
+        session_min = self._session_min_tokens()
+        budget = self._current_budget()
+
+        # Warn when budget < session floor: expansion will still produce
+        # ~session_min tokens (root of each turn is protected), but the
+        # user should know the number they entered is a lower bound
+        # only in name.
+        if budget < session_min:
+            budget_note = (
+                f"  [yellow](< min floor — output will be ~{session_min:,}t)[/]"
+            )
+        else:
+            budget_note = ""
+
         spark = _sparkline(alloc, width=80)
         preview.update(
-            f"[dim]Budget preview (one column per turn / bucket):[/]\n"
+            f"[dim]Assistant-side allocation preview "
+            f"(one column per turn / bucket):[/]\n"
             f"[cyan]{spark}[/]\n"
-            f"[dim]Σ allocated = {allocated_total:,}t  ·  "
-            f"per-turn max = {max_alloc:,}t  ·  min = {min_alloc:,}t[/]"
+            f"[bold]Budget:[/] {budget:,}t{budget_note}\n"
+            f"[bold]Min viable (session floor):[/] {session_min:,}t  "
+            f"[dim](depends on scheduler; last_k_raw's k grows this)[/]\n"
+            f"[bold]Σ assistant alloc:[/] {assist_total:,}t  ·  "
+            f"[bold]largest single-turn alloc:[/] {biggest:,}t"
         )
 
+    # Explicit RadioSet handler.
     def on_radio_set_changed(self, event: RadioSet.Changed) -> None:
         pressed_id = event.pressed.id if event.pressed else ""
         if pressed_id.startswith("sched-"):
             self._scheduler = pressed_id[len("sched-"):]
         self._refresh_preview()
 
-    def on_input_changed(self, event: Input.Changed) -> None:
-        # Re-preview on any parameter tweak.
+    # Explicit per-Input handlers via @on decorator. The generic
+    # `on_input_changed` on the Screen didn't reliably fire on every
+    # keystroke — @on wires the message directly to the method with an
+    # ID selector, which is what Textual documents for multi-input
+    # forms.
+    @on(Input.Changed, "#choose-budget")
+    def _budget_changed(self, event: Input.Changed) -> None:
+        self._refresh_preview()
+
+    @on(Input.Changed, "#choose-k")
+    def _k_changed(self, event: Input.Changed) -> None:
+        self._refresh_preview()
+
+    @on(Input.Changed, "#choose-hl")
+    def _hl_changed(self, event: Input.Changed) -> None:
         self._refresh_preview()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -1096,6 +1165,59 @@ class CompactScreen(ModalScreen[None]):
         except Exception:  # noqa: BLE001
             return []
         return [(t.turn_id, sum(l.tokens for l in t.leaves)) for t in forest]
+
+    def _per_turn_forest_stats(self) -> list[tuple[str, int, int, int]]:
+        """Richer per-turn info for the ChooseSchedulerScreen. Returns
+        ``[(turn_id, leaves_tokens, prompt_tokens, min_tokens), ...]``:
+
+        - leaves_tokens: sum of assistant-side leaves (what the
+          scheduler splits over).
+        - prompt_tokens: verbatim user-prompt tokens (always kept as
+          floor, never compacted).
+        - min_tokens: root.tokens if a real cached tree exists (the
+          most-collapsed form for this turn), else leaves_tokens as
+          an over-estimate.
+
+        Used to compute the session-wide "minimum viable" number the
+        picker displays — which depends on the scheduler (last_k_raw
+        promotes the tail turns to their raw cost, so the floor grows
+        with k).
+        """
+        import json as _json
+        full = full_jsonl_path(self.claude_uuid)
+        if not full.is_file():
+            return []
+        try:
+            from compaction.parser import parse_session  # noqa: E402
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            forest = parse_session(str(full))
+        except Exception:  # noqa: BLE001
+            return []
+        cache_root = multiverse_dir() / "trees" / self.claude_uuid
+        out: list[tuple[str, int, int, int]] = []
+        for t in forest:
+            leaves = sum(l.tokens for l in t.leaves)
+            prompt = t.user_prompt.tokens if t.user_prompt else 0
+            min_tok = leaves  # fallback: whole raw leaf sum
+            tree_path = cache_root / f"{t.turn_id}.json"
+            if tree_path.is_file():
+                try:
+                    d = _json.loads(tree_path.read_text())
+                    tree = d.get("tree")
+                    # Aborted stubs' root tokens equal the leaf sum
+                    # (nothing was really merged) — treat as no tree
+                    # so the "min" doesn't lie about compactability.
+                    if (isinstance(tree, dict)
+                            and not _stub_summary(tree)):
+                        tok = tree.get("tokens")
+                        if isinstance(tok, int):
+                            min_tok = tok
+                except (OSError, _json.JSONDecodeError):
+                    pass
+            out.append((t.turn_id, leaves, prompt, min_tok))
+        return out
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
         """Return (n_trees_matching_chain, recent_build_times)."""
@@ -1449,12 +1571,13 @@ class CompactScreen(ModalScreen[None]):
             self.query_one("#compact-hint", Static).update(
                 "[dim]Trees built. Choose scheduler + budget…[/]"
             )
+            # Rebuild the richer per-turn stats now that trees are
+            # freshly built — root.tokens for each turn is up-to-date.
             picker = ChooseSchedulerScreen(
                 claude_uuid=self.claude_uuid,
                 cwd=self.cwd,
                 display_name=self.display_name,
-                forest_sizes=self._forest_sizes
-                or self._per_turn_full_tokens(),
+                forest_stats=self._per_turn_forest_stats(),
                 default_budget=max(1, self.total_tokens // 2),
             )
             self.app.push_screen(picker, self._on_config_chosen)
