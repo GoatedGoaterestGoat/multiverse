@@ -38,6 +38,7 @@ when only the live one exists.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -71,6 +72,39 @@ def _log(log_path: Path, msg: str) -> None:
             f.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
     except OSError:
         pass
+
+
+def _is_valid_cached_tree(path: Path) -> bool:
+    """True if an existing ``<turn_id>.json`` represents a real cache hit.
+
+    Must match ``compact_runner._count_cached_trees``'s notion of "built",
+    or the runner and this worker disagree forever: a turn whose tree is a
+    dict counts unless it's the constructor's aborted-stub placeholder
+    (build failed partway); a turn with ``tree: null`` counts only if
+    ``n_leaves == 0`` (nothing to build — the correct terminal state for
+    an empty turn, not an unbuilt one). Anything else (corrupt JSON,
+    missing tree with leaves present) is treated as not-yet-built so it
+    gets rebuilt below instead of being skipped forever.
+
+    The aborted-stub check is an EXACT match against the constructor's
+    literal placeholder string, not a substring check — a genuinely-built
+    summary can legitimately discuss aborted-stub trees as content (e.g.
+    a turn where the agent debugged this very compaction feature) without
+    being one itself. A substring match would misclassify that turn as
+    unbuilt on every single retry, burning a real rebuild attempt each
+    time with no way to ever pass.
+    """
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    tree = data.get("tree")
+    if tree is None:
+        return data.get("n_leaves") == 0
+    if not isinstance(tree, dict):
+        return False
+    summary = tree.get("summary", "")
+    return summary != "<construction aborted; uncollapsed frontier>"
 
 
 def main() -> int:
@@ -175,9 +209,12 @@ def _run(live: Path, session_id: str, cwd: str, cache_root: Path,
     for turn_idx, pid in enumerate(target_ids):
         out_file = cache_root / f"{pid}.json"
         if out_file.exists() and out_file.stat().st_size > 0:
-            _log(log, f"turn {turn_idx} ({pid[:8]}) — cache hit, skip")
-            skipped += 1
-            continue
+            if _is_valid_cached_tree(out_file):
+                _log(log, f"turn {turn_idx} ({pid[:8]}) — cache hit, skip")
+                skipped += 1
+                continue
+            _log(log, f"turn {turn_idx} ({pid[:8]}) — stale/invalid cache "
+                      f"(aborted stub or corrupt), rebuilding")
 
         _log(log, f"turn {turn_idx} ({pid[:8]}) — building...")
         t0 = time.time()

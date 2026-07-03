@@ -689,11 +689,15 @@ def _stub_summary(tree: dict) -> bool:
     """True if this cached tree is a constructor 'aborted' stub — the
     root wraps the un-merged leaves as-is, so root.tokens ≈ leaf sum
     and treating it as a real summary would inflate the session-wide
-    'min' estimate."""
+    'min' estimate.
+
+    Exact match against the constructor's literal placeholder, not a
+    substring check: a real summary can legitimately mention "aborted;
+    uncollapsed" as content without being an unbuilt stub itself."""
     if tree.get("type") != "node":
         return False
     summary = tree.get("summary", "")
-    return isinstance(summary, str) and "aborted; uncollapsed" in summary
+    return summary == "<construction aborted; uncollapsed frontier>"
 
 
 def _sparkline(values: list[int], width: int = 80) -> str:

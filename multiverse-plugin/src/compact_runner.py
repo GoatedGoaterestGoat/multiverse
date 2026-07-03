@@ -386,9 +386,14 @@ class CompactRunner:
         - its filename (``<turn_id>.json``) is a turn_id in the chain
           (or the chain set hasn't been populated yet — edge case
           before ``_count_total_turns`` runs);
-        - it opens cleanly as JSON with a dict ``tree`` field;
-        - the tree isn't an aborted-construction stub (constructor's
-          synthetic wrapper for turns whose build failed at step 0).
+        - it opens cleanly as JSON;
+        - EITHER the ``tree`` field is a dict that isn't an
+          aborted-construction stub (constructor's synthetic wrapper for
+          turns whose build failed at step 0), OR ``tree`` is ``null``
+          with ``n_leaves == 0`` (a turn with no assistant leaves at
+          all — construct_turn_priv_cli returns immediately without
+          setting turn.root, which is the correct terminal state, not
+          an unbuilt one).
 
         Aborted stubs are the gotcha: ``_attach_trees_from_cache``
         treats them as "no tree" and the turn falls back to
@@ -417,6 +422,18 @@ class CompactRunner:
             except (OSError, json.JSONDecodeError):
                 continue
             tree = data.get("tree")
+            if tree is None:
+                # A turn with zero assistant leaves legitimately has no
+                # tree — construct_turn_priv_cli returns immediately
+                # ("empty turn") without ever setting turn.root, so
+                # tree=None here means "correctly built, nothing to
+                # summarize", not "never built". A genuine build failure
+                # always produces the aborted-stub Node below instead,
+                # never a bare null. Confirm via n_leaves rather than
+                # trusting tree=None alone, in case of a truncated write.
+                if data.get("n_leaves") == 0:
+                    n += 1
+                continue
             if not isinstance(tree, dict):
                 continue
             if _is_aborted_stub(tree):
@@ -751,10 +768,23 @@ class CompactRunner:
         return None
 
 
+_ABORTED_STUB_SUMMARY = "<construction aborted; uncollapsed frontier>"
+
+
 def _is_aborted_stub(td: dict) -> bool:
     """True if the cached tree is just the constructor's
     'aborted-at-step-0' synthetic wrapper — a single Node whose summary
-    is the placeholder ``<construction aborted; uncollapsed frontier>``.
+    is EXACTLY the placeholder ``<construction aborted; uncollapsed
+    frontier>`` (see ``constructor.py``, where this string is the sole
+    literal value ever assigned to a stub's ``summary``).
+
+    Must be an exact match, not a substring check: a genuinely-built
+    summary can legitimately *discuss* aborted-stub trees as content
+    (e.g. a turn where the agent debugged this very compaction feature)
+    and would then contain the phrase "construction aborted" without
+    being one itself. A substring match misclassifies that turn as
+    unbuilt forever, wasting a real rebuild attempt every retry with no
+    way to ever pass.
 
     These trees provide no real summarization (the merge LLM never
     produced a usable response). Treat them as 'no tree' so expansion
@@ -767,7 +797,7 @@ def _is_aborted_stub(td: dict) -> bool:
     if td.get("type") != "node":
         return False
     summary = td.get("summary", "")
-    return isinstance(summary, str) and "construction aborted" in summary.lower()
+    return summary == _ABORTED_STUB_SUMMARY
 
 
 def _reconstruct_tree(d: dict):

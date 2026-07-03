@@ -334,16 +334,21 @@ def minimum_compacted_tokens(claude_uuid: str, cwd: str) -> tuple[int, int, int]
 
 
 def _is_aborted_stub(tree: dict) -> bool:
-    """A node whose sole 'summary' is the constructor's aborted-stub
-    placeholder — its children ARE its leaves (nothing was really merged),
-    so the root's tokens equal the leaf sum and the tree is functionally
-    equivalent to no tree at all."""
+    """A node whose sole 'summary' is EXACTLY the constructor's aborted-stub
+    placeholder (``<construction aborted; uncollapsed frontier>``) — its
+    children ARE its leaves (nothing was really merged), so the root's
+    tokens equal the leaf sum and the tree is functionally equivalent to
+    no tree at all.
+
+    Exact match, not substring: a real summary can legitimately mention
+    "aborted; uncollapsed" as content (e.g. a turn about debugging this
+    very feature) without being an unbuilt stub itself."""
     if tree.get("type") != "node":
         return False
     summary = tree.get("summary", "")
     if not isinstance(summary, str):
         return False
-    return "aborted; uncollapsed" in summary
+    return summary == "<construction aborted; uncollapsed frontier>"
 
 
 def list_orphan_fulls(cwd_filter: str | None = None) -> list[dict]:
