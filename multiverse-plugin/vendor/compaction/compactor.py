@@ -289,6 +289,7 @@ def allocate_budget(
     total_budget: int,
     scheduler: Scheduler = proportional,
     image_budget_fraction: float = DEFAULT_IMAGE_BUDGET_FRACTION,
+    image_mode: str = "budget_fit",
 ) -> tuple[dict[str, int], set[str]]:
     """Split ``total_budget`` across the WHOLE compacted output.
 
@@ -298,19 +299,20 @@ def allocate_budget(
 
       1. User-prompt TEXT is a mandatory floor — summed and subtracted off
          the top. (Tiny; it's the turn separator.)
-      2. User-prompt IMAGES are droppable. Up to
-         ``image_budget_fraction`` of the remaining budget is spent keeping
-         them, newest turn first, all-or-nothing per turn. Turns not in the
-         returned keep-set have their images replaced by a placeholder.
+      2. User-prompt IMAGES:
+         - ``image_mode="keep_all"`` — every image-bearing turn kept
+           verbatim. Their full token cost is deducted from the budget.
+         - ``image_mode="drop_all"`` — no images kept. Every image-bearing
+           turn renders a short "[N image(s) omitted]" marker instead.
+         - ``image_mode="budget_fit"`` (default; retained for backward
+           compat with pre-picker callers) — newest turn first, all-or-
+           nothing per turn, capped at ``image_budget_fraction`` of the
+           post-text remainder.
       3. Whatever remains funds the assistant content, divided by
          ``scheduler``.
 
     Returns ``(per_turn_assistant_budget, keep_image_turn_ids)``. Both are
     consumed by the renderer (``compact_forest_to_session_jsonl``).
-
-    The result guarantees the rendered output is approximately bounded by
-    ``total_budget`` (within summary/rendering slack), instead of letting
-    un-budgeted user images blow past it.
     """
     if not forest:
         return {}, set()
@@ -319,17 +321,28 @@ def allocate_budget(
     text_floor = sum(_user_prompt_text_tokens(t) for t in forest)
     remaining = max(0, total_budget - text_floor)
 
-    # 2. Keep user-prompt images newest-first within the image sub-budget.
-    image_budget = int(remaining * image_budget_fraction)
+    # 2. Image handling — decided by image_mode.
     keep_images: set[str] = set()
     spent_on_images = 0
-    for turn in reversed(forest):  # newest first
-        cost = _user_prompt_image_tokens(turn)
-        if cost <= 0:
-            continue
-        if spent_on_images + cost <= image_budget:
-            keep_images.add(turn.turn_id)
-            spent_on_images += cost
+    if image_mode == "keep_all":
+        for turn in forest:
+            cost = _user_prompt_image_tokens(turn)
+            if cost > 0:
+                keep_images.add(turn.turn_id)
+                spent_on_images += cost
+    elif image_mode == "drop_all":
+        # Nothing kept; marker cost is negligible so we don't reserve
+        # for it in the assistant budget. Renderer emits the marker.
+        pass
+    else:  # "budget_fit" — legacy newest-first logic.
+        image_budget = int(remaining * image_budget_fraction)
+        for turn in reversed(forest):  # newest first
+            cost = _user_prompt_image_tokens(turn)
+            if cost <= 0:
+                continue
+            if spent_on_images + cost <= image_budget:
+                keep_images.add(turn.turn_id)
+                spent_on_images += cost
 
     # 3. Assistant content gets the rest.
     assistant_budget = max(0, remaining - spent_on_images)

@@ -120,6 +120,7 @@ class CompactRunner:
         expand_only: bool = False,
         scheduler_name: str = "proportional",
         scheduler_params: Optional[dict] = None,
+        image_mode: str = "budget_fit",
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
@@ -144,7 +145,17 @@ class CompactRunner:
         # schedulers that take no params.
         self.scheduler_name = scheduler_name
         self.scheduler_params = dict(scheduler_params or {})
+        # Image mode passed straight to allocate_budget. "keep_all" /
+        # "drop_all" now come from the picker; "budget_fit" (default)
+        # preserves the legacy newest-first behaviour for any caller
+        # that hasn't opted into the explicit toggle.
+        self.image_mode = image_mode
         self.paths = CompactPaths.for_session(claude_uuid)
+        # Populated by _count_total_turns so _count_cached_trees can
+        # filter stale tree files (from earlier chain states, reverted
+        # turns, etc.) out of the "built" number. Without this the
+        # count could exceed total turns.
+        self._chain_turn_ids: Optional[set[str]] = None
         self._cancelled = threading.Event()
         self._log_offset = 0  # bytes already streamed to UI
 
@@ -363,18 +374,32 @@ class CompactRunner:
     def _count_total_turns(self, full: Path) -> int:
         # Lazy import; vendor is on sys.path.
         from compaction.parser import parse_session  # noqa: E402
-        return len(parse_session(str(full)))
+        forest = parse_session(str(full))
+        # Cache turn_ids for _count_cached_trees's chain filter.
+        self._chain_turn_ids = {t.turn_id for t in forest}
+        return len(forest)
 
     def _count_cached_trees(self) -> int:
+        """Count cached tree files that belong to the CURRENT chain.
+
+        Tree JSON filenames are ``<turn_id>.json`` — the worker writes
+        them that way, so we can filter without opening each file. If
+        the chain set isn't populated yet (edge case: hit before
+        _count_total_turns runs), fall back to the total file count
+        so progress numbers still exist.
+        """
         if not self.paths.cache_root.is_dir():
             return 0
+        valid = self._chain_turn_ids
         n = 0
         for p in self.paths.cache_root.glob("*.json"):
             try:
-                if p.stat().st_size > 0:
-                    n += 1
+                if p.stat().st_size <= 0:
+                    continue
             except OSError:
                 continue
+            if valid is None or p.stem in valid:
+                n += 1
         return n
 
     def _read_lock_pid(self) -> Optional[int]:
@@ -551,16 +576,24 @@ class CompactRunner:
         # content. Without this, verbatim user images ride along outside the
         # budget and a 400k compaction can still emit 800k+ tokens.
         per_turn, keep_image_turn_ids = allocate_budget(
-            forest, self.total_budget, scheduler=scheduler
+            forest, self.total_budget, scheduler=scheduler,
+            image_mode=self.image_mode,
         )
         n_img_turns = sum(
             1 for t in forest if t.user_prompt and t.user_prompt.images
         )
         if n_img_turns:
+            if self.image_mode == "keep_all":
+                mode_note = "keep_all mode"
+            elif self.image_mode == "drop_all":
+                mode_note = "drop_all mode"
+            else:
+                mode_note = "budget_fit mode"
             on_log(
-                f"User-prompt images: keeping {len(keep_image_turn_ids)} of "
-                f"{n_img_turns} image-bearing turn(s) within budget; the rest "
-                f"are replaced by a placeholder."
+                f"User-prompt images ({mode_note}): keeping "
+                f"{len(keep_image_turn_ids)} of {n_img_turns} "
+                f"image-bearing turn(s); the rest are replaced by "
+                f"a placeholder."
             )
         # Log per-turn budget allocation. Cap output at first 10 turns to
         # keep the log readable on long sessions; full mapping is in the

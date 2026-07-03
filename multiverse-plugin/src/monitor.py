@@ -32,6 +32,7 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
+    Checkbox,
     DataTable,
     Footer,
     Header,
@@ -740,34 +741,94 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
     _DEFAULT_RATIO = 3.0
     _DEFAULT_HALF_LIFE = 10.0
 
+    # Rough token cost of the "[N image(s) omitted…]" marker emitted
+    # when a turn's user-prompt images are dropped to fit the budget.
+    # Matches what priv_session inserts in turn_to_rows.
+    _IMAGE_OMISSION_MARKER_TOKENS = 15
+
+    # allocate_budget's image_budget_fraction (fraction of the post-
+    # text-floor remainder allowed for kept images). Duplicated here
+    # because the picker reimplements the allocation flow rather than
+    # calling allocate_budget with a Forest object.
+    _IMAGE_BUDGET_FRACTION = 0.5
+
     def __init__(
         self,
         claude_uuid: str,
         cwd: str,
         display_name: str,
-        forest_stats: list[tuple[str, int, int, int]],
+        forest_stats: list[tuple[str, int, int, int, int]],
         default_budget: int,
+        full_tokens: int = 0,
+        full_turns: int = 0,
+        live_tokens: int = 0,
+        live_turns: int = 0,
     ) -> None:
         super().__init__()
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.display_name = display_name
-        # forest_stats: [(turn_id, leaves_tokens, prompt_tokens,
-        # min_tokens_root_or_leaves), ...] in chain order.
+        # forest_stats: [(turn_id, leaves, prompt_text, prompt_image,
+        #                 min_tok), ...] in chain order.
         self.forest_stats = forest_stats
         self.default_budget = max(1, default_budget)
+        # Kept for the always-visible stats line above the picker so
+        # the user doesn't lose sight of what "full" / "live" mean.
+        self.full_tokens = full_tokens
+        self.full_turns = full_turns
+        self.live_tokens = live_tokens
+        self.live_turns = live_turns
         self._scheduler = "proportional"
         self._k = self._DEFAULT_K
         self._ratio = self._DEFAULT_RATIO
         self._half_life = self._DEFAULT_HALF_LIFE
+        # Binary image handling: True → include ALL user-prompt images
+        # verbatim in the input floor; False → drop every image, emit a
+        # short marker in its place. Default True: no surprise data
+        # loss on first run.
+        self._include_images = True
 
     def compose(self) -> ComposeResult:
-        n_turns = len(self.forest_stats)
-        total = sum(leaves + prompt for _, leaves, prompt, _ in self.forest_stats)
+        text_floor = sum(
+            text for _, _, text, _, _ in self.forest_stats
+        )
+        image_floor = sum(
+            img for _, _, _, img, _ in self.forest_stats
+        )
+        n_img_turns = sum(
+            1 for _, _, _, img, _ in self.forest_stats if img > 0
+        )
+        marker_floor = n_img_turns * self._IMAGE_OMISSION_MARKER_TOKENS
+
+        live_line = ""
+        if self.live_tokens or self.live_turns:
+            pct = ""
+            if self.full_tokens:
+                pct = (
+                    f" ({100.0 * self.live_tokens / self.full_tokens:.1f}%"
+                    f" of full)"
+                )
+            live_line = (
+                f"\n[dim]Live pre-compaction: {self.live_tokens:,}t · "
+                f"{self.live_turns} turn(s){pct}[/]"
+            )
+        prompt_line = (
+            f"\n[dim]Prompts (always kept): text {text_floor:,}t"
+        )
+        if image_floor:
+            prompt_line += (
+                f"  ·  images {image_floor:,}t across {n_img_turns} "
+                f"turn(s) (or ~{marker_floor:,}t if dropped)"
+            )
+        prompt_line += "[/]"
+
         yield Vertical(
             Static(
-                f"Compact: [bold]{self.display_name}[/]  "
-                f"[dim]({n_turns} turn(s), {total:,}t full)[/]",
+                f"Compact: [bold]{self.display_name}[/]\n"
+                f"[dim]Full (uncompacted): {self.full_tokens:,}t · "
+                f"{self.full_turns} turn(s)[/]"
+                f"{live_line}"
+                f"{prompt_line}",
                 id="choose-title",
             ),
             Static("Scheduler:", id="choose-sched-label"),
@@ -776,6 +837,21 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 RadioButton("recency_boosted", id="sched-recency_boosted"),
                 RadioButton("last_k_raw", id="sched-last_k_raw"),
                 id="choose-scheduler",
+            ),
+
+            # Binary image toggle: keep all verbatim or drop all.
+            Checkbox(
+                "Include user-prompt images verbatim",
+                value=True,
+                id="choose-include-images",
+            ),
+            Static(
+                "[dim]Images can add significant tokens per turn. "
+                "Uncheck to drop ALL user-prompt images across the "
+                "session and replace each with a short omission "
+                "marker. Assistant-side allocation and the sparkline "
+                "reflect only output tokens either way.[/]",
+                id="choose-images-desc",
             ),
 
             # last_k_raw params — hidden unless that scheduler is picked.
@@ -910,18 +986,41 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         except (ValueError, AttributeError):
             return self._DEFAULT_RATIO
 
-    def _compute_allocation(self) -> list[int]:
-        """Recompute per-turn assistant-side allocation with current
-        scheduler / params. Returned in chain order matching
-        ``self.forest_stats``.
+    def _compute_input_floor(self) -> tuple[int, int, int]:
+        """Return ``(input_floor, text_floor, image_floor)``.
 
-        This is the scheduler's view — leaves-only, does NOT include
-        the user_prompt floor (that's added on top of every turn by
-        ``allocate_budget`` at expansion time, outside the scheduler).
+        ``input_floor`` is the total non-compactable input cost — text
+        (always kept) plus either full image tokens (if the checkbox
+        is on) or one omission marker per image-bearing turn (if off).
+        The scheduler operates on ``total_budget − input_floor``.
         """
-        turn_ids = [tid for tid, _, _, _ in self.forest_stats]
-        leaves_by_id = {tid: leaves for tid, leaves, _, _ in self.forest_stats}
-        budget = self._current_budget()
+        text_floor = sum(
+            text for _, _, text, _, _ in self.forest_stats
+        )
+        if self._include_images:
+            image_floor = sum(
+                img for _, _, _, img, _ in self.forest_stats
+            )
+        else:
+            image_floor = sum(
+                self._IMAGE_OMISSION_MARKER_TOKENS
+                for _, _, _, img, _ in self.forest_stats
+                if img > 0
+            )
+        return text_floor + image_floor, text_floor, image_floor
+
+    def _compute_allocation(self) -> list[int]:
+        """Per-turn OUTPUT (assistant) allocation from the scheduler,
+        in chain order. Budget the scheduler sees is
+        ``total_budget − input_floor``.
+        """
+        turn_ids = [tid for tid, _, _, _, _ in self.forest_stats]
+        leaves_by_id = {
+            tid: leaves for tid, leaves, _, _, _ in self.forest_stats
+        }
+        total_budget = self._current_budget()
+        input_floor, _, _ = self._compute_input_floor()
+        budget = max(0, total_budget - input_floor)
 
         if self._scheduler == "proportional":
             total = sum(max(1, s) for s in leaves_by_id.values()) or 1
@@ -971,68 +1070,129 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         return [alloc.get(tid, 0) for tid in turn_ids]
 
     def _session_min_tokens(self) -> int:
-        """Session-wide floor: total tokens that must survive no matter
-        how small the budget is. Per-scheduler:
+        """Session-wide floor at ``budget = 0`` (no output allowed).
 
-        - proportional / recency_boosted: each turn survives as at least
-          (user_prompt + root.tokens). Sum across all turns.
-        - last_k_raw with k: last k turns kept verbatim (user_prompt +
-          leaves), rest at (user_prompt + root.tokens). Grows with k
-          — the user picking a bigger k is picking a bigger floor.
+        Composed of:
+        - The current input floor (text + images-or-markers per the
+          checkbox).
+        - Every turn's assistant floor: root.tokens under proportional
+          / recency_boosted; leaves under last_k_raw's verbatim tail.
 
-        These are the numbers ``expand_to_budget`` protects: even if
-        you set the total budget below this, each turn still emits at
-        least this much.
+        Note the input floor already reflects the checkbox choice —
+        toggling images off drops the min accordingly.
         """
         n = len(self.forest_stats)
         if n == 0:
             return 0
-        # Default: every turn compacted to root.
-        totals = [
-            prompt + min_tok
-            for _, _, prompt, min_tok in self.forest_stats
-        ]
+        input_floor, _, _ = self._compute_input_floor()
+        outputs = [min_tok for _, _, _, _, min_tok in self.forest_stats]
         if self._scheduler == "last_k_raw":
-            k = self._current_k()
-            k_eff = min(k, n)
-            # Promote the last k turns to their raw (leaves) cost.
+            k_eff = min(self._current_k(), n)
             for i in range(n - k_eff, n):
-                _, leaves, prompt, _ = self.forest_stats[i]
-                totals[i] = prompt + leaves
-        return sum(totals)
+                _, leaves, _, _, _ = self.forest_stats[i]
+                outputs[i] = leaves
+        return input_floor + sum(outputs)
 
     def _refresh_preview(self) -> None:
         try:
             preview = self.query_one("#choose-preview", Static)
         except Exception:  # noqa: BLE001
             return
-        alloc = self._compute_allocation()
-        assist_total = sum(alloc)
-        biggest = max(alloc) if alloc else 0
-        session_min = self._session_min_tokens()
-        budget = self._current_budget()
 
-        # Warn when budget < session floor: expansion will still produce
-        # ~session_min tokens (root of each turn is protected), but the
-        # user should know the number they entered is a lower bound
-        # only in name.
+        budget = self._current_budget()
+        alloc = self._compute_allocation()  # per-turn OUTPUT allocation
+        input_floor, text_floor, image_floor = self._compute_input_floor()
+
+        # Per-turn OUTPUT projection: max(scheduler alloc, root.tokens).
+        # expand_to_budget always keeps at least the root, so no turn
+        # can emit less output than its root token count.
+        output_per_turn: list[int] = []
+        breakdowns: list[tuple[int, int, int]] = []  # (text, img_out, out)
+        for i, a in enumerate(alloc):
+            tid, _leaves, text, img_tok, min_tok = self.forest_stats[i]
+            if img_tok > 0 and not self._include_images:
+                img_out = self._IMAGE_OMISSION_MARKER_TOKENS
+            elif img_tok > 0:
+                img_out = img_tok
+            else:
+                img_out = 0
+            out_val = max(a, min_tok)
+            output_per_turn.append(out_val)
+            breakdowns.append((text, img_out, out_val))
+
+        total_output = sum(output_per_turn)
+        total_projected = input_floor + total_output
+        session_min = self._session_min_tokens()
+
         if budget < session_min:
             budget_note = (
-                f"  [yellow](< min floor — output will be ~{session_min:,}t)[/]"
+                f"  [yellow](< min viable — output pinned at "
+                f"~{session_min:,}t)[/]"
+            )
+        elif total_projected > budget:
+            budget_note = (
+                f"  [yellow](root-floor rescue pushed projected above "
+                f"budget)[/]"
             )
         else:
             budget_note = ""
 
-        spark = _sparkline(alloc, width=80)
+        # For the "saved" number we want the DELTA between what
+        # verbatim images would cost and what we're spending on
+        # markers — not the marker cost itself.
+        full_image_tokens = sum(
+            img for _, _, _, img, _ in self.forest_stats
+        )
+        image_note = ""
+        if full_image_tokens > 0 and self._include_images:
+            image_note = (
+                f"[dim]Images: keeping all image-bearing turns "
+                f"verbatim ({image_floor:,}t total).[/]\n"
+            )
+        elif full_image_tokens > 0 and not self._include_images:
+            saved = full_image_tokens - image_floor
+            image_note = (
+                f"[dim]Images: dropped — replaced with omission "
+                f"markers ({image_floor:,}t markers vs "
+                f"{full_image_tokens:,}t verbatim; ~{saved:,}t saved).[/]\n"
+            )
+
+        # Identify the dominant OUTPUT turn — output is what the
+        # scheduler controls, so pointing here tells the user which
+        # turn to investigate in the tree visualizer.
+        if output_per_turn:
+            i_big = max(
+                range(len(output_per_turn)),
+                key=lambda i: output_per_turn[i],
+            )
+            t, im, out_val = breakdowns[i_big]
+            total_at_big = t + im + out_val
+            big_line = (
+                f"[bold]Largest OUTPUT turn:[/] #{i_big} — "
+                f"{out_val:,}t assistant  "
+                f"[dim](whole turn {total_at_big:,}t = text {t:,} + "
+                f"image {im:,} + output {out_val:,})[/]\n"
+            )
+        else:
+            big_line = ""
+
+        spark = _sparkline(output_per_turn, width=80)
         preview.update(
-            f"[dim]Assistant-side allocation preview "
-            f"(one column per turn / bucket):[/]\n"
+            f"[dim]Per-turn OUTPUT allocation (one column per turn "
+            f"/ bucket; assistant only, no prompts):[/]\n"
             f"[cyan]{spark}[/]\n"
-            f"[bold]Budget:[/] {budget:,}t{budget_note}\n"
-            f"[bold]Min viable (session floor):[/] {session_min:,}t  "
-            f"[dim](depends on scheduler; last_k_raw's k grows this)[/]\n"
-            f"[bold]Σ assistant alloc:[/] {assist_total:,}t  ·  "
-            f"[bold]largest single-turn alloc:[/] {biggest:,}t"
+            f"{image_note}"
+            f"[bold]Budget entered:[/] {budget:,}t{budget_note}\n"
+            f"[bold]Input floor:[/] {input_floor:,}t  "
+            f"[dim](text {text_floor:,} + "
+            f"{'images ' if self._include_images else 'markers '}"
+            f"{image_floor:,})[/]\n"
+            f"[bold]Output budget:[/] {max(0, budget - input_floor):,}t  "
+            f"[dim](what the scheduler distributes)[/]\n"
+            f"[bold]Min viable output:[/] {session_min:,}t  "
+            f"[dim](session floor at current settings)[/]\n"
+            f"[bold]Total projected output:[/] {total_projected:,}t\n"
+            f"{big_line}"
         )
 
     # Explicit RadioSet handler.
@@ -1043,6 +1203,11 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         # Hide/show the param inputs for the new scheduler, then
         # recompute the preview under the new params.
         self._apply_param_visibility()
+        self._refresh_preview()
+
+    @on(Checkbox.Changed, "#choose-include-images")
+    def _include_images_changed(self, event: Checkbox.Changed) -> None:
+        self._include_images = bool(event.value)
         self._refresh_preview()
 
     # Explicit per-Input handlers via @on decorator. The generic
@@ -1078,7 +1243,11 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         if budget <= 0:
             self.notify("Budget must be positive", severity="warning")
             return
-        config: dict = {"scheduler": self._scheduler, "budget": budget}
+        config: dict = {
+            "scheduler": self._scheduler,
+            "budget": budget,
+            "include_images": self._include_images,
+        }
         if self._scheduler == "last_k_raw":
             config["k"] = self._current_k()
         elif self._scheduler == "recency_boosted":
@@ -1247,22 +1416,25 @@ class CompactScreen(ModalScreen[None]):
             return []
         return [(t.turn_id, sum(l.tokens for l in t.leaves)) for t in forest]
 
-    def _per_turn_forest_stats(self) -> list[tuple[str, int, int, int]]:
+    def _per_turn_forest_stats(
+        self,
+    ) -> list[tuple[str, int, int, int, int]]:
         """Richer per-turn info for the ChooseSchedulerScreen. Returns
-        ``[(turn_id, leaves_tokens, prompt_tokens, min_tokens), ...]``:
+        ``[(turn_id, leaves_tokens, prompt_text_tokens,
+              prompt_image_tokens, min_tokens), ...]``:
 
         - leaves_tokens: sum of assistant-side leaves (what the
           scheduler splits over).
-        - prompt_tokens: verbatim user-prompt tokens (always kept as
-          floor, never compacted).
-        - min_tokens: root.tokens if a real cached tree exists (the
-          most-collapsed form for this turn), else leaves_tokens as
-          an over-estimate.
-
-        Used to compute the session-wide "minimum viable" number the
-        picker displays — which depends on the scheduler (last_k_raw
-        promotes the tail turns to their raw cost, so the floor grows
-        with k).
+        - prompt_text_tokens: verbatim user-prompt TEXT ONLY. Always
+          kept as a floor and never compacted.
+        - prompt_image_tokens: verbatim user-prompt IMAGE tokens.
+          Droppable (replaced by a short omission marker) when the
+          budget can't fit them; kept newest-first otherwise. This
+          separation is critical — before the split we were double-
+          counting image cost in the floor, inflating min viable for
+          image-heavy sessions.
+        - min_tokens: root.tokens from the cached tree if real, else
+          leaves_tokens as fallback.
         """
         import json as _json
         full = full_jsonl_path(self.claude_uuid)
@@ -1270,6 +1442,10 @@ class CompactScreen(ModalScreen[None]):
             return []
         try:
             from compaction.parser import parse_session  # noqa: E402
+            from compaction.compactor import (  # noqa: E402
+                _user_prompt_image_tokens,
+                _user_prompt_text_tokens,
+            )
         except Exception:  # noqa: BLE001
             return []
         try:
@@ -1277,19 +1453,17 @@ class CompactScreen(ModalScreen[None]):
         except Exception:  # noqa: BLE001
             return []
         cache_root = multiverse_dir() / "trees" / self.claude_uuid
-        out: list[tuple[str, int, int, int]] = []
+        out: list[tuple[str, int, int, int, int]] = []
         for t in forest:
             leaves = sum(l.tokens for l in t.leaves)
-            prompt = t.user_prompt.tokens if t.user_prompt else 0
+            prompt_text = _user_prompt_text_tokens(t)
+            prompt_image = _user_prompt_image_tokens(t)
             min_tok = leaves  # fallback: whole raw leaf sum
             tree_path = cache_root / f"{t.turn_id}.json"
             if tree_path.is_file():
                 try:
                     d = _json.loads(tree_path.read_text())
                     tree = d.get("tree")
-                    # Aborted stubs' root tokens equal the leaf sum
-                    # (nothing was really merged) — treat as no tree
-                    # so the "min" doesn't lie about compactability.
                     if (isinstance(tree, dict)
                             and not _stub_summary(tree)):
                         tok = tree.get("tokens")
@@ -1297,7 +1471,7 @@ class CompactScreen(ModalScreen[None]):
                             min_tok = tok
                 except (OSError, _json.JSONDecodeError):
                     pass
-            out.append((t.turn_id, leaves, prompt, min_tok))
+            out.append((t.turn_id, leaves, prompt_text, prompt_image, min_tok))
         return out
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
@@ -1512,6 +1686,8 @@ class CompactScreen(ModalScreen[None]):
         for pk in ("k", "recency_ratio", "recency_half_life"):
             if pk in config:
                 params[pk] = config[pk]
+        include_images = bool(config.get("include_images", True))
+        image_mode = "keep_all" if include_images else "drop_all"
         self._runner = CompactRunner(
             claude_uuid=self.claude_uuid,
             cwd=self.cwd,
@@ -1521,6 +1697,7 @@ class CompactScreen(ModalScreen[None]):
             expand_only=True,
             scheduler_name=config["scheduler"],
             scheduler_params=params,
+            image_mode=image_mode,
         )
         self._run_in_thread()
 
@@ -1654,12 +1831,20 @@ class CompactScreen(ModalScreen[None]):
             )
             # Rebuild the richer per-turn stats now that trees are
             # freshly built — root.tokens for each turn is up-to-date.
+            # Live stats come along so the picker's header keeps the
+            # full / live context visible instead of dropping it when
+            # we transition from the input phase.
+            live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
             picker = ChooseSchedulerScreen(
                 claude_uuid=self.claude_uuid,
                 cwd=self.cwd,
                 display_name=self.display_name,
                 forest_stats=self._per_turn_forest_stats(),
                 default_budget=max(1, self.total_tokens // 2),
+                full_tokens=self.total_tokens,
+                full_turns=self.total_turns,
+                live_tokens=live_toks,
+                live_turns=live_turns,
             )
             self.app.push_screen(picker, self._on_config_chosen)
             return
@@ -2082,6 +2267,8 @@ class MonitorApp(App):
     #choose-title { height: auto; padding-bottom: 1; }
     #choose-sched-label { height: auto; }
     #choose-scheduler { height: auto; }
+    #choose-include-images { height: auto; padding-top: 1; }
+    #choose-images-desc { height: auto; padding-bottom: 1; }
     #choose-k-label { height: auto; padding-top: 1; }
     #choose-k { height: 3; }
     #choose-k-desc { height: auto; padding-bottom: 1; }
