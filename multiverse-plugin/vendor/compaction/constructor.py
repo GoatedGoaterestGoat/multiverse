@@ -691,7 +691,7 @@ def _priv_cli_request_merge(
 ) -> tuple[int, int, str]:
     """Invoke `claude --resume <id> -p <instruction>` for one merge call."""
     cmd = [
-        "claude",
+        os.environ.get("MULTIVERSE_CLAUDE_BIN") or "claude",
         "-p", instruction,
         "--resume", session_id,
         "--no-session-persistence",

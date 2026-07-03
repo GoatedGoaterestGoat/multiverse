@@ -15,6 +15,7 @@ object which we parse out of the CLI's `{"result": ...}` envelope.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass
@@ -97,7 +98,7 @@ def request_merge_via_cli(
     user_prompt = USER_PROMPT_TEMPLATE.format(frontier=rendered)
 
     cmd = [
-        "claude",
+        os.environ.get("MULTIVERSE_CLAUDE_BIN") or "claude",
         "-p",
         "--no-session-persistence",
         "--disable-slash-commands",

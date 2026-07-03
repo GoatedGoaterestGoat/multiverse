@@ -119,7 +119,7 @@ def _ask_one(
     wrapped = SIDE_QUESTION_WRAPPER + question
     jsonl = CLAUDE_PROJECTS_DIR / _encode_cwd(target.cwd) / f"{fork_uuid}.jsonl"
 
-    cmd = ["claude"]
+    cmd = [os.environ.get("MULTIVERSE_CLAUDE_BIN") or "claude"]
     if plugin_root:
         cmd += ["--plugin-dir", plugin_root]
     cmd += [

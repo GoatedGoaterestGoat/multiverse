@@ -43,3 +43,8 @@ node_modules/
 # OS
 .DS_Store
 Thumbs.db
+
+# Machine-local multiverse overrides (host-specific claude binary, extra
+# plugin dirs, config dir). Sourced by bin/multiverse; per-machine, never
+# committed. See "Machine-local config" in multiverse-plugin/README.md.
+multiverse-plugin/bin/multiverse.local

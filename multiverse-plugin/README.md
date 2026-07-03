@@ -63,6 +63,27 @@ multiverse setup    # re-run if Python deps changed (pyproject.toml/uv.lock)
 
 Any arguments passed to `multiverse` (other than a subcommand like `setup`/`update`) are forwarded as default `claude` args to every session spawned from the TUI. The monitor auto-loads the plugin into each session via `claude --plugin-dir <plugin_root>`, so you don't need to install the plugin globally for dev work.
 
+### Machine-local config (`bin/multiverse.local`)
+
+`bin/multiverse` sources an optional, **gitignored** file at `multiverse-plugin/bin/multiverse.local` before launching the monitor — the one place for host-specific settings, so they survive `git pull` and never get committed. Three knobs are supported; all default to standard behavior when the file is absent, so a checkout with no `multiverse.local` behaves exactly as before.
+
+| Variable | Default | What it does |
+|:---------|:--------|:-------------|
+| `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
+| `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
+| `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
+
+Example — use an alternate `claude` binary and load an extra local dev plugin:
+
+```bash
+# multiverse-plugin/bin/multiverse.local — gitignored, per-machine.
+export MULTIVERSE_CLAUDE_BIN="my-claude-build"
+export MULTIVERSE_EXTRA_PLUGIN_DIRS="/path/to/another-plugin"
+export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.my-claude}"
+```
+
+These values are exported by `bin/multiverse` and propagated into every spawned session (the monitor adds them to each `tmux new-session -e` env), so a single edit reaches the monitor, interactive sessions, the inter-agent fork path, and compaction.
+
 ## Usage
 
 ### Monitor TUI
@@ -307,6 +328,9 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 | `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
 | `MULTIVERSE_STATUS=…/status.json` | hook scripts |
 | `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir`) |
+| `MULTIVERSE_CLAUDE_BIN=<binary>` | inner script + fork/compaction paths — which Claude binary to run (default `claude`; see [Machine-local config](#machine-local-config-binmultiverselocal)) |
+| `MULTIVERSE_EXTRA_PLUGIN_DIRS=<dir:dir>` | inner script — extra `--plugin-dir` entries for interactive sessions |
+| `CLAUDE_CONFIG_DIR` / `CLAUDE_LOCAL_DATA_DIR` / `PATH` | propagated when set so spawned sessions resolve transcripts under the same Claude config dir (and find the same binary) the monitor used |
 
 ### MCP server: tools
 

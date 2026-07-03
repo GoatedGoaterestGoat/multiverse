@@ -15,6 +15,24 @@ set -euo pipefail
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Machine-local overrides (gitignored, never pushed). Lets a single checkout
+# adapt to this host — e.g. a company-packaged claude binary and extra local
+# dev plugin dirs — without editing tracked files. See bin/multiverse.local.
+if [ -f "$PLUGIN_ROOT/bin/multiverse.local" ]; then
+  # shellcheck disable=SC1090,SC1091
+  . "$PLUGIN_ROOT/bin/multiverse.local"
+fi
+
+# Which claude binary the whole stack invokes (monitor-spawned sessions, the
+# /btw fork path, and compaction). Defaults to vanilla `claude`. Exported so
+# child processes (the monitor, tmux sessions, the MCP server) inherit it.
+export MULTIVERSE_CLAUDE_BIN="${MULTIVERSE_CLAUDE_BIN:-claude}"
+CLAUDE_BIN="$MULTIVERSE_CLAUDE_BIN"
+
+# Colon-separated extra plugin dirs loaded into interactive sessions
+# (in addition to the multiverse plugin itself). Exported for the same reason.
+export MULTIVERSE_EXTRA_PLUGIN_DIRS="${MULTIVERSE_EXTRA_PLUGIN_DIRS:-}"
+
 # Preserve the user's original cwd so the monitor can default new
 # sessions to it (uv run below will cd into the plugin root). Respect a
 # pre-set value so callers that can't control the process cwd — e.g. the
@@ -49,13 +67,13 @@ MULTIVERSE_ENV_FILE="${MULTIVERSE_ROOT}/claude-env.sh"
 if [ -f "$MULTIVERSE_ENV_FILE" ] \
    && [ -z "${CLAUDE_CONFIG_DIR:-}" ] \
    && [ -z "${CLAUDE_LOCAL_DATA_DIR:-}" ] \
-   && ! command -v claude >/dev/null 2>&1; then
+   && ! command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   # shellcheck disable=SC1090
   . "$MULTIVERSE_ENV_FILE"
 fi
 if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
    || [ -n "${CLAUDE_LOCAL_DATA_DIR:-}" ] \
-   || command -v claude >/dev/null 2>&1; then
+   || command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   mkdir -p "$MULTIVERSE_ROOT"
   {
     echo "# Auto-saved by bin/multiverse so multiverse can resume sessions"
@@ -65,9 +83,9 @@ if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
       && printf 'export CLAUDE_CONFIG_DIR=%q\n' "$CLAUDE_CONFIG_DIR"
     [ -n "${CLAUDE_LOCAL_DATA_DIR:-}" ] \
       && printf 'export CLAUDE_LOCAL_DATA_DIR=%q\n' "$CLAUDE_LOCAL_DATA_DIR"
-    if command -v claude >/dev/null 2>&1; then
+    if command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
       printf 'export PATH=%q:"${PATH-}"\n' \
-        "$(dirname "$(command -v claude)")"
+        "$(dirname "$(command -v "$CLAUDE_BIN")")"
     fi
   } > "$MULTIVERSE_ENV_FILE.tmp" \
     && mv "$MULTIVERSE_ENV_FILE.tmp" "$MULTIVERSE_ENV_FILE"
