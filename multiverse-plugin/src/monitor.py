@@ -316,6 +316,43 @@ class NameInputScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class ConfirmDeleteScreen(ModalScreen[bool]):
+    """Yes/no confirmation before deleting a dormant session's JSONL.
+
+    Returns ``True`` on confirm (Enter), ``False`` on cancel (Esc).
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(self, display_name: str) -> None:
+        super().__init__()
+        self.display_name = display_name
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                f"Delete dormant session [bold]'{self.display_name}'[/]?",
+                id="confirm-delete-header",
+            ),
+            Static(
+                "This permanently deletes its JSONL from disk. "
+                "This cannot be undone.",
+                id="confirm-delete-body",
+            ),
+            Static("Enter to confirm · Esc to cancel", id="confirm-delete-hint"),
+            id="confirm-delete-dialog",
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+
 class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
     """Browse claude sessions in the monitor's cwd and pick one to resume.
 
@@ -2111,6 +2148,26 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #confirm-delete-dialog {
+        width: 100;
+        height: auto;
+        padding: 1 2;
+        border: round $error;
+        background: $surface;
+    }
+    #confirm-delete-header {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-delete-body {
+        color: $text-muted;
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-delete-hint {
+        color: $text-muted;
+        height: auto;
+    }
     #resume-dialog {
         width: 100%;
         height: 100%;
@@ -2759,10 +2816,33 @@ class MonitorApp(App):
             )
             return
         if e.session is None:
-            self.notify(
-                "Dormant sessions cannot be killed from here — delete the JSONL manually",
-                severity="warning",
-            )
+            claude_uuid = e.claude_uuid
+            cwd = e.cwd
+            display_name = e.name
+
+            def _on_close(confirmed: Optional[bool]) -> None:
+                if not confirmed:
+                    return
+                if not claude_uuid:
+                    self.notify(
+                        "No claude UUID tracked for this row — cannot delete",
+                        severity="error",
+                    )
+                    return
+                jsonl = live_jsonl_path(claude_uuid, cwd)
+                if not jsonl.is_file():
+                    self.notify("JSONL already gone", severity="warning")
+                    self.refresh_sessions()
+                    return
+                try:
+                    jsonl.unlink()
+                except OSError as exc:
+                    self.notify(f"Failed to delete: {exc}", severity="error")
+                    return
+                self.notify(f"Deleted dormant session '{display_name}'")
+                self.refresh_sessions()
+
+            self.push_screen(ConfirmDeleteScreen(display_name), _on_close)
             return
         kill_session(e.session)
         self.notify(f"Killed {e.session.id}")

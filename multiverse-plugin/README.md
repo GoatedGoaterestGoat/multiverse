@@ -100,7 +100,7 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
 | `i` | View the highlighted agent's pending inbox — a read-only peek at queued `message_agent` messages. Does **not** consume them; they're still delivered to the agent on its next hook fire. |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. Refused while the row is `compacting` |
-| `k` | Kill the highlighted session — tmux kill + remove state dir. Refused while the row is `compacting` |
+| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
 
