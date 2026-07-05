@@ -21,6 +21,14 @@ from .tokenize import count_image_tokens, count_tokens
 from .types import Forest, Leaf, Turn
 
 # Top-level `type` values that carry no compactable content.
+# Note: ``attachment`` is a broad container — most kinds (deferred_tools,
+# skill_listing, task_reminder, IDE state, etc.) are transient system
+# notices and correctly skipped. But ``attachment.type == "queued_command"``
+# is a real user-authored prompt (typed while the agent was mid-turn) —
+# it lands in the JSONL as an attachment row rather than a regular user
+# row because it took the queue path instead of the fresh-prompt path.
+# _classify_and_extract handles that case specially BEFORE this blanket
+# skip fires, so those aren't silently dropped.
 SKIP_TYPES = frozenset({
     "custom-title",
     "agent-name",
@@ -160,6 +168,28 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     each meaningful row has exactly one content block. We rely on this.
     """
     t = row.get("type")
+
+    # Special case BEFORE the SKIP_TYPES check: a queued_command is a
+    # prompt the user typed while the agent was mid-turn — it takes
+    # the queue path (attachment row with attachment.type ==
+    # "queued_command") instead of the fresh-prompt path (a real
+    # user-role row with its own promptId). Structurally it's mid-turn
+    # content, so it should land as a Leaf on the current turn's
+    # leaves, not create a new turn boundary. Treat it as user_text
+    # so it renders as a mid-turn user text block on the round-trip.
+    if t == "attachment":
+        att = row.get("attachment")
+        if isinstance(att, dict) and att.get("type") == "queued_command":
+            prompt = att.get("prompt", "") or ""
+            uuid = row.get("uuid", "")
+            return Leaf(
+                kind="user_text",
+                content={"text": prompt},
+                tokens=count_tokens(prompt),
+                preview=_preview(prompt, "user"),
+                source_uuids=[uuid],
+            )
+
     if t in SKIP_TYPES or t is None:
         return None
 
