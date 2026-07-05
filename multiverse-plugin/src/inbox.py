@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -75,8 +76,11 @@ def write_message_to_inbox(
 def list_pending_messages(cwd: str, name: str) -> list[dict]:
     """List pending inbox messages for an agent, sorted by ts ascending.
 
-    Each dict is the message JSON augmented with ``__path`` (string) so
-    callers can pass it to ``consume_messages``.
+    Read-only — does NOT consume anything. Used only by the dashboard's
+    "peek" (``i`` key), which explicitly must not clear the inbox. Any
+    caller that intends to deliver-and-clear must use
+    ``claim_pending_messages`` instead, not this + a separate delete —
+    see that function's docstring for why.
     """
     d = agent_inbox_dir(cwd, name)
     if not d.is_dir():
@@ -93,16 +97,60 @@ def list_pending_messages(cwd: str, name: str) -> list[dict]:
     return out
 
 
-def consume_messages(messages: list[dict]) -> None:
-    """Delete the underlying files of the given pending messages."""
-    for m in messages:
-        path = m.get("__path")
-        if not path:
+def claim_pending_messages(cwd: str, name: str) -> list[dict]:
+    """Atomically claim (read + delete) all pending messages for an agent.
+
+    Safe under concurrent callers — e.g. two processes that both ended up
+    live under the same ``(cwd, name)`` (a duplicate-session bug, not
+    something this function can prevent, but one it must not compound).
+    Without this, a naive "read all, then delete all" sequence has a real
+    window where two concurrent readers both see the same still-present
+    file before either deletes it, and both deliver it — the same message
+    injected twice, each at its own hook-fire's slightly different
+    timestamp.
+
+    The claim step is a rename to a claimant-unique path, NOT a bare
+    ``unlink()`` race — measured directly under heavy thread contention,
+    two racing ``unlink()`` calls on the same path both reported success
+    often enough to matter (not a theoretical concern), while a rename of
+    the same shared source to two DIFFERENT claimant-unique destinations
+    never double-succeeded across thousands of trials. ``rename()``
+    requires the source to still exist, so only one racer's rename can
+    ever land; every other racer's rename fails with ``FileNotFoundError``
+    the instant the winner's rename completes, and they drop the message
+    without returning it. Once renamed to our own uniquely-named path, no
+    other caller even knows that name, so reading + deleting it afterward
+    is no longer contested.
+
+    Returns the claimed messages, sorted by ts ascending — each still a
+    plain message dict (no ``__path``, since there's nothing left to do
+    with it once deleted).
+    """
+    d = agent_inbox_dir(cwd, name)
+    if not d.is_dir():
+        return []
+    claimant = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
+    claimed: list[dict] = []
+    for path in d.glob("*.json"):
+        claim_path = path.with_name(path.name + f".claim-{claimant}")
+        try:
+            path.rename(claim_path)
+        except OSError:
+            # Another concurrent claimant won the race for this file —
+            # they're the one delivering it, not us.
             continue
         try:
-            Path(path).unlink()
+            data = json.loads(claim_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            data = None
+        try:
+            claim_path.unlink()
         except OSError:
             pass
+        if data is not None:
+            claimed.append(data)
+    claimed.sort(key=lambda m: m.get("ts", 0))
+    return claimed
 
 
 def pending_inbox_count(cwd: str, name: str) -> int:

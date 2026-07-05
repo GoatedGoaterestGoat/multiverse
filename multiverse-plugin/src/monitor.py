@@ -67,7 +67,9 @@ from .sessions import (
     Session,
     build_dashboard_rows,
     create_session,
+    current_host,
     existing_names_in_cwd,
+    foreign_host_still_reported_live,
     kill_session,
     list_claude_sessions_in,
     list_sessions,
@@ -2431,7 +2433,18 @@ class MonitorApp(App):
         # in other cwds.
         self.sessions = [s for s in all_sessions if s.cwd == self.monitor_cwd]
         for s in self.sessions:
-            if s.status not in ("ended",) and not tmux_session_exists(s.tmux_name):
+            # Only trust "local tmux doesn't have it" as proof of death
+            # for sessions THIS host created. A session created on a
+            # different host (shared MULTIVERSE_ROOT deployments) is
+            # invisible to our local tmux by construction — showing it
+            # as "ended" here would be wrong, and would invite an Enter
+            # press that reaps a session that's still very much alive
+            # elsewhere. See foreign_host_still_reported_live.
+            if (
+                s.status not in ("ended",)
+                and (not s.host or s.host == current_host())
+                and not tmux_session_exists(s.tmux_name)
+            ):
                 s.status = "ended"
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
@@ -2730,6 +2743,16 @@ class MonitorApp(App):
         # Ended multiverse row: free the name by reaping its meta dir before
         # spawning the replacement (otherwise existing_names_in_cwd blocks it).
         if e.session is not None and e.status == "ended":
+            if foreign_host_still_reported_live(e.session):
+                self.notify(
+                    f"'{e.name}' was created on host '{e.session.host}' and "
+                    "its status there still says it's active — refusing to "
+                    "resume as a new session here to avoid creating a "
+                    "duplicate. Kill it from its own host first if it's "
+                    "actually dead.",
+                    severity="error",
+                )
+                return
             kill_session(e.session)
 
         self._spawn_resumed(e.cwd, uuid, e.name)
@@ -2843,6 +2866,17 @@ class MonitorApp(App):
                 self.refresh_sessions()
 
             self.push_screen(ConfirmDeleteScreen(display_name), _on_close)
+            return
+        if foreign_host_still_reported_live(e.session):
+            self.notify(
+                f"'{e.name}' was created on host '{e.session.host}' and "
+                "its status there still says it's active — refusing to "
+                "kill it from here. Local tmux can't reach that host's "
+                "session, so this would only delete its bookkeeping "
+                "(inviting a duplicate later) without actually stopping "
+                "it. Kill it from its own host.",
+                severity="error",
+            )
             return
         kill_session(e.session)
         self.notify(f"Killed {e.session.id}")

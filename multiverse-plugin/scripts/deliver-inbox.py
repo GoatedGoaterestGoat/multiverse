@@ -17,8 +17,8 @@ Output format depends on the hook event:
     the wakeup we want when an inbox arrives mid-task.)
 
 The agent-callable ``check_inbox`` MCP tool reuses the same renderer +
-consume path (``src.inbox.render_messages_as_system_reminder`` +
-``consume_messages``) so a hook-delivered batch and a tool-delivered
+claim path (``src.inbox.render_messages_as_system_reminder`` +
+``claim_pending_messages``) so a hook-delivered batch and a tool-delivered
 batch are byte-identical.
 """
 
@@ -35,10 +35,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inbox import (  # noqa: E402
-    consume_messages,
-    list_pending_messages,
+    claim_pending_messages,
     render_messages_as_system_reminder,
 )
+from src.interagent_log import log_inbox_delivered  # noqa: E402
 
 
 def _read_input() -> dict:
@@ -57,12 +57,18 @@ def main() -> None:
     if not cwd or not name:
         return  # not running under multiverse
 
-    messages = list_pending_messages(cwd, name)
+    # Claims (reads + atomically deletes) whatever is still ours to
+    # deliver. If a duplicate-session process raced us for the same
+    # inbox, whatever it already claimed simply won't be here to claim
+    # again — see claim_pending_messages' docstring.
+    messages = claim_pending_messages(cwd, name)
     if not messages:
-        return  # nothing to deliver
+        return  # nothing to deliver (or someone else already claimed it)
 
     hook_input = _read_input()
     event = hook_input.get("hook_event_name") or "UserPromptSubmit"
+
+    log_inbox_delivered(recipient=name, cwd=cwd, hook_event=event, messages=messages)
 
     body = render_messages_as_system_reminder(messages)
 
@@ -77,7 +83,6 @@ def main() -> None:
         }
 
     print(json.dumps(out))
-    consume_messages(messages)
 
 
 if __name__ == "__main__":

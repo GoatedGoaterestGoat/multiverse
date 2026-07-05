@@ -250,10 +250,16 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │                                 stale-PID recovery). Holding monitor's PID
 │                                 in body. Other monitors render the row as
 │                                 ``compacting`` and refuse Enter / Kill.
-└── auto_build/<claude-uuid>    — empty marker file; presence means
-                                  background auto tree-build is enabled for
-                                  this session. Toggled with ``b`` in the
-                                  dashboard. Default state is OFF (no file).
+├── auto_build/<claude-uuid>    — empty marker file; presence means
+│                                 background auto tree-build is enabled for
+│                                 this session. Toggled with ``b`` in the
+│                                 dashboard. Default state is OFF (no file).
+└── logs/inter-agent/<YYYY-MM-DD>.jsonl
+                                — one line per message_agent call, push-
+                                  notification routing outcome, and inbox
+                                  delivery (hook- or check_inbox-triggered).
+                                  Files older than 7 days are deleted the
+                                  next time anything is logged.
 ```
 
 Sessions survive monitor restarts — the TUI rebuilds its view from disk every refresh. Inbox files survive everything; they wait until the recipient's hooks fire.
@@ -442,6 +448,8 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 - **Graceful degradation.** Without the wrapper the plugin still loads, but the inter-agent tools error (they need the `MULTIVERSE_*` env vars the monitor injects) and there's no monitor UI. Auto tree-building works via hooks alone if you create the marker file by hand.
 - **Concurrent-safe.** Each session has its own state directory and its own env vars (injected via `tmux new-session -e`); nothing leaks between sessions.
 - **Cross-process path coherence.** All state paths — including `MULTIVERSE_ROOT` (the `~/.multiverse` directory itself) — flow as absolute paths via `tmux -e` rather than being derived from `HOME` in each process. This matters in deployments where the monitor and the spawned claude processes have different `HOME` values (e.g. containers where a wrapper sets `HOME=/weka/...` for claude so `~/.claude` lands on persistent storage); without an explicit `MULTIVERSE_ROOT` the inbox and spawn-request directories silently diverge between the two sides.
+- **Inbox delivery claims, it doesn't just read-then-delete.** `claim_pending_messages` renames each message file to a claimant-unique path before reading/deleting it — `unlink()` alone was measured to occasionally let two racing callers both report success under heavy thread contention, which is exactly the failure mode that matters here (two live sessions sharing an inbox both delivering the same message). `rename()` of a shared source to two different destinations never double-succeeded across thousands of trials, so that's the actual claim step; delete is just cleanup afterward, no longer contested.
+- **A session's `host` field guards against reaping a session that's alive on a different host.** `tmux_session_exists()` is inherently local — it can't see a different host's tmux server. In a shared-`MULTIVERSE_ROOT` deployment (multiple containers/hosts on the same network storage), a session created on host A looks "ended" from host B's monitor purely because host B's tmux doesn't have it, not because it's actually dead. Reaping-then-recreating under that false premise (the Enter-to-resume flow, and `message_agent`'s push-notification auto-resume) creates an invisible zombie: the old process keeps running with no meta dir anywhere, silently sharing its inbox with the new session it got replaced by — the mechanism behind duplicate message/notification delivery. `create_session` now stamps the creating host into `meta.json`; `foreign_host_still_reported_live()` refuses to treat "not found in local tmux" as proof of death when the recorded host differs from the current one, trusting only the durable, hook-persisted `status.json` value (`"ended"` is written exclusively by the real process's own `SessionEnd` hook, wherever it runs) instead.
 - **Two JSONLs, one source of truth.** Compaction rewrites *live* but the *full* JSONL is append-only and never compacted. Token counts, turn counts, and tree building always read from full — so re-compacting after a prior compaction reaches back to the original uncompacted history rather than compounding summaries.
 - **Marker by uuid, not byte offset.** The mirror tracks "last live row already mirrored" by uuid. Byte offsets break the moment compaction shrinks live; uuid lookup degrades gracefully (an unreachable marker just means "append nothing this round" rather than corrupting full).
 - **Cross-monitor compaction lock is the row's status.** No separate display state — the same `~/.multiverse/compacting/<uuid>.json` file that prevents Enter / Kill is also what triggers the `compacting` status badge in every monitor's dashboard refresh. One mechanism, no drift.

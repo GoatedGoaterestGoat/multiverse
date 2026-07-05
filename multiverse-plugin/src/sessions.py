@@ -19,6 +19,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -219,6 +220,12 @@ class Session:
     # claude UUIDs that this multiverse session has superseded via
     # context_fold. Each entry: {"uuid": str, "folded_at": float}.
     superseded_uuids: list[dict] = field(default_factory=list)
+    # Hostname that created this session (see current_host()). None for
+    # sessions created before this field existed. Used to tell whether a
+    # local "tmux doesn't have this session" observation is meaningful —
+    # it isn't, when MULTIVERSE_ROOT is shared network storage and the
+    # session was actually spawned on a different host's tmux server.
+    host: Optional[str] = None
 
     @property
     def tmux_name(self) -> str:
@@ -314,6 +321,7 @@ def load_session(session_id: str) -> Optional[Session]:
         name=meta.get("name"),
         claude_uuid=_read_text_stripped(d / "claude_uuid"),
         superseded_uuids=superseded,
+        host=meta.get("host"),
     )
     st = _read_json(s.status_path)
     if st:
@@ -678,6 +686,7 @@ def create_session(
         "cwd": cwd_abs,
         "created_at": now,
         "claude_args": claude_args,
+        "host": current_host(),
     }
     if resumed_from:
         meta["resumed_from"] = resumed_from
@@ -783,7 +792,55 @@ def create_session(
         status_ts=now,
         resumed_from=resumed_from,
         name=name,
+        host=meta["host"],
     )
+
+
+def current_host() -> str:
+    return socket.gethostname()
+
+
+def foreign_host_still_reported_live(s: Session) -> bool:
+    """True if ``s`` looks safe to reap ONLY because tmux can't see it —
+    and that "can't see it" signal isn't trustworthy for this session.
+
+    Liveness is normally read off local tmux (``tmux_session_exists``),
+    which only ever sees tmux servers on the CURRENT host. That's a
+    problem in a deployment ``MULTIVERSE_ROOT`` docs already describe as
+    supported: multiple containers/hosts sharing one network-mounted
+    state directory. A session spawned on host A is invisible to host
+    B's local tmux — host B's monitor would conclude "ended" when the
+    session is actually alive on host A, still updating the SAME shared
+    status.json via its own real hooks.
+
+    The one cross-host-trustworthy signal is the hook-persisted status
+    value itself: "ended" is written ONLY by the SessionEnd hook of the
+    actual live process, wherever it runs. Anything else read fresh from
+    disk (idle/working/waiting/starting) means something, somewhere, is
+    still alive and updating it.
+
+    Callers use this to gate the "reap this ended-looking session's state
+    dir before spawning a replacement under the same name" step (the
+    monitor's Enter-to-resume flow, and message_agent's push-notification
+    auto-resume). Skipping this check lets a foreign, still-alive session
+    get its state dir deleted out from under it while a brand-new session
+    is created under the identical name — an invisible zombie (no meta
+    dir anywhere, so no dashboard shows it) that keeps running, keeps
+    firing its own hooks, and keeps polling/consuming the same shared
+    inbox as the new session — the mechanism behind duplicate message
+    delivery.
+
+    Returns False (safe to reap) when ``s.host`` is unset (legacy session
+    predating this field, or ``current_host()`` failed at creation time)
+    or matches this host — local tmux is authoritative for those, same
+    as before this function existed.
+    """
+    if not s.host or s.host == current_host():
+        return False
+    fresh = load_session(s.id)
+    if fresh is None:
+        return False  # already reaped by someone else; nothing to protect
+    return fresh.status != "ended"
 
 
 def kill_session(s: Session) -> None:

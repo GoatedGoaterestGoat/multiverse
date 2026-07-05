@@ -37,15 +37,20 @@ from src.sessions import (
     create_session,
     existing_names_in_cwd,
     find_agent_by_name,
+    foreign_host_still_reported_live,
     kill_session,
     list_named_agents_in_cwd,
 )
 from src.inbox import (
-    consume_messages,
-    list_pending_messages,
+    claim_pending_messages,
     pending_inbox_count,
     render_messages_as_tool_result,
     write_message_to_inbox,
+)
+from src.interagent_log import (
+    log_inbox_delivered,
+    log_message_sent,
+    log_notification_routed,
 )
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
@@ -156,6 +161,14 @@ def _auto_resume(target, cwd: str) -> None:
             "cannot resume programmatically"
         )
     if target.session is not None and target.status == "ended":
+        if foreign_host_still_reported_live(target.session):
+            raise RuntimeError(
+                f"'{target.name}' was created on host "
+                f"'{target.session.host}' and its status there still says "
+                "it's active — refusing to auto-resume as a new session "
+                "here to avoid creating a duplicate that would share its "
+                "inbox"
+            )
         kill_session(target.session)
     create_session(
         cwd=cwd,
@@ -372,10 +385,18 @@ def message_agent(
 
     # Always write the inbox file first — and, critically, BEFORE any
     # auto-resume, so the resumed agent's SessionStart hook sees it.
-    write_message_to_inbox(
+    inbox_file = write_message_to_inbox(
         sender_name=self_name,
         recipient_name=target_name,
         recipient_cwd=cwd,
+        message=message,
+    )
+    log_message_sent(
+        sender=self_name,
+        recipient=target_name,
+        cwd=cwd,
+        push_notification=push_notification,
+        message_id=inbox_file.stem,
         message=message,
     )
 
@@ -402,11 +423,19 @@ def message_agent(
         try:
             _auto_resume(target, cwd)
         except Exception as e:  # noqa: BLE001 — surface as tool error text
+            log_notification_routed(
+                sender=self_name, recipient=target_name, cwd=cwd,
+                route="auto_resume", success=False,
+            )
             return (
                 f"Message queued for '{target_name}', but auto-resume failed "
                 f"({e}). It will be delivered when the session is next "
                 "resumed." + reply_hint
             )
+        log_notification_routed(
+            sender=self_name, recipient=target_name, cwd=cwd,
+            route="auto_resume", success=True,
+        )
         return (
             f"Woke '{target_name}' (it was dormant) and delivered your "
             "message — it will process it on startup." + reply_hint
@@ -415,6 +444,10 @@ def message_agent(
     status = target.status
 
     if status == "listening":
+        log_notification_routed(
+            sender=self_name, recipient=target_name, cwd=cwd,
+            route="already_listening",
+        )
         return (
             f"Delivered to '{target_name}' — it was already listening on its "
             "inbox and will pick the message up within a second." + reply_hint
@@ -423,13 +456,22 @@ def message_agent(
     if status in ("idle", "working"):
         tmux_name = target.session.tmux_name
         if _client_attached(tmux_name):
+            log_notification_routed(
+                sender=self_name, recipient=target_name, cwd=cwd,
+                route="passive_fallback_client_attached",
+            )
             return (
                 f"Message queued for '{target_name}' — a user is attached to "
                 "its terminal, so it falls back to passive delivery (delivered "
                 "on the recipient's next turn) rather than a terminal ping."
                 + reply_hint
             )
-        if _wake_via_tmux(tmux_name):
+        woke = _wake_via_tmux(tmux_name)
+        log_notification_routed(
+            sender=self_name, recipient=target_name, cwd=cwd,
+            route="wake_tmux", success=woke,
+        )
+        if woke:
             return (
                 f"Delivered to '{target_name}' and pinged its terminal to "
                 f"check its inbox now (it was {status})." + reply_hint
@@ -472,13 +514,16 @@ def check_inbox() -> str:
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
         )
 
-    messages = list_pending_messages(cwd, name)
+    # Claims (reads + atomically deletes) — safe if a duplicate-session
+    # process is also polling this same inbox; see claim_pending_messages.
+    messages = claim_pending_messages(cwd, name)
     if not messages:
         return "You have no pending inbox messages."
 
-    rendered = render_messages_as_tool_result(messages)
-    consume_messages(messages)
-    return rendered
+    log_inbox_delivered(
+        recipient=name, cwd=cwd, hook_event="check_inbox_tool", messages=messages
+    )
+    return render_messages_as_tool_result(messages)
 
 
 @mcp.tool()
