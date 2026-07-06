@@ -33,6 +33,25 @@ CLAUDE_BIN="$MULTIVERSE_CLAUDE_BIN"
 # (in addition to the multiverse plugin itself). Exported for the same reason.
 export MULTIVERSE_EXTRA_PLUGIN_DIRS="${MULTIVERSE_EXTRA_PLUGIN_DIRS:-}"
 
+# Rate-limit retry knobs for the underlying claude CLI. Multiverse tends to
+# saturate rate limits — many active agents plus background tree-build
+# workers per session, all hitting the same account. Claude's own defaults
+# (10 retries, 500ms * 2^attempt exponential backoff, ~8min total) burn
+# through quickly under a real traffic wave and then just fail.
+#   - CLAUDE_CODE_MAX_RETRIES: raises the retry count (default 10). Only
+#     takes effect during rate-limit / 5xx / connection failures; a good
+#     request never touches this ceiling.
+#   - CLAUDE_CODE_UNATTENDED_RETRY: enables persistent-retry mode —
+#     backoff caps at 5min per attempt and total wait at 6 hours, with
+#     heartbeats every 30s so the session doesn't idle out mid-wait.
+#     Designed for unattended (background) sessions, exactly matching
+#     tree-build workers and long-running agents. Feature-gated in the
+#     claude CLI itself; harmless no-op if the build lacks the feature.
+# Both propagate into every tmux-spawned session (see sessions.py's -e
+# list) and every subprocess spawned by workers (natural inheritance).
+export CLAUDE_CODE_MAX_RETRIES="${CLAUDE_CODE_MAX_RETRIES:-30}"
+export CLAUDE_CODE_UNATTENDED_RETRY="${CLAUDE_CODE_UNATTENDED_RETRY:-1}"
+
 # Preserve the user's original cwd so the monitor can default new
 # sessions to it (uv run below will cd into the plugin root). Respect a
 # pre-set value so callers that can't control the process cwd — e.g. the

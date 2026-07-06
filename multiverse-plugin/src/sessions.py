@@ -762,7 +762,12 @@ def create_session(
     # picking up the existing one. PATH carries the bin dir of the
     # caller's `claude` so the inner shell finds the same binary.
     for env_key in ("CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "PATH",
-                    "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS"):
+                    "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
+                    # Rate-limit retry tuning — see bin/multiverse for
+                    # defaults + rationale. Propagated so interactive
+                    # claude sessions inside tmux honor them, not just
+                    # subprocess-inherited workers.
+                    "CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_UNATTENDED_RETRY"):
         val = os.environ.get(env_key)
         if val:
             cmd += ["-e", f"{env_key}={val}"]

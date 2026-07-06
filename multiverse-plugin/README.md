@@ -65,13 +65,15 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 
 ### Machine-local config (`bin/multiverse.local`)
 
-`bin/multiverse` sources an optional, **gitignored** file at `multiverse-plugin/bin/multiverse.local` before launching the monitor — the one place for host-specific settings, so they survive `git pull` and never get committed. Three knobs are supported; all default to standard behavior when the file is absent, so a checkout with no `multiverse.local` behaves exactly as before.
+`bin/multiverse` sources an optional, **gitignored** file at `multiverse-plugin/bin/multiverse.local` before launching the monitor — the one place for host-specific settings, so they survive `git pull` and never get committed. Each knob defaults to something sensible when the file is absent (or when the file leaves it alone), so a checkout with no `multiverse.local` behaves out of the box.
 
 | Variable | Default | What it does |
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
 | `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
+| `CLAUDE_CODE_MAX_RETRIES` | `30` | Rate-limit / transient-error retry count for the underlying claude CLI (its own default is 10). Multiverse tends to saturate rate limits — many active agents plus a background tree-build worker per session, all hitting one account — so claude's 10-retry / ~8-min ceiling burns through fast under a real traffic wave. This raises the ceiling. Set to `10` to restore claude's default; only takes effect on rate-limit / 5xx / connection failures, so a healthy request never touches it. |
+| `CLAUDE_CODE_UNATTENDED_RETRY` | `1` | Enables claude's persistent-retry mode: backoff caps at 5min per attempt, total wait at 6 hours, with a heartbeat yield every 30s so the session isn't declared idle mid-wait. Ideal for background tree-build workers and long-running agents where waiting through a traffic wave beats failing outright. Feature-gated inside the claude CLI itself — harmless no-op on builds that don't have it compiled in. Set to `0` to opt out. |
 
 Example — use an alternate `claude` binary and load an extra local dev plugin:
 
