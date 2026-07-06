@@ -57,19 +57,27 @@ def write_message_to_inbox(
     recipient_name: str,
     recipient_cwd: str,
     message: str,
+    sender_cwd: str = "",
 ) -> Path:
-    """Drop a message into the recipient's inbox."""
+    """Drop a message into the recipient's inbox.
+
+    ``sender_cwd`` should be set only for cross-workspace messages (when the
+    sender's workspace differs from the recipient's). It's recorded as
+    ``from_cwd`` so the delivered message can tell the recipient which
+    workspace to reply into (``message_agent(..., working_directory=...)``).
+    Omit it for same-workspace messages — a plain ``from`` name is enough.
+    """
     message_id = new_message_id()
     inbox_file = agent_inbox_dir(recipient_cwd, recipient_name) / f"{message_id}.json"
-    _atomic_write_json(
-        inbox_file,
-        {
-            "message_id": message_id,
-            "from": sender_name,
-            "body": message,
-            "ts": time.time(),
-        },
-    )
+    payload: dict = {
+        "message_id": message_id,
+        "from": sender_name,
+        "body": message,
+        "ts": time.time(),
+    }
+    if sender_cwd:
+        payload["from_cwd"] = sender_cwd
+    _atomic_write_json(inbox_file, payload)
     return inbox_file
 
 
@@ -174,19 +182,21 @@ def _format_one_message(m: dict, idx: int, total: int) -> list[str]:
     """Render a single message: separator, header lines, body. Shared by
     both delivery paths so the per-message layout stays in lockstep."""
     from_name = m.get("from", "?")
+    from_cwd = m.get("from_cwd")  # present only for cross-workspace messages
     body = m.get("body", "")
     ts = m.get("ts", 0)
     ts_str = (
         time.strftime("%Y-%m-%d %H:%M", time.localtime(ts)) if ts else "?"
     )
-    return [
-        "─" * 56,
-        f"[{idx}/{total}] From agent: {from_name}",
-        f"        received: {ts_str}",
-        "",
-        *_fmt_lines(body),
-        "",
-    ]
+    header = f"[{idx}/{total}] From agent: {from_name}"
+    lines = ["─" * 56, header, f"        received: {ts_str}"]
+    if from_cwd:
+        lines.append(f"        in workspace: {from_cwd}")
+        lines.append(
+            f'        (to reply, use working_directory="{from_cwd}")'
+        )
+    lines += ["", *_fmt_lines(body), ""]
+    return lines
 
 
 def render_messages_as_system_reminder(messages: list[dict]) -> str:
@@ -213,8 +223,9 @@ def render_messages_as_system_reminder(messages: list[dict]) -> str:
     parts.append(
         "You may use any tools (Read, Bash, Grep, etc.) to act on these "
         "messages. To reply to a sender, call the `message_agent` tool "
-        "with their name as the target. Replies are not required — only "
-        "respond if it's useful."
+        "with their name as the target (for a sender shown 'in workspace …', "
+        "pass that path as `working_directory`). Replies are not required — "
+        "only respond if it's useful."
     )
     parts.append("</system-reminder>")
     return "\n".join(parts)
@@ -237,6 +248,8 @@ def render_messages_as_tool_result(messages: list[dict]) -> str:
     parts.append("─" * 56)
     parts.append(
         "To reply to any sender, call `message_agent` with their name as "
-        "the target. Replies are not required — only respond if it's useful."
+        "the target (for a sender shown 'in workspace …', pass that path as "
+        "`working_directory`). Replies are not required — only respond if "
+        "it's useful."
     )
     return "\n".join(parts)

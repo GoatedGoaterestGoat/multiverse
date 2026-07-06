@@ -120,17 +120,18 @@ The scroll wheel works natively inside attached sessions — the monitor sets pe
 
 ### Inter-agent communication
 
-Several MCP tools are available to any agent running under the wrapper. Each is workspace-scoped — agents in other multiverse workspaces are not visible.
+Several MCP tools are available to any agent running under the wrapper. They default to your own workspace, but `list_agents`, `ask_agent`, and `message_agent` all accept a `working_directory` argument to reach agents in other workspaces.
 
 **`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster.
 
-**`message_agent(target_name, message, push_notification=False)`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
+**`message_agent(target_name, message, push_notification=False, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
 - Delivered as a system-reminder injected into the recipient's next turn
 - Recipient has full tool access (Read, Bash, Grep, etc.) and can take their time
 - Persists in the recipient's conversation history
 - Fire-and-forget — the tool returns as soon as the message is queued; you don't block on a reply
 - To reply, the recipient simply calls `message_agent` back at the original sender (no separate respond tool)
+- **Cross-workspace**: pass `working_directory=<abs path>` to message an agent in another workspace (like `ask_agent`). The delivered message carries the sender's workspace, and the recipient is told to reply with `working_directory=<sender's workspace>` — so replies route back correctly.
 
 **`push_notification`** controls *when* the message reaches the recipient:
 
@@ -349,7 +350,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 | Tool | Purpose |
 |:-----|:--------|
 | `list_agents(max_agents)` | Discover other agents in the workspace |
-| `message_agent(target_name, message, push_notification)` | Send a durable message (inbox-delivered); `push_notification=True` actively wakes the recipient |
+| `message_agent(target_name, message, push_notification, working_directory)` | Send a durable message (inbox-delivered); `push_notification=True` actively wakes the recipient; `working_directory` targets another workspace |
 | `check_inbox()` | Read + clear pending inbox messages on demand |
 | `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible; shows as `listening`) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
@@ -400,7 +401,7 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 
 ### What happens during a `message_agent` call
 
-1. `message_agent(target, message, push_notification=…)` writes `~/.multiverse/inbox/<cwd>/<target>/<id>.json` (atomic tmp+rename). The inbox write always happens first — before any auto-resume — so a resumed recipient's SessionStart hook sees it.
+1. `message_agent(target, message, push_notification=…, working_directory=…)` writes `~/.multiverse/inbox/<target-cwd>/<target>/<id>.json` (atomic tmp+rename), where `<target-cwd>` is `working_directory` if given (cross-workspace) else the sender's own cwd. For a cross-workspace send it also stamps `from_cwd` (the sender's workspace) so the recipient can reply. The inbox write always happens first — before any auto-resume — so a resumed recipient's SessionStart hook sees it.
 2. **Routing by `push_notification`:**
    - `False` → nothing else happens; the message waits for the recipient's next natural hook fire (dormant recipients wait for the *user* to resume them).
    - `True` + dormant/ended → `_auto_resume` spawns `tmux new-session -d` + `claude --resume <uuid>`; the wakeup-on-resume machinery (below) delivers it on startup.

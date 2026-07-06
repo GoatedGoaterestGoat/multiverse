@@ -318,18 +318,27 @@ def message_agent(
     message: str,
     push_notification: bool = False,
     push_notifications: bool = False,
+    working_directory: str = "",
 ) -> str:
-    """Send a durable message to another named agent in your workspace.
+    """Send a durable message to another named agent.
 
     Use this for instructions, in-depth questions, or any communication
     where the recipient should be able to take action — read files, run
     commands, use tools, then reply at their own pace.
 
+    By default the target is looked up in your own workspace. Pass
+    ``working_directory`` (an absolute path) to message an agent in a
+    DIFFERENT workspace — use ``list_agents(working_directory=...)`` to
+    discover targets there. A cross-workspace message records your own
+    workspace with it, so the delivered message tells the recipient to
+    reply with ``working_directory=<your workspace>``.
+
     The message is always dropped into the recipient's inbox and persists
     in their conversation history once delivered. To reply to a message you
-    received, simply call ``message_agent`` back at the original sender —
-    there is no separate "respond" tool. For a quick fact you don't want to
-    persist in the target's session, use ``ask_agent`` instead.
+    received, call ``message_agent`` back at the original sender (passing
+    ``working_directory`` if the message says the sender is in another
+    workspace) — there is no separate "respond" tool. For a quick fact you
+    don't want to persist in the target's session, use ``ask_agent``.
 
     DELIVERY TIMING is controlled by ``push_notification``:
 
@@ -372,32 +381,60 @@ def message_agent(
             passive delivery on their next turn / user-initiated resume.
         push_notifications: Accepted alias for ``push_notification`` (either
             spelling works; they're OR'd together).
+        working_directory: Optional absolute path to another workspace. When
+            omitted, the target is looked up in your own workspace. When
+            provided, the target (and any auto-resume / inbox delivery)
+            happens in that workspace instead.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
-    if not cwd or not self_name:
+    if not self_cwd or not self_name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
         )
 
-    if target_name == self_name:
+    # Resolve the workspace the target lives in — our own by default.
+    if working_directory:
+        try:
+            cwd = str(Path(working_directory).expanduser().resolve())
+        except (OSError, RuntimeError) as e:
+            return f"Error: invalid working_directory '{working_directory}': {e}"
+    else:
+        cwd = self_cwd
+
+    try:
+        self_cwd_abs = str(Path(self_cwd).expanduser().resolve())
+    except (OSError, RuntimeError):
+        self_cwd_abs = self_cwd
+    in_own_workspace = cwd == self_cwd_abs
+
+    if in_own_workspace and target_name == self_name:
         return "Error: cannot message yourself."
 
     target = find_agent_by_name(cwd, target_name)
     if target is None:
+        if in_own_workspace:
+            return (
+                f"Error: no agent named '{target_name}' in this workspace. "
+                "Call list_agents to see who's available."
+            )
         return (
-            f"Error: no agent named '{target_name}' in this workspace. "
-            "Call list_agents to see who's available."
+            f"Error: no agent named '{target_name}' in workspace '{cwd}'. "
+            f"Call list_agents(working_directory='{cwd}') to see who's "
+            "available."
         )
 
     # Always write the inbox file first — and, critically, BEFORE any
-    # auto-resume, so the resumed agent's SessionStart hook sees it.
+    # auto-resume, so the resumed agent's SessionStart hook sees it. For a
+    # cross-workspace message, stamp our own workspace so the recipient
+    # knows where to reply.
     inbox_file = write_message_to_inbox(
         sender_name=self_name,
         recipient_name=target_name,
         recipient_cwd=cwd,
         message=message,
+        sender_cwd="" if in_own_workspace else self_cwd_abs,
     )
     # Accept either spelling — models frequently pluralize "notification".
     push = bool(push_notification) or bool(push_notifications)
