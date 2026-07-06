@@ -169,26 +169,63 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """
     t = row.get("type")
 
-    # Special case BEFORE the SKIP_TYPES check: a queued_command is a
-    # prompt the user typed while the agent was mid-turn — it takes
-    # the queue path (attachment row with attachment.type ==
-    # "queued_command") instead of the fresh-prompt path (a real
-    # user-role row with its own promptId). Structurally it's mid-turn
-    # content, so it should land as a Leaf on the current turn's
-    # leaves, not create a new turn boundary. Treat it as user_text
-    # so it renders as a mid-turn user text block on the round-trip.
+    # Special cases BEFORE the SKIP_TYPES check for attachment rows
+    # that DO carry primary content (as opposed to the many transient
+    # attachment kinds that don't — deferred_tools, skill_listing,
+    # task_reminder, IDE state, etc.).
     if t == "attachment":
         att = row.get("attachment")
-        if isinstance(att, dict) and att.get("type") == "queued_command":
-            prompt = att.get("prompt", "") or ""
-            uuid = row.get("uuid", "")
-            return Leaf(
-                kind="user_text",
-                content={"text": prompt},
-                tokens=count_tokens(prompt),
-                preview=_preview(prompt, "user"),
-                source_uuids=[uuid],
-            )
+        if isinstance(att, dict):
+            att_type = att.get("type")
+
+            # queued_command: a prompt the user typed while the agent
+            # was mid-turn. Takes the queue path instead of the
+            # fresh-prompt path, so it lands as an attachment row
+            # rather than a normal user-role row. Structurally mid-turn
+            # content (shares prior turn's promptId), so no new turn
+            # boundary — Leaf appended to current turn's leaves.
+            if att_type == "queued_command":
+                prompt = att.get("prompt", "") or ""
+                uuid = row.get("uuid", "")
+                return Leaf(
+                    kind="user_text",
+                    content={"text": prompt},
+                    tokens=count_tokens(prompt),
+                    preview=_preview(prompt, "user"),
+                    source_uuids=[uuid],
+                )
+
+            # hook_additional_context is a broad container — most
+            # occurrences are transient system context (skill listings,
+            # deferred-tools updates, task reminders, etc. injected via
+            # hooks). But when it carries an inter-agent message (the
+            # multiverse deliver-inbox hook injects a
+            # `<system-reminder>[Multiverse Inter-Agent] …</system-reminder>`
+            # payload), that's the SOLE surviving copy — the inbox file
+            # gets unlinked after successful delivery, so losing this
+            # row means the inter-agent message is gone from history
+            # entirely. Sniff content for the marker; other
+            # hook_additional_context payloads keep going through
+            # SKIP_TYPES below.
+            if att_type == "hook_additional_context":
+                content = att.get("content")
+                if isinstance(content, list):
+                    joined = "\n".join(
+                        c if isinstance(c, str) else str(c) for c in content
+                    )
+                elif isinstance(content, str):
+                    joined = content
+                else:
+                    joined = ""
+                if "[Multiverse Inter-Agent]" in joined:
+                    uuid = row.get("uuid", "")
+                    return Leaf(
+                        kind="user_text",
+                        content={"text": joined},
+                        tokens=count_tokens(joined),
+                        preview=_preview(joined, "user"),
+                        source_uuids=[uuid],
+                    )
 
     if t in SKIP_TYPES or t is None:
         return None
