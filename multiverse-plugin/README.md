@@ -92,8 +92,8 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse` |
-| `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden) |
+| `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse`. Starts in `--permission-mode auto` by default (see below). |
+| `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Also starts in auto mode. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
 | `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
@@ -105,6 +105,8 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 | `q` | Quit the monitor — sessions keep running in tmux |
 
 **Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
+
+**Auto permission mode by default.** Every session `create_session` spawns — new (`n`), resumed (`R` / `Enter` on a dormant/ended row, including right after compaction, which claude treats as a new session since it's a freshly-written live JSONL), auto-resumed via a push-notification `message_agent` call, or spawned via `spawn_agent` — starts with `--permission-mode auto` unless the caller already passed an explicit `--permission-mode` (e.g. via `multiverse --permission-mode plan`), which is left untouched.
 
 **Dashboard columns**: `ID · Name · Inbox · Build · Status · Tokens · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks — press `i` to peek at them. The Build column shows `on` (green) / `off` for the per-session auto tree-build toggle — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
 

@@ -681,6 +681,15 @@ def create_session(
     if not Path(cwd_abs).is_dir():
         raise ValueError(f"Not a directory: {cwd_abs}")
 
+    # Default every spawned session to auto permission mode — a brand new
+    # session, and a resume after compaction (which claude treats as a new
+    # session since it's a freshly-written live JSONL), otherwise both start
+    # in claude's default (prompt-for-everything) mode. Skipped if the
+    # caller already specified a mode, so an explicit `multiverse
+    # --permission-mode plan` (or similar) isn't silently overridden.
+    if not any(a == "--permission-mode" for a in claude_args):
+        claude_args = [*claude_args, "--permission-mode", "auto"]
+
     now = time.time()
     meta: dict[str, Any] = {
         "cwd": cwd_abs,
