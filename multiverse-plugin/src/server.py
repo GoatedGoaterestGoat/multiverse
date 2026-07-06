@@ -52,6 +52,7 @@ from src.interagent_log import (
     log_message_sent,
     log_notification_routed,
 )
+from src.compact_state import is_locked
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
 from src.spawn_requests import (
@@ -316,6 +317,7 @@ def message_agent(
     target_name: str,
     message: str,
     push_notification: bool = False,
+    push_notifications: bool = False,
 ) -> str:
     """Send a durable message to another named agent in your workspace.
 
@@ -350,6 +352,10 @@ def message_agent(
         message still arrives on the recipient's next turn.
       - listening (parked in ``monitor_inbox``) → it's already watching its
         inbox and picks the message up within a second; no wake needed.
+      - compacting → the agent is locked (its terminal is killed and even
+        the user can't interact with it during compaction), so it is NOT
+        woken; the message queues and is delivered once compaction finishes
+        and the session resumes.
     Use this for time-sensitive messages or when you're blocked waiting on
     the recipient to act.
 
@@ -364,6 +370,8 @@ def message_agent(
         push_notification: If True, actively wake the recipient to deliver
             now (see above). If False (default), leave it in the inbox for
             passive delivery on their next turn / user-initiated resume.
+        push_notifications: Accepted alias for ``push_notification`` (either
+            spelling works; they're OR'd together).
     """
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
@@ -391,11 +399,14 @@ def message_agent(
         recipient_cwd=cwd,
         message=message,
     )
+    # Accept either spelling — models frequently pluralize "notification".
+    push = bool(push_notification) or bool(push_notifications)
+
     log_message_sent(
         sender=self_name,
         recipient=target_name,
         cwd=cwd,
-        push_notification=push_notification,
+        push_notification=push,
         message_id=inbox_file.stem,
         message=message,
     )
@@ -407,7 +418,24 @@ def message_agent(
         "call monitor_inbox to wait for it (it blocks), or check_inbox later."
     )
 
-    if not push_notification:
+    # A compacting agent is LOCKED: its tmux pane is killed for the duration
+    # of the compaction and even the user can't attach/interact. Never wake
+    # it (no auto-resume, no terminal ping) — queue the message for passive
+    # delivery regardless of push, to be picked up when compaction finishes
+    # and the session resumes. Checked against the compaction lock directly
+    # (authoritative) rather than the status string.
+    if target.claude_uuid and is_locked(target.claude_uuid):
+        log_notification_routed(
+            sender=self_name, recipient=target_name, cwd=cwd,
+            route="passive_fallback_compacting",
+        )
+        return (
+            f"Message queued for '{target_name}' — it's currently compacting "
+            "(locked), so the message will be delivered once compaction "
+            "finishes and the session resumes." + reply_hint
+        )
+
+    if not push:
         if is_dormant:
             return (
                 f"Message queued for '{target_name}' (dormant — it will be "
@@ -418,7 +446,7 @@ def message_agent(
             "recipient's next turn." + reply_hint
         )
 
-    # push_notification=True — actively wake the recipient.
+    # push enabled — actively wake the recipient.
     if is_dormant:
         try:
             _auto_resume(target, cwd)
