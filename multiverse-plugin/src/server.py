@@ -58,17 +58,18 @@ from src.names import pick_random_name
 from src.spawn_requests import (
     cleanup_request,
     new_request_id,
-    wait_for_resolution,
-    write_resolution,
+    read_resolution,
     write_spawn_request,
 )
 
 mcp = FastMCP("multiverse")
 
 _DEFAULT_ASK_TIMEOUT = 60
-_DEFAULT_SPAWN_TIMEOUT = 300
 _DEFAULT_MONITOR_INBOX_TIMEOUT = 300
 _MONITOR_INBOX_POLL_INTERVAL = 1.0
+# Poll interval while a spawn request waits (indefinitely) for the user to
+# accept/reject in the monitor.
+_SPAWN_POLL_INTERVAL = 0.25
 
 # Status written to this session's status.json while monitor_inbox is parked,
 # so the dashboard and list_agents show the agent as waiting-for-messages
@@ -758,7 +759,7 @@ def ask_agent(
 
 
 @mcp.tool()
-def spawn_agent(instruction: str, name: str = "") -> str:
+async def spawn_agent(instruction: str, name: str = "") -> str:
     """Spawn a brand-new subagent in your workspace with a starting task.
 
     The ``instruction`` you pass becomes the subagent's first user message —
@@ -771,8 +772,10 @@ def spawn_agent(instruction: str, name: str = "") -> str:
 
     User flow: a naming widget opens in the multiverse monitor showing your
     instruction and a suggested name. The user can accept, edit the name,
-    or reject. This tool blocks until they respond (or a 5-minute timeout).
-    If rejected or timed out, no subagent is created.
+    or reject. This tool blocks until they respond — there is NO timeout, so
+    the request waits however long the user needs. (You can interrupt the
+    wait with Esc to give up; that cancels the request and no subagent is
+    created.) If rejected, no subagent is created.
 
     Args:
         instruction: The first user message for the new agent. Can be
@@ -820,7 +823,6 @@ def spawn_agent(instruction: str, name: str = "") -> str:
             instruction=instruction,
             default_name=default_name,
             caller_tmux_session=caller_tmux,
-            timeout_seconds=_DEFAULT_SPAWN_TIMEOUT,
         )
     except OSError as e:
         return f"Error: failed to write spawn request: {e}"
@@ -841,18 +843,17 @@ def spawn_agent(instruction: str, name: str = "") -> str:
     except (OSError, subprocess.SubprocessError):
         pass
 
-    res = wait_for_resolution(req_id, _DEFAULT_SPAWN_TIMEOUT)
-
     try:
-        if res is None:
-            # Timed out before the user (or any monitor) resolved. Write a
-            # terminal resolution so any still-open modal dismisses itself.
-            write_resolution(req_id, status="timeout", reason="timeout")
-            return (
-                f"Spawn request timed out after {_DEFAULT_SPAWN_TIMEOUT}s "
-                "with no user response in the monitor. No subagent was "
-                "created."
-            )
+        # Wait indefinitely for the user to accept/reject in the monitor —
+        # no timeout. Async sleep so a user interrupt (Esc) surfaces as
+        # cancellation: CancelledError propagates through the `finally`,
+        # which cleans up the request file, and the monitor dismisses any
+        # open modal once that file is gone.
+        while True:
+            res = read_resolution(req_id)
+            if res is not None:
+                break
+            await asyncio.sleep(_SPAWN_POLL_INTERVAL)
 
         status = res.get("status")
         if status != "accepted":

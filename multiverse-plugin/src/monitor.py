@@ -2777,7 +2777,13 @@ class MonitorApp(App):
             self._spawn_queue.append(req)
 
         if self._active_spawn_id is not None:
-            if read_resolution(self._active_spawn_id) is not None:
+            # Dismiss the open modal if the request was resolved externally
+            # (another monitor got there first) OR the request file vanished
+            # (the caller cleaned up — it finished, was rejected elsewhere,
+            # or the caller interrupted/cancelled the wait).
+            resolved = read_resolution(self._active_spawn_id) is not None
+            gone = not request_path(self._active_spawn_id).is_file()
+            if resolved or gone:
                 modal = self._active_spawn_modal
                 if modal is not None:
                     try:
@@ -2796,15 +2802,14 @@ class MonitorApp(App):
                 req = self._spawn_queue.pop(0)
                 rid = req.get("id") or ""
                 # The request may have been resolved by another monitor, or
-                # cleaned up by the tool (timeout/rejection path) during the
-                # interval between enqueue and push. Drop silently.
+                # cleaned up by the tool (rejection / caller-cancel path)
+                # during the interval between enqueue and push. Drop
+                # silently. (No timeout check — spawn requests never expire;
+                # orphaned ones are filtered by list_pending_requests'
+                # caller-liveness check instead.)
                 if read_resolution(rid) is not None:
                     continue
                 if not request_path(rid).is_file():
-                    continue
-                timeout = int(req.get("timeout_seconds") or 300)
-                ts = float(req.get("ts") or 0)
-                if time.time() - ts > timeout:
                     continue
                 self._show_spawn_modal(req)
                 break

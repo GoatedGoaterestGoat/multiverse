@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -35,7 +36,27 @@ from .inbox import MULTIVERSE_DIR
 
 SPAWN_REQUESTS_DIR = MULTIVERSE_DIR / "spawn_requests"
 
-_DEFAULT_POLL_INTERVAL = 0.25
+
+def _caller_alive(caller_tmux_session: str) -> bool:
+    """True if the request's caller is still running (its tmux session
+    exists). A spawn request has no timeout — it waits until the user
+    resolves it — so orphan requests (from a caller that was hard-killed
+    without cleaning up) are reaped by this liveness check instead. On any
+    uncertainty (no session name recorded, tmux missing/erroring) we return
+    True so a legitimate pending request is never dropped by mistake.
+    """
+    if not caller_tmux_session:
+        return True
+    try:
+        r = subprocess.run(
+            ["tmux", "has-session", "-t", caller_tmux_session],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+        )
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return True
 
 
 def new_request_id() -> str:
@@ -57,7 +78,6 @@ def write_spawn_request(
     instruction: str,
     default_name: str,
     caller_tmux_session: str,
-    timeout_seconds: int,
 ) -> Path:
     """Atomically (tmp+rename) drop a spawn request into the watch dir."""
     SPAWN_REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -70,7 +90,6 @@ def write_spawn_request(
         "instruction": instruction,
         "default_name": default_name,
         "caller_tmux_session": caller_tmux_session,
-        "timeout_seconds": int(timeout_seconds),
         "ts": time.time(),
     }
     tmp.write_text(json.dumps(data))
@@ -82,18 +101,19 @@ def write_spawn_request(
 
 
 def list_pending_requests(cwd: str) -> list[dict]:
-    """Unresolved, non-stale requests matching ``cwd``, sorted oldest first.
+    """Unresolved requests matching ``cwd``, sorted oldest first.
 
-    The monitor calls this every tick. Skips:
+    The monitor calls this every tick. Requests have no timeout — they stay
+    pending until the user resolves them. Skips:
       - resolution files (``*.resolved.json``) and temp files (``*.tmp``)
       - requests from other cwds
-      - requests older than their declared timeout
+      - requests whose caller is no longer alive (orphans — the waiting tool
+        was hard-killed without cleaning up; see ``_caller_alive``)
       - requests that already have a resolution
     """
     if not SPAWN_REQUESTS_DIR.is_dir():
         return []
 
-    now = time.time()
     out: list[dict] = []
     for path in SPAWN_REQUESTS_DIR.iterdir():
         name = path.name
@@ -107,9 +127,7 @@ def list_pending_requests(cwd: str) -> list[dict]:
             continue
         if data.get("cwd") != cwd:
             continue
-        timeout = int(data.get("timeout_seconds") or 300)
-        ts = float(data.get("ts") or 0)
-        if now - ts > timeout:
+        if not _caller_alive(data.get("caller_tmux_session", "")):
             continue
         if resolution_path(data.get("id", "")).is_file():
             continue
@@ -168,21 +186,6 @@ def write_resolution(
     except Exception:  # noqa: BLE001 - never break the resolution write
         pass
     return True
-
-
-def wait_for_resolution(
-    req_id: str,
-    timeout_seconds: float,
-    poll_interval: float = _DEFAULT_POLL_INTERVAL,
-) -> Optional[dict]:
-    """Block until a resolution appears or ``timeout_seconds`` elapses."""
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        res = read_resolution(req_id)
-        if res is not None:
-            return res
-        time.sleep(poll_interval)
-    return None
 
 
 def cleanup_request(req_id: str) -> None:
