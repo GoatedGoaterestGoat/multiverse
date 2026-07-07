@@ -128,12 +128,17 @@ class ActionKind(StrEnum):
 
 
 class QueryKind(StrEnum):
-    """Read-only backfill query kinds (SB -> wrapper, req/resp), §10.4 table."""
+    """Read-only query kinds (SB -> wrapper, req/resp), §10.4 table.
+
+    All queries are read-only and therefore permission-exempt (DESIGN.md §4c/§6): the SB
+    agent may issue them regardless of its earned grants in a workspace.
+    """
 
     LIST_WORKSPACES = "list_workspaces"
     LIST_AGENTS = "list_agents"
     GET_STATUS = "get_status"
     GET_TRANSCRIPT = "get_transcript"
+    GET_DASHBOARD = "get_dashboard"  # full monitor dashboard for one workspace (first agent tool)
 
 
 class Authority(StrEnum):

@@ -817,20 +817,66 @@ class SBConnector:
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""
-        # TODO(binding): read the requested slice (list_workspaces / list_agents /
-        # get_status / get_transcript) from ~/.multiverse and shape the result.
+        from . import sb_queries
+
+        kind = query.kind
+        params = query.params or {}
+        try:
+            if kind == p.QueryKind.LIST_WORKSPACES:  # device-scoped; no workspace_id
+                result = {"workspaces": sb_queries.list_workspaces(self.identity.granted_workspaces)}
+            elif kind == p.QueryKind.GET_DASHBOARD:  # the full monitor dashboard (§4d)
+                cwd = self._query_cwd(query)
+                if cwd is None:
+                    return await self._reject_query(ws, query, "forbidden", "unknown/ungranted workspace")
+                result = {"sessions": sb_queries.dashboard(cwd)}
+            elif kind == p.QueryKind.LIST_AGENTS:
+                cwd = self._query_cwd(query)
+                if cwd is None:
+                    return await self._reject_query(ws, query, "forbidden", "unknown/ungranted workspace")
+                result = {"agents": sb_queries.list_agents(cwd)}
+            elif kind == p.QueryKind.GET_STATUS:
+                cwd = self._query_cwd(query)
+                agent = params.get("agent")
+                if cwd is None or not agent:
+                    return await self._reject_query(ws, query, "bad_request", "workspace_id + agent required")
+                st = sb_queries.get_status(cwd, agent)
+                result = st if st is not None else {"status": None}
+            else:  # get_transcript (recall path) — a later phase-2 step
+                return await self._reject_query(
+                    ws, query, "not_implemented",
+                    f"query {getattr(kind, 'value', kind)} not implemented yet",
+                )
+        except Exception as exc:  # noqa: BLE001 - surface a failure, don't drop the query
+            return await self._reject_query(ws, query, "query_failed", str(exc), status=p.ResultStatus.ERROR)
+        await self._send(
+            ws, p.QueryResult(query_id=query.query_id, status=p.ResultStatus.OK, result=result)
+        )
+
+    def _query_cwd(self, query: p.Query) -> str | None:
+        """Resolve a workspace-scoped query's cwd from ``workspace_id`` (``<device_id>:<cwd>``),
+        gated by the device's ACL — return None if it isn't one of our granted workspaces.
+
+        ``device_id`` is base32 (no ``:``), so a single split separates it from the abs cwd.
+        The host already enforces the ACL; this is defense-in-depth.
+        """
+        wsid = query.workspace_id or (query.params or {}).get("workspace_id", "")
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return None
+        cwd_abs = str(Path(cwd).expanduser().resolve())
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        return cwd_abs if cwd_abs in granted else None
+
+    async def _reject_query(  # noqa: ANN001
+        self, ws, query: p.Query, code: str, message: str,
+        status: p.ResultStatus = p.ResultStatus.REJECTED,
+    ) -> None:
         await self._send(
             ws,
             p.QueryResult(
                 query_id=query.query_id,
-                status=p.ResultStatus.REJECTED,
-                error={
-                    "code": "not_implemented",
-                    "message": (
-                        f"connector query binding not implemented yet "
-                        f"(kind={getattr(query.kind, 'value', query.kind)})"
-                    ),
-                },
+                status=status,
+                error={"code": code, "message": message},
             ),
         )
 
