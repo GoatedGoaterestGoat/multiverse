@@ -160,6 +160,191 @@ def _build_usage_index(path: str) -> tuple[dict[str, int], dict[str, int]]:
     return out_tok, visible_tok
 
 
+def _render_content_attachment(att: dict[str, Any]) -> tuple[str, bool] | None:
+    """For any non-empty attachment, return ``(rendered_text, compactable)``.
+    Returns None only when the attachment has no meaningful content on
+    this row (e.g. an empty task_reminder or a hook_additional_context
+    whose ``content`` array is empty).
+
+    ``compactable=True`` means the leaf goes through the compaction
+    pipeline normally — considered for merging, and preserved (or
+    summarized) in the compacted JSONL as a user-role text block. Only
+    the WHITELIST kinds get this: a ``queued_command`` (a prompt the
+    user actually typed), and an inter-agent-message
+    ``hook_additional_context`` (a message from another agent —
+    semantically user-role to the recipient, and the sole surviving
+    copy once the inbox file is unlinked).
+
+    ``compactable=False`` is the default for everything else. Those
+    leaves are counted for display / total accounting but filtered out
+    before tree building. This is a whitelist by design: if claude
+    later adds a new attachment kind, it'll be counted (via the generic
+    fallback below) and stay out of the compaction pipeline until we
+    explicitly decide it belongs on the whitelist.
+
+    Rendering: known kinds mirror ``utils/messages.ts`` in claude's
+    source (case dispatch on ``attachment.type``), so ``count_tokens``
+    lands close to what claude actually sends. Unknown kinds fall back
+    to a JSON serialization of the attachment's non-type fields — an
+    approximation, but non-zero, and correct-signed.
+    """
+    att_type = att.get("type")
+
+    # ------------------------------------------------------------------
+    # WHITELIST: kinds that ride the user-role text path through
+    # compaction because they ARE user-role speech.
+    # ------------------------------------------------------------------
+
+    if att_type == "queued_command":
+        prompt = att.get("prompt", "") or ""
+        return (prompt, True) if prompt else None
+
+    if att_type == "hook_additional_context":
+        content = att.get("content")
+        if isinstance(content, list):
+            joined = "\n".join(
+                c if isinstance(c, str) else str(c) for c in content
+            )
+        elif isinstance(content, str):
+            joined = content
+        else:
+            return None
+        if not joined:
+            return None
+        hook_name = att.get("hookName", "?")
+        rendered = f"{hook_name} hook additional context: {joined}"
+        # IAM messages ARE user-role (from a peer agent, sole copy).
+        # Anything else in hook_additional_context is misc hook context
+        # — counted but not compacted.
+        is_iam = "[Multiverse Inter-Agent]" in joined
+        return (rendered, is_iam)
+
+    # ------------------------------------------------------------------
+    # NON-COMPACTABLE, known kinds. Each mirrors claude's own render
+    # template from utils/messages.ts for accuracy.
+    # ------------------------------------------------------------------
+
+    if att_type == "edited_text_file":
+        filename = att.get("filename", "") or ""
+        snippet = att.get("snippet", "") or ""
+        return (
+            f"Note: {filename} was modified, either by the user or by "
+            "a linter. This change was intentional, so make sure to "
+            "take it into account as you proceed (ie. don't revert it "
+            "unless the user asks you to). Don't tell the user this, "
+            "since they are already aware. Here are the relevant "
+            f"changes (shown with line numbers):\n{snippet}",
+            False,
+        )
+
+    if att_type == "task_reminder":
+        content = att.get("content") or []
+        if not isinstance(content, list) or not content:
+            return None
+        items = "\n".join(
+            f"#{t.get('id','?')}. [{t.get('status','?')}] {t.get('subject','')}"
+            for t in content if isinstance(t, dict)
+        )
+        return (
+            "The task tools haven't been used recently. If you're "
+            "working on tasks that would benefit from tracking "
+            "progress, consider using TaskCreate to add new tasks and "
+            "TaskUpdate to update task status (set to in_progress when "
+            "starting, completed when done). Also consider cleaning up "
+            "the task list if it has become stale. Only use these if "
+            "relevant to the current work. This is just a gentle "
+            "reminder - ignore if not applicable. Make sure that you "
+            "NEVER mention this reminder to the user\n\nHere are the "
+            f"existing tasks:\n\n{items}",
+            False,
+        )
+
+    if att_type == "skill_listing":
+        content = att.get("content")
+        if not isinstance(content, str) or not content:
+            return None
+        return (
+            "The following skills are available for use with the Skill "
+            f"tool:\n\n{content}",
+            False,
+        )
+
+    if att_type == "deferred_tools_delta":
+        added = att.get("addedLines") or []
+        removed = att.get("removedNames") or []
+        parts: list[str] = []
+        if added:
+            parts.append(
+                "The following deferred tools are now available via "
+                "ToolSearch:\n" + "\n".join(str(x) for x in added)
+            )
+        if removed:
+            parts.append(
+                "The following deferred tools are no longer available "
+                "(their MCP server disconnected). Do not search for "
+                "them — ToolSearch will return no match:\n"
+                + "\n".join(str(x) for x in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    if att_type == "agent_listing_delta":
+        added = att.get("addedLines") or []
+        removed = att.get("removedTypes") or []
+        parts = []
+        if added:
+            header = (
+                "Available agent types for the Agent tool:"
+                if att.get("isInitial")
+                else "New agent types are now available for the Agent tool:"
+            )
+            parts.append(f"{header}\n" + "\n".join(str(x) for x in added))
+        if removed:
+            parts.append(
+                "The following agent types are no longer available:\n"
+                + "\n".join(f"- {t}" for t in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    if att_type == "mcp_instructions_delta":
+        added = att.get("addedBlocks") or []
+        removed = att.get("removedNames") or []
+        parts = []
+        if added:
+            parts.append(
+                "# MCP Server Instructions\n\nThe following MCP "
+                "servers have provided instructions for how to use "
+                "their tools and resources:\n\n"
+                + "\n\n".join(str(x) for x in added)
+            )
+        if removed:
+            parts.append(
+                "The following MCP servers have disconnected. Their "
+                "instructions above no longer apply:\n"
+                + "\n".join(str(x) for x in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    # ------------------------------------------------------------------
+    # FALLBACK: unknown attachment.type — new kinds claude-code added
+    # since we last synced with its source. Render the non-``type`` fields
+    # as JSON so we count SOME tokens rather than silently dropping the
+    # payload, and mark non-compactable so it never surprises anyone by
+    # showing up as user speech in the compacted output. When a new kind
+    # deserves a proper rendering (or a whitelist entry for compaction),
+    # add it explicitly above.
+    # ------------------------------------------------------------------
+    payload = {k: v for k, v in att.items() if k != "type"}
+    if not payload:
+        return None
+    try:
+        rendered = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if not rendered or rendered == "{}":
+        return None
+    return (rendered, False)
+
+
 def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """Turn one JSONL row into a Leaf, or None if the row is metadata.
 
@@ -169,63 +354,29 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """
     t = row.get("type")
 
-    # Special cases BEFORE the SKIP_TYPES check for attachment rows
-    # that DO carry primary content (as opposed to the many transient
-    # attachment kinds that don't — deferred_tools, skill_listing,
-    # task_reminder, IDE state, etc.).
+    # Attachment rows that carry real model-visible content. Rendered
+    # here using the same template strings claude uses in
+    # utils/messages.ts (case dispatch on attachment.type), so
+    # count_tokens reflects roughly what the model actually sees rather
+    # than the compact JSON we happen to store on disk. Attachment kinds
+    # not returned by _render_content_attachment fall through to the
+    # SKIP_TYPES filter below and are dropped (transient markers like
+    # plan_mode_exit, file-history-snapshot, IDE-state pings, etc.).
     if t == "attachment":
         att = row.get("attachment")
         if isinstance(att, dict):
-            att_type = att.get("type")
-
-            # queued_command: a prompt the user typed while the agent
-            # was mid-turn. Takes the queue path instead of the
-            # fresh-prompt path, so it lands as an attachment row
-            # rather than a normal user-role row. Structurally mid-turn
-            # content (shares prior turn's promptId), so no new turn
-            # boundary — Leaf appended to current turn's leaves.
-            if att_type == "queued_command":
-                prompt = att.get("prompt", "") or ""
+            rendered = _render_content_attachment(att)
+            if rendered is not None:
+                text, compactable = rendered
                 uuid = row.get("uuid", "")
                 return Leaf(
                     kind="user_text",
-                    content={"text": prompt},
-                    tokens=count_tokens(prompt),
-                    preview=_preview(prompt, "user"),
+                    content={"text": text},
+                    tokens=count_tokens(text),
+                    preview=_preview(text, "user"),
                     source_uuids=[uuid],
+                    compactable=compactable,
                 )
-
-            # hook_additional_context is a broad container — most
-            # occurrences are transient system context (skill listings,
-            # deferred-tools updates, task reminders, etc. injected via
-            # hooks). But when it carries an inter-agent message (the
-            # multiverse deliver-inbox hook injects a
-            # `<system-reminder>[Multiverse Inter-Agent] …</system-reminder>`
-            # payload), that's the SOLE surviving copy — the inbox file
-            # gets unlinked after successful delivery, so losing this
-            # row means the inter-agent message is gone from history
-            # entirely. Sniff content for the marker; other
-            # hook_additional_context payloads keep going through
-            # SKIP_TYPES below.
-            if att_type == "hook_additional_context":
-                content = att.get("content")
-                if isinstance(content, list):
-                    joined = "\n".join(
-                        c if isinstance(c, str) else str(c) for c in content
-                    )
-                elif isinstance(content, str):
-                    joined = content
-                else:
-                    joined = ""
-                if "[Multiverse Inter-Agent]" in joined:
-                    uuid = row.get("uuid", "")
-                    return Leaf(
-                        kind="user_text",
-                        content={"text": joined},
-                        tokens=count_tokens(joined),
-                        preview=_preview(joined, "user"),
-                        source_uuids=[uuid],
-                    )
 
     if t in SKIP_TYPES or t is None:
         return None
@@ -418,6 +569,34 @@ def _is_user_prompt_row(row: dict[str, Any], last_pid: str | None) -> bool:
             if isinstance(block, dict) and block.get("type") == "text":
                 return True
     return False
+
+
+def filter_compactable(forest: Forest) -> Forest:
+    """Return ``forest`` with non-compactable leaves stripped out of every
+    turn — for consumers on the compaction pipeline that must not surface
+    display-only attachment content as user speech in the compacted
+    output.
+
+    ``parse_session`` returns a forest that includes every leaf the model
+    could see, so ``live_stats``/total-token consumers get accurate
+    dashboard numbers. But some of those leaves — non-IAM
+    ``hook_additional_context``, ``task_reminder``, ``skill_listing``,
+    ``deferred_tools_delta``, ``agent_listing_delta``,
+    ``mcp_instructions_delta``, ``edited_text_file``, and any future
+    attachment kinds we don't explicitly whitelist — are structural
+    context, not user speech. Feeding them into ``render_frontier_as_messages``
+    would render them as user-role text blocks in the compacted JSONL,
+    corrupting the transcript with fake user messages.
+
+    So the compaction pipeline calls this first, and everything
+    downstream (tree building, budget allocation, rendering) operates on
+    the filtered view. Turn structure (user_prompt, turn_id, ordering)
+    is preserved; only ``turn.leaves`` shrinks. Mutates in place and
+    returns the same forest for chainability.
+    """
+    for turn in forest:
+        turn.leaves = [l for l in turn.leaves if l.compactable]
+    return forest
 
 
 def parse_session(path: str) -> Forest:

@@ -287,6 +287,128 @@ def live_stats_cached(claude_uuid: str, cwd: str) -> tuple[int, int]:
     return result
 
 
+def structural_tokens(claude_uuid: str, cwd: str) -> int:
+    """Return the derived "structural" token count for a live session —
+    everything the model sees each turn that ISN'T in the JSONL
+    transcript: system prompt template, tool schemas, memory files,
+    skills, agents, MCP server descriptions.
+
+    Derivation, not measurement. Claude records the exact API-billed
+    input token count (`input_tokens + cache_creation + cache_read`) on
+    every real assistant row's ``message.usage``. The parser gives the
+    transcript-only sum for the same state of the file. The difference
+    is everything the model saw that the parser can't see:
+
+        structural = usage_total - parser_at_snapshot
+
+    Structural is roughly stable for a session (system prompt + tools
+    don't change turn-to-turn), so any single fresh usage snapshot
+    calibrates it. Callers use this + a fresh ``live_stats`` sum to
+    reconstruct the true current context size — matching claude's own
+    ``/clear`` / ``/context`` output to a few tokens.
+
+    Returns 0 when no usable usage exists yet (freshly-compacted
+    session before its first post-compaction API call, or a brand-new
+    session that hasn't hit the API). The two values summed still work
+    as an under-estimate in that case.
+    """
+    live = live_jsonl_path(claude_uuid, cwd)
+    if not live.is_file():
+        return 0
+    # Walk the file, capturing the last real usage snapshot's uuid. We
+    # skip synthetic ``msg_priv`` rows (produced by our own compaction
+    # renderer) — those get ``usage.output_tokens`` stamped now but not
+    # a real input side. Only genuine claude-CLI-written rows count.
+    snapshot_usage: dict | None = None
+    snapshot_uuid: str | None = None
+    try:
+        with live.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                msg = row.get("message", {})
+                mid = msg.get("id", "")
+                if isinstance(mid, str) and mid.startswith("msg_priv"):
+                    continue
+                usage = msg.get("usage")
+                if not (isinstance(usage, dict)
+                        and isinstance(usage.get("input_tokens"), int)):
+                    continue
+                snapshot_usage = usage
+                snapshot_uuid = row.get("uuid")
+    except OSError:
+        return 0
+    if snapshot_usage is None or snapshot_uuid is None:
+        return 0
+    usage_total = (
+        snapshot_usage.get("input_tokens", 0)
+        + (snapshot_usage.get("cache_creation_input_tokens") or 0)
+        + (snapshot_usage.get("cache_read_input_tokens") or 0)
+    )
+    # Compute parser tokens for the same file state UP TO the snapshot's
+    # uuid — a leaf whose source_uuids contains snapshot_uuid marks the
+    # snapshot; sum tokens for everything at-or-before it.
+    from compaction.parser import parse_session  # noqa: E402
+    forest = parse_session(str(live))
+    parser_at_snapshot = 0
+    found = False
+    for turn in forest:
+        if found:
+            break
+        if turn.user_prompt is not None:
+            parser_at_snapshot += turn.user_prompt.tokens
+            if snapshot_uuid in turn.user_prompt.source_uuids:
+                found = True
+                continue
+        for leaf in turn.leaves:
+            parser_at_snapshot += leaf.tokens
+            if snapshot_uuid in leaf.source_uuids:
+                found = True
+                break
+    if not found:
+        # Snapshot uuid isn't on the current chain (a revert-branch
+        # assistant row, or the row is metadata that doesn't map to a
+        # leaf). Fall back to using the full parser total — under-
+        # estimates structural if there was real content past the
+        # snapshot, but never over-estimates.
+        for turn in forest:
+            if turn.user_prompt is not None:
+                parser_at_snapshot += turn.user_prompt.tokens
+            for leaf in turn.leaves:
+                parser_at_snapshot += leaf.tokens
+    return max(0, usage_total - parser_at_snapshot)
+
+
+# mtime-keyed cache of structural_tokens results.
+_STRUCTURAL_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def structural_tokens_cached(claude_uuid: str, cwd: str) -> int:
+    """mtime-cached wrapper around ``structural_tokens``. Structural is
+    stable across turns for a session, but the file mtime changes on
+    every turn, so we recompute — cheap for the dashboard's 1s tick and
+    keeps the value fresh across compaction/resume boundaries."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    try:
+        mtime = live.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(live)
+    cached = _STRUCTURAL_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = structural_tokens(claude_uuid, cwd)
+    _STRUCTURAL_CACHE[key] = (mtime, result)
+    return result
+
+
 def minimum_compacted_tokens(claude_uuid: str, cwd: str) -> tuple[int, int, int]:
     """Return ``(min_tokens, n_cached, n_total)`` — the smallest possible
     live-JSONL cost if every turn compacted to its most-collapsed frontier

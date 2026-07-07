@@ -54,6 +54,8 @@ from .full_jsonl import (
     live_stats,
     live_stats_cached,
     minimum_compacted_tokens,
+    structural_tokens,
+    structural_tokens_cached,
     total_token_count,
     total_turn_count,
 )
@@ -84,6 +86,7 @@ from .spawn_requests import (
     write_resolution,
 )
 from . import web_share
+from . import sb_control
 
 
 STATUS_STYLES = {
@@ -721,6 +724,202 @@ class WebShareScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class SecondBrainScreen(ModalScreen[None]):
+    """Enroll / connect / disconnect this device to the SecondBrain apprentice (the ``S`` key).
+
+    SecondBrain (SB) is a separate, locally-hosted apprentice that watches the user across
+    all their Multiverse workspaces and — within earned trust — acts on their behalf. This
+    device streams perception events to SB over one authenticated WebSocket, dialing *out*
+    (SB is behind NAT). The connector is device-level and host-aware singleton — it survives
+    this monitor quitting, so SB keeps perceiving.
+
+    One form serves both flows. Enrollment fields (pairing code + fingerprint) are needed
+    only the first time (or to re-enroll / re-grant); a plain reconnect ignores them.
+
+      Enter  — enroll+connect if this device isn't enrolled, else connect
+      e      — (re-)enroll using the form (needs pairing code + fingerprint)
+      d      — disconnect (stop the connector daemon)
+      Esc    — close (the daemon keeps running)
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("enter", "primary", "Enroll/Connect"),
+        Binding("e", "reenroll", "Re-enroll"),
+        Binding("d", "disconnect", "Disconnect"),
+    ]
+
+    def __init__(self, cwd: str) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        import socket as _socket
+
+        st = sb_control.status()
+        yield Vertical(
+            Static("[bold]SecondBrain[/] — connect this device to your apprentice", id="sb-title"),
+            Static("", id="sb-status"),
+            VerticalScroll(
+                Static("[dim]Endpoint (SB base URL — wss:// through the tunnel, or "
+                       "ws://127.0.0.1:8765 same-box):[/]"),
+                Input(value=st.get("base_url", ""), id="sb-url"),
+                Static("[dim]— Enrollment only (first time / re-grant) —[/]"),
+                Static("[dim]Pairing code (from `sb-pair` on the SB host):[/]"),
+                Input(placeholder="XXXX-XXXX-XXXX-XXXX", id="sb-code"),
+                Static("[dim]SB server fingerprint (pin, from `sb-pair`):[/]"),
+                Input(placeholder="XXXX-XXXX-XXXX-XXXX", id="sb-fingerprint"),
+                Static("[dim]Device name:[/]"),
+                Input(value=_socket.gethostname(), id="sb-name"),
+                Static("[dim]Workspaces to expose (comma-separated abs paths):[/]"),
+                Input(value=self.cwd, id="sb-workspaces"),
+                Static("[dim]— Cloudflare Access service token (wss:// only; blank = keep/none) —[/]"),
+                Input(value=sb_control.get_cf_client_id(), placeholder="CF-Access-Client-Id",
+                      id="sb-cf-id"),
+                Input(placeholder="CF-Access-Client-Secret (leave blank to keep stored)",
+                      password=True, id="sb-cf-secret"),
+                id="sb-form",
+            ),
+            Static("", id="sb-hint"),
+            id="sb-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self._refresh_status()
+        self.query_one("#sb-url", Input).focus()
+
+    def _refresh_status(self) -> None:
+        st = sb_control.status()
+        state = st.get("state", "stopped")
+        colors = {
+            "connected": "green", "connecting": "cyan", "reconnecting": "yellow",
+            "locked": "yellow", "stopped": "dim", "unenrolled": "red", "error": "red",
+        }
+        color = colors.get(state, "white")
+        lines = [f"Status: [{color}]{state}[/]"]
+        if st.get("detail"):
+            lines[0] += f"  [dim]({st['detail']})[/]"
+        if st.get("enrolled"):
+            granted = st.get("granted_workspaces", [])
+            here = "[green]✓ this workspace exposed[/]" if self.cwd in granted else (
+                "[yellow]this workspace not yet granted[/]")
+            lines.append(
+                f"Device: [bold]{st.get('device_id', '?')}[/] · "
+                f"{len(granted)} workspace(s) granted · {here}"
+            )
+            lines.append(
+                f"CF token: {'[green]stored[/]' if st.get('has_cf_creds') else '[dim]none[/]'}"
+            )
+        else:
+            lines.append("[dim]Not enrolled yet — fill the form and press Enter to enroll.[/]")
+        self.query_one("#sb-status", Static).update("\n".join(lines))
+
+        running = st.get("running")
+        if running:
+            hint = "[b]d[/] disconnect · [b]e[/] re-enroll · [b]Esc[/] close (daemon keeps running)"
+        elif st.get("enrolled"):
+            hint = "[b]Enter[/] connect · [b]e[/] re-enroll · [b]Esc[/] close"
+        else:
+            hint = "[b]Enter[/] enroll & connect · [b]Esc[/] cancel"
+        self.query_one("#sb-hint", Static).update(hint)
+
+    # ---- field helpers -------------------------------------------------------------
+
+    def _val(self, wid: str) -> str:
+        return self.query_one(f"#sb-{wid}", Input).value.strip()
+
+    def _cf_from_fields(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return (client_id, client_secret, error). Both-or-neither; blank => keep existing."""
+        cid, csecret = self._val("cf-id"), self.query_one("#sb-cf-secret", Input).value
+        if not cid and not csecret:
+            return None, None, None
+        if cid and csecret:
+            return cid, csecret, None
+        return None, None, "Enter BOTH CF Access fields, or leave both blank."
+
+    # ---- actions -------------------------------------------------------------------
+
+    def action_primary(self) -> None:
+        if self._busy:
+            return
+        st = sb_control.status()
+        if st.get("running"):
+            self.notify("Already connected — press d to disconnect.")
+            return
+        if st.get("enrolled"):
+            self._start_worker("connect")
+        else:
+            self._start_worker("enroll")
+
+    def action_reenroll(self) -> None:
+        if not self._busy:
+            self._start_worker("enroll")
+
+    def action_disconnect(self) -> None:
+        if not self._busy:
+            self._start_worker("disconnect")
+
+    def _start_worker(self, op: str) -> None:
+        url = self._val("url")
+        if op in ("connect", "enroll") and not url:
+            self._set_error("Endpoint URL is required.")
+            return
+        cid, csecret, cf_err = self._cf_from_fields()
+        if cf_err:
+            self._set_error(cf_err)
+            return
+        code = fingerprint = name = ""
+        workspaces: list[str] = []
+        if op == "enroll":
+            code, fingerprint = self._val("code"), self._val("fingerprint")
+            if not code or not fingerprint:
+                self._set_error("Pairing code and fingerprint are required to enroll.")
+                return
+            name = self._val("name") or ""
+            workspaces = [w.strip() for w in self._val("workspaces").replace(",", " ").split()]
+        self._busy = True
+        self.query_one("#sb-hint", Static).update("[cyan]working… (this can take a few seconds)[/]")
+        self._run(op, url, code, fingerprint, name, workspaces, cid, csecret)
+
+    @work(thread=True, group="secondbrain")
+    def _run(
+        self, op: str, url: str, code: str, fingerprint: str, name: str,
+        workspaces: list, cid: Optional[str], csecret: Optional[str],
+    ) -> None:
+        err: Optional[str] = None
+        try:
+            if cid and csecret:
+                sb_control.save_cf_creds(cid, csecret)
+            if op == "enroll":
+                sb_control.enroll(
+                    base_url=url, code=code, fingerprint=fingerprint,
+                    name=name, want=workspaces,
+                )
+                sb_control.start(url)
+            elif op == "connect":
+                sb_control.start(url)
+            elif op == "disconnect":
+                sb_control.stop()
+        except Exception as exc:  # surface enroll/connect failures to the panel
+            err = str(exc)
+        self.app.call_from_thread(self._after, err)
+
+    def _after(self, err: Optional[str]) -> None:
+        self._busy = False
+        if err:
+            self._set_error(err)
+            return
+        self._refresh_status()
+
+    def _set_error(self, msg: str) -> None:
+        self.query_one("#sb-hint", Static).update(f"[red]{msg}[/]")
+
+    def action_close(self) -> None:
+        if not self._busy:
+            self.dismiss(None)
+
+
 _SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 
@@ -807,6 +1006,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         full_turns: int = 0,
         live_tokens: int = 0,
         live_turns: int = 0,
+        structural_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.claude_uuid = claude_uuid
@@ -822,6 +1022,14 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.full_turns = full_turns
         self.live_tokens = live_tokens
         self.live_turns = live_turns
+        # Structural tokens — system prompt, tool schemas, memory files,
+        # skills, agents, MCP server definitions. Derived from the last
+        # recorded API call's usage delta (see full_jsonl.structural_tokens).
+        # Session-wide fixed cost, non-compactable: rolls into
+        # ``input_floor`` alongside user-prompt text and images so the
+        # scheduler allocates the OUTPUT budget against a realistic
+        # ceiling.
+        self.structural_tokens = structural_tokens
         self._scheduler = "proportional"
         self._k = self._DEFAULT_K
         self._ratio = self._DEFAULT_RATIO
@@ -863,6 +1071,19 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             prompt_line += (
                 f"  ·  images {image_floor:,}t across {n_img_turns} "
                 f"turn(s) (or ~{marker_floor:,}t if dropped)"
+            )
+        # Structural = system prompt + tool schemas + memory files +
+        # skills + agents + MCP definitions. Not in the JSONL but present
+        # in every API request the model actually sends, so it's part of
+        # the always-kept input floor — the scheduler's OUTPUT budget is
+        # what's left after reserving it. Grouped visually with the other
+        # kept-verbatim sections. Only shown when > 0 (a freshly-
+        # compacted session has no post-compact API call yet, so we can't
+        # derive it — display collapses to old-behavior text-and-images
+        # in that case).
+        if self.structural_tokens:
+            prompt_line += (
+                f"  ·  system prompt ~{self.structural_tokens:,}t"
             )
         prompt_line += "[/]"
 
@@ -1030,13 +1251,16 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         except (ValueError, AttributeError):
             return self._DEFAULT_RATIO
 
-    def _compute_input_floor(self) -> tuple[int, int, int]:
-        """Return ``(input_floor, text_floor, image_floor)``.
+    def _compute_input_floor(self) -> tuple[int, int, int, int]:
+        """Return ``(input_floor, text_floor, image_floor, structural_floor)``.
 
-        ``input_floor`` is the total non-compactable input cost — text
-        (always kept) plus either full image tokens (if the checkbox
-        is on) or one omission marker per image-bearing turn (if off).
-        The scheduler operates on ``total_budget − input_floor``.
+        ``input_floor`` is the total non-compactable input cost:
+        user-prompt text (always kept) + user-prompt images (verbatim
+        or one omission marker per image-bearing turn, depending on the
+        checkbox) + the session's structural tokens (system prompt,
+        tools, memory, skills, agents, MCP definitions — never in the
+        JSONL but always in every API request). The scheduler operates
+        on ``total_budget − input_floor``.
         """
         text_floor = sum(
             text for _, _, text, _, _ in self.forest_stats
@@ -1051,7 +1275,13 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 for _, _, _, img, _ in self.forest_stats
                 if img > 0
             )
-        return text_floor + image_floor, text_floor, image_floor
+        structural_floor = self.structural_tokens
+        return (
+            text_floor + image_floor + structural_floor,
+            text_floor,
+            image_floor,
+            structural_floor,
+        )
 
     def _compute_allocation(self) -> list[int]:
         """Per-turn OUTPUT (assistant) allocation from the scheduler,
@@ -1063,7 +1293,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             tid: leaves for tid, leaves, _, _, _ in self.forest_stats
         }
         total_budget = self._current_budget()
-        input_floor, _, _ = self._compute_input_floor()
+        input_floor, _, _, _ = self._compute_input_floor()
         budget = max(0, total_budget - input_floor)
 
         if self._scheduler == "proportional":
@@ -1127,7 +1357,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         n = len(self.forest_stats)
         if n == 0:
             return 0
-        input_floor, _, _ = self._compute_input_floor()
+        input_floor, _, _, _ = self._compute_input_floor()
         outputs = [min_tok for _, _, _, _, min_tok in self.forest_stats]
         if self._scheduler == "last_k_raw":
             k_eff = min(self._current_k(), n)
@@ -1144,7 +1374,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
 
         budget = self._current_budget()
         alloc = self._compute_allocation()  # per-turn OUTPUT allocation
-        input_floor, text_floor, image_floor = self._compute_input_floor()
+        input_floor, text_floor, image_floor, structural_floor = self._compute_input_floor()
 
         # Per-turn OUTPUT projection is bounded on both ends:
         # - lower bound: root.tokens (expand_to_budget always keeps
@@ -1882,6 +2112,7 @@ class CompactScreen(ModalScreen[None]):
             # full / live context visible instead of dropping it when
             # we transition from the input phase.
             live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
+            struct_toks = structural_tokens(self.claude_uuid, self.cwd)
             picker = ChooseSchedulerScreen(
                 claude_uuid=self.claude_uuid,
                 cwd=self.cwd,
@@ -1892,6 +2123,7 @@ class CompactScreen(ModalScreen[None]):
                 full_turns=self.total_turns,
                 live_tokens=live_toks,
                 live_turns=live_turns,
+                structural_tokens=struct_toks,
             )
             self.app.push_screen(picker, self._on_config_chosen)
             return
@@ -2253,6 +2485,29 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #sb-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #sb-title {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #sb-status {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #sb-form {
+        height: 1fr;
+    }
+    #sb-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     #spawn-dialog {
         width: 100%;
         height: 100%;
@@ -2381,6 +2636,7 @@ class MonitorApp(App):
         Binding("a", "ask_all", "Ask all"),
         Binding("i", "view_inbox", "View inbox"),
         Binding("w", "share_web", "Web share"),
+        Binding("S", "secondbrain", "SecondBrain"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
         Binding("r", "refresh", "Refresh"),
@@ -2594,8 +2850,15 @@ class MonitorApp(App):
             else:
                 build_cell = "[dim]off[/]"
             if e.claude_uuid:
+                # Displayed = transcript tokens + structural (derived
+                # from the last recorded API call's usage). Matches
+                # claude's own /clear / /context total to a few tokens.
+                # Falls back to just the transcript number when
+                # structural isn't measurable yet (freshly-compacted
+                # session before its first API call).
                 live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
-                tokens_cell = f"{live_toks:,}"
+                struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
+                tokens_cell = f"{live_toks + struct_toks:,}"
             else:
                 tokens_cell = "[dim]-[/]"
             preview = e.preview or "[dim](empty)[/]"
@@ -2827,6 +3090,19 @@ class MonitorApp(App):
             self.refresh_sessions()
 
         self.push_screen(WebShareScreen(self.monitor_cwd), _on_close)
+
+    def action_secondbrain(self) -> None:
+        """Enroll / connect / disconnect this device to SecondBrain (the `S` key).
+
+        Opens a panel to authenticate this device to the SecondBrain apprentice and
+        bring up (or tear down) the connector daemon that streams perception events to
+        it. Device-level (not row-level), so selection doesn't matter.
+        """
+
+        def _on_close(_: None) -> None:
+            self.refresh_sessions()
+
+        self.push_screen(SecondBrainScreen(self.monitor_cwd), _on_close)
 
     def action_kill(self) -> None:
         e = self._current_entry()

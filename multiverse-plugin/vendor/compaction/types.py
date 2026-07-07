@@ -58,6 +58,18 @@ class Leaf:
     # are dropped — they're in the compactable region and their information is
     # folded into the summary instead).
     images: list[dict] = field(default_factory=list)
+    # True (default) means this leaf goes through the normal compaction
+    # pipeline — considered for merging and preserved (or summarized) in
+    # the compacted JSONL. False means it's included in parser totals
+    # (for accurate display / structural-token derivation) but filtered
+    # out before tree building. Used for attachment kinds that carry
+    # ephemeral session-scope context — task_reminder / skill_listing /
+    # deferred_tools_delta / agent_listing_delta / mcp_instructions_delta
+    # (all regenerated at session start), edited_text_file (a historical
+    # snapshot, not user speech), non-IAM hook_additional_context — that
+    # would misrepresent themselves as user messages if compacted through
+    # the render_frontier_as_messages user-role text path.
+    compactable: bool = True
 
 
 @dataclass

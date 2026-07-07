@@ -580,12 +580,19 @@ class CompactRunner:
             allocate_budget,
             proportional,
         )
-        from compaction.parser import parse_session  # noqa: E402
+        from compaction.parser import filter_compactable, parse_session  # noqa: E402
         from compaction.priv_session import (  # noqa: E402
             compact_forest_to_session_jsonl,
         )
 
-        forest = parse_session(str(full))
+        # Strip display-only leaves (non-whitelisted attachments — task
+        # reminders, skill listings, tool/agent/MCP deltas, file-edit
+        # snapshots, misc hook context, etc.) BEFORE any downstream
+        # step sees the forest. Leaves' contribution to display totals
+        # is already booked into live_stats via the unfiltered parser
+        # output; the compaction pipeline just shouldn't be tricked
+        # into rendering them as user-role text blocks in the output.
+        forest = filter_compactable(parse_session(str(full)))
         if not forest:
             raise RuntimeError("forest is empty after parse_session")
 
