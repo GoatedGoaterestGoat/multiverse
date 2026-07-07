@@ -296,31 +296,46 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
     Derivation, not measurement. Claude records the exact API-billed
     input token count (`input_tokens + cache_creation + cache_read`) on
     every real assistant row's ``message.usage``. The parser gives the
-    transcript-only sum for the same state of the file. The difference
-    is everything the model saw that the parser can't see:
+    transcript-only sum for the same file state. The difference is
+    everything the model saw that the parser can't:
 
         structural = usage_total - parser_at_snapshot
 
-    Structural is roughly stable for a session (system prompt + tools
-    don't change turn-to-turn), so any single fresh usage snapshot
-    calibrates it. Callers use this + a fresh ``live_stats`` sum to
-    reconstruct the true current context size — matching claude's own
-    ``/clear`` / ``/context`` output to a few tokens.
+    THE SNAPSHOT CHOICE MATTERS. Claude's cached microcompaction evicts
+    old tool results from the actual API context via cache-editing —
+    with no marker in the JSONL (the full content stays on disk). Once
+    that kicks in on a long session, the parser (which counts all the
+    on-disk content) over-counts relative to the real context, so
+    ``usage_total - parser`` at the LAST request goes negative. But at
+    an EARLY request — before enough tool results accumulate to trigger
+    eviction — the parser still matches the real context and the
+    derivation is clean.
 
-    Returns 0 when no usable usage exists yet (freshly-compacted
-    session before its first post-compaction API call, or a brand-new
-    session that hasn't hit the API). The two values summed still work
-    as an under-estimate in that case.
+    So we pick the snapshot by whether the session has been compacted
+    (by us — detected via ``msg_priv`` rows):
+
+    - Compacted session → the FIRST post-compaction request. Our
+      compaction reset the transcript and eviction state, and the
+      session was already running so its tools are loaded. This is the
+      reliable low-pressure point, and it's naturally stable until the
+      NEXT compaction rewrites the prefix (auto-refresh — exactly "re-
+      measure on the first turn after a compaction").
+    - Never-compacted session → the LAST request. A short fresh session
+      has no eviction yet, and the last request has the most tools
+      loaded (deferred tools / MCP connect over the first few turns, so
+      the first request would under-count structural).
+
+    Returns 0 when no usable usage exists yet (freshly-compacted before
+    its first post-compaction API call, or a brand-new session).
     """
     live = live_jsonl_path(claude_uuid, cwd)
     if not live.is_file():
         return 0
-    # Walk the file, capturing the last real usage snapshot's uuid. We
-    # skip synthetic ``msg_priv`` rows (produced by our own compaction
-    # renderer) — those get ``usage.output_tokens`` stamped now but not
-    # a real input side. Only genuine claude-CLI-written rows count.
-    snapshot_usage: dict | None = None
-    snapshot_uuid: str | None = None
+    # One pass over raw rows: detect compaction (msg_priv present) and
+    # collect the FIRST and LAST real (non-msg_priv) usage snapshots.
+    has_compaction = False
+    first_snap: tuple[dict, str] | None = None
+    last_snap: tuple[dict, str] | None = None
     try:
         with live.open() as f:
             for line in f:
@@ -336,25 +351,33 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
                 msg = row.get("message", {})
                 mid = msg.get("id", "")
                 if isinstance(mid, str) and mid.startswith("msg_priv"):
+                    has_compaction = True
                     continue
                 usage = msg.get("usage")
                 if not (isinstance(usage, dict)
                         and isinstance(usage.get("input_tokens"), int)):
                     continue
-                snapshot_usage = usage
-                snapshot_uuid = row.get("uuid")
+                uuid = row.get("uuid")
+                if uuid is None:
+                    continue
+                if first_snap is None:
+                    first_snap = (usage, uuid)
+                last_snap = (usage, uuid)
     except OSError:
         return 0
-    if snapshot_usage is None or snapshot_uuid is None:
+
+    snap = first_snap if has_compaction else last_snap
+    if snap is None:
         return 0
+    snapshot_usage, snapshot_uuid = snap
     usage_total = (
         snapshot_usage.get("input_tokens", 0)
         + (snapshot_usage.get("cache_creation_input_tokens") or 0)
         + (snapshot_usage.get("cache_read_input_tokens") or 0)
     )
-    # Compute parser tokens for the same file state UP TO the snapshot's
-    # uuid — a leaf whose source_uuids contains snapshot_uuid marks the
-    # snapshot; sum tokens for everything at-or-before it.
+    # Parser tokens for the same file state UP TO the snapshot's uuid —
+    # a leaf whose source_uuids contains snapshot_uuid marks the point;
+    # sum tokens for everything at-or-before it.
     from compaction.parser import parse_session  # noqa: E402
     forest = parse_session(str(live))
     parser_at_snapshot = 0
@@ -374,10 +397,10 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
                 break
     if not found:
         # Snapshot uuid isn't on the current chain (a revert-branch
-        # assistant row, or the row is metadata that doesn't map to a
-        # leaf). Fall back to using the full parser total — under-
-        # estimates structural if there was real content past the
-        # snapshot, but never over-estimates.
+        # assistant row, or metadata that doesn't map to a leaf). Fall
+        # back to the full parser total — under-estimates structural if
+        # there was real content past the snapshot, never over-estimates.
+        parser_at_snapshot = 0
         for turn in forest:
             if turn.user_prompt is not None:
                 parser_at_snapshot += turn.user_prompt.tokens

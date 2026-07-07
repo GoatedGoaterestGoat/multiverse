@@ -1007,7 +1007,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         claude_uuid: str,
         cwd: str,
         display_name: str,
-        forest_stats: list[tuple[str, int, int, int, int]],
+        forest_stats: list[tuple[str, int, int, int, int, int]],
         default_budget: int,
         full_tokens: int = 0,
         full_turns: int = 0,
@@ -1020,7 +1020,11 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.cwd = cwd
         self.display_name = display_name
         # forest_stats: [(turn_id, leaves, prompt_text, prompt_image,
-        #                 min_tok), ...] in chain order.
+        #                 min_tok, alloc_weight), ...] in chain order.
+        # leaves = full raw leaf sum (bounds, verbatim last_k tail);
+        # alloc_weight = leaves minus evictable tool-result output (the
+        # scheduler's proportional weight, so verbose tool output doesn't
+        # command an outsized budget slice).
         self.forest_stats = forest_stats
         self.default_budget = max(1, default_budget)
         # Kept for the always-visible stats line above the picker so
@@ -1049,13 +1053,13 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
 
     def compose(self) -> ComposeResult:
         text_floor = sum(
-            text for _, _, text, _, _ in self.forest_stats
+            text for _, _, text, _, _, _ in self.forest_stats
         )
         image_floor = sum(
-            img for _, _, _, img, _ in self.forest_stats
+            img for _, _, _, img, _, _ in self.forest_stats
         )
         n_img_turns = sum(
-            1 for _, _, _, img, _ in self.forest_stats if img > 0
+            1 for _, _, _, img, _, _ in self.forest_stats if img > 0
         )
         marker_floor = n_img_turns * self._IMAGE_OMISSION_MARKER_TOKENS
 
@@ -1267,16 +1271,16 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         on ``total_budget − input_floor``.
         """
         text_floor = sum(
-            text for _, _, text, _, _ in self.forest_stats
+            text for _, _, text, _, _, _ in self.forest_stats
         )
         if self._include_images:
             image_floor = sum(
-                img for _, _, _, img, _ in self.forest_stats
+                img for _, _, _, img, _, _ in self.forest_stats
             )
         else:
             image_floor = sum(
                 self._IMAGE_OMISSION_MARKER_TOKENS
-                for _, _, _, img, _ in self.forest_stats
+                for _, _, _, img, _, _ in self.forest_stats
                 if img > 0
             )
         structural_floor = self.structural_tokens
@@ -1292,18 +1296,26 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         in chain order. Budget the scheduler sees is
         ``total_budget − input_floor``.
         """
-        turn_ids = [tid for tid, _, _, _, _ in self.forest_stats]
-        leaves_by_id = {
-            tid: leaves for tid, leaves, _, _, _ in self.forest_stats
+        turn_ids = [tid for tid, _, _, _, _, _ in self.forest_stats]
+        # full_by_id: raw leaf sum (verbatim cost). weight_by_id:
+        # allocation weight, evictable tool output excluded. Mirrors
+        # compactor.py — proportional/recency split by weight; last_k_raw
+        # keeps its verbatim tail at full cost but splits the rest by
+        # weight.
+        full_by_id = {
+            tid: leaves for tid, leaves, _, _, _, _ in self.forest_stats
+        }
+        weight_by_id = {
+            tid: alloc for tid, _, _, _, _, alloc in self.forest_stats
         }
         total_budget = self._current_budget()
         input_floor, _, _, _ = self._compute_input_floor()
         budget = max(0, total_budget - input_floor)
 
         if self._scheduler == "proportional":
-            total = sum(max(1, s) for s in leaves_by_id.values()) or 1
+            total = sum(max(1, s) for s in weight_by_id.values()) or 1
             alloc = {
-                tid: int(budget * max(1, leaves_by_id[tid]) / total)
+                tid: int(budget * max(1, weight_by_id[tid]) / total)
                 for tid in turn_ids
             }
         elif self._scheduler == "recency_boosted":
@@ -1312,14 +1324,14 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             weights = {}
             for k, tid in enumerate(reversed(turn_ids)):
                 multiplier = 1.0 + (ratio - 1.0) / (1.0 + k / hl)
-                weights[tid] = max(1, leaves_by_id[tid]) * multiplier
+                weights[tid] = max(1, weight_by_id[tid]) * multiplier
             total_w = sum(weights.values()) or 1.0
             alloc = {
                 tid: int(budget * weights[tid] / total_w) for tid in turn_ids
             }
         elif self._scheduler == "last_k_raw":
             # Clamp k at the turn count. When k == n, the whole forest
-            # is "verbatim tail": each turn gets its leaves count as
+            # is "verbatim tail": each turn gets its full leaves count as
             # its allocation, bounded and budget-invariant. Without
             # this clamp, k > n fell through to plain proportional-of-
             # budget which grew unboundedly at high budgets and made
@@ -1327,20 +1339,20 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             k = min(max(1, self._current_k()), len(turn_ids))
             last_ids = turn_ids[-k:]
             rest_ids = turn_ids[:-k]  # empty when k == n
-            raw_cost = sum(leaves_by_id[tid] for tid in last_ids)
+            raw_cost = sum(full_by_id[tid] for tid in last_ids)
             if raw_cost >= budget and rest_ids:
-                total = sum(max(1, s) for s in leaves_by_id.values()) or 1
+                total = sum(max(1, s) for s in weight_by_id.values()) or 1
                 alloc = {
-                    tid: int(budget * max(1, leaves_by_id[tid]) / total)
+                    tid: int(budget * max(1, weight_by_id[tid]) / total)
                     for tid in turn_ids
                 }
             else:
                 remaining = max(0, budget - raw_cost)
-                alloc = {tid: leaves_by_id[tid] for tid in last_ids}
+                alloc = {tid: full_by_id[tid] for tid in last_ids}
                 if rest_ids:
-                    rest_total = sum(max(1, leaves_by_id[tid]) for tid in rest_ids) or 1
+                    rest_total = sum(max(1, weight_by_id[tid]) for tid in rest_ids) or 1
                     for tid in rest_ids:
-                        alloc[tid] = int(remaining * max(1, leaves_by_id[tid]) / rest_total)
+                        alloc[tid] = int(remaining * max(1, weight_by_id[tid]) / rest_total)
         else:
             alloc = {tid: 0 for tid in turn_ids}
 
@@ -1362,11 +1374,11 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         if n == 0:
             return 0
         input_floor, _, _, _ = self._compute_input_floor()
-        outputs = [min_tok for _, _, _, _, min_tok in self.forest_stats]
+        outputs = [min_tok for _, _, _, _, min_tok, _ in self.forest_stats]
         if self._scheduler == "last_k_raw":
             k_eff = min(self._current_k(), n)
             for i in range(n - k_eff, n):
-                _, leaves, _, _, _ = self.forest_stats[i]
+                _, leaves, _, _, _, _ = self.forest_stats[i]
                 outputs[i] = leaves
         return input_floor + sum(outputs)
 
@@ -1390,7 +1402,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         output_per_turn: list[int] = []
         breakdowns: list[tuple[int, int, int]] = []  # (text, img_out, out)
         for i, a in enumerate(alloc):
-            tid, leaves, text, img_tok, min_tok = self.forest_stats[i]
+            tid, leaves, text, img_tok, min_tok, _ = self.forest_stats[i]
             if img_tok > 0 and not self._include_images:
                 img_out = self._IMAGE_OMISSION_MARKER_TOKENS
             elif img_tok > 0:
@@ -1422,7 +1434,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         # verbatim images would cost and what we're spending on
         # markers — not the marker cost itself.
         full_image_tokens = sum(
-            img for _, _, _, img, _ in self.forest_stats
+            img for _, _, _, img, _, _ in self.forest_stats
         )
         image_note = ""
         if full_image_tokens > 0 and self._include_images:
@@ -1727,6 +1739,7 @@ class CompactScreen(ModalScreen[None]):
         try:
             from compaction.parser import parse_session  # noqa: E402
             from compaction.compactor import (  # noqa: E402
+                _alloc_weight,
                 _user_prompt_image_tokens,
                 _user_prompt_text_tokens,
             )
@@ -1740,9 +1753,15 @@ class CompactScreen(ModalScreen[None]):
         except Exception:  # noqa: BLE001
             return []
         cache_root = multiverse_dir() / "trees" / self.claude_uuid
-        out: list[tuple[str, int, int, int, int]] = []
+        out: list[tuple[str, int, int, int, int, int]] = []
         for t in forest:
             leaves = sum(l.tokens for l in t.leaves)
+            # Allocation weight excludes evictable tool-result output so
+            # a turn full of long file reads / command output doesn't
+            # command an outsized budget slice (mirrors the scheduler in
+            # compactor.py). Kept as a 6th field; ``leaves`` (full) still
+            # drives display bounds and the verbatim last_k_raw tail.
+            alloc = _alloc_weight(t)
             prompt_text = _user_prompt_text_tokens(t)
             prompt_image = _user_prompt_image_tokens(t)
             min_tok = leaves  # fallback: whole raw leaf sum
@@ -1758,7 +1777,9 @@ class CompactScreen(ModalScreen[None]):
                             min_tok = tok
                 except (OSError, _json.JSONDecodeError):
                     pass
-            out.append((t.turn_id, leaves, prompt_text, prompt_image, min_tok))
+            out.append(
+                (t.turn_id, leaves, prompt_text, prompt_image, min_tok, alloc)
+            )
         return out
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
