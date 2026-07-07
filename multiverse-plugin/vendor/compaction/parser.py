@@ -688,6 +688,71 @@ def _is_user_prompt_row(row: dict[str, Any], last_pid: str | None) -> bool:
     return False
 
 
+def _is_start_hook_iam(row: dict[str, Any]) -> bool:
+    """True if this row is an inter-agent-message hook_additional_context
+    delivered on a start-of-turn hook (``UserPromptSubmit`` or
+    ``SessionStart``).
+
+    Those payloads are structurally injected ALONGSIDE the associated
+    user prompt — UserPromptSubmit fires as the user submits, SessionStart
+    fires as the session resumes right before the next prompt lands.
+    Semantically they belong ON the user_prompt (a verbatim, non-compactable
+    turn separator) rather than as mid-turn assistant-side leaves. We
+    detect them here so ``parse_session`` can merge instead of append.
+
+    ``Stop``-hook IAMs (delivered while the assistant is winding down its
+    response, not tied to a fresh user prompt) and ``queued_command``
+    attachments (mid-turn interjections during an ongoing assistant
+    response) keep their existing behaviour: a fresh mid-turn leaf.
+    """
+    if row.get("type") != "attachment":
+        return False
+    att = row.get("attachment")
+    if not isinstance(att, dict):
+        return False
+    if att.get("type") != "hook_additional_context":
+        return False
+    if att.get("hookEvent") not in ("UserPromptSubmit", "SessionStart"):
+        return False
+    content = att.get("content")
+    if isinstance(content, list):
+        joined = "\n".join(
+            c if isinstance(c, str) else str(c) for c in content
+        )
+    elif isinstance(content, str):
+        joined = content
+    else:
+        return False
+    return "[Multiverse Inter-Agent]" in joined
+
+
+def _merge_iam_into_prompt(prompt: Leaf | None, extra: Leaf) -> Leaf | None:
+    """Mutate ``prompt`` in place to absorb ``extra``'s text + tokens.
+
+    Prepends the IAM content with a blank-line separator ahead of the
+    user's actual prompt text — matches how the model originally saw it
+    (system-reminder injected as additional context BEFORE the user's
+    message reached the model). ``source_uuids`` gains the IAM row's
+    uuid so downstream consumers that key by source uuid still find
+    the IAM content.
+
+    Returns the (possibly-new) prompt. Falls back to just returning
+    ``extra`` if ``prompt`` is None — a session that resumes with only
+    an IAM and no subsequent user prompt shouldn't lose the IAM.
+    """
+    if prompt is None:
+        return extra
+    old_text = prompt.content.get("text", "") or ""
+    new_text = extra.content.get("text", "") or ""
+    prompt.content["text"] = (
+        f"{new_text}\n\n{old_text}" if old_text else new_text
+    )
+    prompt.tokens += extra.tokens
+    if extra.source_uuids:
+        prompt.source_uuids.extend(extra.source_uuids)
+    return prompt
+
+
 def filter_compactable(forest: Forest) -> Forest:
     """Return ``forest`` with non-compactable leaves stripped out of every
     turn — for consumers on the compaction pipeline that must not surface
@@ -745,6 +810,10 @@ def parse_session(
     turns: Forest = []
     current: Turn | None = None
     pending_orphans: list[Leaf] = []
+    # SessionStart-hook IAMs arrive in the file BEFORE the next user
+    # prompt row, so we can't merge in-place at scan time — stash and
+    # drain into the next Turn's user_prompt when it's created.
+    pending_start_iams: list[Leaf] = []
     last_pid: str | None = None
 
     for row in chain_rows:
@@ -770,6 +839,14 @@ def parse_session(
             # The user prompt is hoisted out of `leaves` — it acts as a
             # verbatim separator and never enters the compactable region.
             current = Turn(turn_id=turn_id, user_prompt=leaf, leaves=[])
+            # Drain any SessionStart-hook IAMs that arrived before this
+            # prompt — they were injected as additional context WITH the
+            # user's next prompt, so they belong ON this prompt.
+            for iam in pending_start_iams:
+                current.user_prompt = _merge_iam_into_prompt(
+                    current.user_prompt, iam
+                )
+            pending_start_iams = []
             # Drain any pre-first-prompt orphans into this turn's leaves
             if pending_orphans:
                 current.leaves.extend(pending_orphans)
@@ -779,6 +856,25 @@ def parse_session(
         # Non-prompt row
         if leaf is None:
             continue
+
+        # Start-of-turn IAM merges into the user_prompt rather than
+        # landing as a mid-turn leaf. UserPromptSubmit fires AFTER its
+        # prompt row (current.user_prompt is set) — merge now.
+        # SessionStart fires BEFORE the next prompt row (current is
+        # either None or the previous turn) — stash for the next
+        # user_prompt drain above.
+        if _is_start_hook_iam(row):
+            hook_event = row["attachment"].get("hookEvent")
+            if (
+                hook_event == "UserPromptSubmit"
+                and current is not None
+                and current.user_prompt is not None
+            ):
+                _merge_iam_into_prompt(current.user_prompt, leaf)
+            else:
+                pending_start_iams.append(leaf)
+            continue
+
         if current is None:
             # Content before any user prompt; stash and attach to first turn
             pending_orphans.append(leaf)
