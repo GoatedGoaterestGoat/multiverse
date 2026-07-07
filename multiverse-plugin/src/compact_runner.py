@@ -373,12 +373,12 @@ class CompactRunner:
 
     def _count_total_turns(self, full: Path) -> int:
         # Lazy import; vendor is on sys.path.
-        from compaction.parser import parse_session  # noqa: E402
-        # strip_command_turns_=True: match what the compaction pipeline
-        # in the main run() path uses, so the turn count here reflects
-        # the turns that will actually get built into trees / rendered
-        # into the compacted output — not the full display-oriented count.
-        forest = parse_session(str(full), strip_command_turns_=True)
+        from compaction.parser import compaction_forest  # noqa: E402
+        # The canonical compaction view (command turns stripped,
+        # non-compactable leaves filtered, empty turns merged) so the
+        # turn count / turn_ids here match exactly what the tree builder
+        # and the main run() path operate on.
+        forest = compaction_forest(str(full))
         # Cache turn_ids for _count_cached_trees's chain filter.
         self._chain_turn_ids = {t.turn_id for t in forest}
         return len(forest)
@@ -584,7 +584,11 @@ class CompactRunner:
             allocate_budget,
             proportional,
         )
-        from compaction.parser import filter_compactable, parse_session  # noqa: E402
+        from compaction.parser import (  # noqa: E402
+            filter_compactable,
+            merge_empty_turns,
+            parse_session,
+        )
         from compaction.priv_session import (  # noqa: E402
             compact_forest_to_session_jsonl,
         )
@@ -615,7 +619,9 @@ class CompactRunner:
             for leaf in turn.leaves:
                 if not leaf.compactable:
                     noncompactable_uuids.update(leaf.source_uuids)
-        forest = filter_compactable(raw_forest)
+        # filter non-compactable leaves, then merge any now-empty turns
+        # forward so the compacted output has no stranded empty turns.
+        forest = merge_empty_turns(filter_compactable(raw_forest))
         if not forest:
             raise RuntimeError("forest is empty after parse_session")
 
