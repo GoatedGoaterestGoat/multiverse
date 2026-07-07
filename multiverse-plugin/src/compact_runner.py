@@ -586,7 +586,6 @@ class CompactRunner:
         )
         from compaction.parser import (  # noqa: E402
             filter_compactable,
-            merge_empty_turns,
             parse_session,
         )
         from compaction.priv_session import (  # noqa: E402
@@ -608,26 +607,16 @@ class CompactRunner:
         # Both categories' tokens are already booked into live_stats
         # (unfiltered parser output) for accurate dashboard display;
         # they get netted out of structural via the derivation delta.
-        raw_forest = parse_session(str(full), strip_command_turns_=True)
-        # Capture the source_uuids of the leaves filter_compactable will
-        # drop — used below to detect stale cached trees that were built
-        # BEFORE the whitelist filter existed (they still contain these
-        # non-compactable leaves baked in, and would leak them into the
-        # compacted output as user-role text blocks).
-        noncompactable_uuids: set[str] = set()
-        for turn in raw_forest:
-            for leaf in turn.leaves:
-                if not leaf.compactable:
-                    noncompactable_uuids.update(leaf.source_uuids)
-        # filter non-compactable leaves, then merge any now-empty turns
-        # forward so the compacted output has no stranded empty turns.
-        forest = merge_empty_turns(filter_compactable(raw_forest))
+        forest = filter_compactable(
+            parse_session(str(full), strip_command_turns_=True)
+        )
         if not forest:
             raise RuntimeError("forest is empty after parse_session")
 
-        n_with, n_without = self._attach_trees_from_cache(
-            forest, noncompactable_uuids
-        )
+        # _attach_trees_from_cache rejects any cached tree that references
+        # content no longer a leaf of its turn (filtered away, or merged
+        # into the user_prompt), so stale pre-fix trees self-heal.
+        n_with, n_without = self._attach_trees_from_cache(forest)
         on_log(
             f"Loaded trees: {n_with} attached from cache, {n_without} "
             f"will fall back to greedy-from-start.",
@@ -737,9 +726,7 @@ class CompactRunner:
         )
         return n_rows
 
-    def _attach_trees_from_cache(
-        self, forest, noncompactable_uuids: Optional[set] = None
-    ) -> tuple[int, int]:
+    def _attach_trees_from_cache(self, forest) -> tuple[int, int]:
         """Walk the forest, attach turn.root from cache when available.
 
         Returns (n_with_tree, n_without_tree). Turns without a cached
@@ -751,19 +738,24 @@ class CompactRunner:
         placeholder summary is itself an angle-bracket-wrapped string
         that gets stripped by claude code's markdown renderer.
 
-        ``noncompactable_uuids`` — source_uuids of leaves the current
-        compaction view filters out. A cached tree that references any
-        of them was built BEFORE the whitelist filter existed and still
-        has non-compactable content (edited_text_file, task_reminder,
-        etc.) baked in; using it would leak that content into the
-        compacted output as a user-role text block. Such a tree is
-        rejected (deleted so it rebuilds clean, treated as no-tree for
-        this run — the turn falls back to greedy-from-filtered-leaves,
-        which is correct because the bad leaves are already gone from
-        turn.leaves).
+        STALE-TREE REJECTION. A cached tree is built over exactly one
+        turn's leaves. If the tree references (via leaf source_uuids)
+        any uuid that is NOT a leaf in the CURRENT compaction-view turn,
+        the tree predates a parser change and would leak that content
+        into the compacted output. This catches every such drift with
+        one subset check:
+          - a leaf the whitelist filter now drops (edited_text_file,
+            task_reminder, …) — the tree still has it;
+          - an inter-agent-message hook that the parser now MERGES into
+            the user_prompt instead of leaving as a leaf — the tree
+            still has it as a leaf, so it renders both in the merged
+            prompt AND again as a stray user-role message.
+        Any tree whose leaf uuids aren't a subset of the current turn's
+        leaf uuids is deleted (forces a clean rebuild) and treated as
+        no-tree for this run; the turn falls back to
+        greedy-from-current-leaves, which is correct.
         """
         import json  # local import — only this method needs it
-        bad_uuids = noncompactable_uuids or set()
         n_with = n_without = 0
         for turn in forest:
             path = self.paths.cache_root / f"{turn.turn_id}.json"
@@ -782,8 +774,12 @@ class CompactRunner:
             except (KeyError, TypeError):
                 n_without += 1
                 continue
-            # Reject stale trees that still carry now-filtered content.
-            if bad_uuids and (_tree_source_uuids(root) & bad_uuids):
+            # Reject a tree that references content no longer a leaf of
+            # this turn (filtered away, or merged into the user_prompt).
+            current_leaf_uuids = {
+                su for leaf in turn.leaves for su in leaf.source_uuids
+            }
+            if _tree_source_uuids(root) - current_leaf_uuids:
                 try:
                     path.unlink()  # force a clean rebuild next time
                 except OSError:

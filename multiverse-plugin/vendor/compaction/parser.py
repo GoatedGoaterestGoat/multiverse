@@ -823,94 +823,18 @@ def filter_compactable(forest: Forest) -> Forest:
     return forest
 
 
-def _merge_user_prompts(prompts: list[Leaf]) -> Leaf | None:
-    """Combine several user-prompt leaves into one (text joined by blank
-    lines; images and source_uuids concatenated; tokens summed)."""
-    prompts = [p for p in prompts if p is not None]
-    if not prompts:
-        return None
-    if len(prompts) == 1:
-        return prompts[0]
-    texts = [(p.content or {}).get("text", "") or "" for p in prompts]
-    combined = "\n\n".join(t for t in texts if t)
-    images: list[dict] = []
-    src: list[str] = []
-    tokens = 0
-    for p in prompts:
-        images.extend(p.images or [])
-        src.extend(p.source_uuids or [])
-        tokens += p.tokens
-    return Leaf(
-        kind="user_text",
-        content={"text": combined},
-        tokens=tokens,
-        preview=_preview(combined, "user"),
-        source_uuids=src,
-        images=images,
-    )
-
-
-def merge_empty_turns(forest: Forest) -> Forest:
-    """Fold turns with no assistant leaves (empty output) FORWARD into the
-    next turn, so the compacted transcript never contains a user prompt
-    stranded in its own turn with an empty / placeholder response.
-
-    A user message immediately followed by another user message before
-    any assistant output parses as a 0-leaf turn. This happens for
-    inter-agent-message deliveries, ``local-command-caveat`` notices, and
-    hook injections (e.g. a "check your inbox" wake) that land right
-    before the real prompt. Claude sends both user messages and then
-    responds once, so semantically it's ONE turn — we merge the empty
-    turn's user_prompt into the following turn's user_prompt (text joined,
-    images / source_uuids combined). The following turn keeps its
-    ``turn_id``, ``leaves`` and cached tree (only ``user_prompt`` changes,
-    which is never part of the tree), so nothing invalidates. Consecutive
-    empties chain forward into the same following turn.
-
-    A trailing empty turn (no following turn to merge into) is left
-    unchanged — it's typically the in-progress current turn.
-
-    Must run AFTER ``filter_compactable`` (which can itself turn a turn
-    into a 0-leaf one by removing all its non-compactable leaves).
-    Returns a new forest list; the surviving Turn objects are the
-    originals (mutated user_prompt), so ``turn_id`` / tree lookups still
-    resolve.
-    """
-    if not forest:
-        return forest
-    out: Forest = []
-    pending: list[Leaf] = []          # user_prompts of empty turns awaiting a target
-    pending_turns: list[Turn] = []    # the original empty Turn objects (trailing case)
-    for turn in forest:
-        if not turn.leaves:
-            if turn.user_prompt is not None:
-                pending.append(turn.user_prompt)
-            pending_turns.append(turn)
-            continue
-        if pending:
-            merged = pending + (
-                [turn.user_prompt] if turn.user_prompt is not None else []
-            )
-            turn.user_prompt = _merge_user_prompts(merged)
-        pending = []
-        pending_turns = []
-        out.append(turn)
-    # Trailing empties with no real turn to absorb them: keep as-is.
-    out.extend(pending_turns)
-    return out
-
-
 def compaction_forest(path: str) -> Forest:
-    """The canonical forest the compaction pipeline operates on:
-    command turns stripped, non-compactable attachment leaves filtered,
-    empty-output turns merged forward. EVERY compaction call site (tree
-    builder worker + CLI, scheduler-preview stats, the compaction runner)
-    must build the forest this way so the turn list / turn_idx / turn_ids
-    stay identical across them.
+    """The canonical forest the compaction pipeline operates on: command
+    turns stripped, non-compactable attachment leaves filtered. EVERY
+    compaction call site (tree builder worker + CLI, scheduler-preview
+    stats, the compaction runner) must build the forest this way so the
+    turn list / turn_idx / turn_ids stay identical across them.
+
+    (Inter-agent-message hooks are folded into the user_prompt inside
+    ``parse_session`` itself — see ``_merge_iam_into_prompt`` — so no
+    separate empty-turn merge is needed or wanted here.)
     """
-    return merge_empty_turns(
-        filter_compactable(parse_session(path, strip_command_turns_=True))
-    )
+    return filter_compactable(parse_session(path, strip_command_turns_=True))
 
 
 def parse_session(
