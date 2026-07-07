@@ -6,6 +6,8 @@ requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
     "textual>=0.80",
+    "websockets>=13",
+    "cryptography>=42",
 ]
 
 [project.scripts]

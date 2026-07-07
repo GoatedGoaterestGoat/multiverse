@@ -1,0 +1,964 @@
+"""Multiverse-side SecondBrain connector — the transport/auth *client* of the seam.
+
+This is the Multiverse half of the SecondBrain seam (``SecondBrain/docs/INFRA.md``).
+SecondBrain (SB) is a separate, locally-hosted "apprentice" that watches the user
+across all their Multiverse workspaces and — within earned trust — acts on their
+behalf. The connector is how a Multiverse remote becomes *observable and actionable*
+to SB over one authenticated channel:
+
+* **This machine is a "device."** One Ed25519 device keypair identifies it; the
+  ``device_id`` (self-certifying, ``base32(sha256(pubkey))[:16]``) is both the auth
+  identity and the namespacing key. A device exposes one or more workspaces (cwds).
+* **The connector dials OUT.** SB is a server (behind NAT, on the user's Mac); the
+  connector always connects out to ``wss://…`` — so a Multiverse remote on a GPU
+  cluster only needs outbound internet. One long-lived WebSocket per device.
+* **One socket per device.** SB's host *supersedes* a second connect from the same
+  device, so the connector runs as a **host-aware singleton daemon** (lockfile under
+  ``~/.multiverse/secondbrain/``) — any monitor can start/stop it; it survives the
+  monitor quitting so SB keeps perceiving.
+
+What is COMPLETE here: device keygen, the one-time ``/enroll`` flow, the pinned-server
+handshake, the X25519->HKDF->ChaCha20-Poly1305 sealed channel, the durable
+``seq``/``ack`` replay buffer, action idempotency, and ``lock``/``unlock`` park —
+the transport/auth plumbing, adapted from ``SecondBrain/connector/sb_connector.py``
+against the byte-identical vendored ``secondbrain.protocol`` + ``secondbrain.auth``.
+
+What is STUBBED (the next phase — the "binding"): translating Multiverse's file
+substrate (hooks, ``~/.multiverse/`` status/inbox/spawn/full_jsonls) into perception
+*events*, and executing inbound *actions*/*queries* against Multiverse. Those handlers
+return a clear ``not_implemented`` result for now; a single real event —
+``workspace.connected`` — is emitted on connect as the end-to-end liveness proof.
+
+CLI::
+
+    python -m src.sb_connector enroll   # one-time device enrollment (widget-driven)
+    python -m src.sb_connector stream    # run the long-lived connector daemon
+    python -m src.sb_connector status    # print the current status JSON
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import itertools
+import json
+import logging
+import os
+import signal
+import socket
+import sys
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from pathlib import Path
+
+# Make the vendored SecondBrain contract importable (same pattern the plugin uses
+# for vendor/compaction): vendor/ on sys.path, then import the top-level package.
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+_VENDOR = str(_PLUGIN_ROOT / "vendor")
+if _VENDOR not in sys.path:
+    sys.path.insert(0, _VENDOR)
+
+from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: E402
+
+from secondbrain import auth  # noqa: E402  (vendored)
+from secondbrain import protocol as p  # noqa: E402  (vendored)
+
+from .paths import multiverse_dir  # noqa: E402
+
+log = logging.getLogger("sb_connector")
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def current_host() -> str:
+    """Host identity for the singleton lock (shared-MULTIVERSE_ROOT deployments)."""
+    return socket.gethostname()
+
+
+# --------------------------------------------------------------------------------------
+# On-disk layout under ~/.multiverse/secondbrain/  (outside the git repo)
+# --------------------------------------------------------------------------------------
+
+
+def sb_dir() -> Path:
+    """The connector's state directory. Created lazily; 0700."""
+    d = multiverse_dir() / "secondbrain"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    return d
+
+
+def device_key_path() -> Path:
+    return sb_dir() / "device.key"
+
+
+def cf_creds_path() -> Path:
+    return sb_dir() / "cf_access.json"
+
+
+def config_path() -> Path:
+    return sb_dir() / "config.json"
+
+
+def status_path() -> Path:
+    return sb_dir() / "status.json"
+
+
+def lock_path() -> Path:
+    return sb_dir() / "connector.lock"
+
+
+def log_path() -> Path:
+    return sb_dir() / "daemon.log"
+
+
+# Default endpoint: SB hosted on the user's Mac, reached over the reused Cloudflare
+# named tunnel. Overridable per-remote (the widget / SB_BASE_URL) — e.g. a same-box
+# dev run points at ws://127.0.0.1:8765.
+DEFAULT_BASE_URL = "wss://secondbrain.silicon23.me"
+
+
+def _atomic_write_json(path: Path, data: dict, *, mode: int | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    if mode is not None:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    else:
+        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+# --------------------------------------------------------------------------------------
+# Config (endpoint URL) + Cloudflare Access service-token creds
+# --------------------------------------------------------------------------------------
+
+
+def load_config() -> dict:
+    """Connector config: the SB base URL. ``$SB_BASE_URL`` overrides the stored value."""
+    data = _read_json(config_path()) or {}
+    base = os.environ.get("SB_BASE_URL") or data.get("base_url") or DEFAULT_BASE_URL
+    return {"base_url": base.rstrip("/")}
+
+
+def save_config(base_url: str) -> None:
+    _atomic_write_json(config_path(), {"base_url": base_url.rstrip("/")})
+
+
+def enroll_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/enroll"
+
+
+def stream_url(base_url: str) -> str:
+    return base_url.rstrip("/") + "/stream"
+
+
+def load_cf_creds() -> dict[str, str] | None:
+    """Cloudflare Access service-token creds, or ``None`` if unset.
+
+    Precedence: environment ($CF_ACCESS_CLIENT_ID / $CF_ACCESS_CLIENT_SECRET, which
+    ``bin/multiverse.local`` is the natural place to export on a cluster) over the
+    0600 file the connect widget writes. Only needed for the ``wss://`` tunnel path;
+    a same-box ``ws://127.0.0.1`` run needs none.
+    """
+    cid = os.environ.get("CF_ACCESS_CLIENT_ID")
+    csecret = os.environ.get("CF_ACCESS_CLIENT_SECRET")
+    if cid and csecret:
+        return {"client_id": cid, "client_secret": csecret}
+    data = _read_json(cf_creds_path())
+    if data and data.get("client_id") and data.get("client_secret"):
+        return {"client_id": data["client_id"], "client_secret": data["client_secret"]}
+    return None
+
+
+def save_cf_creds(client_id: str, client_secret: str) -> None:
+    """Persist CF Access creds 0600 (same at-rest posture as the device key)."""
+    _atomic_write_json(
+        cf_creds_path(),
+        {"client_id": client_id, "client_secret": client_secret},
+        mode=0o600,
+    )
+
+
+def clear_cf_creds() -> None:
+    try:
+        cf_creds_path().unlink()
+    except OSError:
+        pass
+
+
+def cf_access_headers(creds: dict[str, str] | None) -> dict[str, str] | None:
+    """Turn CF Access creds into the request headers the edge requires (INFRA §5.1)."""
+    if creds and creds.get("client_id") and creds.get("client_secret"):
+        return {
+            "CF-Access-Client-Id": creds["client_id"],
+            "CF-Access-Client-Secret": creds["client_secret"],
+        }
+    return None
+
+
+# --------------------------------------------------------------------------------------
+# Status file — what the monitor reads to render the SecondBrain widget
+# --------------------------------------------------------------------------------------
+
+# state ∈ {unenrolled, stopped, connecting, connected, reconnecting, locked, error}
+def write_status(state: str, *, detail: str = "", **extra) -> None:
+    payload = {
+        "state": state,
+        "detail": detail,
+        "ts": _now_iso(),
+        "host": current_host(),
+        "pid": os.getpid(),
+        **extra,
+    }
+    try:
+        _atomic_write_json(status_path(), payload)
+    except OSError:
+        pass
+
+
+def read_status() -> dict:
+    return _read_json(status_path()) or {"state": "stopped", "detail": ""}
+
+
+# --------------------------------------------------------------------------------------
+# Durable connector state — MUST survive daemon restarts (INFRA §8.1)
+# --------------------------------------------------------------------------------------
+#
+# ``seq`` is monotonic per device and durable across reconnects; the host's ack cursor
+# survives too, so a restarted daemon must continue the sequence rather than restart at
+# 1 (which would collide with the host's cursor). ``seeded`` is the set of workspaces
+# already announced via ``workspace.connected`` — a first-ever event, not a
+# per-reconnect one — so a restart doesn't re-announce them.
+
+
+def state_path() -> Path:
+    return sb_dir() / "state.json"
+
+
+def load_conn_state() -> dict:
+    data = _read_json(state_path()) or {}
+    return {"seq_hw": int(data.get("seq_hw", 0)), "seeded": list(data.get("seeded", []))}
+
+
+def save_conn_state(state: dict) -> None:
+    _atomic_write_json(
+        state_path(),
+        {"seq_hw": int(state.get("seq_hw", 0)), "seeded": sorted(set(state.get("seeded", [])))},
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Host-aware singleton lock (mirrors sessions.py's host guard for shared FS)
+# --------------------------------------------------------------------------------------
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def lock_holder() -> dict | None:
+    """The live daemon holding the singleton lock, or None.
+
+    A lock whose holder is on THIS host but whose pid is dead is stale (reaped).
+    A lock held on a DIFFERENT host is trusted as live — a bare pid isn't
+    meaningful across hosts on a shared ~/.multiverse, exactly the case
+    sessions.py's host guard exists for.
+    """
+    data = _read_json(lock_path())
+    if not data:
+        return None
+    host = data.get("host")
+    pid = int(data.get("pid", 0))
+    if host == current_host():
+        return data if _pid_alive(pid) else None
+    return data  # foreign host — cannot probe its pid; assume alive
+
+
+def acquire_lock() -> bool:
+    """Claim the singleton lock for this process. False if a live daemon holds it."""
+    holder = lock_holder()
+    if holder is not None and not (
+        holder.get("host") == current_host() and holder.get("pid") == os.getpid()
+    ):
+        return False
+    _atomic_write_json(
+        lock_path(),
+        {"host": current_host(), "pid": os.getpid(), "started_at": _now_iso()},
+    )
+    return True
+
+
+def release_lock() -> None:
+    data = _read_json(lock_path())
+    if data and data.get("host") == current_host() and data.get("pid") == os.getpid():
+        try:
+            lock_path().unlink()
+        except OSError:
+            pass
+
+
+# --------------------------------------------------------------------------------------
+# Device identity (device key + enrollment result) — persisted 0600 on this device
+# --------------------------------------------------------------------------------------
+
+
+def load_or_create_device_key(path: str | os.PathLike[str]) -> ed25519.Ed25519PrivateKey:
+    """Load the device's Ed25519 private key, generating it 0600 on first run."""
+    p_ = Path(path)
+    if p_.exists():
+        return ed25519.Ed25519PrivateKey.from_private_bytes(p_.read_bytes())
+    priv = ed25519.Ed25519PrivateKey.generate()
+    p_.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(p_, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(priv.private_bytes_raw())
+    return priv
+
+
+@dataclass
+class DeviceIdentity:
+    """The device's durable credential + enrollment result."""
+
+    device_id: str
+    private_key: ed25519.Ed25519PrivateKey
+    pinned_server_fingerprint: str
+    granted_workspaces: list[str] = field(default_factory=list)
+
+    @property
+    def device_pubkey_b64(self) -> str:
+        return auth.b64e(self.private_key.public_key().public_bytes_raw())
+
+    @classmethod
+    def sidecar_path(cls, key_path: str | os.PathLike[str]) -> Path:
+        return Path(f"{key_path}.json")
+
+    def save(self, key_path: str | os.PathLike[str]) -> None:
+        self.sidecar_path(key_path).write_text(
+            json.dumps(
+                {
+                    "device_id": self.device_id,
+                    "pinned_server_fingerprint": self.pinned_server_fingerprint,
+                    "granted_workspaces": self.granted_workspaces,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    @classmethod
+    def load(cls, key_path: str | os.PathLike[str]) -> DeviceIdentity:
+        priv = load_or_create_device_key(key_path)
+        data = json.loads(cls.sidecar_path(key_path).read_text(encoding="utf-8"))
+        return cls(
+            device_id=data["device_id"],
+            private_key=priv,
+            pinned_server_fingerprint=data["pinned_server_fingerprint"],
+            granted_workspaces=data.get("granted_workspaces", []),
+        )
+
+
+def is_enrolled() -> bool:
+    return DeviceIdentity.sidecar_path(device_key_path()).exists()
+
+
+def load_identity() -> DeviceIdentity:
+    return DeviceIdentity.load(device_key_path())
+
+
+# --------------------------------------------------------------------------------------
+# Enrollment (§6.2) — one time per device
+# --------------------------------------------------------------------------------------
+
+
+async def enroll(
+    *,
+    url: str,
+    pairing_code: str,
+    pinned_fingerprint: str,
+    device_name: str,
+    want: list[str],
+    key_path: str | os.PathLike[str],
+    cf_access: dict[str, str] | None = None,
+) -> DeviceIdentity:
+    """Run the ``/enroll`` sub-flow and persist the resulting identity (§6.2)."""
+    from websockets.asyncio.client import connect
+
+    priv = load_or_create_device_key(key_path)
+    device_pubkey = auth.b64e(priv.public_key().public_bytes_raw())
+
+    async with connect(url, max_size=p.MAX_FRAME_BYTES, additional_headers=cf_access) as ws:
+        x_priv, epk_c = auth.generate_ephemeral()
+        await ws.send(
+            p.encode(
+                p.EnrollHello(
+                    device_pubkey=device_pubkey,
+                    device_name=device_name,
+                    want=want,
+                    epk_c=epk_c,
+                )
+            )
+        )
+        chal = p.decode(await ws.recv())
+        if not isinstance(chal, p.EnrollChallenge):
+            raise ConnectionError(f"expected enroll_challenge, got {chal.T.value}")
+
+        # Verify server identity BEFORE proving the pairing code: pin, then signature.
+        _verify_server(
+            chal.server_pubkey,
+            chal.server_sig,
+            pinned_fingerprint,
+            auth.enroll_chal_transcript(chal.epk_s, epk_c, chal.nonce),
+        )
+        channel = auth.derive_channel(x_priv, chal.epk_s, chal.nonce, is_server=False)
+
+        transcript = auth.enroll_transcript(
+            device_pubkey_b64=device_pubkey,
+            epk_c_b64=epk_c,
+            epk_s_b64=chal.epk_s,
+            nonce_b64=chal.nonce,
+            device_name=device_name,
+            want=want,
+        )
+        proof = p.EnrollProof(
+            mac=auth.enroll_mac(pairing_code, transcript),  # pairing code stays off the wire
+            device_sig=auth.sign(priv, transcript),
+        )
+        await ws.send(auth.seal(channel, p.encode(proof).encode("utf-8")))
+
+        resp = p.decode(auth.open(channel, await ws.recv()))
+        if isinstance(resp, p.EnrollError):
+            raise ConnectionError(f"enroll rejected: {resp.code} — {resp.message}")
+        if not isinstance(resp, p.EnrollOk):
+            raise ConnectionError(f"expected enroll_ok, got {resp.T.value}")
+
+        identity = DeviceIdentity(
+            device_id=resp.device_id,
+            private_key=priv,
+            pinned_server_fingerprint=pinned_fingerprint,
+            granted_workspaces=resp.granted_workspaces,
+        )
+        identity.save(key_path)
+        log.info("enrolled device_id=%s granted=%s", resp.device_id, resp.granted_workspaces)
+        return identity
+
+
+def _verify_server(
+    server_pubkey_b64: str, server_sig_b64: str, pinned_fp: str, transcript: bytes
+) -> None:
+    """Pin-check the server key then verify its signature; raise on either failure (§6.3)."""
+    if auth.fingerprint_for_pubkey(auth.b64d(server_pubkey_b64)) != pinned_fp:
+        raise ConnectionError("server fingerprint mismatch — possible MITM; aborting")
+    if not auth.verify(server_pubkey_b64, server_sig_b64, transcript):
+        raise ConnectionError("bad server signature — aborting")
+
+
+# --------------------------------------------------------------------------------------
+# Durable outbound buffer (events) + action dedup — INFRA §8
+# --------------------------------------------------------------------------------------
+
+
+class OutboundBuffer:
+    """A durable, ordered buffer of un-acked events (§8.1). Events accumulate a
+    strictly-increasing per-device ``seq`` and stay buffered until SB cumulatively
+    ``ack``s them; on reconnect / unlock the tail (``seq > from_seq``) is replayed.
+    """
+
+    def __init__(self, *, start_seq: int = 0, on_seq=None, buffer_max: int = 50_000) -> None:
+        self._events: list[p.Event] = []
+        self._seq = itertools.count(start_seq + 1)  # continue from the durable high-water
+        self._on_seq = on_seq  # callback(seq) -> persist the new high-water
+        self._buffer_max = buffer_max
+
+    def next_seq(self) -> int:
+        s = next(self._seq)
+        if self._on_seq is not None:
+            self._on_seq(s)  # durable before the event goes on the wire (§8.1)
+        return s
+
+    def append(self, event: p.Event) -> None:
+        self._events.append(event)
+        if len(self._events) > self._buffer_max:
+            log.warning("outbound buffer at cap (%s) — applying backpressure", self._buffer_max)
+
+    def trim_through(self, ack_seq: int) -> None:
+        self._events = [e for e in self._events if e.seq > ack_seq]
+
+    def replay_from(self, from_seq: int) -> list[p.Event]:
+        return [e for e in self._events if e.seq > from_seq]
+
+
+class ActionDedup:
+    """Idempotency guard for inbound actions (§8.2): ``action_id -> cached result``.
+    A duplicate action is NOT re-executed — the cached result is returned."""
+
+    def __init__(self, max_entries: int = 10_000) -> None:
+        self._seen: dict[str, p.ActionResult] = {}
+        self._max = max_entries
+
+    def cached(self, action_id: str) -> p.ActionResult | None:
+        return self._seen.get(action_id)
+
+    def remember(self, result: p.ActionResult) -> None:
+        self._seen[result.action_id] = result
+        if len(self._seen) > self._max:
+            self._seen.pop(next(iter(self._seen)))
+
+
+# --------------------------------------------------------------------------------------
+# The connector
+# --------------------------------------------------------------------------------------
+
+
+def _workspace_label(cwd: str) -> str:
+    return Path(cwd).name or cwd
+
+
+def _workspace_summary(cwd: str) -> str:
+    """A short human description of a workspace for SB to seed per-workspace memory.
+
+    TODO(binding): produce a real summary from the workspace's history (agents,
+    recent activity). For now a minimal placeholder — enough for the first-connect
+    ``workspace.connected`` liveness signal.
+    """
+    return f"Multiverse workspace '{_workspace_label(cwd)}' at {cwd}."
+
+
+class SBConnector:
+    """A single device's connection loop to SB (INFRA §13 steps 3-8)."""
+
+    def __init__(
+        self,
+        base_url: str,
+        identity: DeviceIdentity,
+        cf_access: dict[str, str] | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.identity = identity
+        self.cf_access = cf_access
+        # Durable state (survives daemon restarts, §8.1): continue seq from the
+        # high-water, and remember which workspaces we've already announced.
+        self._state = load_conn_state()
+        self.buffer = OutboundBuffer(start_seq=self._state["seq_hw"], on_seq=self._persist_seq)
+        self.dedup = ActionDedup()
+        self.channel: auth.SessionChannel | None = None
+        self._locked = False  # between lock and unlock (§9)
+        self._stop = asyncio.Event()
+        self._seeded: set[str] = set(self._state["seeded"])
+        self._ws = None  # the live connection while connected (for a graceful close)
+
+    def _persist_seq(self, seq: int) -> None:
+        self._state["seq_hw"] = seq
+        save_conn_state(self._state)
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    async def aclose(self) -> None:
+        """Graceful shutdown: flag stop, then send a proper WebSocket close (code 1000).
+
+        Cancelling the task instead would abort the close handshake mid-flight and the
+        peer would see an abnormal drop (1006). Closing the socket explicitly sends the
+        1000 close frame AND unblocks a parked ``recv``, so :meth:`run` exits cleanly
+        (its ``except`` sees ``_stop`` set and breaks). Bounded so an unresponsive peer
+        can't wedge shutdown.
+        """
+        self.request_stop()
+        ws = self._ws
+        if ws is not None:
+            try:
+                await asyncio.wait_for(ws.close(code=1000, reason="shutdown"), timeout=5.0)
+            except Exception:  # noqa: BLE001 - best-effort close; force-drop on timeout
+                pass
+
+    # ---- §13.3 connect loop with backoff + resume ---------------------------------
+
+    async def run(self) -> None:
+        from websockets.asyncio.client import connect
+
+        backoff = 1.0
+        while not self._stop.is_set():
+            try:
+                write_status(
+                    "connecting",
+                    detail=f"dialing {stream_url(self.base_url)}",
+                    device_id=self.identity.device_id,
+                    url=self.base_url,
+                )
+                async with connect(
+                    stream_url(self.base_url),
+                    max_size=p.MAX_FRAME_BYTES,
+                    additional_headers=self.cf_access,
+                ) as ws:
+                    self._ws = ws  # exposed to aclose() for a graceful 1000 close
+                    try:
+                        backoff = 1.0
+                        self.channel = None
+                        await self._handshake(ws)
+                        write_status(
+                            "connected",
+                            detail="authenticated",
+                            device_id=self.identity.device_id,
+                            url=self.base_url,
+                            granted_workspaces=self.identity.granted_workspaces,
+                        )
+                        await self._emit_initial_connected(ws)
+                        await self._stream(ws)
+                    finally:
+                        self._ws = None
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - top-level reconnect guard
+                if self._stop.is_set():
+                    break
+                log.info("connection lost (%s); reconnecting in %.1fs", exc, backoff)
+                write_status(
+                    "reconnecting",
+                    detail=str(exc),
+                    device_id=self.identity.device_id,
+                    url=self.base_url,
+                )
+                try:
+                    await asyncio.wait_for(self._stop.wait(), timeout=backoff)
+                except asyncio.TimeoutError:
+                    pass
+                backoff = min(backoff * 2, 30.0)
+
+    # ---- sealed frame I/O (post-challenge) ----------------------------------------
+
+    async def _send(self, ws, frame: p.Frame) -> None:  # noqa: ANN001
+        text = p.encode(frame)
+        if self.channel is not None:
+            await ws.send(auth.seal(self.channel, text.encode("utf-8")))
+        else:
+            await ws.send(text)
+
+    async def _recv(self, ws) -> p.Frame:  # noqa: ANN001
+        raw = await ws.recv()
+        if self.channel is not None:
+            raw = auth.open(self.channel, raw)
+        return p.decode(raw)
+
+    # ---- §13.3 handshake: hello -> challenge -> auth -> auth_ok --------------------
+
+    async def _handshake(self, ws) -> None:  # noqa: ANN001
+        x_priv, epk_c = auth.generate_ephemeral()
+        await ws.send(
+            p.encode(
+                p.Hello(
+                    device_id=self.identity.device_id,
+                    client_version="mv-conn/0.1",
+                    epk_c=epk_c,
+                    workspaces=list(self.identity.granted_workspaces),
+                )
+            )
+        )
+
+        challenge = p.decode(await ws.recv())
+        if not isinstance(challenge, p.Challenge):
+            raise ConnectionError(f"expected challenge, got {challenge.T.value}")
+        _verify_server(
+            challenge.server_pubkey,
+            challenge.server_sig,
+            self.identity.pinned_server_fingerprint,
+            auth.chal_transcript(challenge.epk_s, epk_c, challenge.nonce_s),
+        )
+        self.channel = auth.derive_channel(
+            x_priv, challenge.epk_s, challenge.nonce_s, is_server=False
+        )
+
+        device_sig = auth.sign(
+            self.identity.private_key,
+            auth.auth_transcript(
+                challenge.nonce_s, challenge.epk_s, epk_c, self.identity.device_id
+            ),
+        )
+        await self._send(ws, p.Auth(device_sig=device_sig))
+
+        auth_ok = await self._recv(ws)
+        if not isinstance(auth_ok, p.AuthOk):
+            raise ConnectionError(f"expected auth_ok, got {auth_ok.T.value}")
+        # Refresh the ACL from the host and persist it (grants may have changed).
+        if auth_ok.granted_workspaces != self.identity.granted_workspaces:
+            self.identity.granted_workspaces = auth_ok.granted_workspaces
+            self.identity.save(device_key_path())
+        for event in self.buffer.replay_from(auth_ok.from_seq):
+            await self._send(ws, event)
+        if auth_ok.from_seq == 0:
+            log.info("new device/host — SB will backfill via queries")
+
+    # ---- one real event: workspace.connected (liveness proof) ---------------------
+
+    async def _emit_initial_connected(self, ws) -> None:  # noqa: ANN001
+        """Emit ``workspace.connected`` for each granted workspace not yet announced.
+
+        ``workspace.connected`` is a **first-ever** event (a workspace opting into SB),
+        not a per-reconnect one — the first announce carries a ``workspace_summary`` so
+        SB can seed per-workspace memory (§4b). We persist which workspaces have been
+        announced, so a daemon restart does NOT re-announce (its seq would collide with
+        the host's already-advanced cursor). On a plain reconnect an un-acked announce
+        is replayed from the buffer by :meth:`_handshake`, not re-created here.
+
+        This is the minimal proof that events flow end to end; the full event producer
+        (Multiverse hooks/file substrate -> events) is the next-phase binding.
+        """
+        if self._locked:
+            return
+        for cwd in self.identity.granted_workspaces:
+            workspace_id = f"{self.identity.device_id}:{cwd}"
+            if workspace_id in self._seeded:
+                continue  # already announced (this run or a prior one) — not a new opt-in
+            event = self.make_event(
+                workspace_id=workspace_id,
+                workspace_label=_workspace_label(cwd),
+                kind=p.EventKind.WORKSPACE_CONNECTED,
+                payload={"summary": _workspace_summary(cwd)},
+                event_id=f"wsconn:{workspace_id}",  # stable -> SB dedups a replay
+            )
+            # Mark announced once it's buffered: a later reconnect replays the buffered
+            # copy (via _handshake) rather than minting a second one.
+            self._seeded.add(workspace_id)
+            self._state["seeded"] = sorted(self._seeded)
+            save_conn_state(self._state)
+            await self._send(ws, event)
+
+    # ---- §13.4-6 stream: emit events, execute actions, answer queries --------------
+
+    async def _stream(self, ws) -> None:  # noqa: ANN001
+        # v1: consumer only. The next-phase producer (Multiverse hooks/file substrate
+        # -> events -> self._send) runs concurrently here.
+        while not self._stop.is_set():
+            frame = await self._recv(ws)
+            await self._dispatch(ws, frame)
+
+    async def _dispatch(self, ws, frame: p.Frame) -> None:  # noqa: ANN001
+        t = frame.T
+        if t is p.FrameType.ACTION:
+            await self._on_action(ws, frame)  # type: ignore[arg-type]
+        elif t is p.FrameType.QUERY:
+            await self._on_query(ws, frame)  # type: ignore[arg-type]
+        elif t is p.FrameType.ACK:
+            self.buffer.trim_through(frame.ack_seq)  # type: ignore[attr-defined]
+        elif t is p.FrameType.RESUME:
+            for event in self.buffer.replay_from(frame.from_seq):  # type: ignore[attr-defined]
+                await self._send(ws, event)
+        elif t is p.FrameType.LOCK:
+            self._locked = True  # §9: hold new events; keep assigning seqs
+            write_status(
+                "locked",
+                detail=getattr(frame, "reason", "compaction"),
+                device_id=self.identity.device_id,
+                url=self.base_url,
+                granted_workspaces=self.identity.granted_workspaces,
+            )
+        elif t is p.FrameType.UNLOCK:
+            self._locked = False  # §9: drain the held tail (== resume)
+            for event in self.buffer.replay_from(0):
+                await self._send(ws, event)
+            write_status(
+                "connected",
+                detail="unlocked",
+                device_id=self.identity.device_id,
+                url=self.base_url,
+                granted_workspaces=self.identity.granted_workspaces,
+            )
+        elif t is p.FrameType.PING:
+            await self._send(ws, p.Pong(ts=frame.ts))  # type: ignore[attr-defined]
+        elif t is p.FrameType.BYE:
+            raise ConnectionError("server sent bye")
+
+    async def _on_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Execute an inbound action against Multiverse, idempotently (§8.2)."""
+        cached = self.dedup.cached(action.action_id)
+        if cached is not None:
+            await self._send(ws, cached)  # retry: return cached result, do NOT re-run
+            return
+        # TODO(binding): map the verb to a real Multiverse operation:
+        #   prompt_agent / answer_question -> send-keys / inbox
+        #   answer_permission_prompt       -> tmux send-keys to a `waiting` pane
+        #   answer_spawn_request           -> write the spawn-request resolution
+        #   message_agent                  -> the inter-agent inbox
+        #   spawn_agent                    -> the spawn-request flow
+        #   ask_agent                      -> the existing ask_agents.py fork
+        result = p.ActionResult(
+            action_id=action.action_id,
+            status=p.ResultStatus.REJECTED,
+            error={
+                "code": "not_implemented",
+                "message": (
+                    f"connector action binding not implemented yet "
+                    f"(verb={getattr(action.kind, 'value', action.kind)})"
+                ),
+            },
+        )
+        self.dedup.remember(result)
+        await self._send(ws, result)
+
+    async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
+        """Answer a read-only backfill query from Multiverse state (§10.4)."""
+        # TODO(binding): read the requested slice (list_workspaces / list_agents /
+        # get_status / get_transcript) from ~/.multiverse and shape the result.
+        await self._send(
+            ws,
+            p.QueryResult(
+                query_id=query.query_id,
+                status=p.ResultStatus.REJECTED,
+                error={
+                    "code": "not_implemented",
+                    "message": (
+                        f"connector query binding not implemented yet "
+                        f"(kind={getattr(query.kind, 'value', query.kind)})"
+                    ),
+                },
+            ),
+        )
+
+    # ---- producer side: translate a Multiverse signal into an event ----------------
+
+    def make_event(
+        self,
+        workspace_id: str,
+        workspace_label: str,
+        kind,  # p.EventKind | str  (unknown kinds pass through as strings, §10)
+        payload: dict,
+        agent: str | None = None,
+        event_id: str | None = None,
+    ) -> p.Event:
+        """Build an outbound event with the next durable per-device ``seq`` (§8.1)."""
+        seq = self.buffer.next_seq()
+        event = p.Event(
+            seq=seq,
+            event_id=event_id or f"evt_{seq:08d}",  # TODO(binding): source-citable ids
+            ts=_now_iso(),
+            workspace_id=workspace_id,
+            workspace_label=workspace_label,
+            kind=kind,
+            agent=agent,
+            payload=payload,
+        )
+        self.buffer.append(event)
+        return event
+
+
+# --------------------------------------------------------------------------------------
+# Daemon entry (stream) — singleton, signal-aware
+# --------------------------------------------------------------------------------------
+
+
+async def _run_daemon() -> int:
+    if not is_enrolled():
+        write_status("unenrolled", detail="no device identity — enroll first")
+        log.error("not enrolled; run `sb_connector enroll` (or use the dashboard widget)")
+        return 2
+    if not acquire_lock():
+        holder = lock_holder() or {}
+        log.error("another connector daemon is live (host=%s pid=%s)",
+                  holder.get("host"), holder.get("pid"))
+        return 3
+
+    identity = load_identity()
+    cfg = load_config()
+    creds = load_cf_creds()
+    conn = SBConnector(cfg["base_url"], identity, cf_access=cf_access_headers(creds))
+
+    loop = asyncio.get_running_loop()
+    run_task = asyncio.ensure_future(conn.run())
+
+    def _shutdown() -> None:
+        # Graceful: flag stop + send a proper 1000 close (which also unblocks a parked
+        # recv), so run() breaks on its own. A watchdog force-cancels if the close hangs.
+        async def _go() -> None:
+            await conn.aclose()
+            try:
+                await asyncio.wait_for(asyncio.shield(run_task), timeout=8.0)
+            except (asyncio.TimeoutError, Exception):  # noqa: BLE001
+                run_task.cancel()
+
+        asyncio.ensure_future(_go())
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _shutdown)
+        except (NotImplementedError, ValueError):
+            pass
+
+    try:
+        await run_task
+        return 0
+    except asyncio.CancelledError:
+        return 0
+    finally:
+        write_status("stopped", detail="daemon exited", device_id=identity.device_id)
+        release_lock()
+
+
+# --------------------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------------------
+
+
+def main() -> None:
+    logging.basicConfig(
+        level="INFO", format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    parser = argparse.ArgumentParser(description="Multiverse SecondBrain connector")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    e = sub.add_parser("enroll", help="one-time device enrollment")
+    e.add_argument("--base-url", default=load_config()["base_url"],
+                   help="SB base URL, e.g. wss://secondbrain.silicon23.me")
+    e.add_argument("--code", required=True, help="pairing code from `sb-pair`")
+    e.add_argument("--fingerprint", required=True, help="pinned SB server fingerprint")
+    e.add_argument("--name", default=current_host(), help="device name")
+    e.add_argument("--workspace", action="append", default=[],
+                   help="requested cwd to expose (repeatable)")
+
+    sub.add_parser("stream", help="run the connector daemon (after enrollment)")
+    sub.add_parser("status", help="print current status JSON")
+
+    args = parser.parse_args()
+
+    if args.cmd == "enroll":
+        save_config(args.base_url)
+        identity = asyncio.run(
+            enroll(
+                url=enroll_url(args.base_url),
+                pairing_code=args.code,
+                pinned_fingerprint=args.fingerprint,
+                device_name=args.name,
+                want=[str(Path(w).expanduser().resolve()) for w in args.workspace],
+                key_path=device_key_path(),
+                cf_access=cf_access_headers(load_cf_creds()),
+            )
+        )
+        print(f"enrolled device_id={identity.device_id} "
+              f"granted={identity.granted_workspaces}")
+    elif args.cmd == "stream":
+        raise SystemExit(asyncio.run(_run_daemon()))
+    elif args.cmd == "status":
+        print(json.dumps(read_status(), indent=2))
+
+
+if __name__ == "__main__":
+    main()
