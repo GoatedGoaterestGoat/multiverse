@@ -58,7 +58,12 @@ def main():
     p.add_argument("--model", default="sonnet")
     args = p.parse_args()
 
-    forest = preprocess_forest(parse_session(args.session), PreprocessConfig())
+    # strip command turns to match the worker + compaction pipeline —
+    # turn_idx is relative to the stripped forest.
+    forest = preprocess_forest(
+        parse_session(args.session, strip_command_turns_=True),
+        PreprocessConfig(),
+    )
     if args.turn_idx >= len(forest):
         print(f"only {len(forest)} turns; index {args.turn_idx} out of range",
               file=sys.stderr)

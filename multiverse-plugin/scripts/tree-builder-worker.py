@@ -172,7 +172,11 @@ def _run(live: Path, session_id: str, cwd: str, cache_root: Path,
         return 1
 
     try:
-        forest = parse_session(str(full))
+        # strip command turns — /context, /model, /effort turns are
+        # dropped from the compaction pipeline, so building trees for
+        # them just wastes API calls and produces orphaned cache files
+        # that never get used.
+        forest = parse_session(str(full), strip_command_turns_=True)
     except (OSError, ValueError) as e:
         _log(log, f"parse_session failed: {e}")
         return 1

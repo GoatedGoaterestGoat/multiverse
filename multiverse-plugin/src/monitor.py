@@ -1685,7 +1685,10 @@ class CompactScreen(ModalScreen[None]):
             return []
         try:
             from compaction.parser import parse_session  # noqa: E402
-            forest = parse_session(str(full))
+            # strip command turns so the scheduler preview sparkline
+            # doesn't show ignored-at-compaction turns as budget-
+            # consuming.
+            forest = parse_session(str(full), strip_command_turns_=True)
         except Exception:  # noqa: BLE001
             return []
         return [(t.turn_id, sum(l.tokens for l in t.leaves)) for t in forest]
@@ -1723,7 +1726,10 @@ class CompactScreen(ModalScreen[None]):
         except Exception:  # noqa: BLE001
             return []
         try:
-            forest = parse_session(str(full))
+            # strip command turns so ChooseSchedulerScreen sees only
+            # the turns actually eligible for compaction — matches
+            # what the pipeline in compact_runner.py builds against.
+            forest = parse_session(str(full), strip_command_turns_=True)
         except Exception:  # noqa: BLE001
             return []
         cache_root = multiverse_dir() / "trees" / self.claude_uuid
@@ -1761,7 +1767,11 @@ class CompactScreen(ModalScreen[None]):
             # full_jsonl on import, so this is cheap once warm.
             from compaction.parser import parse_session  # noqa: E402
             try:
-                forest = parse_session(str(full))
+                # strip command turns — command-turn tree files
+                # (harmless orphans) shouldn't be counted toward the
+                # "trees matching chain" figure the compact widget's
+                # status readout uses.
+                forest = parse_session(str(full), strip_command_turns_=True)
                 chain_turns = {t.turn_id for t in forest}
             except Exception:  # noqa: BLE001
                 chain_turns = set()
