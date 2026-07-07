@@ -618,6 +618,7 @@ class SBConnector:
         self._locked = False  # between lock and unlock (§9)
         self._stop = asyncio.Event()
         self._seeded: set[str] = set(self._state["seeded"])
+        self._marker_inited: set[str] = set()  # workspaces whose transcript markers are set
         self._ws = None  # the live connection while connected (for a graceful close)
         # Producer <-> sender coordination: the watcher enqueues events and sets
         # _new_event; the per-connection sender flushes everything past _sent_through.
@@ -854,13 +855,66 @@ class SBConnector:
         before" gate was applied at record time, so nothing here needs re-gating."""
         while not self._stop.is_set():
             try:
-                self._consume_pending()
-            except Exception:  # noqa: BLE001 - a consume error must not kill the producer
-                log.debug("pending consume failed", exc_info=True)
+                self._init_new_markers()          # transcript markers for newly-seeded workspaces
+                self._consume_pending()            # spawn events (fully composed at the choke-point)
+                self._consume_response_signals()   # agent.response (transcript generated here)
+            except Exception:  # noqa: BLE001 - a step error must not kill the producer
+                log.debug("producer step failed", exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
             except asyncio.TimeoutError:
                 pass
+
+    def _init_new_markers(self) -> None:
+        """For each newly-seeded workspace, initialize the transcript delivery marker of
+        each of its current agents to the LAST live turn — so the first agent.response
+        covers "from now on", never the backlog (DESIGN §4b + the transcript spec). Runs
+        off the connect path (in the producer loop); idempotent per workspace + per agent.
+        A NEW agent created later has no marker → its first transcript covers its whole
+        (short) history, which is correct."""
+        pending = self._seeded - self._marker_inited
+        if not pending:
+            return
+        from . import sb_transcript
+        from .sessions import list_named_agents_in_cwd
+
+        for workspace_id in pending:
+            _, _, cwd = workspace_id.partition(":")
+            try:
+                for row in list_named_agents_in_cwd(cwd):
+                    sb_transcript.initialize_marker(cwd, row.name)
+            except Exception:  # noqa: BLE001
+                log.debug("marker init failed for %s", cwd, exc_info=True)
+            self._marker_inited.add(workspace_id)
+
+    def _consume_response_signals(self) -> None:
+        """Turn each fast turn-end signal (from the Stop hook) into an ``agent.response``
+        event: generate the partial transcript (peek), compose the payload, buffer it,
+        commit the marker, then drop the signal. Marker is committed AFTER the event is
+        durably buffered, so a crash re-delivers (SB dedups), never a gap."""
+        from . import sb_events, sb_notify, sb_transcript
+
+        for sig in sb_notify.list_response_signals():
+            cwd = sig.get("cwd", "")
+            agent = sig.get("agent", "")
+            peeked = sb_transcript.peek_partial_transcript(cwd, agent)
+            if peeked is None:  # agent unresolvable (gone?) — drop the signal
+                log.debug("agent.response: %s unresolvable, dropping signal", agent)
+                sb_notify.delete_response_signal(sig)
+                continue
+            text, cursor = peeked
+            payload = sb_events.agent_response_event_fields(agent, text)
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind="agent.response",
+                payload=payload,
+                agent=agent,
+                event_id=f"aresp:{Path(sig['_path']).stem}",  # unique per turn-end signal
+            )
+            sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
+            sb_notify.delete_response_signal(sig)
+            log.info("relayed agent.response (idle) for %s", agent)
 
     def _consume_pending(self) -> None:
         """Drain durable pending event records (firsthand-produced) into the outbound

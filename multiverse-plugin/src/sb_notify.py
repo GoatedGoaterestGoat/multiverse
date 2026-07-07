@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import os
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -155,6 +156,62 @@ def record_spawn_request(req: dict) -> None:
             wsid, req.get("cwd", ""), agent, payload,
         )
     except Exception:  # noqa: BLE001 - never break the spawn flow
+        pass
+
+
+def response_signals_dir() -> Path:
+    """Queue of lightweight turn-end signals the connector turns into agent.response
+    events (generating the transcript off the agent's critical path)."""
+    return _sb_dir() / "response_signals"
+
+
+def record_response_signal(cwd: str, agent_name: str) -> None:
+    """Record a fast turn-end signal for the connector to expand into an ``agent.response``
+    event (the agent finished a turn normally → idle). Called from the Stop hook — it must
+    stay CHEAP (no transcript parsing here; the connector does that). Gated on the workspace
+    having connected to SB before (seeded)."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None:
+            return
+        d = response_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "ts": _now_iso(),
+        }
+        path = d / f"{uuid.uuid4().hex}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def list_response_signals() -> list[dict]:
+    """Pending turn-end signals, oldest first (by ``ts``); each has ``_path`` for delete."""
+    d = response_signals_dir()
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    for p in d.glob("*.json"):
+        if p.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(p)
+        if rec:
+            rec["_path"] = str(p)
+            out.append(rec)
+    out.sort(key=lambda r: r.get("ts", ""))
+    return out
+
+
+def delete_response_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
         pass
 
 

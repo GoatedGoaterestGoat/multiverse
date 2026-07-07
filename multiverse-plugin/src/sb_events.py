@@ -18,6 +18,10 @@ from __future__ import annotations
 #: How much of the spawn instruction to inline in the default-visible summary.
 SPAWN_PROMPT_TRUNC = 240
 
+#: Max length of an agent.response summary (a cheap first-cut summary; upgradeable to a
+#: real LLM summary later with zero wire change — ``summary`` stays a plain string).
+RESP_SUMMARY_TRUNC = 220
+
 
 def spawn_request_event_fields(req: dict) -> tuple[str, dict]:
     """``(requesting_agent, payload)`` for an ``agent.spawn_request`` event.
@@ -93,3 +97,34 @@ def spawn_decision_event_fields(
         "summary": summary,
     }
     return requesting, payload
+
+
+def _last_assistant_line(full: str) -> str:
+    """The last ``[assistant] …`` line in a rendered partial transcript (for a cheap
+    idle summary), whitespace-collapsed and length-capped. "" if none."""
+    last = ""
+    for line in full.splitlines():
+        if line.startswith("[assistant] "):
+            last = line[len("[assistant] "):]
+    last = " ".join(last.split())
+    return last[:160] if last else ""
+
+
+def agent_response_event_fields(agent_name: str, full: str) -> dict:
+    """The ``agent.response`` payload (DESIGN §4b): the agent finished a turn **normally**
+    and went idle → ``{state: "idle", summary, full}``.
+
+    ``agent.response`` is ONLY the normal idle finish. Waiting-on-permission and
+    waiting-on-a-question (the ask tool) are their own separate event pairs, not this event
+    — so there is no ``waiting`` state and no ``waiting_detail`` here. ``full`` is the
+    partial transcript from :mod:`sb_transcript`; ``summary`` is a **cheap** connector-
+    produced string (the last assistant line) — upgradeable to a real LLM summary later
+    with no wire change. ``state`` is retained (always ``"idle"``) to match SB's shape.
+    """
+    tail = _last_assistant_line(full)
+    summary = (
+        f"agent '{agent_name}' finished a turn: {tail}"
+        if tail
+        else f"agent '{agent_name}' finished a turn"
+    )
+    return {"state": "idle", "summary": summary[:RESP_SUMMARY_TRUNC].rstrip(), "full": full}
