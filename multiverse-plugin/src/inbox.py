@@ -214,7 +214,8 @@ def render_messages_as_system_reminder(messages: list[dict]) -> str:
     parts: list[str] = ["<system-reminder>"]
     parts.append(
         f"[Multiverse Inter-Agent] You have received {n} new "
-        f"message{plural} from other agents in your workspace."
+        f"message{plural} from other agents (each is labelled with its "
+        "sender; messages from another workspace also show that workspace)."
     )
     parts.append("")
     for i, m in enumerate(messages, 1):
