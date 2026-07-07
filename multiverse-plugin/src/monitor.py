@@ -1064,28 +1064,25 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 f"\n[dim]Live pre-compaction: {self.live_tokens:,}t · "
                 f"{self.live_turns} turn(s){pct}[/]"
             )
-        prompt_line = (
-            f"\n[dim]Prompts (always kept): text {text_floor:,}t"
-        )
+        # Structural (system prompt + tool schemas + memory files + skills
+        # + agents + MCP definitions) leads the input-floor line since
+        # it's typically the dominant section by far and it's the piece
+        # the user has no direct control over. Then text (user prompts),
+        # then images. Only rendered when > 0 (freshly-compacted sessions
+        # can't derive structural until their first post-compact API
+        # call — display collapses to just text-and-images in that
+        # transient case).
+        prompt_line = "\n[dim]Prompts (always kept):"
+        parts: list[str] = []
+        if self.structural_tokens:
+            parts.append(f"system prompt ~{self.structural_tokens:,}t")
+        parts.append(f"text {text_floor:,}t")
         if image_floor:
-            prompt_line += (
-                f"  ·  images {image_floor:,}t across {n_img_turns} "
+            parts.append(
+                f"images {image_floor:,}t across {n_img_turns} "
                 f"turn(s) (or ~{marker_floor:,}t if dropped)"
             )
-        # Structural = system prompt + tool schemas + memory files +
-        # skills + agents + MCP definitions. Not in the JSONL but present
-        # in every API request the model actually sends, so it's part of
-        # the always-kept input floor — the scheduler's OUTPUT budget is
-        # what's left after reserving it. Grouped visually with the other
-        # kept-verbatim sections. Only shown when > 0 (a freshly-
-        # compacted session has no post-compact API call yet, so we can't
-        # derive it — display collapses to old-behavior text-and-images
-        # in that case).
-        if self.structural_tokens:
-            prompt_line += (
-                f"  ·  system prompt ~{self.structural_tokens:,}t"
-            )
-        prompt_line += "[/]"
+        prompt_line += " " + "  ·  ".join(parts) + "[/]"
 
         yield Vertical(
             Static(
