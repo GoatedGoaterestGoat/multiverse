@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
 
 from compaction.constructor import ConstructorConfig, construct_turn_priv_cli
-from compaction.parser import parse_session
+from compaction.parser import filter_compactable, parse_session
 from compaction.preprocess import PreprocessConfig, preprocess_forest
 from compaction.types import Leaf, Node
 
@@ -58,10 +58,18 @@ def main():
     p.add_argument("--model", default="sonnet")
     args = p.parse_args()
 
-    # strip command turns to match the worker + compaction pipeline —
-    # turn_idx is relative to the stripped forest.
+    # strip command turns AND filter non-compactable leaves to match the
+    # compaction pipeline exactly — the tree must be built over ONLY the
+    # leaves that will end up in the compacted output. Without the
+    # filter, non-compactable attachment leaves (edited_text_file,
+    # task_reminder, skill_listing, etc.) get built into the tree and
+    # then leak into the compacted JSONL as user-role text blocks.
+    # filter_compactable removes leaves but never turns, so turn_idx
+    # still aligns with the worker's enumeration.
     forest = preprocess_forest(
-        parse_session(args.session, strip_command_turns_=True),
+        filter_compactable(
+            parse_session(args.session, strip_command_turns_=True)
+        ),
         PreprocessConfig(),
     )
     if args.turn_idx >= len(forest):
