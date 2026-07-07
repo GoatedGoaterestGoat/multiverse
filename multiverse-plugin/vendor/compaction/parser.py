@@ -15,6 +15,7 @@ them as distinct leaves with linkage info preserved on `Leaf.content`.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterator
 
 from .tokenize import count_image_tokens, count_tokens
@@ -39,6 +40,122 @@ SKIP_TYPES = frozenset({
     "queue-operation",
     "system",
 })
+
+
+# Pure-display slash commands whose entire "turn" is dropped from the
+# parse output. These consume tokens on every subsequent API call (the
+# command output + the meta transcript representation stay on the
+# chain) but contribute nothing to the conversation. Excluding them
+# means:
+#   - live_stats / dashboard / compaction-widget stats don't count them
+#     against the parser total. Their tokens still show up in the
+#     derived structural overhead via full_jsonl.structural_tokens
+#     (structural absorbs any delta the parser doesn't see), so the
+#     dashboard's grand total continues to match /clear / /context.
+#   - compaction never sees them, so they don't get summarized into
+#     tree nodes AND don't appear in the compacted JSONL. On resume
+#     from the compacted state, they're gone from the transcript.
+#
+# Commands NOT in this list (e.g. /rename — its meta message tells the
+# model what the session was renamed to, real information) pass through
+# unchanged.
+_SKIP_COMMAND_TURNS = frozenset({
+    "/context",
+    "/model",
+    "/effort",
+})
+
+_COMMAND_NAME_RE = re.compile(r"<command-name>(/[\w-]+)</command-name>")
+
+
+def _strip_command_turns(
+    rows: list[dict[str, Any]],
+    skip: frozenset[str] = _SKIP_COMMAND_TURNS,
+) -> list[dict[str, Any]]:
+    """Drop the rows that make up a display-only slash command turn
+    (``/context``, ``/model``, ``/effort`` by default) from a chain-walk
+    row list, and rewire ``parentUuid`` on the next real row so the
+    chain stays continuous.
+
+    A command turn's rows (see ``utils/processSlashCommand.tsx`` in
+    claude-code):
+
+      1. ``type=system, subtype=local_command``, content wraps
+         ``<command-name>/X</command-name>``.
+      2. ``type=system, subtype=local_command``, content wraps
+         ``<local-command-stdout>...</local-command-stdout>``.
+      3. One or more ``type=user, isMeta=true`` rows carrying the
+         command's transcript representation (a formatted markdown
+         rendering the model would otherwise re-see every subsequent
+         turn).
+
+    We identify the turn's start by the ``<command-name>`` marker in
+    step 1; keep dropping subsequent ``system/local_command`` +
+    ``user isMeta=true`` rows until we hit a real row; and rewrite that
+    real row's ``parentUuid`` to point at the pre-command-turn parent
+    saved from step 1. Downstream code sees a chain that appears to
+    skip straight over the command turn.
+    """
+    out: list[dict[str, Any]] = []
+    in_skip_turn = False
+    bypass_target: str | None = None
+
+    for row in rows:
+        t = row.get("type")
+        subtype = row.get("subtype")
+
+        if t == "system" and subtype == "local_command":
+            content = row.get("content") or ""
+            if isinstance(content, str):
+                m = _COMMAND_NAME_RE.search(content)
+                if m:
+                    cmd = m.group(1)
+                    if cmd in skip:
+                        # Start (or continuation, if two command
+                        # turns are back-to-back) of a skip turn.
+                        # First time in, snapshot the parentUuid.
+                        if not in_skip_turn:
+                            bypass_target = row.get("parentUuid")
+                            in_skip_turn = True
+                        continue
+                    # A command NOT in the skip list — end any active
+                    # skip turn cleanly. The chain rewiring applies to
+                    # THIS row (the new command's first row).
+                    if in_skip_turn:
+                        in_skip_turn = False
+                        if bypass_target is not None:
+                            row = {**row, "parentUuid": bypass_target}
+                            bypass_target = None
+                # No command-name marker — this is the stdout / arg
+                # continuation row of a command in progress.
+                elif in_skip_turn:
+                    continue
+            elif in_skip_turn:
+                continue
+        elif in_skip_turn:
+            # Meta user rows (isMeta=True) are the transcript display
+            # for the command output — part of the same command turn.
+            if t == "user" and row.get("isMeta"):
+                continue
+            # Rows with no uuid don't participate in the parentUuid
+            # chain — file-history-snapshot, custom-title, mode, etc.
+            # can freely sit between the command turn and the next
+            # real chain row without any rewiring being needed. Pass
+            # them through without ending the skip turn, so we can
+            # still rewire whatever real row comes next.
+            if not row.get("uuid"):
+                out.append(row)
+                continue
+            # A real chain row — end the skip turn and rewire its
+            # parentUuid to bypass the dropped command rows.
+            in_skip_turn = False
+            if bypass_target is not None:
+                row = {**row, "parentUuid": bypass_target}
+                bypass_target = None
+
+        out.append(row)
+
+    return out
 
 
 def _iter_jsonl(path: str) -> Iterator[dict[str, Any]]:
@@ -608,7 +725,7 @@ def parse_session(path: str) -> Forest:
     selection rule and rationale.
     """
     out_tok, visible_tok = _build_usage_index(path)
-    chain_rows = _live_chain_rows(path)
+    chain_rows = _strip_command_turns(_live_chain_rows(path))
 
     turns: Forest = []
     current: Turn | None = None
