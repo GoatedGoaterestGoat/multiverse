@@ -540,6 +540,10 @@ class InboxViewerScreen(ModalScreen[None]):
         ]
         for i, m in enumerate(self.messages, 1):
             from_name = m.get("from", "?")
+            # from_cwd is present only on cross-workspace messages; show the
+            # sender's workspace only in that case (same-workspace messages
+            # don't carry it, so nothing extra is rendered).
+            from_cwd = m.get("from_cwd")
             body = m.get("body", "")
             ts = m.get("ts", 0)
             ts_str = (
@@ -547,10 +551,13 @@ class InboxViewerScreen(ModalScreen[None]):
                 if ts
                 else "?"
             )
+            origin = f"from {escape(str(from_name))}"
+            if from_cwd:
+                origin += f" [dim](in workspace {escape(str(from_cwd))})[/]"
             blocks.append(
                 Static(
-                    f"\n[bold yellow]━━━ [{i}/{n}] from "
-                    f"{escape(str(from_name))}[/]  [dim]({ts_str})[/]"
+                    f"\n[bold yellow]━━━ [{i}/{n}] {origin}[/]  "
+                    f"[dim]({ts_str})[/]"
                 )
             )
             # CRITICAL: render body with markup=False. The message body is
