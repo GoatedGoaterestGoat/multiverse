@@ -374,7 +374,11 @@ class CompactRunner:
     def _count_total_turns(self, full: Path) -> int:
         # Lazy import; vendor is on sys.path.
         from compaction.parser import parse_session  # noqa: E402
-        forest = parse_session(str(full))
+        # strip_command_turns_=True: match what the compaction pipeline
+        # in the main run() path uses, so the turn count here reflects
+        # the turns that will actually get built into trees / rendered
+        # into the compacted output — not the full display-oriented count.
+        forest = parse_session(str(full), strip_command_turns_=True)
         # Cache turn_ids for _count_cached_trees's chain filter.
         self._chain_turn_ids = {t.turn_id for t in forest}
         return len(forest)
@@ -585,14 +589,24 @@ class CompactRunner:
             compact_forest_to_session_jsonl,
         )
 
-        # Strip display-only leaves (non-whitelisted attachments — task
-        # reminders, skill listings, tool/agent/MCP deltas, file-edit
-        # snapshots, misc hook context, etc.) BEFORE any downstream
-        # step sees the forest. Leaves' contribution to display totals
-        # is already booked into live_stats via the unfiltered parser
-        # output; the compaction pipeline just shouldn't be tricked
-        # into rendering them as user-role text blocks in the output.
-        forest = filter_compactable(parse_session(str(full)))
+        # Two compaction-only filters applied BEFORE any downstream
+        # step sees the forest:
+        #   - strip_command_turns_ drops /context, /model, /effort
+        #     turns so they don't get summarized into tree nodes and
+        #     don't appear in the compacted output — those tokens are
+        #     transient display cost and shouldn't be reserved against
+        #     the budget's un-compactable input floor.
+        #   - filter_compactable strips display-only attachment leaves
+        #     (task reminders, skill listings, tool/agent/MCP deltas,
+        #     file-edit snapshots, misc hook context) so the pipeline
+        #     doesn't render them as user-role text blocks in the
+        #     output.
+        # Both categories' tokens are already booked into live_stats
+        # (unfiltered parser output) for accurate dashboard display;
+        # they get netted out of structural via the derivation delta.
+        forest = filter_compactable(
+            parse_session(str(full), strip_command_turns_=True)
+        )
         if not forest:
             raise RuntimeError("forest is empty after parse_session")
 

@@ -68,7 +68,7 @@ _SKIP_COMMAND_TURNS = frozenset({
 _COMMAND_NAME_RE = re.compile(r"<command-name>(/[\w-]+)</command-name>")
 
 
-def _strip_command_turns(
+def strip_command_turns(
     rows: list[dict[str, Any]],
     skip: frozenset[str] = _SKIP_COMMAND_TURNS,
 ) -> list[dict[str, Any]]:
@@ -716,16 +716,31 @@ def filter_compactable(forest: Forest) -> Forest:
     return forest
 
 
-def parse_session(path: str) -> Forest:
+def parse_session(
+    path: str,
+    strip_command_turns_: bool = False,
+) -> Forest:
     """Parse a Claude Code JSONL session log into a Forest of Turns.
 
     Only rows on the **live conversation chain** are processed.
     Abandoned branches from "restore conversation" stay in the file
     but are skipped here — see ``_live_chain_rows`` for the tip-
     selection rule and rationale.
+
+    ``strip_command_turns_=True`` additionally drops the display-only
+    slash-command turns (``/context``, ``/model``, ``/effort``) from
+    the chain before turn construction — used by the compaction
+    pipeline so these turns aren't summarized into tree nodes and
+    don't appear in the compacted output. Default is False so callers
+    like ``live_stats`` and ``structural_tokens`` see the raw
+    transcript (structural derivation needs command tokens present
+    on the parser side to net them out of the usage-vs-parser delta
+    correctly).
     """
     out_tok, visible_tok = _build_usage_index(path)
-    chain_rows = _strip_command_turns(_live_chain_rows(path))
+    chain_rows = _live_chain_rows(path)
+    if strip_command_turns_:
+        chain_rows = strip_command_turns(chain_rows)
 
     turns: Forest = []
     current: Turn | None = None
