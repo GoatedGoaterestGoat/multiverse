@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from . import sb_notify
 from .inbox import MULTIVERSE_DIR
 
 
@@ -74,6 +75,9 @@ def write_spawn_request(
     }
     tmp.write_text(json.dumps(data))
     tmp.rename(path)
+    # Firsthand: record an agent.spawn_request for the SecondBrain connector at creation
+    # (no-op unless this workspace has connected to SB before). Never breaks the spawn flow.
+    sb_notify.record_spawn_request(data)
     return path
 
 
@@ -154,6 +158,15 @@ def write_resolution(
         os.write(fd, content)
     finally:
         os.close(fd)
+    # Firsthand: record the user's decision for the SecondBrain connector. We won the
+    # O_EXCL race (authoritative resolver), and the request file still exists (the spawn
+    # tool cleans up only after reading this resolution), so read it for the agent/name
+    # details. This is exactly what a poll-based observer would miss on a fast rejection.
+    try:
+        req = json.loads(request_path(req_id).read_text())
+        sb_notify.record_spawn_decision(req, status, name)
+    except Exception:  # noqa: BLE001 - never break the resolution write
+        pass
     return True
 
 

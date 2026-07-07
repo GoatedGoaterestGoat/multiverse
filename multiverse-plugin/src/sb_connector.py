@@ -260,9 +260,6 @@ def load_conn_state() -> dict:
     return {
         "seq_hw": int(data.get("seq_hw", 0)),
         "seeded": list(data.get("seeded", [])),
-        # spawn-request ids we've already decided about (emitted or dropped) — dedup +
-        # "already handled" tracking across polls and daemon restarts.
-        "seen_spawns": list(data.get("seen_spawns", [])),
     }
 
 
@@ -272,7 +269,6 @@ def save_conn_state(state: dict) -> None:
         {
             "seq_hw": int(state.get("seq_hw", 0)),
             "seeded": sorted(set(state.get("seeded", []))),
-            "seen_spawns": sorted(set(state.get("seen_spawns", []))),
         },
     )
 
@@ -622,7 +618,6 @@ class SBConnector:
         self._locked = False  # between lock and unlock (§9)
         self._stop = asyncio.Event()
         self._seeded: set[str] = set(self._state["seeded"])
-        self._seen_spawns: set[str] = set(self._state["seen_spawns"])
         self._ws = None  # the live connection while connected (for a graceful close)
         # Producer <-> sender coordination: the watcher enqueues events and sets
         # _new_event; the per-connection sender flushes everything past _sent_through.
@@ -848,50 +843,43 @@ class SBConnector:
     # ---- producer: watch the Multiverse substrate, enqueue events ------------------
 
     async def run_producer(self) -> None:
-        """Watch ``~/.multiverse`` and enqueue perception events. Runs continuously
-        across reconnects (independent of the socket): events accumulate in the durable
-        buffer while disconnected and replay on the next connect — but only for
-        workspaces SB already knows about (``_seeded``), per the "no queue for a
-        never-connected workspace" rule."""
+        """Relay events into the durable buffer. Runs continuously across reconnects
+        (independent of the socket): events accumulate in the durable outbox while
+        disconnected and replay on the next connect.
+
+        Events are produced **firsthand** at Multiverse's own choke-points (e.g.
+        ``spawn_requests.write_spawn_request`` / ``write_resolution`` via :mod:`sb_notify`)
+        and dropped into a durable pending queue — the connector does not poll or race the
+        file substrate. This loop just drains that queue onto the wire. The "connected
+        before" gate was applied at record time, so nothing here needs re-gating."""
         while not self._stop.is_set():
             try:
-                self._poll_spawn_requests()
-            except Exception:  # noqa: BLE001 - a poll error must not kill the producer
-                log.debug("producer poll failed", exc_info=True)
+                self._consume_pending()
+            except Exception:  # noqa: BLE001 - a consume error must not kill the producer
+                log.debug("pending consume failed", exc_info=True)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
             except asyncio.TimeoutError:
                 pass
 
-    def _poll_spawn_requests(self) -> None:
-        from . import sb_events
+    def _consume_pending(self) -> None:
+        """Drain durable pending event records (firsthand-produced) into the outbound
+        buffer, oldest first, assigning each the next monotonic ``seq``. A record is
+        deleted once it's durably buffered; a crash in that window re-buffers it under the
+        same ``event_id``, which SB dedups (at-least-once → effectively-once)."""
+        from . import sb_notify
 
-        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
-        changed = False
-        for req in sb_events.scan_spawn_requests(granted):
-            rid = req.get("id")
-            if not rid or rid in self._seen_spawns:
-                continue
-            self._seen_spawns.add(rid)
-            changed = True
-            cwd = str(Path(req.get("cwd", "")).expanduser().resolve())
-            workspace_id = f"{self.identity.device_id}:{cwd}"
-            # Queue only for a workspace that has connected to SB before (is seeded).
-            # A never-connected workspace drops its events rather than piling a stale queue.
-            if workspace_id in self._seeded:
-                agent, payload = sb_events.spawn_request_event_fields(req)
-                self.make_event(
-                    workspace_id=workspace_id,
-                    workspace_label=_workspace_label(cwd),
-                    kind="agent.spawn_request",  # §4b (not in the stale enum; string ok)
-                    payload=payload,
-                    agent=agent,
-                    event_id=f"spawnreq:{rid}",
-                )
-                log.info("enqueued agent.spawn_request from %s (%s)", agent, rid)
-        if changed:
-            self._state["seen_spawns"] = sorted(self._seen_spawns)
-            save_conn_state(self._state)
+        for rec in sb_notify.list_pending():
+            self.make_event(
+                workspace_id=rec.get("workspace_id", ""),
+                workspace_label=rec.get("workspace_label", ""),
+                kind=rec.get("kind", ""),
+                payload=rec.get("payload", {}),
+                agent=rec.get("agent"),
+                event_id=rec.get("event_id"),
+            )
+            log.info("relayed %s (%s)", rec.get("kind"), rec.get("event_id"))
+            sb_notify.delete_pending(rec)
 
     async def _dispatch(self, ws, frame: p.Frame) -> None:  # noqa: ANN001
         t = frame.T
