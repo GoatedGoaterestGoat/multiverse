@@ -249,15 +249,31 @@ def state_path() -> Path:
     return sb_dir() / "state.json"
 
 
+def outbox_path() -> Path:
+    """Durable outbound event queue — un-acked events persist here so a notification
+    survives a daemon restart (not just a socket blip), replaying on the next connect."""
+    return sb_dir() / "outbox.json"
+
+
 def load_conn_state() -> dict:
     data = _read_json(state_path()) or {}
-    return {"seq_hw": int(data.get("seq_hw", 0)), "seeded": list(data.get("seeded", []))}
+    return {
+        "seq_hw": int(data.get("seq_hw", 0)),
+        "seeded": list(data.get("seeded", [])),
+        # spawn-request ids we've already decided about (emitted or dropped) — dedup +
+        # "already handled" tracking across polls and daemon restarts.
+        "seen_spawns": list(data.get("seen_spawns", [])),
+    }
 
 
 def save_conn_state(state: dict) -> None:
     _atomic_write_json(
         state_path(),
-        {"seq_hw": int(state.get("seq_hw", 0)), "seeded": sorted(set(state.get("seeded", [])))},
+        {
+            "seq_hw": int(state.get("seq_hw", 0)),
+            "seeded": sorted(set(state.get("seeded", []))),
+            "seen_spawns": sorted(set(state.get("seen_spawns", []))),
+        },
     )
 
 
@@ -482,14 +498,40 @@ def _verify_server(
 class OutboundBuffer:
     """A durable, ordered buffer of un-acked events (§8.1). Events accumulate a
     strictly-increasing per-device ``seq`` and stay buffered until SB cumulatively
-    ``ack``s them; on reconnect / unlock the tail (``seq > from_seq``) is replayed.
+    ``ack``s them; on reconnect the tail (``seq > from_seq``) is replayed.
+
+    When ``path`` is given the buffer is **persisted to disk** — un-acked events survive
+    a daemon restart, so a notification produced while SB is disconnected is not lost.
     """
 
-    def __init__(self, *, start_seq: int = 0, on_seq=None, buffer_max: int = 50_000) -> None:
-        self._events: list[p.Event] = []
+    def __init__(
+        self, *, path: Path | None = None, start_seq: int = 0, on_seq=None,
+        buffer_max: int = 50_000,
+    ) -> None:
+        self._path = path
+        self._events: list[p.Event] = self._load()
         self._seq = itertools.count(start_seq + 1)  # continue from the durable high-water
         self._on_seq = on_seq  # callback(seq) -> persist the new high-water
         self._buffer_max = buffer_max
+
+    def _load(self) -> list[p.Event]:
+        if self._path is None:
+            return []
+        data = _read_json(self._path)
+        if not data:
+            return []
+        try:
+            return [p.Event.from_json(d) for d in data.get("events", [])]
+        except (TypeError, ValueError):
+            return []
+
+    def _persist(self) -> None:
+        if self._path is None:
+            return
+        try:
+            _atomic_write_json(self._path, {"events": [e.to_json() for e in self._events]})
+        except OSError:
+            log.debug("outbox persist failed", exc_info=True)
 
     def next_seq(self) -> int:
         s = next(self._seq)
@@ -499,14 +541,25 @@ class OutboundBuffer:
 
     def append(self, event: p.Event) -> None:
         self._events.append(event)
+        self._persist()
         if len(self._events) > self._buffer_max:
             log.warning("outbound buffer at cap (%s) — applying backpressure", self._buffer_max)
 
     def trim_through(self, ack_seq: int) -> None:
+        before = len(self._events)
         self._events = [e for e in self._events if e.seq > ack_seq]
+        if len(self._events) != before:
+            self._persist()
 
     def replay_from(self, from_seq: int) -> list[p.Event]:
         return [e for e in self._events if e.seq > from_seq]
+
+    def pending_after(self, seq: int) -> list[p.Event]:
+        """Buffered events with ``seq`` greater than ``seq`` (the unsent tail)."""
+        return [e for e in self._events if e.seq > seq]
+
+    def has_after(self, seq: int) -> bool:
+        return any(e.seq > seq for e in self._events)
 
 
 class ActionDedup:
@@ -558,15 +611,24 @@ class SBConnector:
         self.identity = identity
         self.cf_access = cf_access
         # Durable state (survives daemon restarts, §8.1): continue seq from the
-        # high-water, and remember which workspaces we've already announced.
+        # high-water, remember which workspaces we've announced, and which spawn
+        # requests we've already handled.
         self._state = load_conn_state()
-        self.buffer = OutboundBuffer(start_seq=self._state["seq_hw"], on_seq=self._persist_seq)
+        self.buffer = OutboundBuffer(
+            path=outbox_path(), start_seq=self._state["seq_hw"], on_seq=self._persist_seq
+        )
         self.dedup = ActionDedup()
         self.channel: auth.SessionChannel | None = None
         self._locked = False  # between lock and unlock (§9)
         self._stop = asyncio.Event()
         self._seeded: set[str] = set(self._state["seeded"])
+        self._seen_spawns: set[str] = set(self._state["seen_spawns"])
         self._ws = None  # the live connection while connected (for a graceful close)
+        # Producer <-> sender coordination: the watcher enqueues events and sets
+        # _new_event; the per-connection sender flushes everything past _sent_through.
+        self._new_event = asyncio.Event()
+        self._sent_through = 0  # highest seq sent on the current connection
+        self._poll_interval = 1.0  # producer poll cadence (s)
 
     def _persist_seq(self, seq: int) -> None:
         self._state["seq_hw"] = seq
@@ -615,7 +677,7 @@ class SBConnector:
                     try:
                         backoff = 1.0
                         self.channel = None
-                        await self._handshake(ws)
+                        from_seq = await self._handshake(ws)
                         write_status(
                             "connected",
                             detail="authenticated",
@@ -623,8 +685,8 @@ class SBConnector:
                             url=self.base_url,
                             granted_workspaces=self.identity.granted_workspaces,
                         )
-                        await self._emit_initial_connected(ws)
-                        await self._stream(ws)
+                        self._emit_initial_connected()  # enqueue; the sender flushes it
+                        await self._pump(ws, from_seq)
                     finally:
                         self._ws = None
             except asyncio.CancelledError:
@@ -662,7 +724,7 @@ class SBConnector:
 
     # ---- §13.3 handshake: hello -> challenge -> auth -> auth_ok --------------------
 
-    async def _handshake(self, ws) -> None:  # noqa: ANN001
+    async def _handshake(self, ws) -> int:  # noqa: ANN001
         x_priv, epk_c = auth.generate_ephemeral()
         await ws.send(
             p.encode(
@@ -703,54 +765,133 @@ class SBConnector:
         if auth_ok.granted_workspaces != self.identity.granted_workspaces:
             self.identity.granted_workspaces = auth_ok.granted_workspaces
             self.identity.save(device_key_path())
-        for event in self.buffer.replay_from(auth_ok.from_seq):
-            await self._send(ws, event)
         if auth_ok.from_seq == 0:
             log.info("new device/host — SB will backfill via queries")
+        return auth_ok.from_seq  # the sender replays events with seq > from_seq
 
     # ---- one real event: workspace.connected (liveness proof) ---------------------
 
-    async def _emit_initial_connected(self, ws) -> None:  # noqa: ANN001
-        """Emit ``workspace.connected`` for each granted workspace not yet announced.
+    def _emit_initial_connected(self) -> None:
+        """Enqueue ``workspace.connected`` for each granted workspace not yet announced.
 
         ``workspace.connected`` is a **first-ever** event (a workspace opting into SB),
         not a per-reconnect one — the first announce carries a ``workspace_summary`` so
         SB can seed per-workspace memory (§4b). We persist which workspaces have been
-        announced, so a daemon restart does NOT re-announce (its seq would collide with
-        the host's already-advanced cursor). On a plain reconnect an un-acked announce
-        is replayed from the buffer by :meth:`_handshake`, not re-created here.
+        announced (``_seeded``), so a daemon restart does NOT re-announce (its seq would
+        collide with the host's cursor), and a plain reconnect replays the un-acked
+        buffered copy rather than minting a second one.
 
-        This is the minimal proof that events flow end to end; the full event producer
-        (Multiverse hooks/file substrate -> events) is the next-phase binding.
+        Being seeded also **gates event queueing**: only a workspace SB already knows
+        about accumulates a durable queue (see :meth:`_poll_spawn_requests`).
+
+        Just enqueues — the per-connection sender flushes it.
         """
-        if self._locked:
-            return
         for cwd in self.identity.granted_workspaces:
             workspace_id = f"{self.identity.device_id}:{cwd}"
             if workspace_id in self._seeded:
                 continue  # already announced (this run or a prior one) — not a new opt-in
-            event = self.make_event(
+            self.make_event(
                 workspace_id=workspace_id,
                 workspace_label=_workspace_label(cwd),
                 kind=p.EventKind.WORKSPACE_CONNECTED,
                 payload={"summary": _workspace_summary(cwd)},
                 event_id=f"wsconn:{workspace_id}",  # stable -> SB dedups a replay
             )
-            # Mark announced once it's buffered: a later reconnect replays the buffered
-            # copy (via _handshake) rather than minting a second one.
             self._seeded.add(workspace_id)
             self._state["seeded"] = sorted(self._seeded)
             save_conn_state(self._state)
-            await self._send(ws, event)
 
-    # ---- §13.4-6 stream: emit events, execute actions, answer queries --------------
+    # ---- §13.4-6 stream: receiver + sender, concurrently -------------------------
 
-    async def _stream(self, ws) -> None:  # noqa: ANN001
-        # v1: consumer only. The next-phase producer (Multiverse hooks/file substrate
-        # -> events -> self._send) runs concurrently here.
+    async def _pump(self, ws, from_seq: int) -> None:  # noqa: ANN001
+        """Run the receiver and sender together until the connection drops.
+
+        The sender starts by replaying the un-acked tail (``seq > from_seq``), then
+        streams newly-produced events as the watcher enqueues them. If either side
+        errors (e.g. the socket closes), we cancel the other and re-raise so ``run``
+        reconnects.
+        """
+        self._sent_through = from_seq
+        self._new_event.set()  # kick the sender to flush the tail (seq > from_seq)
+        recv_task = asyncio.ensure_future(self._receiver(ws))
+        send_task = asyncio.ensure_future(self._sender(ws))
+        try:
+            done, _ = await asyncio.wait(
+                {recv_task, send_task}, return_when=asyncio.FIRST_COMPLETED
+            )
+        finally:
+            for t in (recv_task, send_task):
+                t.cancel()
+            await asyncio.gather(recv_task, send_task, return_exceptions=True)
+        for t in done:
+            exc = t.exception()
+            if exc is not None:
+                raise exc
+
+    async def _receiver(self, ws) -> None:  # noqa: ANN001
         while not self._stop.is_set():
             frame = await self._recv(ws)
             await self._dispatch(ws, frame)
+
+    async def _sender(self, ws) -> None:  # noqa: ANN001
+        while not self._stop.is_set():
+            if not self._locked:  # §9: hold everything while SB is compacting
+                for event in self.buffer.pending_after(self._sent_through):
+                    await self._send(ws, event)
+                    self._sent_through = event.seq
+            self._new_event.clear()
+            # Re-check after clearing so a wakeup that raced the flush isn't lost.
+            if not self._locked and self.buffer.has_after(self._sent_through):
+                continue
+            await self._new_event.wait()
+
+    # ---- producer: watch the Multiverse substrate, enqueue events ------------------
+
+    async def run_producer(self) -> None:
+        """Watch ``~/.multiverse`` and enqueue perception events. Runs continuously
+        across reconnects (independent of the socket): events accumulate in the durable
+        buffer while disconnected and replay on the next connect — but only for
+        workspaces SB already knows about (``_seeded``), per the "no queue for a
+        never-connected workspace" rule."""
+        while not self._stop.is_set():
+            try:
+                self._poll_spawn_requests()
+            except Exception:  # noqa: BLE001 - a poll error must not kill the producer
+                log.debug("producer poll failed", exc_info=True)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._poll_interval)
+            except asyncio.TimeoutError:
+                pass
+
+    def _poll_spawn_requests(self) -> None:
+        from . import sb_events
+
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        changed = False
+        for req in sb_events.scan_spawn_requests(granted):
+            rid = req.get("id")
+            if not rid or rid in self._seen_spawns:
+                continue
+            self._seen_spawns.add(rid)
+            changed = True
+            cwd = str(Path(req.get("cwd", "")).expanduser().resolve())
+            workspace_id = f"{self.identity.device_id}:{cwd}"
+            # Queue only for a workspace that has connected to SB before (is seeded).
+            # A never-connected workspace drops its events rather than piling a stale queue.
+            if workspace_id in self._seeded:
+                agent, payload = sb_events.spawn_request_event_fields(req)
+                self.make_event(
+                    workspace_id=workspace_id,
+                    workspace_label=_workspace_label(cwd),
+                    kind="agent.spawn_request",  # §4b (not in the stale enum; string ok)
+                    payload=payload,
+                    agent=agent,
+                    event_id=f"spawnreq:{rid}",
+                )
+                log.info("enqueued agent.spawn_request from %s (%s)", agent, rid)
+        if changed:
+            self._state["seen_spawns"] = sorted(self._seen_spawns)
+            save_conn_state(self._state)
 
     async def _dispatch(self, ws, frame: p.Frame) -> None:  # noqa: ANN001
         t = frame.T
@@ -760,11 +901,11 @@ class SBConnector:
             await self._on_query(ws, frame)  # type: ignore[arg-type]
         elif t is p.FrameType.ACK:
             self.buffer.trim_through(frame.ack_seq)  # type: ignore[attr-defined]
-        elif t is p.FrameType.RESUME:
-            for event in self.buffer.replay_from(frame.from_seq):  # type: ignore[attr-defined]
-                await self._send(ws, event)
+        elif t is p.FrameType.RESUME:  # server gap self-heal: re-send seq > from_seq
+            self._sent_through = min(self._sent_through, frame.from_seq)  # type: ignore[attr-defined]
+            self._new_event.set()
         elif t is p.FrameType.LOCK:
-            self._locked = True  # §9: hold new events; keep assigning seqs
+            self._locked = True  # §9: sender holds new events; seqs keep advancing
             write_status(
                 "locked",
                 detail=getattr(frame, "reason", "compaction"),
@@ -773,9 +914,8 @@ class SBConnector:
                 granted_workspaces=self.identity.granted_workspaces,
             )
         elif t is p.FrameType.UNLOCK:
-            self._locked = False  # §9: drain the held tail (== resume)
-            for event in self.buffer.replay_from(0):
-                await self._send(ws, event)
+            self._locked = False  # §9: release; sender drains the held tail
+            self._new_event.set()
             write_status(
                 "connected",
                 detail="unlocked",
@@ -903,7 +1043,8 @@ class SBConnector:
             agent=agent,
             payload=payload,
         )
-        self.buffer.append(event)
+        self.buffer.append(event)  # durable
+        self._new_event.set()  # wake the sender (no-op if disconnected)
         return event
 
 
@@ -930,12 +1071,16 @@ async def _run_daemon() -> int:
 
     loop = asyncio.get_running_loop()
     run_task = asyncio.ensure_future(conn.run())
+    # The producer runs alongside the connection (across reconnects): it watches the
+    # Multiverse substrate and enqueues events, which buffer durably while disconnected.
+    producer_task = asyncio.ensure_future(conn.run_producer())
 
     def _shutdown() -> None:
         # Graceful: flag stop + send a proper 1000 close (which also unblocks a parked
         # recv), so run() breaks on its own. A watchdog force-cancels if the close hangs.
         async def _go() -> None:
             await conn.aclose()
+            producer_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(run_task), timeout=8.0)
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
@@ -955,6 +1100,8 @@ async def _run_daemon() -> int:
     except asyncio.CancelledError:
         return 0
     finally:
+        producer_task.cancel()
+        await asyncio.gather(producer_task, return_exceptions=True)
         write_status("stopped", detail="daemon exited", device_id=identity.device_id)
         release_lock()
 

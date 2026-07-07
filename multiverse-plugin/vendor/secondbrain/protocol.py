@@ -101,16 +101,23 @@ class FrameType(StrEnum):
 
 
 class EventKind(StrEnum):
-    """Perception event kinds (wrapper -> SB), §10.2 table -- kept 1:1 with the spec."""
+    """Perception event kinds (wrapper -> SB), the finalized DESIGN.md §4b vocabulary.
 
-    WORKSPACE_CONNECTED = "workspace.connected"
+    `agent.response` carries `state` (`idle`|`waiting`) + optional `waiting_detail` in its
+    payload — it subsumes the old `agent.status_changed` (dropped). `agent.message` is also
+    dropped (inter-agent messages aren't observed). The `user.*` decision events are core
+    apprenticeship signal (SB learns from how the user answers/permits/decides).
+    """
+
+    WORKSPACE_CONNECTED = "workspace.connected"  # first connect carries a workspace_summary
     WORKSPACE_DISCONNECTED = "workspace.disconnected"
     AGENT_CREATED = "agent.created"
-    AGENT_STATUS_CHANGED = "agent.status_changed"  # to == "waiting" is the key alert
-    USER_PROMPT = "user.prompt"
-    AGENT_RESPONSE = "agent.response"
-    AGENT_MESSAGE = "agent.message"
+    USER_PROMPT = "user.prompt"  # + overview_since_last + full
+    AGENT_RESPONSE = "agent.response"  # + state, summary, full, waiting_detail?
     AGENT_SPAWN_REQUEST = "agent.spawn_request"
+    USER_ANSWERED = "user.answered"
+    USER_PERMISSION_DECISION = "user.permission_decision"
+    USER_SPAWN_DECISION = "user.spawn_decision"
 
 
 class ActionKind(StrEnum):
@@ -190,6 +197,11 @@ class Frame:
     T: ClassVar[FrameType]
     #: The protocol version stamped into every frame.
     V: ClassVar[int] = PROTOCOL_VERSION
+    #: Body fields that carry a StrEnum on the wire. :meth:`from_json` coerces a *known*
+    #: decoded string back to its enum member so downstream ``x is Kind.MEMBER`` /
+    #: ``x is Status.OK`` identity checks work; an *unknown* value is left as a plain
+    #: string (forward-compat, §10). Overridden on frames that have enum fields.
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {}
 
     def to_json(self) -> dict[str, Any]:
         """Serialize to a JSON-ready dict, including ``t`` and ``v``.
@@ -211,10 +223,19 @@ class Frame:
 
         Unknown keys are tolerated for forward-compatibility (a newer connector may add
         fields). Missing *required* fields surface as a ``TypeError`` from the dataclass
-        constructor, which :func:`decode` maps to :class:`ProtocolError`.
+        constructor, which :func:`decode` maps to :class:`ProtocolError`. Known enum-valued
+        fields (:attr:`_ENUM_FIELDS`) are coerced back to their enum member; unknown values
+        stay strings.
         """
         field_names = {f.name for f in dataclasses.fields(cls)}  # type: ignore[arg-type]
         kwargs = {k: v for k, v in data.items() if k in field_names}
+        for name, enum_cls in cls._ENUM_FIELDS.items():
+            value = kwargs.get(name)
+            if isinstance(value, str):
+                try:
+                    kwargs[name] = enum_cls(value)
+                except ValueError:
+                    pass  # unknown member → keep the raw string (forward-compat, §10)
         return cls(**kwargs)  # type: ignore[call-arg]
 
 
@@ -441,6 +462,7 @@ class Event(Frame):
     agent: str | None = None
     payload: dict[str, Any] = field(default_factory=dict)
     T: ClassVar[FrameType] = FrameType.EVENT
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {"kind": EventKind}
 
 
 # --------------------------------------------------------------------------------------
@@ -461,6 +483,7 @@ class Action(Frame):
     agent: str | None = None  # target agent, for kinds that need it
     payload: dict[str, Any] = field(default_factory=dict)
     T: ClassVar[FrameType] = FrameType.ACTION
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {"kind": ActionKind, "authority": Authority}
 
 
 @dataclass
@@ -472,6 +495,7 @@ class ActionResult(Frame):
     result: dict[str, Any] | None = None  # kind-specific, e.g. {"spawned_name": "triage"}
     error: dict[str, Any] | None = None  # {"code": "...", "message": "..."}
     T: ClassVar[FrameType] = FrameType.ACTION_RESULT
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {"status": ResultStatus}
 
 
 # --------------------------------------------------------------------------------------
@@ -488,6 +512,7 @@ class Query(Frame):
     workspace_id: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     T: ClassVar[FrameType] = FrameType.QUERY
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {"kind": QueryKind}
 
 
 @dataclass
@@ -499,6 +524,7 @@ class QueryResult(Frame):
     result: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     T: ClassVar[FrameType] = FrameType.QUERY_RESULT
+    _ENUM_FIELDS: ClassVar[dict[str, type[Enum]]] = {"status": ResultStatus}
 
 
 # --------------------------------------------------------------------------------------
