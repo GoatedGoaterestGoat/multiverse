@@ -855,9 +855,11 @@ class SBConnector:
         before" gate was applied at record time, so nothing here needs re-gating."""
         while not self._stop.is_set():
             try:
-                self._init_new_markers()          # transcript markers for newly-seeded workspaces
-                self._consume_pending()            # spawn events (fully composed at the choke-point)
-                self._consume_response_signals()   # agent.response (transcript generated here)
+                self._init_new_markers()            # transcript markers for newly-seeded workspaces
+                self._consume_pending()              # spawn events (fully composed at the choke-point)
+                self._consume_response_signals()     # agent.response (transcript generated here)
+                self._consume_question_signals()     # agent.question (transcript = "why" context)
+                self._consume_answered_signals()     # user.answered (no transcript — agent was blocked)
             except Exception:  # noqa: BLE001 - a step error must not kill the producer
                 log.debug("producer step failed", exc_info=True)
             try:
@@ -915,6 +917,66 @@ class SBConnector:
             sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
             sb_notify.delete_response_signal(sig)
             log.info("relayed agent.response (idle) for %s", agent)
+
+    def _consume_question_signals(self) -> None:
+        """Expand each ask-tool question signal into an ``agent.question`` event:
+        generate the partial transcript (peek) as the "why" context, compose the payload
+        (full question + choices verbatim in ``summary``; transcript in ``full``),
+        buffer it, commit the marker, drop the signal. Order = make_event → commit →
+        delete for at-least-once (SB dedups by ``event_id``)."""
+        from . import sb_events, sb_notify, sb_transcript
+
+        for sig in sb_notify.list_question_signals():
+            cwd = sig.get("cwd", "")
+            agent = sig.get("agent", "")
+            question_id = sig.get("question_id", "")
+            questions = sig.get("questions") or []
+            peeked = sb_transcript.peek_partial_transcript(cwd, agent)
+            transcript = ""
+            cursor: dict | None = None
+            if peeked is not None:
+                transcript, cursor = peeked
+            # If the agent is unresolvable we still relay the question — the transcript is
+            # just missing "why" context, but the question itself is authoritative from the
+            # PreToolUse payload we captured firsthand.
+            payload = sb_events.agent_question_event_fields(
+                agent, question_id, questions, transcript
+            )
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind="agent.question",
+                payload=payload,
+                agent=agent,
+                event_id=f"aq:{question_id}",  # stable → SB dedups on retry
+            )
+            if cursor is not None:
+                sb_transcript.commit_marker(cwd, agent, cursor)
+            sb_notify.delete_question_signal(sig)
+            log.info("relayed agent.question (%s) for %s", question_id, agent)
+
+    def _consume_answered_signals(self) -> None:
+        """Turn each answered signal into a ``user.answered`` event — no transcript
+        (the agent was blocked between pre/post so nothing happened). Shares
+        ``question_id`` with the earlier ``agent.question`` so SB pairs them."""
+        from . import sb_events, sb_notify
+
+        for sig in sb_notify.list_answered_signals():
+            agent = sig.get("agent", "")
+            question_id = sig.get("question_id", "")
+            payload = sb_events.user_answered_event_fields(
+                agent, question_id, sig.get("answers"), sig.get("questions")
+            )
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind="user.answered",
+                payload=payload,
+                agent=agent,
+                event_id=f"uans:{question_id}",
+            )
+            sb_notify.delete_answered_signal(sig)
+            log.info("relayed user.answered (%s) for %s", question_id, agent)
 
     def _consume_pending(self) -> None:
         """Drain durable pending event records (firsthand-produced) into the outbound

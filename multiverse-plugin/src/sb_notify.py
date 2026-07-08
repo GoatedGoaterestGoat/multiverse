@@ -215,6 +215,124 @@ def delete_response_signal(record: dict) -> None:
         pass
 
 
+# ---- ask-tool question/answered signals -----------------------------------------------
+# Firsthand production points: PreToolUse[AskUserQuestion] → question_signal; the pair
+# closes at PostToolUse[AskUserQuestion] → answered_signal. Filename = tool_use_id (the
+# ``question_id``) so a re-fire idempotently overwrites the same signal.
+
+def _list_and_stamp(d: Path) -> list[dict]:
+    if not d.is_dir():
+        return []
+    out: list[dict] = []
+    for p in d.glob("*.json"):
+        if p.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(p)
+        if rec:
+            rec["_path"] = str(p)
+            out.append(rec)
+    out.sort(key=lambda r: r.get("ts", ""))
+    return out
+
+
+def question_signals_dir() -> Path:
+    """Queue of ask-tool question signals the connector expands into agent.question events
+    (attaching the partial transcript = the "why" context)."""
+    return _sb_dir() / "question_signals"
+
+
+def answered_signals_dir() -> Path:
+    """Queue of ask-tool answered signals the connector expands into user.answered events
+    (the close of the question pair; shares question_id with the earlier agent.question)."""
+    return _sb_dir() / "answered_signals"
+
+
+def record_question_signal(
+    cwd: str, agent_name: str, question_id: str, questions: list
+) -> None:
+    """Record a fast ask-tool question signal (from PreToolUse[AskUserQuestion]). CHEAP —
+    no transcript parsing here; the connector generates it off the agent's critical path.
+    Gated on the workspace being seeded."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None or not question_id:
+            return
+        d = question_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "question_id": question_id,
+            "questions": questions,
+            "ts": _now_iso(),
+        }
+        path = d / f"{_safe(question_id)}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def list_question_signals() -> list[dict]:
+    return _list_and_stamp(question_signals_dir())
+
+
+def delete_question_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
+        pass
+
+
+def record_answered_signal(
+    cwd: str,
+    agent_name: str,
+    question_id: str,
+    answers: dict | list,
+    questions: list | None = None,
+) -> None:
+    """Record a fast ask-tool answered signal (from PostToolUse[AskUserQuestion]). Carries
+    the shared ``question_id`` so SB pairs it to the earlier agent.question. Keeps the
+    original ``questions`` inline for SB's context (matching the pattern where the closer
+    reminds you of what was asked). Gated on the workspace being seeded."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None or not question_id:
+            return
+        d = answered_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "question_id": question_id,
+            "answers": answers,
+            "questions": questions,
+            "ts": _now_iso(),
+        }
+        path = d / f"{_safe(question_id)}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def list_answered_signals() -> list[dict]:
+    return _list_and_stamp(answered_signals_dir())
+
+
+def delete_answered_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
+        pass
+
+
 def record_spawn_decision(req: dict, status: str, name: str | None) -> None:
     """Record a ``user.spawn_decision`` event at resolution time (``write_resolution``).
 

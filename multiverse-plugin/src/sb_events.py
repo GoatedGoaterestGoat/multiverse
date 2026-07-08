@@ -110,6 +110,86 @@ def _last_assistant_line(full: str) -> str:
     return last[:160] if last else ""
 
 
+def _render_questions_verbatim(questions: list) -> str:
+    """Render an AskUserQuestion payload (1..N questions, each with options) as a
+    human-readable text block that SB delivers ~verbatim as the turn — nothing truncated,
+    no view_full round-trip needed for the question itself."""
+    if not questions:
+        return "(no questions)"
+    lines: list[str] = []
+    for i, q in enumerate(questions):
+        prefix = f"Q{i+1}: " if len(questions) > 1 else ""
+        lines.append(f"{prefix}{q.get('question') or '(no text)'}")
+        opts = q.get("options") or []
+        if q.get("multiSelect"):
+            lines.append("  (choose one or more)")
+        for opt in opts:
+            label = opt.get("label") or "?"
+            desc = (opt.get("description") or "").strip()
+            lines.append(f"  - {label}: {desc}" if desc else f"  - {label}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def agent_question_event_fields(
+    agent_name: str, question_id: str, questions: list, transcript: str
+) -> dict:
+    """``agent.question`` payload — the first-kind of the ask-tool question pair.
+
+    Per the user: the full question(s) + choices ride in ``summary`` VERBATIM (not
+    truncated); SB delivers that as the turn text without needing view_full for the
+    question. ``full`` carries the partial transcript from the last marker → now, so SB has
+    the "why" context (same transcript mechanism as agent.response). Structured
+    ``questions`` are retained for the eventual ``answer_question`` action; ``question_id``
+    (= the AskUserQuestion tool_use_id) is the pair key echoed by ``user.answered``.
+    """
+    rendered = _render_questions_verbatim(questions)
+    summary = f"agent '{agent_name}' asks:\n{rendered}"
+    return {
+        "question_id": question_id,
+        "questions": questions,
+        "summary": summary,
+        "full": transcript,
+    }
+
+
+def _render_answers_verbatim(answers, questions: list | None) -> str:
+    """Render the user's selection(s) as compact text. AskUserQuestion returns a list per
+    question (one entry per original questions[]), each an ``answer`` string or list."""
+    if isinstance(answers, list) and questions and len(answers) == len(questions):
+        lines: list[str] = []
+        for q, a in zip(questions, answers):
+            qtext = (q.get("question") or "").strip()
+            if isinstance(a, dict):
+                a = a.get("answer") or a.get("selected") or a
+            if isinstance(a, list):
+                a = ", ".join(str(x) for x in a)
+            lines.append(f"- {qtext}\n  → {a}")
+        return "\n".join(lines)
+    if isinstance(answers, dict):
+        return "\n".join(f"- {k}: {v}" for k, v in answers.items())
+    if isinstance(answers, list):
+        return ", ".join(str(x) for x in answers)
+    return str(answers or "(no answer)")
+
+
+def user_answered_event_fields(
+    agent_name: str, question_id: str, answers, questions: list | None = None
+) -> dict:
+    """``user.answered`` payload — the close of the ask-tool question pair. Carries the
+    shared ``question_id`` so SB pairs it to the earlier ``agent.question``, plus the
+    user's selection(s). No transcript here: between PreToolUse and PostToolUse the agent
+    is BLOCKED waiting, so there's no new turn to deliver."""
+    rendered = _render_answers_verbatim(answers, questions)
+    summary = f"user answered {agent_name}'s question:\n{rendered}"
+    return {
+        "question_id": question_id,
+        "answers": answers,
+        "questions": questions,
+        "summary": summary,
+    }
+
+
 def agent_response_event_fields(agent_name: str, full: str) -> dict:
     """The ``agent.response`` payload (DESIGN §4b): the agent finished a turn **normally**
     and went idle → ``{state: "idle", summary, full}``.
