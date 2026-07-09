@@ -358,6 +358,58 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+class ConfirmForceKillScreen(ModalScreen[bool]):
+    """Confirmation before force-killing a session created on a different
+    host. Used when the shared-storage host guard would normally block —
+    e.g. after a container/machine gets replaced and its sessions never
+    got a chance to write a clean ``ended`` status.
+
+    Returns ``True`` on confirm (Enter), ``False`` on cancel (Esc).
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(
+        self, display_name: str, other_host: str, current: str
+    ) -> None:
+        super().__init__()
+        self.display_name = display_name
+        self.other_host = other_host
+        self.current = current
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                f"Force-kill session [bold]'{self.display_name}'[/]?",
+                id="confirm-force-header",
+            ),
+            Static(
+                f"Session was created on host [bold]{self.other_host}[/] and "
+                f"its durable status there is not [italic]ended[/]. "
+                f"You're on [bold]{self.current}[/].\n\n"
+                "Normal kill is blocked because the session might still be "
+                "alive on that other host — killing it from here would only "
+                "delete its bookkeeping (inviting a duplicate later) without "
+                "actually stopping the process there.\n\n"
+                "Confirm only if you're sure that host is gone (container "
+                "recycled, machine dead, etc.). This will remove the local "
+                "state files here.",
+                id="confirm-force-body",
+            ),
+            Static("Enter to force-kill · Esc to cancel", id="confirm-force-hint"),
+            id="confirm-force-dialog",
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+
 class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
     """Browse claude sessions in the monitor's cwd and pick one to resume.
 
@@ -2437,6 +2489,26 @@ class MonitorApp(App):
         color: $text-muted;
         height: auto;
     }
+    #confirm-force-dialog {
+        width: 100;
+        height: auto;
+        padding: 1 2;
+        border: round $error;
+        background: $surface;
+    }
+    #confirm-force-header {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-force-body {
+        color: $text-muted;
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-force-hint {
+        color: $text-muted;
+        height: auto;
+    }
     #resume-dialog {
         width: 100%;
         height: 100%;
@@ -3184,14 +3256,35 @@ class MonitorApp(App):
             self.push_screen(ConfirmDeleteScreen(display_name), _on_close)
             return
         if foreign_host_still_reported_live(e.session):
-            self.notify(
-                f"'{e.name}' was created on host '{e.session.host}' and "
-                "its status there still says it's active — refusing to "
-                "kill it from here. Local tmux can't reach that host's "
-                "session, so this would only delete its bookkeeping "
-                "(inviting a duplicate later) without actually stopping "
-                "it. Kill it from its own host.",
-                severity="error",
+            # Session was created on a different host and never wrote
+            # `ended` there. Normally we refuse (avoids duplicate-session
+            # bookkeeping issues while the original process is still
+            # running elsewhere). But when a whole container/machine dies
+            # without a clean shutdown — recycled Beaker container, dead
+            # remote — every session it owned is stuck this way, with no
+            # way for the user to clear them from any other host. Offer
+            # a confirm-and-force-kill path here, keyed on the user's
+            # first-hand knowledge that the foreign host is gone.
+            session = e.session
+            display_name = e.name
+
+            def _on_force_close(confirmed: Optional[bool]) -> None:
+                if not confirmed:
+                    return
+                kill_session(session)
+                self.notify(
+                    f"Force-killed '{display_name}' "
+                    f"(was on host {session.host})"
+                )
+                self.refresh_sessions()
+
+            self.push_screen(
+                ConfirmForceKillScreen(
+                    display_name=display_name,
+                    other_host=e.session.host or "(unknown)",
+                    current=current_host(),
+                ),
+                _on_force_close,
             )
             return
         kill_session(e.session)
