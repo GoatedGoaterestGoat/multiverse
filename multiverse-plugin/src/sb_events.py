@@ -153,40 +153,49 @@ def agent_question_event_fields(
     }
 
 
-def _render_answers_verbatim(answers, questions: list | None) -> str:
-    """Render the user's selection(s) as compact text. AskUserQuestion returns a list per
-    question (one entry per original questions[]), each an ``answer`` string or list."""
-    if isinstance(answers, list) and questions and len(answers) == len(questions):
-        lines: list[str] = []
-        for q, a in zip(questions, answers):
-            qtext = (q.get("question") or "").strip()
+def _render_answer_picks(answers, questions: list | None) -> str:  # noqa: ARG001
+    """Render the user's selection(s) as JUST the pick(s) — no restated question.
+
+    SB's pair-combine joins the held ``agent.question.summary`` (which already carries the
+    question + options) with this via ``" → "``, so restating the question would just be
+    noise. AskUserQuestion returns one entry per input question; multi-select within a
+    question → comma-joined; across questions → semicolon-separated. E.g. a single-select
+    single-question → ``"Postgres"``; a two-question ask with a multi-select in the second
+    → ``"Postgres; ci, cd"``.
+    """
+    if isinstance(answers, list):
+        picks: list[str] = []
+        for a in answers:
             if isinstance(a, dict):
                 a = a.get("answer") or a.get("selected") or a
             if isinstance(a, list):
-                a = ", ".join(str(x) for x in a)
-            lines.append(f"- {qtext}\n  → {a}")
-        return "\n".join(lines)
+                joined = ", ".join(str(x) for x in a if x)
+                if joined:
+                    picks.append(joined)
+            elif a:
+                picks.append(str(a))
+        return "; ".join(picks) if picks else "(no answer)"
     if isinstance(answers, dict):
-        return "\n".join(f"- {k}: {v}" for k, v in answers.items())
-    if isinstance(answers, list):
-        return ", ".join(str(x) for x in answers)
-    return str(answers or "(no answer)")
+        vals = [v for v in answers.values() if v]
+        return "; ".join(str(v) for v in vals) if vals else "(no answer)"
+    return str(answers) if answers else "(no answer)"
 
 
 def user_answered_event_fields(
     agent_name: str, question_id: str, answers, questions: list | None = None
-) -> dict:
-    """``user.answered`` payload — the close of the ask-tool question pair. Carries the
-    shared ``question_id`` so SB pairs it to the earlier ``agent.question``, plus the
-    user's selection(s). No transcript here: between PreToolUse and PostToolUse the agent
-    is BLOCKED waiting, so there's no new turn to deliver."""
-    rendered = _render_answers_verbatim(answers, questions)
-    summary = f"user answered {agent_name}'s question:\n{rendered}"
+) -> dict:  # noqa: ARG001 - agent_name kept for API parity (structured payload includes it via envelope)
+    """``user.answered`` payload — close of the ask-tool question pair. Shares
+    ``question_id`` with the earlier ``agent.question``. ``summary`` is JUST the pick(s):
+    SB's pair-combine already restates the question from the held first's summary, so
+    including it again would be redundant. No transcript here — the agent was BLOCKED in
+    the ask between PreToolUse and PostToolUse, so nothing happened on its side.
+    """
+    picks = _render_answer_picks(answers, questions)
     return {
         "question_id": question_id,
         "answers": answers,
         "questions": questions,
-        "summary": summary,
+        "summary": picks,
     }
 
 

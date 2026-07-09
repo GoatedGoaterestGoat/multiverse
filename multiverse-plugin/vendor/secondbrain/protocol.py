@@ -113,9 +113,10 @@ class EventKind(StrEnum):
     WORKSPACE_DISCONNECTED = "workspace.disconnected"
     AGENT_CREATED = "agent.created"
     USER_PROMPT = "user.prompt"  # + overview_since_last + full
-    AGENT_RESPONSE = "agent.response"  # + state, summary, full, waiting_detail?
-    AGENT_SPAWN_REQUEST = "agent.spawn_request"
-    USER_ANSWERED = "user.answered"
+    AGENT_RESPONSE = "agent.response"  # idle-only ({summary, full}); waiting cases below
+    AGENT_SPAWN_REQUEST = "agent.spawn_request"  # first-kind of the spawn pair (§5f)
+    AGENT_QUESTION = "agent.question"  # first-kind of the question pair (§5f) — AskUserQuestion
+    USER_ANSWERED = "user.answered"  # closes agent.question, keyed by question_id/tool_use_id
     USER_PERMISSION_DECISION = "user.permission_decision"
     USER_SPAWN_DECISION = "user.spawn_decision"
 
