@@ -153,41 +153,79 @@ def agent_question_event_fields(
     }
 
 
-def _fold_pick_with_note(pick, note) -> str:
-    """Combine one pick with its per-question ``annotations.notes`` (if any) so an
-    ``"Other"`` choice keeps the user's typed text. Rules:
+#: Marker for a user-typed answer (the always-present "Other" option). Makes it obvious
+#: — in the summary SB delivers verbatim — that the user rejected every offered choice
+#: and wrote in their own answer, which is a stronger signal than "picked from the menu".
+_CUSTOM_TAIL = " (typed by user)"
 
-      pick=``"Postgres"``,        note=``None``       → ``"Postgres"``
-      pick=``"Other"`` (any case), note=``"SQLite"``  → ``"SQLite"``   (custom text is the pick)
-      pick=``"Postgres"``,        note=``"prefer TLS"`` → ``"Postgres (prefer TLS)"``
-      pick=``None``/``""``,        note=``"SQLite"``   → ``"SQLite"``
+
+def _mark_custom(text: str) -> str:
+    return f"'{text.strip()}'{_CUSTOM_TAIL}" if text and text.strip() else ""
+
+
+def _render_one_answer(question: dict | None, answer, note) -> str:
+    """Render one question's answer, distinguishing preset picks from user-typed text.
+
+    A pick is "custom" (Other) when either the answer is not among the question's
+    ``options.label`` set, or the answer is the literal ``"Other"`` with a ``notes``
+    annotation carrying the typed text. Preset picks with an accompanying note keep the
+    note parenthetically (some ask flows let the user annotate any pick, not just Other).
+    Multi-select splits on commas and marks each part independently.
+
+      Postgres, no note                        → ``Postgres``
+      Postgres, note "prefer TLS"              → ``Postgres (prefer TLS)``
+      "Other", note "SQLite"                   → ``'SQLite' (typed by user)``
+      "SQLite" alone (inline Other)            → ``'SQLite' (typed by user)``
+      multiSelect ci,cd + custom "smoke"       → ``ci, cd, 'smoke' (typed by user)``
     """
-    p = ("" if pick is None else str(pick)).strip()
+    q = question or {}
+    offered = {(o.get("label") or "").strip() for o in (q.get("options") or []) if o.get("label")}
+    multi = bool(q.get("multiSelect"))
+    ans = ("" if answer is None else str(answer)).strip()
     n = ("" if note is None else str(note)).strip()
-    if not p:
-        return n or "(no answer)"
-    if p.lower() == "other" and n:
-        return n
-    return f"{p} ({n})" if n else p
+
+    # "Other" + notes: the typed text IS the pick (SB sees it was custom).
+    if ans.lower() == "other" and n:
+        return _mark_custom(n)
+    # No answer but a note → note is the typed pick.
+    if not ans and n:
+        return _mark_custom(n)
+
+    def _fmt(part: str) -> str:
+        part = part.strip()
+        if not part:
+            return ""
+        # If we know the offered options and this part isn't among them, it's custom.
+        # (No `offered` known → we can't tell; fall through as a plain pick.)
+        return part if not offered or part in offered else _mark_custom(part)
+
+    if multi:
+        parts = [p for p in (x.strip() for x in ans.split(",")) if p]
+        rendered = ", ".join(f for f in (_fmt(p) for p in parts) if f) or "(no answer)"
+    else:
+        rendered = _fmt(ans) or "(no answer)"
+
+    # Preset + note (a clarification, not the Other-shortcut): append parenthetically.
+    if n and ans.lower() != "other":
+        rendered = f"{rendered} ({n})"
+    return rendered
 
 
 def _render_answer_picks(answers, questions: list | None, annotations) -> str:
-    """Render the user's selection(s) as JUST the pick(s) — no restated question.
+    """Render the user's selection(s) as JUST the pick(s) — no restated question — with
+    user-typed ("Other") answers explicitly marked so SB and its agent can tell them
+    apart from preset picks.
 
-    SB's pair-combine joins the held ``agent.question.summary`` (which already carries the
-    question + options) with this via ``" → "``, so restating the question would be noise.
-
-    Handles the canonical ``AskUserQuestion`` response — ``answers`` is a dict keyed by
-    question text; ``annotations`` (if present) is a parallel dict of ``{notes, preview}``.
-    "Other" custom text arrives inline in the answer string OR routed via
-    ``annotations.notes`` — either way :func:`_fold_pick_with_note` keeps it. Also
-    tolerates a list shape (legacy/defensive), with per-index alignment to ``questions``.
-
-    Multi-select within a question → comma-joined; across questions → semicolon-separated.
-    E.g. single-select single-question → ``"Postgres"``; two-question ask with multi-select
-    in the second → ``"Postgres; ci, cd"``; ``Other`` with typed text → ``"SQLite"``.
+    SB's pair-combine joins ``held.summary`` (the question + options) with this via
+    ``" → "``, so restating the question would be noise. Handles the canonical
+    ``AskUserQuestion`` shape (``answers`` dict keyed by question text, optional parallel
+    ``annotations`` dict of ``{notes, preview}``), and a defensive list shape (per-index
+    aligned to ``questions``). Multi-select within a question → comma-joined; across
+    questions → semicolon-separated.
     """
     ann = annotations if isinstance(annotations, dict) else {}
+    qs = questions or []
+    q_by_text = {(q.get("question") or ""): q for q in qs}
 
     def _note_for(qtext: str):
         entry = ann.get(qtext) if isinstance(qtext, str) else None
@@ -197,27 +235,22 @@ def _render_answer_picks(answers, questions: list | None, annotations) -> str:
 
     if isinstance(answers, dict):
         for qtext, val in answers.items():
-            note = _note_for(qtext)
-            if isinstance(val, list):  # multi-select — no per-choice notes to attach
-                joined = ", ".join(str(x) for x in val if x)
-                picks.append(_fold_pick_with_note(joined, note))
-            else:
-                picks.append(_fold_pick_with_note(val, note))
+            q = q_by_text.get(qtext)
+            picks.append(_render_one_answer(q, val, _note_for(qtext)))
     elif isinstance(answers, list):
-        qs = questions or []
         for i, val in enumerate(answers):
-            qtext = (qs[i].get("question") if i < len(qs) else None) or ""
+            q = qs[i] if i < len(qs) else None
+            qtext = (q.get("question") if q else "") or ""
             note = _note_for(qtext)
             if isinstance(val, dict):  # accept {answer, notes?} shape defensively
-                val = val.get("answer") or val.get("selected") or val
-                note = note or val.get("notes") if isinstance(val, dict) else note
+                inner_note = val.get("notes")
+                val = val.get("answer") or val.get("selected") or ""
+                note = note or inner_note
             if isinstance(val, list):
-                joined = ", ".join(str(x) for x in val if x)
-                picks.append(_fold_pick_with_note(joined, note))
-            else:
-                picks.append(_fold_pick_with_note(val, note))
+                val = ", ".join(str(x) for x in val if x)
+            picks.append(_render_one_answer(q, val, note))
     else:
-        return _fold_pick_with_note(answers, None)
+        return str(answers) if answers else "(no answer)"
 
     return "; ".join(p for p in picks if p) or "(no answer)"
 
