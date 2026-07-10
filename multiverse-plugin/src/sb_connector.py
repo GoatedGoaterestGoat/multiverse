@@ -965,7 +965,11 @@ class SBConnector:
             agent = sig.get("agent", "")
             question_id = sig.get("question_id", "")
             payload = sb_events.user_answered_event_fields(
-                agent, question_id, sig.get("answers"), sig.get("questions")
+                agent,
+                question_id,
+                sig.get("answers"),
+                sig.get("questions"),
+                sig.get("annotations"),
             )
             self.make_event(
                 workspace_id=sig.get("workspace_id", ""),

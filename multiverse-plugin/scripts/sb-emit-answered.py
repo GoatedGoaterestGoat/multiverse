@@ -38,12 +38,21 @@ def main() -> None:
     if not tool_use_id:
         return
 
-    # The tool response format Claude Code exposes may vary — accept both a raw list
-    # (the AskUserQuestion answers, one per input question) and a wrapping dict.
+    # The AskUserQuestion tool_response shape (per the tool schema):
+    #   {"answers": {<question_text>: <picked label OR "Other"-typed text>},
+    #    "annotations"?: {<question_text>: {"notes"?: <free-text/Other-typed>, "preview"?: ...}}}
+    # Be defensive about shape drift — accept a bare dict of answers too, and pass along
+    # annotations if present so an "Other" typed text isn't silently dropped when the
+    # tool routes it via annotations.notes rather than inline in the answer string.
     resp = data.get("tool_response")
     answers = None
+    annotations = None
     if isinstance(resp, dict):
-        answers = resp.get("answers") if "answers" in resp else resp
+        if "answers" in resp:
+            answers = resp.get("answers")
+            annotations = resp.get("annotations")
+        else:
+            answers = resp
     else:
         answers = resp
     # Keep the original questions for context so SB can re-render the pair on its side.
@@ -53,7 +62,9 @@ def main() -> None:
     try:
         from src import sb_notify
 
-        sb_notify.record_answered_signal(cwd, agent, tool_use_id, answers, questions)
+        sb_notify.record_answered_signal(
+            cwd, agent, tool_use_id, answers, questions, annotations
+        )
     except Exception:  # noqa: BLE001 - never break the agent's turn
         pass
 

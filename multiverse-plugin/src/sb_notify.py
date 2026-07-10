@@ -293,11 +293,13 @@ def record_answered_signal(
     question_id: str,
     answers: dict | list,
     questions: list | None = None,
+    annotations: dict | None = None,
 ) -> None:
     """Record a fast ask-tool answered signal (from PostToolUse[AskUserQuestion]). Carries
     the shared ``question_id`` so SB pairs it to the earlier agent.question. Keeps the
-    original ``questions`` inline for SB's context (matching the pattern where the closer
-    reminds you of what was asked). Gated on the workspace being seeded."""
+    original ``questions`` inline for SB's context, and ``annotations`` (per-question
+    notes/previews from the AskUserQuestion response) so any "Other"-typed text isn't
+    lost if the tool routes it there. Gated on the workspace being seeded."""
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None or not question_id:
@@ -312,6 +314,7 @@ def record_answered_signal(
             "question_id": question_id,
             "answers": answers,
             "questions": questions,
+            "annotations": annotations,
             "ts": _now_iso(),
         }
         path = d / f"{_safe(question_id)}.json"

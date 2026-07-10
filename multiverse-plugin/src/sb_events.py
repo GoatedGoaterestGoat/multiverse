@@ -153,50 +153,101 @@ def agent_question_event_fields(
     }
 
 
-def _render_answer_picks(answers, questions: list | None) -> str:  # noqa: ARG001
+def _fold_pick_with_note(pick, note) -> str:
+    """Combine one pick with its per-question ``annotations.notes`` (if any) so an
+    ``"Other"`` choice keeps the user's typed text. Rules:
+
+      pick=``"Postgres"``,        note=``None``       → ``"Postgres"``
+      pick=``"Other"`` (any case), note=``"SQLite"``  → ``"SQLite"``   (custom text is the pick)
+      pick=``"Postgres"``,        note=``"prefer TLS"`` → ``"Postgres (prefer TLS)"``
+      pick=``None``/``""``,        note=``"SQLite"``   → ``"SQLite"``
+    """
+    p = ("" if pick is None else str(pick)).strip()
+    n = ("" if note is None else str(note)).strip()
+    if not p:
+        return n or "(no answer)"
+    if p.lower() == "other" and n:
+        return n
+    return f"{p} ({n})" if n else p
+
+
+def _render_answer_picks(answers, questions: list | None, annotations) -> str:
     """Render the user's selection(s) as JUST the pick(s) — no restated question.
 
     SB's pair-combine joins the held ``agent.question.summary`` (which already carries the
-    question + options) with this via ``" → "``, so restating the question would just be
-    noise. AskUserQuestion returns one entry per input question; multi-select within a
-    question → comma-joined; across questions → semicolon-separated. E.g. a single-select
-    single-question → ``"Postgres"``; a two-question ask with a multi-select in the second
-    → ``"Postgres; ci, cd"``.
+    question + options) with this via ``" → "``, so restating the question would be noise.
+
+    Handles the canonical ``AskUserQuestion`` response — ``answers`` is a dict keyed by
+    question text; ``annotations`` (if present) is a parallel dict of ``{notes, preview}``.
+    "Other" custom text arrives inline in the answer string OR routed via
+    ``annotations.notes`` — either way :func:`_fold_pick_with_note` keeps it. Also
+    tolerates a list shape (legacy/defensive), with per-index alignment to ``questions``.
+
+    Multi-select within a question → comma-joined; across questions → semicolon-separated.
+    E.g. single-select single-question → ``"Postgres"``; two-question ask with multi-select
+    in the second → ``"Postgres; ci, cd"``; ``Other`` with typed text → ``"SQLite"``.
     """
-    if isinstance(answers, list):
-        picks: list[str] = []
-        for a in answers:
-            if isinstance(a, dict):
-                a = a.get("answer") or a.get("selected") or a
-            if isinstance(a, list):
-                joined = ", ".join(str(x) for x in a if x)
-                if joined:
-                    picks.append(joined)
-            elif a:
-                picks.append(str(a))
-        return "; ".join(picks) if picks else "(no answer)"
+    ann = annotations if isinstance(annotations, dict) else {}
+
+    def _note_for(qtext: str):
+        entry = ann.get(qtext) if isinstance(qtext, str) else None
+        return (entry or {}).get("notes") if isinstance(entry, dict) else None
+
+    picks: list[str] = []
+
     if isinstance(answers, dict):
-        vals = [v for v in answers.values() if v]
-        return "; ".join(str(v) for v in vals) if vals else "(no answer)"
-    return str(answers) if answers else "(no answer)"
+        for qtext, val in answers.items():
+            note = _note_for(qtext)
+            if isinstance(val, list):  # multi-select — no per-choice notes to attach
+                joined = ", ".join(str(x) for x in val if x)
+                picks.append(_fold_pick_with_note(joined, note))
+            else:
+                picks.append(_fold_pick_with_note(val, note))
+    elif isinstance(answers, list):
+        qs = questions or []
+        for i, val in enumerate(answers):
+            qtext = (qs[i].get("question") if i < len(qs) else None) or ""
+            note = _note_for(qtext)
+            if isinstance(val, dict):  # accept {answer, notes?} shape defensively
+                val = val.get("answer") or val.get("selected") or val
+                note = note or val.get("notes") if isinstance(val, dict) else note
+            if isinstance(val, list):
+                joined = ", ".join(str(x) for x in val if x)
+                picks.append(_fold_pick_with_note(joined, note))
+            else:
+                picks.append(_fold_pick_with_note(val, note))
+    else:
+        return _fold_pick_with_note(answers, None)
+
+    return "; ".join(p for p in picks if p) or "(no answer)"
 
 
 def user_answered_event_fields(
-    agent_name: str, question_id: str, answers, questions: list | None = None
-) -> dict:  # noqa: ARG001 - agent_name kept for API parity (structured payload includes it via envelope)
+    agent_name: str,  # noqa: ARG001 - kept for API parity; identity is on the envelope
+    question_id: str,
+    answers,
+    questions: list | None = None,
+    annotations: dict | None = None,
+) -> dict:
     """``user.answered`` payload — close of the ask-tool question pair. Shares
-    ``question_id`` with the earlier ``agent.question``. ``summary`` is JUST the pick(s):
-    SB's pair-combine already restates the question from the held first's summary, so
-    including it again would be redundant. No transcript here — the agent was BLOCKED in
-    the ask between PreToolUse and PostToolUse, so nothing happened on its side.
+    ``question_id`` with the earlier ``agent.question``. ``summary`` is JUST the pick(s)
+    (SB restates the question from the held first's summary on pair-combine).
+
+    An ``"Other"`` custom-text answer is preserved even when the tool routes it via
+    ``annotations.notes`` rather than inline in ``answers``; both structured fields ride
+    in the payload so SB can render as it likes. No transcript here — the agent was
+    BLOCKED in the ask between PreToolUse and PostToolUse.
     """
-    picks = _render_answer_picks(answers, questions)
-    return {
+    picks = _render_answer_picks(answers, questions, annotations)
+    payload = {
         "question_id": question_id,
         "answers": answers,
         "questions": questions,
         "summary": picks,
     }
+    if annotations:
+        payload["annotations"] = annotations
+    return payload
 
 
 def agent_response_event_fields(agent_name: str, full: str) -> dict:
