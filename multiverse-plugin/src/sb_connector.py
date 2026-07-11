@@ -1169,11 +1169,9 @@ class SBConnector:
                     return await self._reject_query(ws, query, "bad_request", "workspace_id + agent required")
                 st = sb_queries.get_status(cwd, agent)
                 result = st if st is not None else {"status": None}
-            elif kind_str == "ask_agent":
-                # QueryKind.ASK_AGENT — string dispatch until the enum member lands in
-                # our vendored protocol.py (toolsmith's addition, being committed by infra).
-                # Runs in a BACKGROUND task: the fork can take up to 90s and we can't
-                # stall the receiver on it. The task sends the QueryResult itself.
+            elif kind == p.QueryKind.ASK_AGENT:
+                # Runs in a BACKGROUND task: the fork can take up to _ASK_TIMEOUT and we
+                # can't stall the receiver on it. The task sends the QueryResult itself.
                 asyncio.create_task(self._handle_ask_query(ws, query))
                 return
             else:  # get_transcript (recall path) — a later phase-2 step

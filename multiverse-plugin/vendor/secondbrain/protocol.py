@@ -116,7 +116,9 @@ class EventKind(StrEnum):
     AGENT_RESPONSE = "agent.response"  # idle-only ({summary, full}); waiting cases below
     AGENT_SPAWN_REQUEST = "agent.spawn_request"  # first-kind of the spawn pair (§5f)
     AGENT_QUESTION = "agent.question"  # first-kind of the question pair (§5f) — AskUserQuestion
+    AGENT_PERMISSION_REQUEST = "agent.permission_request"  # first-kind of the permission pair (§5f)
     USER_ANSWERED = "user.answered"  # closes agent.question, keyed by question_id/tool_use_id
+    # closes agent.permission_request, keyed by tool_use_id
     USER_PERMISSION_DECISION = "user.permission_decision"
     USER_SPAWN_DECISION = "user.spawn_decision"
 
@@ -147,6 +149,7 @@ class QueryKind(StrEnum):
     GET_STATUS = "get_status"
     GET_TRANSCRIPT = "get_transcript"
     GET_DASHBOARD = "get_dashboard"  # full monitor dashboard for one workspace (first agent tool)
+    ASK_AGENT = "ask_agent"  # read-only side-question to one agent (answers from its own history)
 
 
 class Authority(StrEnum):
