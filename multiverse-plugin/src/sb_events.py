@@ -15,6 +15,8 @@ In both, ``summary`` is a connector-produced sentence SB delivers ~verbatim.
 
 from __future__ import annotations
 
+import json
+
 #: How much of the spawn instruction to inline in the default-visible summary.
 SPAWN_PROMPT_TRUNC = 240
 
@@ -97,6 +99,86 @@ def spawn_decision_event_fields(
         "summary": summary,
     }
     return requesting, payload
+
+
+#: Cap for the tool_input inline in ``agent.permission_request.summary``. The full
+#: tool_input rides in ``payload.tool_input`` verbatim; this only truncates the
+#: human-facing sentence so a paste of a huge file body doesn't blow out the turn text.
+_PERM_SUMMARY_INPUT_TRUNC = 400
+
+
+def _summarize_tool_input(tool_name: str, tool_input) -> str:
+    """One-line human description of a tool call for the permission summary. Prefers the
+    field that IS the action (Bash.command, Write/Edit.file_path, WebFetch.url); falls
+    back to a compact JSON for unknown tools. Truncates to keep the sentence tight —
+    the full ``tool_input`` is in the payload for anyone who needs it."""
+    ti = tool_input if isinstance(tool_input, dict) else {}
+    tn = (tool_name or "").strip()
+    if tn == "Bash":
+        cmd = str(ti.get("command", "")).strip()
+        core = f"`{cmd}`" if cmd else "(no command)"
+    elif tn in {"Write", "Edit", "MultiEdit", "NotebookEdit", "Read"}:
+        path = ti.get("file_path") or ti.get("path") or ""
+        core = f"`{path}`" if path else "(no path)"
+    elif tn == "WebFetch":
+        url = ti.get("url") or ""
+        core = f"`{url}`" if url else "(no url)"
+    elif tn == "Task":
+        desc = (ti.get("description") or "").strip()
+        core = f"`{desc}`" if desc else "(no description)"
+    else:
+        try:
+            core = "`" + json.dumps(ti, separators=(",", ":"), ensure_ascii=False) + "`"
+        except (TypeError, ValueError):
+            core = "(input not renderable)"
+    if len(core) > _PERM_SUMMARY_INPUT_TRUNC:
+        core = core[: _PERM_SUMMARY_INPUT_TRUNC - 1].rstrip() + "…`"
+    return core
+
+
+def agent_permission_request_event_fields(
+    agent_name: str, tool_use_id: str, tool_name: str, tool_input, transcript: str
+) -> dict:
+    """``agent.permission_request`` payload — first-kind of the permission pair. Fires
+    when Claude Code shows the user a permission prompt for a tool call the agent wants
+    to make. ``tool_use_id`` is the pair key echoed by ``user.permission_decision``.
+    ``summary`` is connector-composed and delivered ~verbatim ("agent 'X' needs permission
+    to run Bash: `rm -rf build`"); ``tool_input`` is the raw tool call verbatim (the
+    eventual ``answer_permission_prompt`` action will want it). ``full`` is the partial
+    transcript = "why" context, via the same peek/commit mechanism as agent.question."""
+    core = _summarize_tool_input(tool_name, tool_input)
+    summary = f"agent '{agent_name}' needs permission to run {tool_name}: {core}"
+    return {
+        "tool_use_id": tool_use_id,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "summary": summary,
+        "full": transcript,
+    }
+
+
+def user_permission_decision_event_fields(
+    agent_name: str,  # noqa: ARG001 - kept for API parity; identity is on the envelope
+    tool_use_id: str,
+    decision: str,
+    tool_name: str,
+    tool_input,
+) -> dict:
+    """``user.permission_decision`` payload — close of the permission pair. Shares
+    ``tool_use_id`` with the earlier ``agent.permission_request``. ``decision`` is
+    ``"allow"`` or ``"deny"`` (Claude Code UX wording, per the locked contract with SB).
+    ``summary`` is kept short so SB's pair-combine reads clean (the held first already
+    carries the tool + command). No transcript — agent was blocked between prompt and
+    decision, nothing happened."""
+    decision = "deny" if str(decision).lower().startswith("d") else "allow"
+    summary = "user allowed" if decision == "allow" else "user denied"
+    return {
+        "tool_use_id": tool_use_id,
+        "decision": decision,
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "summary": summary,
+    }
 
 
 def _last_assistant_line(full: str) -> str:

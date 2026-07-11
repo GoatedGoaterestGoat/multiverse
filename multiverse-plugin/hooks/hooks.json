@@ -50,6 +50,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-notification.sh"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sb-emit-permission-request.py"
           }
         ]
       }
@@ -63,6 +67,15 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sb-emit-question.py"
           }
         ]
+      },
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sb-track-tool.py"
+          }
+        ]
       }
     ],
     "PostToolUse": [
@@ -72,6 +85,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/set-status.sh working"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sb-emit-permission-decision.py"
           }
         ]
       },

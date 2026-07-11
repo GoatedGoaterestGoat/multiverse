@@ -336,6 +336,201 @@ def delete_answered_signal(record: dict) -> None:
         pass
 
 
+# ---- permission pair signals ----------------------------------------------------------
+# Firsthand production points, spread across three hooks (Notification alone doesn't
+# expose tool_use_id, so we correlate via PreToolUse):
+#   PreToolUse[.*]          → pending_tools/<tool_use_id>.json  (candidate)
+#   Notification (perm)     → pending_tools/<tool_use_id>.perm  (marker) + question_request signal
+#   PostToolUse[.*]         → if .perm exists → decision signal; always cleanup candidate + marker
+# Candidate carries session context so Notification can find "the most recent PreToolUse
+# for THIS session that hasn't had PostToolUse yet" (the tool the user is being asked to
+# permit). Parallel tool_use within one turn is the imperfect edge case, per the doc.
+
+def pending_tools_dir() -> Path:
+    return _sb_dir() / "pending_tools"
+
+
+def permission_request_signals_dir() -> Path:
+    return _sb_dir() / "permission_request_signals"
+
+
+def permission_decision_signals_dir() -> Path:
+    return _sb_dir() / "permission_decision_signals"
+
+
+def record_pending_tool(
+    cwd: str, agent_name: str, tool_use_id: str, tool_name: str, tool_input
+) -> None:
+    """Stash a tool-use candidate (from PreToolUse[.*]) — cheap and unconditional. The
+    Notification hook may later flag it with a ``.perm`` marker; PostToolUse cleans up
+    unconditionally. Not seeded-gated at record time: we don't know at PreToolUse whether
+    this session's workspace is seeded (env vars can lie for background sessions), and
+    the record is a bounded working set anyway. The gate applies at the SIGNAL writes."""
+    try:
+        if not tool_use_id or not cwd or not agent_name:
+            return
+        d = pending_tools_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "agent": agent_name,
+            "tool_use_id": tool_use_id,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "ts": _now_iso(),
+        }
+        path = d / f"{_safe(tool_use_id)}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def latest_pending_tool_for_session(cwd: str, agent_name: str) -> dict | None:
+    """The most-recent-by-ts candidate for this session — Notification's best-effort
+    correlation target. Returns the candidate dict (with ``_path``) or ``None`` if we can't
+    match one (the caller then skips the event rather than fire misleading data)."""
+    d = pending_tools_dir()
+    if not d.is_dir():
+        return None
+    cwd_r = _resolve(cwd)
+    best: dict | None = None
+    for p in d.glob("*.json"):
+        if p.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(p)
+        if not rec:
+            continue
+        if rec.get("cwd") != cwd_r or rec.get("agent") != agent_name:
+            continue
+        if best is None or rec.get("ts", "") > best.get("ts", ""):
+            rec["_path"] = str(p)
+            best = rec
+    return best
+
+
+def mark_permission_requested(tool_use_id: str) -> None:
+    """Atomically create the ``<id>.perm`` marker (O_EXCL) so PostToolUse can tell whether
+    a permission prompt happened for this tool_use_id — the pending signal itself may
+    already be consumed by the connector by then."""
+    try:
+        d = pending_tools_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        fd = os.open(
+            str(d / f"{_safe(tool_use_id)}.perm"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+        )
+        os.close(fd)
+    except FileExistsError:
+        pass
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def had_permission_prompt(tool_use_id: str) -> bool:
+    return (pending_tools_dir() / f"{_safe(tool_use_id)}.perm").exists()
+
+
+def cleanup_pending_tool(tool_use_id: str) -> None:
+    """PostToolUse always calls this — whether or not a permission prompt happened."""
+    d = pending_tools_dir()
+    for suffix in (".json", ".perm"):
+        try:
+            (d / f"{_safe(tool_use_id)}{suffix}").unlink()
+        except (OSError, FileNotFoundError):
+            pass
+
+
+def record_permission_request_signal(
+    cwd: str, agent_name: str, tool_use_id: str, tool_name: str, tool_input
+) -> None:
+    """Fast signal (from the Notification hook) → connector expands to
+    ``agent.permission_request`` (attaching the partial transcript = "why" context, off the
+    agent's critical path). Gated on the workspace being seeded. Filename = tool_use_id
+    (idempotent — a Notification re-fire overwrites the same signal)."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None or not tool_use_id:
+            return
+        d = permission_request_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "tool_use_id": tool_use_id,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "ts": _now_iso(),
+        }
+        path = d / f"{_safe(tool_use_id)}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def list_permission_request_signals() -> list[dict]:
+    return _list_and_stamp(permission_request_signals_dir())
+
+
+def delete_permission_request_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
+        pass
+
+
+def record_permission_decision_signal(
+    cwd: str,
+    agent_name: str,
+    tool_use_id: str,
+    decision: str,
+    tool_name: str,
+    tool_input,
+    tool_response,
+) -> None:
+    """Fast signal (from PostToolUse) → connector expands to ``user.permission_decision``.
+    ``decision`` ∈ {``allow``, ``deny``}. No transcript (agent was blocked)."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None or not tool_use_id:
+            return
+        d = permission_decision_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "tool_use_id": tool_use_id,
+            "decision": decision,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "tool_response": tool_response,
+            "ts": _now_iso(),
+        }
+        path = d / f"{_safe(tool_use_id)}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def list_permission_decision_signals() -> list[dict]:
+    return _list_and_stamp(permission_decision_signals_dir())
+
+
+def delete_permission_decision_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
+        pass
+
+
 def record_spawn_decision(req: dict, status: str, name: str | None) -> None:
     """Record a ``user.spawn_decision`` event at resolution time (``write_resolution``).
 

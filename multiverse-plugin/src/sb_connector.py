@@ -860,6 +860,8 @@ class SBConnector:
                 self._consume_response_signals()     # agent.response (transcript generated here)
                 self._consume_question_signals()     # agent.question (transcript = "why" context)
                 self._consume_answered_signals()     # user.answered (no transcript — agent was blocked)
+                self._consume_permission_request_signals()  # agent.permission_request (transcript = "why")
+                self._consume_permission_decision_signals() # user.permission_decision (no transcript)
             except Exception:  # noqa: BLE001 - a step error must not kill the producer
                 log.debug("producer step failed", exc_info=True)
             try:
@@ -981,6 +983,70 @@ class SBConnector:
             )
             sb_notify.delete_answered_signal(sig)
             log.info("relayed user.answered (%s) for %s", question_id, agent)
+
+    def _consume_permission_request_signals(self) -> None:
+        """Expand each permission-request signal into an ``agent.permission_request``
+        event: generate the partial transcript (peek) as the "why" context, compose the
+        payload, buffer it, commit the marker, drop the signal. Order = make_event →
+        commit → delete for at-least-once (SB dedups by ``event_id``)."""
+        from . import sb_events, sb_notify, sb_transcript
+
+        for sig in sb_notify.list_permission_request_signals():
+            cwd = sig.get("cwd", "")
+            agent = sig.get("agent", "")
+            tool_use_id = sig.get("tool_use_id", "")
+            tool_name = sig.get("tool_name", "")
+            tool_input = sig.get("tool_input")
+            peeked = sb_transcript.peek_partial_transcript(cwd, agent)
+            transcript = ""
+            cursor: dict | None = None
+            if peeked is not None:
+                transcript, cursor = peeked
+            payload = sb_events.agent_permission_request_event_fields(
+                agent, tool_use_id, tool_name, tool_input, transcript
+            )
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind="agent.permission_request",
+                payload=payload,
+                agent=agent,
+                event_id=f"apr:{tool_use_id}",  # stable → SB dedups on retry
+            )
+            if cursor is not None:
+                sb_transcript.commit_marker(cwd, agent, cursor)
+            sb_notify.delete_permission_request_signal(sig)
+            log.info("relayed agent.permission_request (%s) for %s", tool_use_id, agent)
+
+    def _consume_permission_decision_signals(self) -> None:
+        """Turn each decision signal into a ``user.permission_decision`` event — shares
+        ``tool_use_id`` with the earlier ``agent.permission_request``. No transcript
+        (agent was blocked between prompt and decision)."""
+        from . import sb_events, sb_notify
+
+        for sig in sb_notify.list_permission_decision_signals():
+            agent = sig.get("agent", "")
+            tool_use_id = sig.get("tool_use_id", "")
+            payload = sb_events.user_permission_decision_event_fields(
+                agent,
+                tool_use_id,
+                sig.get("decision", "allow"),
+                sig.get("tool_name", ""),
+                sig.get("tool_input"),
+            )
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind="user.permission_decision",
+                payload=payload,
+                agent=agent,
+                event_id=f"upd:{tool_use_id}",
+            )
+            sb_notify.delete_permission_decision_signal(sig)
+            log.info(
+                "relayed user.permission_decision (%s) for %s: %s",
+                tool_use_id, agent, sig.get("decision"),
+            )
 
     def _consume_pending(self) -> None:
         """Drain durable pending event records (firsthand-produced) into the outbound
