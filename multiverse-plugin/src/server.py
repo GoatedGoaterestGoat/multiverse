@@ -28,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 # Add parent to path for imports when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -70,6 +70,10 @@ _MONITOR_INBOX_POLL_INTERVAL = 1.0
 # Poll interval while a spawn request waits (indefinitely) for the user to
 # accept/reject in the monitor.
 _SPAWN_POLL_INTERVAL = 0.25
+# Emit a progress notification every N seconds while spawn_agent waits for
+# the user. Keeps the tool call visibly alive on the client (any
+# progress-reset timeout gets pushed forward) and gives UX feedback.
+_SPAWN_PROGRESS_INTERVAL = 10.0
 
 # Status written to this session's status.json while monitor_inbox is parked,
 # so the dashboard and list_agents show the agent as waiting-for-messages
@@ -759,7 +763,11 @@ def ask_agent(
 
 
 @mcp.tool()
-async def spawn_agent(instruction: str, name: str = "") -> str:
+async def spawn_agent(
+    instruction: str,
+    name: str = "",
+    ctx: Context | None = None,
+) -> str:
     """Spawn a brand-new subagent in your workspace with a starting task.
 
     The ``instruction`` you pass becomes the subagent's first user message —
@@ -849,11 +857,34 @@ async def spawn_agent(instruction: str, name: str = "") -> str:
         # cancellation: CancelledError propagates through the `finally`,
         # which cleans up the request file, and the monitor dismisses any
         # open modal once that file is gone.
+        #
+        # Send an MCP progress notification every _SPAWN_PROGRESS_INTERVAL
+        # seconds. The MCP protocol's canonical mechanism for long-running
+        # tools: it advances any progress-reset timeout on the client and
+        # gives the user visible feedback ("Waiting for approval — 30s
+        # elapsed") instead of a mystery-hang. Failures to report are
+        # swallowed — an old/limited client shouldn't take the tool down.
+        wait_start = time.time()
+        next_progress_at = wait_start + _SPAWN_PROGRESS_INTERVAL
         while True:
             res = read_resolution(req_id)
             if res is not None:
                 break
             await asyncio.sleep(_SPAWN_POLL_INTERVAL)
+            now = time.time()
+            if ctx is not None and now >= next_progress_at:
+                elapsed = int(now - wait_start)
+                try:
+                    await ctx.report_progress(
+                        progress=elapsed,
+                        message=(
+                            f"Waiting for user to accept/reject in the "
+                            f"multiverse monitor ({elapsed}s elapsed)"
+                        ),
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+                next_progress_at = now + _SPAWN_PROGRESS_INTERVAL
 
         status = res.get("status")
         if status != "accepted":
