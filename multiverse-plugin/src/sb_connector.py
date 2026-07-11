@@ -67,6 +67,12 @@ from .paths import multiverse_dir  # noqa: E402
 
 log = logging.getLogger("sb_connector")
 
+#: Hard timeout for a single ``ask_agent`` fork (agreed with toolsmith). SB's host-side
+#: query timeout is budgeted at 120s (this + margin for subprocess spawn + serialization
+#: + seam roundtrip). Side-questions to a tool-less fork should return fast; if 90s isn't
+#: enough the fork is stuck and cutting it is the right call.
+_ASK_TIMEOUT = 90.0
+
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -620,6 +626,13 @@ class SBConnector:
         self._seeded: set[str] = set(self._state["seeded"])
         self._marker_inited: set[str] = set()  # workspaces whose transcript markers are set
         self._ws = None  # the live connection while connected (for a graceful close)
+        # ``ask_agent`` (long-running, up to 90s each) runs as background tasks so slow
+        # asks don't block the receiver from other frames. Concurrency cap agreed with
+        # toolsmith (SB is a single-issuer so 4 is ample headroom); asks over the cap are
+        # rejected fast with ``busy`` rather than queued (SB's 120s query timeout would
+        # expire before a queued ask completed anyway).
+        self._active_asks: int = 0
+        self._ask_max: int = 4
         # Producer <-> sender coordination: the watcher enqueues events and sets
         # _new_event; the per-connection sender flushes everything past _sent_through.
         self._new_event = asyncio.Event()
@@ -1134,6 +1147,7 @@ class SBConnector:
         from . import sb_queries
 
         kind = query.kind
+        kind_str = getattr(kind, "value", kind)  # enum -> its value; plain string as-is
         params = query.params or {}
         try:
             if kind == p.QueryKind.LIST_WORKSPACES:  # device-scoped; no workspace_id
@@ -1155,16 +1169,95 @@ class SBConnector:
                     return await self._reject_query(ws, query, "bad_request", "workspace_id + agent required")
                 st = sb_queries.get_status(cwd, agent)
                 result = st if st is not None else {"status": None}
+            elif kind_str == "ask_agent":
+                # QueryKind.ASK_AGENT — string dispatch until the enum member lands in
+                # our vendored protocol.py (toolsmith's addition, being committed by infra).
+                # Runs in a BACKGROUND task: the fork can take up to 90s and we can't
+                # stall the receiver on it. The task sends the QueryResult itself.
+                asyncio.create_task(self._handle_ask_query(ws, query))
+                return
             else:  # get_transcript (recall path) — a later phase-2 step
                 return await self._reject_query(
                     ws, query, "not_implemented",
-                    f"query {getattr(kind, 'value', kind)} not implemented yet",
+                    f"query {kind_str} not implemented yet",
                 )
         except Exception as exc:  # noqa: BLE001 - surface a failure, don't drop the query
             return await self._reject_query(ws, query, "query_failed", str(exc), status=p.ResultStatus.ERROR)
         await self._send(
             ws, p.QueryResult(query_id=query.query_id, status=p.ResultStatus.OK, result=result)
         )
+
+    async def _handle_ask_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
+        """Background handler for ``ask_agent`` — run the blocking side-fork in an
+        executor and reply when it returns.
+
+        Contract with toolsmith: params ``{agent, question}``; workspace_id ACL-gated to
+        this device's granted workspaces. Reply ``{answer}`` on ok; on failure, error
+        codes ``not_found`` (agent missing / no runnable claude_uuid), ``timeout`` (fork
+        exceeded ``_ASK_TIMEOUT``), ``ask_failed`` (spawn or protocol failure), ``busy``
+        (concurrency cap hit — SB will see this as a fast, retriable reject).
+        """
+        params = query.params or {}
+        agent_name = (params.get("agent") or "").strip()
+        question_text = (params.get("question") or "").strip()
+        cwd = self._query_cwd(query)
+        if cwd is None:
+            return await self._reject_query(ws, query, "forbidden", "unknown/ungranted workspace")
+        if not agent_name or not question_text:
+            return await self._reject_query(ws, query, "bad_request", "agent + question required")
+        if self._active_asks >= self._ask_max:
+            return await self._reject_query(
+                ws, query, "busy",
+                f"connector at ask concurrency cap ({self._ask_max}); retry shortly",
+            )
+
+        # Resolve the target inside the executor thread so the roster lookup + fork share
+        # one hop off the event loop. Import here to keep sb_connector's top-level light.
+        from .ask_agents import AskTarget, ask_one
+        from .sessions import find_agent_by_name
+
+        def _blocking_ask() -> tuple[str, str | None, str | None]:
+            """Return (status, answer_or_none, error_message_or_none) where status is
+            one of "ok"/"not_found"/"timeout"/"ask_failed"."""
+            target = find_agent_by_name(cwd, agent_name)
+            if target is None:
+                return ("not_found", None, f"no agent '{agent_name}' in this workspace")
+            if not target.claude_uuid:
+                return (
+                    "not_found",
+                    None,
+                    f"agent '{agent_name}' has no tracked claude UUID yet (just started?)",
+                )
+            r = ask_one(
+                question=question_text,
+                target=AskTarget(name=target.name, cwd=target.cwd, claude_uuid=target.claude_uuid),
+                timeout=_ASK_TIMEOUT,
+            )
+            if r.error:
+                code = "timeout" if "timed out" in r.error else "ask_failed"
+                return (code, None, r.error)
+            return ("ok", r.response or "", None)
+
+        self._active_asks += 1
+        try:
+            loop = asyncio.get_running_loop()
+            status, answer, err = await loop.run_in_executor(None, _blocking_ask)
+        except Exception as exc:  # noqa: BLE001 - unexpected; report as ask_failed
+            return await self._reject_query(ws, query, "ask_failed", str(exc), status=p.ResultStatus.ERROR)
+        finally:
+            self._active_asks -= 1
+
+        if status == "ok":
+            await self._send(
+                ws,
+                p.QueryResult(
+                    query_id=query.query_id,
+                    status=p.ResultStatus.OK,
+                    result={"answer": answer or ""},
+                ),
+            )
+        else:
+            await self._reject_query(ws, query, status, err or "")
 
     def _query_cwd(self, query: p.Query) -> str | None:
         """Resolve a workspace-scoped query's cwd from ``workspace_id`` (``<device_id>:<cwd>``),
