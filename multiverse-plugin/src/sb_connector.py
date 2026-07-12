@@ -872,6 +872,7 @@ class SBConnector:
                 self._init_new_markers()            # transcript markers for newly-seeded workspaces
                 self._consume_pending()              # spawn events (fully composed at the choke-point)
                 self._consume_response_signals()     # agent.response (transcript generated here)
+                self._consume_user_prompt_signals()   # user.prompt (transcript = context + text + overview)
                 self._consume_question_signals()     # agent.question (transcript = "why" context)
                 self._consume_answered_signals()     # user.answered (no transcript — agent was blocked)
                 self._consume_permission_request_signals()  # agent.permission_request (transcript = "why")
@@ -933,6 +934,45 @@ class SBConnector:
             sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
             sb_notify.delete_response_signal(sig)
             log.info("relayed agent.response (idle) for %s", agent)
+
+    def _consume_user_prompt_signals(self) -> None:
+        """Turn each turn-start signal (from the UserPromptSubmit hook) into a
+        ``user.prompt`` event: generate the partial transcript (peek) as context
+        including this new prompt at the end, compose the payload (text + cheap
+        connector-composed overview_since_last + full), buffer it, commit the marker,
+        drop the signal. Order = make_event → commit → delete for at-least-once (SB
+        dedups by ``event_id``).
+
+        Note: the UserPromptSubmit hook fires AFTER the JSONL row for the new prompt is
+        written, so the peeked transcript already ends with this new prompt — deliberate
+        redundancy with the ``text`` field per the SB contract."""
+        from . import sb_events, sb_notify, sb_transcript
+
+        for sig in sb_notify.list_user_prompt_signals():
+            cwd = sig.get("cwd", "")
+            agent = sig.get("agent", "")
+            text = sig.get("text", "")
+            peeked = sb_transcript.peek_partial_transcript(cwd, agent)
+            transcript = ""
+            cursor: dict | None = None
+            if peeked is not None:
+                transcript, cursor = peeked
+            # A dropped signal here is safer than a broken event — if the agent is
+            # unresolvable, still relay with empty full/overview so SB sees the prompt
+            # (text is authoritative and independent of the transcript walker).
+            payload = sb_events.user_prompt_event_fields(agent, text, transcript)
+            self.make_event(
+                workspace_id=sig.get("workspace_id", ""),
+                workspace_label=sig.get("workspace_label", ""),
+                kind=p.EventKind.USER_PROMPT,
+                payload=payload,
+                agent=agent,
+                event_id=f"prompt:{Path(sig['_path']).stem}",
+            )
+            if cursor is not None:
+                sb_transcript.commit_marker(cwd, agent, cursor)
+            sb_notify.delete_user_prompt_signal(sig)
+            log.info("relayed user.prompt for %s (%d chars)", agent, len(text))
 
     def _consume_question_signals(self) -> None:
         """Expand each ask-tool question signal into an ``agent.question`` event:

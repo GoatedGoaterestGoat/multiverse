@@ -192,6 +192,49 @@ def _last_assistant_line(full: str) -> str:
     return last[:160] if last else ""
 
 
+def _count_turns(full: str) -> int:
+    """Best-effort count of turns in a rendered transcript. sb_transcript prefixes each
+    turn with a ``[turn ...]`` marker line, so we just count those."""
+    return sum(1 for line in full.splitlines() if line.startswith("[turn"))
+
+
+def user_prompt_event_fields(agent_name: str, text: str, transcript: str) -> dict:
+    """``user.prompt`` payload (DESIGN §4b): ``{text, overview_since_last, full}``.
+
+    Fires when the user submits a prompt to a session (typed at the terminal, delivered
+    via SB's own ``prompt_agent`` send-keys, or auto-submitted as a resume's positional
+    prompt — all three route through the same UserPromptSubmit hook so a single event
+    kind covers them cleanly).
+
+    Contract (locked with SB):
+      - ``text`` — the prompt verbatim.
+      - ``overview_since_last`` — CHEAP connector-composed take on what the target agent
+        did between the last transcript delivery and now (a "what changed since I last
+        checked in" line). Empty string when nothing to say (dormant agent, no prior
+        activity). SB's ingest renders it as a parenthetical only when non-empty. Same
+        cheap-now-LLM-later pattern as ``agent.response.summary`` — zero wire change on
+        upgrade.
+      - ``full`` — the partial transcript from the delivery marker → now, INCLUDING this
+        new user prompt at the end. Kept deliberately redundant with ``text`` (SB
+        confirmed this reads cleaner than a "jagged" full that stops just before the
+        current prompt) — ``full`` is view-on-demand, held out of the default turn
+        context.
+    """
+    turns = _count_turns(transcript)
+    last = _last_assistant_line(transcript)
+    if turns == 0 and not last:
+        overview = ""  # dormant / nothing new — SB renders no parenthetical
+    elif last:
+        overview = f"{turns} turn(s); last: {last}" if turns else last
+    else:
+        overview = f"{turns} turn(s) since last delivery"
+    return {
+        "text": text,
+        "overview_since_last": overview,
+        "full": transcript,
+    }
+
+
 def _render_questions_verbatim(questions: list) -> str:
     """Render an AskUserQuestion payload (1..N questions, each with options) as a
     human-readable text block that SB delivers ~verbatim as the turn — nothing truncated,

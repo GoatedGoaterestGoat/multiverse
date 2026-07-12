@@ -215,6 +215,51 @@ def delete_response_signal(record: dict) -> None:
         pass
 
 
+def user_prompt_signals_dir() -> Path:
+    """Queue of turn-START signals the connector expands into ``user.prompt`` events
+    (the connector attaches the partial transcript off the critical path)."""
+    return _sb_dir() / "user_prompt_signals"
+
+
+def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
+    """Record a fast turn-start signal (from the UserPromptSubmit hook) — CHEAP, no
+    transcript parsing on the agent's critical path. Gated on the workspace being seeded.
+
+    ``text`` is the user's prompt content verbatim (from the hook payload's ``prompt``
+    field). The connector fills in ``overview_since_last`` + ``full`` at consume time."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None:
+            return
+        d = user_prompt_signals_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        rec = {
+            "cwd": _resolve(cwd),
+            "workspace_id": wsid,
+            "workspace_label": _label(cwd),
+            "agent": agent_name,
+            "text": text,
+            "ts": _now_iso(),
+        }
+        path = d / f"{uuid.uuid4().hex}.json"
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except Exception:  # noqa: BLE001 - never break the hook
+        pass
+
+
+def list_user_prompt_signals() -> list[dict]:
+    return _list_and_stamp(user_prompt_signals_dir())
+
+
+def delete_user_prompt_signal(record: dict) -> None:
+    try:
+        Path(record["_path"]).unlink()
+    except (OSError, KeyError):
+        pass
+
+
 # ---- ask-tool question/answered signals -----------------------------------------------
 # Firsthand production points: PreToolUse[AskUserQuestion] → question_signal; the pair
 # closes at PostToolUse[AskUserQuestion] → answered_signal. Filename = tool_use_id (the

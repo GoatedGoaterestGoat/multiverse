@@ -40,6 +40,10 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/scripts/spawn-tree-builder.py"
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/sb-emit-user-prompt.py"
           }
         ]
       }
