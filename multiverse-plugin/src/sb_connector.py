@@ -47,6 +47,7 @@ import os
 import signal
 import socket
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1399,6 +1400,9 @@ class SBConnector:
         if not agent_name or not question_text:
             return await self._reject_query(ws, query, "bad_request", "agent + question required")
         if self._active_asks >= self._ask_max:
+            log.info(
+                "ask_agent rejected (busy): cap=%d, agent=%s", self._ask_max, agent_name,
+            )
             return await self._reject_query(
                 ws, query, "busy",
                 f"connector at ask concurrency cap ({self._ask_max}); retry shortly",
@@ -1431,16 +1435,33 @@ class SBConnector:
                 return (code, None, r.error)
             return ("ok", r.response or "", None)
 
+        # Truncate the question preview in the log so a big paste doesn't dominate the log.
+        q_preview = question_text if len(question_text) <= 100 else question_text[:97] + "..."
+        log.info(
+            "handling ask_agent(agent=%s, cwd=%s, question=%r) [in_flight=%d/%d]",
+            agent_name, cwd, q_preview, self._active_asks + 1, self._ask_max,
+        )
+        started = time.monotonic()
         self._active_asks += 1
         try:
             loop = asyncio.get_running_loop()
             status, answer, err = await loop.run_in_executor(None, _blocking_ask)
         except Exception as exc:  # noqa: BLE001 - unexpected; report as ask_failed
+            elapsed = time.monotonic() - started
+            log.info(
+                "ask_agent crashed after %.2fs (agent=%s): %s", elapsed, agent_name, exc,
+            )
             return await self._reject_query(ws, query, "ask_failed", str(exc), status=p.ResultStatus.ERROR)
         finally:
             self._active_asks -= 1
 
+        elapsed = time.monotonic() - started
         if status == "ok":
+            ans_len = len(answer or "")
+            log.info(
+                "ask_agent returned ok in %.2fs (agent=%s, %d chars)",
+                elapsed, agent_name, ans_len,
+            )
             await self._send(
                 ws,
                 p.QueryResult(
@@ -1450,6 +1471,10 @@ class SBConnector:
                 ),
             )
         else:
+            log.info(
+                "ask_agent returned %s in %.2fs (agent=%s): %s",
+                status, elapsed, agent_name, err,
+            )
             await self._reject_query(ws, query, status, err or "")
 
     def _query_cwd(self, query: p.Query) -> str | None:
