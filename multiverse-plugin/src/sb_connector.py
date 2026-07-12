@@ -1121,13 +1121,15 @@ class SBConnector:
         if cached is not None:
             await self._send(ws, cached)  # retry: return cached result, do NOT re-run
             return
+        if action.kind == p.ActionKind.PROMPT_AGENT:
+            # Delivery can involve tmux send-keys or spawning a resumed session — neither
+            # is instantaneous. Run in a background task so the receiver stays responsive
+            # to other frames (events, queries). The task dedups + sends the result.
+            asyncio.create_task(self._handle_prompt_agent_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
-        #   prompt_agent / answer_question -> send-keys / inbox
-        #   answer_permission_prompt       -> tmux send-keys to a `waiting` pane
-        #   answer_spawn_request           -> write the spawn-request resolution
-        #   message_agent                  -> the inter-agent inbox
-        #   spawn_agent                    -> the spawn-request flow
-        #   ask_agent                      -> the existing ask_agents.py fork
+        #   answer_question / answer_permission_prompt / answer_spawn_request /
+        #   message_agent / spawn_agent / ask_agent
         result = p.ActionResult(
             action_id=action.action_id,
             status=p.ResultStatus.REJECTED,
@@ -1141,6 +1143,199 @@ class SBConnector:
         )
         self.dedup.remember(result)
         await self._send(ws, result)
+
+    async def _handle_prompt_agent_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Deliver a user-style prompt to a target agent (contract locked with the SB
+        toolsmith). Runs as a background task off the receiver.
+
+        Routing by target status:
+          idle/working/waiting/listening → tmux send-keys with save/clear/restore
+                                            (ignores attached-check — per user directive)
+          dormant/ended                  → create_session(initial_prompt=text) — auto-submits
+                                            as the first user turn via bin/multiverse-session
+          starting                       → wait bounded for ready, then send-keys
+          compacting (locked)            → refuse with a specific message; SB retries later
+
+        Errors: not_found | forbidden | locked | deliver_failed. All ActionResults are
+        cached in ``self.dedup`` so a retry with the same action_id returns the cached
+        outcome and never re-executes (§8.2).
+        """
+        payload = action.payload or {}
+        text = str(payload.get("text") or "")
+        agent_name = str(action.agent or "").strip()
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        # ACL + basic validation. workspace_id is <device_id>:<cwd>; only granted cwds pass.
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            from pathlib import Path as _Path
+            cwd_abs = str(_Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+        if not agent_name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "action.agent is required"},
+            ))
+        if not text:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "payload.text is required"},
+            ))
+
+        # Do the actual work in an executor thread — tmux subprocess + create_session are
+        # blocking and must not sit on the event loop.
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err = await loop.run_in_executor(
+                None, self._deliver_prompt_blocking, cwd_abs, agent_name, text,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface unexpected exceptions as deliver_failed
+            log.exception("prompt_agent deliver crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("prompt_agent delivered to %s: %s", agent_name, status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": status_str, "message": err or ""},
+            ))
+            log.info("prompt_agent %s for %s: %s", status_str, agent_name, err)
+
+    def _deliver_prompt_blocking(
+        self, cwd_abs: str, agent_name: str, text: str,
+    ) -> tuple[str, str, str]:
+        """Blocking body of the prompt_agent action. Returns ``(status, status_text, err)``:
+
+          status='ok'    → status_text = human-readable success line for SB to render
+          status=<code>  → err = the message for SB to render (code = one of the error
+                             codes documented on :meth:`_handle_prompt_agent_action`)
+
+        The routing lives here (not on the async side) because we do a blocking roster
+        resolution up-front, and the delivery primitives (:mod:`sb_actions`) are blocking.
+        """
+        from . import sb_actions
+        from .compact_state import is_locked
+        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+
+        target = find_agent_by_name(cwd_abs, agent_name)
+        if target is None:
+            return ("not_found", "", f"no agent '{agent_name}' in this workspace")
+
+        # Compacting → locked → refuse with the user's phrasing.
+        if target.claude_uuid and is_locked(target.claude_uuid):
+            return (
+                "locked", "",
+                f"'{agent_name}' can't be prompted right now because it is compacting.",
+            )
+
+        # If the session is None (never wrapped) or ended → dormant path.
+        session = target.session
+        is_dormant = session is None or target.status == "ended"
+
+        if is_dormant:
+            # Resume with the SB prompt as the first user turn — no send-keys needed;
+            # bin/multiverse-session picks up initial_prompt as claude's positional arg.
+            if not target.claude_uuid:
+                return (
+                    "not_found", "",
+                    f"'{agent_name}' has no tracked claude UUID yet — can't resume",
+                )
+            try:
+                self._auto_resume_with_prompt(target, cwd_abs, text)
+            except Exception as exc:  # noqa: BLE001
+                return ("deliver_failed", "", f"auto-resume failed: {exc}")
+            return (
+                "ok",
+                f"Woke '{agent_name}' (was dormant) and delivered your prompt as its "
+                "first user turn.",
+                "",
+            )
+
+        # Live path — need the tmux name. Guard: if the session is alive on ANOTHER host
+        # in a shared MULTIVERSE_ROOT, we can't reach its tmux from here.
+        if session.host and session.host != current_host():
+            return (
+                "deliver_failed", "",
+                f"'{agent_name}' is running on host '{session.host}', not this host",
+            )
+        tmux_name = session.tmux_name
+
+        # `starting` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
+        # Also gate this on the tmux session actually existing (defensive).
+        if not tmux_session_exists(tmux_name):
+            return (
+                "deliver_failed", "",
+                f"tmux session for '{agent_name}' is missing (was it just reaped?)",
+            )
+        if target.status == "starting":
+            ok, err = sb_actions.wait_for_ready(tmux_name)
+            if not ok:
+                return ("deliver_failed", "", f"target didn't become ready: {err}")
+
+        ok, saved, err = sb_actions.send_prompt_via_tmux(tmux_name, text)
+        if not ok:
+            return ("deliver_failed", "", err)
+        if saved:
+            return (
+                "ok",
+                f"Prompt delivered to '{agent_name}'; saved and restored the text that "
+                "was in its input box.",
+                "",
+            )
+        return ("ok", f"Prompt delivered to '{agent_name}'.", "")
+
+    def _auto_resume_with_prompt(self, target, cwd: str, prompt: str) -> None:
+        """Headless resume of a dormant/ended target with an initial user prompt. Mirrors
+        the message_agent auto_resume flow, but hands ``initial_prompt`` to create_session
+        so the SB prompt becomes claude's first user turn (via MULTIVERSE_INITIAL_PROMPT_FILE
+        picked up by bin/multiverse-session)."""
+        from .sessions import (
+            create_session, foreign_host_still_reported_live, kill_session,
+        )
+        if target.session is not None and target.status == "ended":
+            if foreign_host_still_reported_live(target.session):
+                raise RuntimeError(
+                    f"'{target.name}' was created on host '{target.session.host}' and "
+                    "its status there still says it's active — refusing to auto-resume "
+                    "as a new session here"
+                )
+            kill_session(target.session)
+        create_session(
+            cwd=cwd,
+            claude_args=["--resume", target.claude_uuid],
+            resumed_from=target.claude_uuid,
+            name=target.name,
+            initial_prompt=prompt,
+        )
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""
