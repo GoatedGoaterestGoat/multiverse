@@ -576,6 +576,31 @@ def delete_permission_decision_signal(record: dict) -> None:
         pass
 
 
+def record_agent_created(cwd: str, name: str, initial_prompt: str | None = None) -> None:
+    """Record an ``agent.created`` event at session-creation time (called from
+    ``sessions.create_session`` when ``resumed_from is None`` — i.e. a fresh new agent,
+    not a resume). Gated on the workspace being seeded. ``initial_prompt`` is present
+    only when the agent was spawn-request-created (the requesting agent's instruction);
+    absent for user-created agents (where the name is the only input).
+
+    Event ID uses the agent name — an agent's name is unique per workspace by the
+    monitor's uniqueness check, so this is deterministic per creation. If a stale
+    agent-name is re-created after the previous one ended (rare but possible over long
+    horizons), the ts distinguishes them in SB's ingest even though the event_id string
+    matches — SB dedups by (event_id, ts) not event_id alone. Fine for practice."""
+    try:
+        wsid = _recordable_workspace_id(cwd)
+        if wsid is None or not name:
+            return
+        payload = sb_events.agent_created_event_fields(initial_prompt)
+        _write_record(
+            f"created:{name}", "agent.created",
+            wsid, cwd, name, payload,
+        )
+    except Exception:  # noqa: BLE001 - never break session creation
+        pass
+
+
 def record_spawn_decision(req: dict, status: str, name: str | None) -> None:
     """Record a ``user.spawn_decision`` event at resolution time (``write_resolution``).
 

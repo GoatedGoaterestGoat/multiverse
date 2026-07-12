@@ -192,6 +192,24 @@ def _last_assistant_line(full: str) -> str:
     return last[:160] if last else ""
 
 
+def agent_created_event_fields(initial_prompt: str | None = None) -> dict:
+    """``agent.created`` payload (DESIGN §4b).
+
+    Envelope ``agent`` carries the new agent's name; the payload is minimal:
+    ``{initial_prompt}`` if the agent was created via a spawn request (the requesting
+    agent's instruction), or ``{}`` if the agent was user-created from the dashboard
+    (name is the only input).
+
+    Contract locked with the SB design agent (2026-07-12): SB's ingest renders "agent
+    'X' was created" for the empty-payload case and appends "Initial task: <text>" when
+    ``initial_prompt`` is present. ``agent_id`` is Multiverse-internal — not carried.
+    """
+    payload: dict = {}
+    if initial_prompt:
+        payload["initial_prompt"] = initial_prompt
+    return payload
+
+
 def user_prompt_event_fields(agent_name: str, text: str, transcript: str) -> dict:  # noqa: ARG001
     """``user.prompt`` payload (DESIGN §4b): ``{text, overview_since_last, full}``.
 

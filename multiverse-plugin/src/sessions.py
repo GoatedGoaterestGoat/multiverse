@@ -798,6 +798,18 @@ def create_session(
         stderr=subprocess.DEVNULL,
     )
 
+    # Firsthand: notify the SecondBrain connector of a fresh agent creation. Only fires
+    # for genuinely new agents (resumed_from is None); resume flows — from the dashboard,
+    # from SB's own auto-resume-with-prompt, from any programmatic resume — are NOT
+    # creation events and skip this. No-op unless the workspace has connected to SB before
+    # (seeded gate applied in the recorder). Never breaks the spawn flow.
+    if resumed_from is None and name:
+        try:
+            from . import sb_notify
+            sb_notify.record_agent_created(cwd_abs, name, initial_prompt)
+        except Exception:  # noqa: BLE001 — never break session creation
+            pass
+
     return Session(
         id=sid,
         cwd=cwd_abs,
