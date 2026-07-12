@@ -71,32 +71,46 @@ def capture_pane(tmux_name: str) -> tuple[bool, str]:
     return _run_tmux(["capture-pane", "-p", "-t", tmux_name], capture=True)
 
 
+import re
+
+# Claude Code's input box is drawn with box-drawing chars. The input line looks like
+# ``│ > <typed text> │`` (padded with spaces to the box width), preceded within a few
+# lines by a top border ``╭───...───╮``.
+#
+# We had a live E2E failure with a looser heuristic that matched ANY ``>`` after
+# stripping box chars — that misfires on inter-agent message quote blocks (``> ...``
+# prefix), tool logs, system reminders, and anywhere else a ``>`` character appears in
+# rendered pane content. This stricter version requires BOTH the specific input-line
+# shape AND a nearby top-border line, which the false-positive scenarios don't satisfy.
+_INPUT_LINE_RE = re.compile(r"^│\s*>\s*(.*?)\s*│\s*$")
+_TOP_BORDER_LOOKBACK = 6  # lines to scan above for ╭...╮
+
+
 def parse_input_box_text(pane: str) -> str:
     """Best-effort extract of any typed-but-unsent text in Claude's input box.
 
-    Claude's TUI shows the input on a bordered line whose content starts with ``>`` after
-    the box border. We scan bottom-up for the last line matching that shape and return the
-    text after ``> ``. This IS a heuristic (Claude TUI-dependent) — if it misclassifies,
-    the ``always save+clear+restore`` policy chosen by the user makes an empty save + empty
-    restore a no-op, so a false negative just means we don't preserve typed text on that
-    call (a mild regression, not corruption).
+    Requires the FULL Claude-input-box shape: a line matching ``│ > <text> │`` (leading
+    box border, ``>`` prompt, trailing box border) AND a top-border line ``╭...╮`` within
+    :data:`_TOP_BORDER_LOOKBACK` lines above. A ``>`` in an inter-agent message quote
+    block, a system reminder, or a tool's output no longer matches — those lack the
+    left-border pattern and/or the accompanying top border.
 
-    Ignores placeholder text (``>``-only lines or the "try 'help'" hint) as empty.
+    Failure mode is still safe: a mismatch returns ``""`` (no save, no restore), which
+    just means we don't preserve typed text on that call — a mild regression, not
+    corruption of the pane.
     """
     lines = pane.splitlines()
-    for line in reversed(lines):
-        stripped = line.strip()
-        # Match a border-wrapped input line: strip common box chars from each end.
-        stripped = stripped.strip("│|╭╮╰╯─╌ ")
-        if not stripped.startswith(">"):
+    for i in range(len(lines) - 1, -1, -1):
+        line = lines[i].rstrip()
+        m = _INPUT_LINE_RE.match(line)
+        if not m:
             continue
-        after = stripped[1:].lstrip()
-        # Placeholder / empty prompt (Claude's TUI shows " > " when there's no text).
-        # Also skip lines that are entirely UI hint text (heuristic — hints tend to be
-        # short and contain characteristic phrases).
-        if not after:
-            return ""
-        return after
+        # Confirm a Claude top-border line sits within a few lines above.
+        for j in range(max(0, i - _TOP_BORDER_LOOKBACK), i):
+            top = lines[j]
+            if "╭" in top and "╮" in top:
+                return m.group(1)
+        # Matched an input-shaped line but no accompanying top border → skip.
     return ""
 
 
