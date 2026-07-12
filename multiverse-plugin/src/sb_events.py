@@ -192,13 +192,7 @@ def _last_assistant_line(full: str) -> str:
     return last[:160] if last else ""
 
 
-def _count_turns(full: str) -> int:
-    """Best-effort count of turns in a rendered transcript. sb_transcript prefixes each
-    turn with a ``[turn ...]`` marker line, so we just count those."""
-    return sum(1 for line in full.splitlines() if line.startswith("[turn"))
-
-
-def user_prompt_event_fields(agent_name: str, text: str, transcript: str) -> dict:
+def user_prompt_event_fields(agent_name: str, text: str, transcript: str) -> dict:  # noqa: ARG001
     """``user.prompt`` payload (DESIGN §4b): ``{text, overview_since_last, full}``.
 
     Fires when the user submits a prompt to a session (typed at the terminal, delivered
@@ -208,26 +202,37 @@ def user_prompt_event_fields(agent_name: str, text: str, transcript: str) -> dic
 
     Contract (locked with SB):
       - ``text`` — the prompt verbatim.
-      - ``overview_since_last`` — CHEAP connector-composed take on what the target agent
-        did between the last transcript delivery and now (a "what changed since I last
-        checked in" line). Empty string when nothing to say (dormant agent, no prior
-        activity). SB's ingest renders it as a parenthetical only when non-empty. Same
-        cheap-now-LLM-later pattern as ``agent.response.summary`` — zero wire change on
-        upgrade.
+      - ``overview_since_last`` — CHEAP connector-composed summary of AGENT activity
+        between the last transcript delivery and now. Empty (``""``) in the steady state
+        — because if the agent was idle when the user prompted, then between the last
+        ``agent.response`` (which advanced the marker) and this new user prompt, the
+        agent literally did nothing worth summarizing. Only non-empty when the user
+        prompts a currently-WORKING agent (mid-turn, no ``agent.response`` since the last
+        marker); in that case we surface the last completed assistant line so SB knows
+        what the agent was mid-way through. Same cheap-now-LLM-later pattern as
+        ``agent.response.summary`` — zero wire change on upgrade.
       - ``full`` — the partial transcript from the delivery marker → now, INCLUDING this
         new user prompt at the end. Kept deliberately redundant with ``text`` (SB
         confirmed this reads cleaner than a "jagged" full that stops just before the
         current prompt) — ``full`` is view-on-demand, held out of the default turn
         context.
+
+    Design note on the marker: there's ONE delivery marker per (workspace, agent), shared
+    by every ``.full``-bearing event (``agent.response`` / ``user.prompt`` /
+    ``agent.question`` / ``agent.permission_request``). Any of them advances it. So in
+    steady on-time operation:
+      1. Agent finishes a turn → ``agent.response`` fires + marker advances to that point.
+      2. User submits next prompt → transcript window since marker contains ONLY the new
+         user turn → no assistant lines → ``overview_since_last`` is ``""``.
+    The field carries information only in the Q3 case (prompted mid-turn) and in
+    offline-recovery paths where multiple activities accumulate before delivery.
     """
-    turns = _count_turns(transcript)
     last = _last_assistant_line(transcript)
-    if turns == 0 and not last:
-        overview = ""  # dormant / nothing new — SB renders no parenthetical
-    elif last:
-        overview = f"{turns} turn(s); last: {last}" if turns else last
-    else:
-        overview = f"{turns} turn(s) since last delivery"
+    # Steady state (agent was idle at prompt time, or dormant, or brand new) → no agent
+    # activity to summarize. The current user prompt is separately in ``text``, so
+    # counting it as "activity" would be misleading redundant noise. Return empty and
+    # let SB's parenthetical drop out.
+    overview = last if last else ""
     return {
         "text": text,
         "overview_since_last": overview,
