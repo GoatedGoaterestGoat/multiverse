@@ -63,6 +63,12 @@ def main() -> None:
         candidate = sb_notify.latest_pending_tool_for_session(cwd, agent)
         if not candidate:
             return  # no correlating PreToolUse — nothing to link this Notification to
+        # AskUserQuestion is not a permission-gated tool — its Notification is the modal
+        # itself, not a permission prompt. Otherwise the three-hook correlation would
+        # false-positive an agent.permission_request with the same tool_use_id as the
+        # agent.question. Silently skip.
+        if candidate.get("tool_name") == "AskUserQuestion":
+            return
         tool_use_id = candidate.get("tool_use_id", "")
         # Mark it (durable) so PostToolUse knows a permission prompt happened here,
         # even if the connector consumes the request signal before PostToolUse fires.
