@@ -354,6 +354,16 @@ def _multi_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
     return batches
 
 
+#: Delay between individual navigation keys (Up/Down/Left/Enter/etc.). Claude Code's
+#: TUI needs a render cycle between keystrokes; without a delay, keys sent in one
+#: ``tmux send-keys`` batch arrive within microseconds and can be coalesced or dropped,
+#: producing off-by-N errors that vary with system load. During the answer_question
+#: debugging phase this is intentionally slow (300ms/key) so the user watching the
+#: pane can actually track which keys land where. Can be reduced (e.g. 50ms) once
+#: the arithmetic is confirmed correct.
+_KEY_DELAY_S = 0.30
+
+
 def answer_askuserquestion_via_tmux(
     tmux_name: str, questions: list, answers: list
 ) -> tuple[bool, str]:
@@ -384,14 +394,23 @@ def answer_askuserquestion_via_tmux(
         if kind == "keys":
             if not val:
                 continue
-            args = ["send-keys", "-t", tmux_name] + list(val)
-            ok, err = _run_tmux(args)
+            # Send each nav key as its own tmux invocation with a small sleep between,
+            # so the TUI has time to render each keystroke. Batching multiple nav keys
+            # into one send-keys call was causing keys to be dropped/coalesced.
+            for i, key in enumerate(val):
+                if i > 0:
+                    time.sleep(_KEY_DELAY_S)
+                ok, err = _run_tmux(["send-keys", "-t", tmux_name, key])
+                if not ok:
+                    return False, err
         else:  # "text"
             if not val:
                 continue
+            # Text typing (Other free-text) doesn't need per-char delays — the input
+            # field buffers characters normally, unlike modal navigation.
             ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", val])
-        if not ok:
-            return False, err
+            if not ok:
+                return False, err
     return True, ""
 
 
