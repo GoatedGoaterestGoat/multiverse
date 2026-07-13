@@ -427,23 +427,32 @@ def answer_askuserquestion_via_tmux(
     return True, ""
 
 
-def _log_cursor(log, tmux_name: str, tag: str) -> None:
-    """Diagnostic helper: capture the pane and log the ``❯ N. Label`` line's index.
+#: Match a modal cursor line like ``❯ 1. Alpha`` (possibly indented, possibly inside a
+#: box border ``│ ❯ 1. Alpha    │``). Requires the ``❯`` to be followed by a numbered
+#: menu entry — distinguishes the modal from a stray ``❯`` character in scrollback
+#: (e.g. an inter-agent message quote or a shell prompt).
+_MODAL_CURSOR_RE = re.compile(r"❯\s+(\d+\.\s+.+?)(?:\s{2,}│|\s*$)")
 
-    Silently no-ops on failure — this is instrumentation, not delivery. Logs the raw
-    cursor line so we can see the option label as rendered by the TUI.
+
+def _log_cursor(log, tmux_name: str, tag: str) -> None:
+    """Diagnostic helper: capture the pane and log the modal cursor line.
+
+    Silently no-ops on failure — this is instrumentation, not delivery. Scans the pane
+    for a ``❯ N. Label`` line matching :data:`_MODAL_CURSOR_RE` (bottom-up so the LAST
+    match wins — the modal is always at the bottom of the pane, so a ``❯`` earlier in
+    scrollback like an inter-agent message quote won't be preferred).
     """
     try:
         ok, pane = _run_tmux(["capture-pane", "-p", "-t", tmux_name], capture=True)
         if not ok:
             return
-        cursor_line = ""
-        for line in pane.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("❯"):
-                cursor_line = stripped
+        cursor = ""
+        for line in reversed(pane.splitlines()):
+            m = _MODAL_CURSOR_RE.search(line)
+            if m:
+                cursor = m.group(1).strip()
                 break
-        log.info("cursor %s: %r", tag, cursor_line)
+        log.info("cursor %s: %r", tag, cursor)
     except Exception:  # noqa: BLE001
         pass
 
