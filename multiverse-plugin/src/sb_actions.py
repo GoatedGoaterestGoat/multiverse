@@ -259,19 +259,18 @@ def _single_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
     """Single-select: pick a preset (Enter selects + advances) or type into Other
     (Enter submits typed text + advances).
 
-    Empirical modal layout for single-select (verified E2E, 2026-07-13):
-      positions 1..P (presets), P+1 (Chat about this = Down dead-end).
-      There is no arrow-nav "Other" position — the free-text input is accessed
-      differently (Tab or click), not via arrow keys.
+    Modal layout (user-confirmed 2026-07-13):
+      positions 1..P (presets), P+1 (Other = free-text input, arrow-navigable),
+      P+2 (Chat about this = Down dead-end).
     """
     a_str = a if isinstance(a, str) else (a[0] if isinstance(a, list) and a else "")
     match = _find_label_index(a_str, options)
 
     if from_chat:
-        # Chat position = P+1. Up N reaches position P+1-N (Chat → preset P → ... → 1).
+        # Chat position = P+2. Up N reaches position P+2-N.
         if match is not None:
             k = match + 1  # 1-indexed preset position
-            ups = P + 1 - k
+            ups = P + 2 - k
             return [("keys", ["Up"] * ups + ["Enter"])]
         # Custom text path: NOT YET REVALIDATED against the corrected model. Fall back
         # to the old assumption (Up 1 = Other) — if empirical testing shows Other is
@@ -312,19 +311,17 @@ def _multi_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
 
     batches: list = []
     if from_chat:
-        # Empirical multi-select modal layout (mirrors the single-select correction
-        # from Forge's E2E-5 analysis): positions 1..P (presets), P+1 (Next/Submit),
-        # P+2 (Chat about this = Down dead-end). No arrow-nav "Other".
-        # Up N from Chat reaches position P+2-N. Re-ground Downs = P + 1 (max needed
-        # from position 1 to Chat).
-        reground = P + 1
+        # Multi-select layout (mirrors user-confirmed single-select correction):
+        # positions 1..P (presets), P+1 (Other), P+2 (Next/Submit), P+3 (Chat about
+        # this = dead-end). Up N from Chat reaches position P+3-N.
+        reground = P + 2  # Down count to reach Chat from position 1
         for m in preset_indexes:
             k = m + 1
-            ups = P + 2 - k
+            ups = P + 3 - k
             batches.append(("keys", ["Up"] * ups + ["Enter"]))  # toggle
             batches.append(("keys", ["Down"] * reground))        # re-ground to Chat
         if custom_text is not None:
-            # Custom text path: NOT YET REVALIDATED. Placeholder.
+            # From Chat (P+3), Up 2 = Other (P+1). Type → implicit-selects.
             batches.append(("keys", ["Up", "Up"]))
             batches.append(("text", _clean_text(custom_text)))
             batches.append(("keys", ["Down"] * reground))
