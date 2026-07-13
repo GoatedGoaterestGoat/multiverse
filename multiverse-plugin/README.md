@@ -142,6 +142,8 @@ Several MCP tools are available to any agent running under the wrapper. They def
 | `True` | idle / working, **no user attached** | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately. |
 | `True` | idle / working, **user attached** | Falls back to passive delivery — we don't disrupt the attached user's pane. |
 | `True` | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
+| `True` | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. Falls back to passive delivery; lands the moment the user resolves the prompt. |
+| `True` | compacting (locked) | Not woken — the pane is killed for the duration. Falls back to passive delivery; lands once compaction finishes and the session resumes. |
 
 The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, fell back to passive, etc.). Use `push_notification=True` for time-sensitive work or when you're blocked on the recipient acting; leave it `False` when it's fine to wait for the recipient (or the user) to get to it.
 
@@ -408,7 +410,9 @@ If the user presses Esc during the running phase, the runner sets a cancellation
    - `True` + idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter` into the pane, triggering a UserPromptSubmit turn.
    - `True` + idle/working + client attached → no ping (would clobber the user's input); passive delivery.
    - `True` + listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
-3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive / already listening).
+   - `True` + waiting (blocked on a permission/input prompt) → passive delivery; a terminal ping would land on the prompt as random keys, not go through, so we don't try.
+   - `True` + compacting (`is_locked(uuid)` — checked before any state-based branching) → passive delivery; the pane is killed for the duration.
+3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive because attached-user / waiting / compacting / etc.).
 4. On the recipient side, the next firing hook (`SessionStart` if just resumed, `Stop` after current turn, `UserPromptSubmit` on next input or a push ping) runs `deliver-inbox.py`, which:
    - Reads all pending messages in the recipient's inbox
    - Formats them as one `<system-reminder>` block

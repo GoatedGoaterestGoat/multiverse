@@ -366,6 +366,10 @@ def message_agent(
         message still arrives on the recipient's next turn.
       - listening (parked in ``monitor_inbox``) → it's already watching its
         inbox and picks the message up within a second; no wake needed.
+      - waiting (blocked on a permission/input prompt) → NOT woken; a
+        terminal ping can't reach a blocked pane. The message queues and
+        is delivered once the user resolves the prompt and the turn
+        continues.
       - compacting → the agent is locked (its terminal is killed and even
         the user can't interact with it during compaction), so it is NOT
         woken; the message queues and is delivered once compaction finishes
@@ -521,6 +525,24 @@ def message_agent(
         return (
             f"Delivered to '{target_name}' — it was already listening on its "
             "inbox and will pick the message up within a second." + reply_hint
+        )
+
+    if status == "waiting":
+        # `waiting` means claude is blocked on a permission prompt (or a
+        # similar user-input request). It can't consume a terminal ping
+        # while it's blocked — the pane is showing the y/n prompt, not the
+        # input box, so send-keys would just queue random keys against the
+        # prompt. Passive delivery only; the message lands the moment the
+        # user resolves the prompt and the turn continues.
+        log_notification_routed(
+            sender=self_name, recipient=target_name, cwd=cwd,
+            route="passive_fallback_waiting",
+        )
+        return (
+            f"Message queued for '{target_name}' — it's currently blocked on "
+            "a user permission/input prompt, so it can't be pushed. The "
+            "message will be delivered the moment the user resolves the "
+            "prompt and the turn continues." + reply_hint
         )
 
     if status in ("idle", "working"):
