@@ -1489,13 +1489,30 @@ class SBConnector:
             )
         tmux_name = session.tmux_name
 
-        # `starting` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
-        # Also gate this on the tmux session actually existing (defensive).
+        # Gate on the tmux session actually existing (defensive).
         if not tmux_session_exists(tmux_name):
             return (
                 "deliver_failed", "",
                 f"tmux session for '{agent_name}' is missing (was it just reaped?)",
             )
+
+        # A ``waiting`` agent has a modal UI open — either AskUserQuestion (multi-choice
+        # question) or a permission prompt — and Claude Code's TUI is actively consuming
+        # keystrokes to navigate it. Send-keys here would corrupt the modal rather than
+        # deliver a user-style prompt. Refuse cleanly; SB can call ``answer_question`` /
+        # ``answer_permission_prompt`` first to close the modal, then retry ``prompt_agent``.
+        #
+        # Contrast with ``listening`` (blocked in monitor_inbox): that path shows no
+        # interactive modal, so send-keys buffered in the terminal is picked up naturally
+        # when the blocking tool call returns — the user confirmed that's fine to deliver.
+        if target.status == "waiting":
+            return (
+                "waiting", "",
+                f"'{agent_name}' is currently waiting for user input (a question or "
+                "permission prompt); the prompt cannot be delivered until they respond.",
+            )
+
+        # ``starting`` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
         if target.status == "starting":
             ok, err = sb_actions.wait_for_ready(tmux_name)
             if not ok:
