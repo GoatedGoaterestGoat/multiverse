@@ -49,6 +49,12 @@ def main() -> None:
         from src import sb_notify
 
         sb_notify.record_question_signal(cwd, agent, tool_use_id, questions)
+        # ALSO populate the pending_tools/ cache — sb-track-tool.py at PreToolUse[.*]
+        # doesn't reliably fire for AskUserQuestion (interactive tool; Claude Code seems
+        # to skip the general matcher when a specific one exists). Duplicating the
+        # record here at the specific matcher guarantees find_pending_askuserquestion
+        # (the resolve-from-live-state path) has a source of truth.
+        sb_notify.record_pending_tool(cwd, agent, tool_use_id, "AskUserQuestion", tool_input)
     except Exception:  # noqa: BLE001 - never break the agent's turn
         pass
 
