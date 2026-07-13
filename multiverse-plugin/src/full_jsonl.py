@@ -432,6 +432,74 @@ def structural_tokens_cached(claude_uuid: str, cwd: str) -> int:
     return result
 
 
+def last_real_usage_total(claude_uuid: str, cwd: str) -> int:
+    """Total input tokens claude billed on the most recent real (non-
+    ``msg_priv``) API request — literally what ``/context`` shows.
+
+    ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens``
+    from the last assistant row that recorded a usage object. Returns 0
+    when no real API call has landed yet (freshly-compacted before its
+    first turn, or a brand-new session).
+
+    Preferable to ``live_stats + structural_tokens`` as the dashboard's
+    displayed total, because it's a direct measurement of the current
+    context size — no derivation, no drift, no over-count when claude's
+    microcompaction evicts old tool results (which leaves the parser
+    counting on-disk content that's no longer in context).
+    """
+    live = live_jsonl_path(claude_uuid, cwd)
+    if not live.is_file():
+        return 0
+    last_total = 0
+    try:
+        with live.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                msg = row.get("message", {})
+                mid = msg.get("id", "")
+                if isinstance(mid, str) and mid.startswith("msg_priv"):
+                    continue
+                usage = msg.get("usage")
+                if not (isinstance(usage, dict)
+                        and isinstance(usage.get("input_tokens"), int)):
+                    continue
+                last_total = (
+                    usage["input_tokens"]
+                    + (usage.get("cache_creation_input_tokens") or 0)
+                    + (usage.get("cache_read_input_tokens") or 0)
+                )
+    except OSError:
+        return 0
+    return last_total
+
+
+_LAST_USAGE_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def last_real_usage_total_cached(claude_uuid: str, cwd: str) -> int:
+    """mtime-cached wrapper around ``last_real_usage_total``."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    try:
+        mtime = live.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(live)
+    cached = _LAST_USAGE_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = last_real_usage_total(claude_uuid, cwd)
+    _LAST_USAGE_CACHE[key] = (mtime, result)
+    return result
+
+
 def minimum_compacted_tokens(claude_uuid: str, cwd: str) -> tuple[int, int, int]:
     """Return ``(min_tokens, n_cached, n_total)`` — the smallest possible
     live-JSONL cost if every turn compacted to its most-collapsed frontier

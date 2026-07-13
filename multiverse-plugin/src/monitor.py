@@ -52,6 +52,7 @@ from .full_jsonl import (
     list_orphan_fulls,
     live_jsonl_path,
     live_stats,
+    last_real_usage_total_cached,
     live_stats_cached,
     minimum_compacted_tokens,
     structural_tokens,
@@ -2968,9 +2969,21 @@ class MonitorApp(App):
                 # Falls back to just the transcript number when
                 # structural isn't measurable yet (freshly-compacted
                 # session before its first API call).
-                live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
-                struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
-                tokens_cell = f"{live_toks + struct_toks:,}"
+                # Prefer the direct measurement — the last real (non-
+                # msg_priv) API request's usage total is literally what
+                # /context shows. It stays correct even when claude's
+                # microcompaction has evicted content the parser still
+                # sees on disk (parser + structural would over-count in
+                # that case). Fall back to parser + structural only for
+                # sessions with no recorded API call yet (freshly-
+                # compacted before first turn, brand-new session).
+                last_usage = last_real_usage_total_cached(e.claude_uuid, e.cwd)
+                if last_usage:
+                    tokens_cell = f"{last_usage:,}"
+                else:
+                    live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
+                    struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
+                    tokens_cell = f"{live_toks + struct_toks:,}"
             else:
                 tokens_cell = "[dim]-[/]"
             preview = e.preview or "[dim](empty)[/]"
