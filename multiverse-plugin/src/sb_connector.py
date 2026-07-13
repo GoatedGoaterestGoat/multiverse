@@ -77,6 +77,84 @@ log = logging.getLogger("sb_connector")
 _ASK_TIMEOUT = 90.0
 
 
+def _validate_answers_against_questions(questions: list, answers: list) -> tuple[bool, str]:
+    """Validate SB's ``answers`` against the pending AskUserQuestion ``questions`` shape.
+
+    Returns ``(ok, err)`` — the ``err`` is the human message SB will surface on
+    ``bad_request``. Checks: same length; per-question shape matches ``multiSelect``
+    (string vs. list); at most one non-matching entry per multi-select (only one Other
+    slot per question).
+    """
+    if not isinstance(answers, list):
+        return False, "answers must be a list"
+    if len(answers) != len(questions):
+        return False, (
+            f"answers length ({len(answers)}) doesn't match questions length "
+            f"({len(questions)})"
+        )
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        options = q.get("options") or []
+        labels = {opt.get("label", "") for opt in options if isinstance(opt, dict) and opt.get("label")}
+        is_multi = bool(q.get("multiSelect"))
+        if is_multi:
+            if not isinstance(a, list):
+                return False, (
+                    f"answers[{i}] must be a list (question {i} is multiSelect); got "
+                    f"{type(a).__name__}"
+                )
+            non_matching = [s for s in a if s not in labels]
+            if len(non_matching) > 1:
+                return False, (
+                    f"answers[{i}] has {len(non_matching)} entries that don't match any "
+                    "option label; at most one Other (custom text) allowed per question"
+                )
+        else:
+            if not isinstance(a, str):
+                return False, (
+                    f"answers[{i}] must be a string (question {i} is single-select); "
+                    f"got {type(a).__name__}"
+                )
+    return True, ""
+
+
+def _compose_answer_status(agent_name: str, questions: list, answers: list) -> str:
+    """Human-readable status text for the ``answer_question`` ActionResult — embedded
+    verbatim in SB's tool return. Distinguishes preset picks from typed 'Other' text so
+    the SB agent (and the user reading its output) can see when a custom answer was
+    typed vs. one of the offered options selected."""
+
+    def _fmt_entry(a, labels: set[str]) -> str:
+        if isinstance(a, list):
+            parts = []
+            for s in a:
+                if s in labels:
+                    parts.append(f"'{s}'")
+                else:
+                    parts.append(f"'{s}' (typed)")
+            return ", ".join(parts) if parts else "(no selection)"
+        s = a if isinstance(a, str) else ""
+        if s in labels:
+            return f"'{s}'"
+        return f"'{s}' (typed)"
+
+    if len(questions) == 1:
+        q = questions[0]
+        labels = {
+            opt.get("label", "") for opt in (q.get("options") or [])
+            if isinstance(opt, dict) and opt.get("label")
+        }
+        return f"Answered '{agent_name}''s question with {_fmt_entry(answers[0], labels)}."
+
+    parts: list[str] = []
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        labels = {
+            opt.get("label", "") for opt in (q.get("options") or [])
+            if isinstance(opt, dict) and opt.get("label")
+        }
+        parts.append(f"Q{i + 1} → {_fmt_entry(a, labels)}")
+    return f"Answered '{agent_name}''s question: {'; '.join(parts)}."
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -1327,6 +1405,9 @@ class SBConnector:
             # to other frames (events, queries). The task dedups + sends the result.
             asyncio.create_task(self._handle_prompt_agent_action(ws, action))
             return
+        if action.kind == p.ActionKind.ANSWER_QUESTION:
+            asyncio.create_task(self._handle_answer_question_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
         #   answer_question / answer_permission_prompt / answer_spawn_request /
         #   message_agent / spawn_agent / ask_agent
@@ -1553,6 +1634,152 @@ class SBConnector:
             name=target.name,
             initial_prompt=prompt,
         )
+
+    async def _handle_answer_question_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Answer a pending AskUserQuestion on the target agent (contract locked with the
+        SB toolsmith). Runs as a background task off the receiver.
+
+        Payload: ``{question_id, answers}`` where ``answers[i]`` pairs with the pending
+        ``tool_input.questions[i]``. Each entry is a string (single-select — matching a
+        label picks the preset; non-match is typed into Other) or a list of strings
+        (multi-select, same rule per item, at most one Other per question).
+
+        Errors: ``not_found`` (agent missing) | ``no_pending_question`` (no such AskUser
+        Question pending for this agent) | ``forbidden`` (workspace ACL) | ``bad_request``
+        (shape / length / multi-Other) | ``deliver_failed`` (tmux / send-keys failure).
+        """
+        payload = action.payload or {}
+        question_id = str(payload.get("question_id") or "").strip()
+        sb_answers = payload.get("answers")
+        agent_name = str(action.agent or "").strip()
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+        if not agent_name or not question_id or sb_answers is None:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": "agent + question_id + answers required"},
+            ))
+        if not isinstance(sb_answers, list):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "answers must be a list"},
+            ))
+
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err = await loop.run_in_executor(
+                None, self._deliver_answer_blocking,
+                cwd_abs, agent_name, question_id, sb_answers,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("answer_question crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("answer_question delivered to %s: %s", agent_name, status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": status_str, "message": err or ""},
+            ))
+            log.info("answer_question %s for %s: %s", status_str, agent_name, err)
+
+    def _deliver_answer_blocking(
+        self, cwd_abs: str, agent_name: str, question_id: str, sb_answers: list,
+    ) -> tuple[str, str, str]:
+        """Blocking body of answer_question: verify the pending AskUserQuestion, validate
+        SB's answers against the pending questions[], and drive the modal via
+        :func:`sb_actions.answer_askuserquestion_via_tmux`. Returns ``(status, ok_text, err)``."""
+        from . import sb_actions, sb_notify
+        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+
+        target = find_agent_by_name(cwd_abs, agent_name)
+        if target is None:
+            return ("not_found", "", f"no agent '{agent_name}' in this workspace")
+
+        # Verify the AskUserQuestion is still pending — the pending_tools/<id>.json file
+        # is written by the PreToolUse[.*] hook and cleaned up by PostToolUse[.*], so its
+        # presence means the tool is still in flight (i.e., agent is blocked waiting).
+        pending = sb_notify.pending_tool_data(question_id)
+        if pending is None:
+            return (
+                "no_pending_question", "",
+                f"no pending question with id '{question_id}' for '{agent_name}' "
+                "(agent may have moved on or the question was already answered)",
+            )
+        if pending.get("tool_name") != "AskUserQuestion":
+            return (
+                "no_pending_question", "",
+                f"pending tool for id '{question_id}' is "
+                f"'{pending.get('tool_name')}', not AskUserQuestion",
+            )
+        # Sanity: the pending record's agent must match — protects against a case where
+        # SB has an old question_id that happens to match a different agent's live tool.
+        if pending.get("agent") and pending.get("agent") != agent_name:
+            return (
+                "no_pending_question", "",
+                f"pending question '{question_id}' is for agent '{pending.get('agent')}', "
+                f"not '{agent_name}'",
+            )
+
+        tool_input = pending.get("tool_input") or {}
+        questions = tool_input.get("questions") or []
+        ok, err = _validate_answers_against_questions(questions, sb_answers)
+        if not ok:
+            return ("bad_request", "", err)
+
+        # Live target guards.
+        if target.session is None:
+            return ("deliver_failed", "",
+                    f"'{agent_name}' has no live session to answer the question in")
+        if target.session.host and target.session.host != current_host():
+            return (
+                "deliver_failed", "",
+                f"'{agent_name}' is running on host '{target.session.host}', not this host",
+            )
+        tmux_name = target.session.tmux_name
+        if not tmux_session_exists(tmux_name):
+            return ("deliver_failed", "",
+                    f"tmux session for '{agent_name}' is missing (was it just reaped?)")
+
+        ok, err = sb_actions.answer_askuserquestion_via_tmux(tmux_name, questions, sb_answers)
+        if not ok:
+            return ("deliver_failed", "", err)
+
+        return ("ok", _compose_answer_status(agent_name, questions, sb_answers), "")
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""

@@ -476,6 +476,17 @@ def had_permission_prompt(tool_use_id: str) -> bool:
     return (pending_tools_dir() / f"{_safe(tool_use_id)}.perm").exists()
 
 
+def pending_tool_data(tool_use_id: str) -> dict | None:
+    """Return the PreToolUse-recorded candidate JSON for this ``tool_use_id`` if it's
+    still in flight (present between the PreToolUse and PostToolUse hook fires), else
+    ``None``. Used by ``answer_question`` to verify the target AskUserQuestion is still
+    pending AND to read its ``tool_input.questions`` for shape validation."""
+    path = pending_tools_dir() / f"{_safe(tool_use_id)}.json"
+    if not path.is_file():
+        return None
+    return _read_json(path)
+
+
 def cleanup_pending_tool(tool_use_id: str) -> None:
     """PostToolUse always calls this — whether or not a permission prompt happened."""
     d = pending_tools_dir()

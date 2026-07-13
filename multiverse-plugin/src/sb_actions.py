@@ -174,6 +174,205 @@ def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
     return True, saved, ""
 
 
+#: Down-count large enough to always dead-end at "Chat about this" from anywhere in an
+#: AskUserQuestion modal — safe over-count. Reachable max positions per question is
+#: presets + Other + (Next|Submit) + Chat = P + 3 (multi) or P + 2 (single). 30 covers
+#: any reasonable P (SB caps 2..4 in the tool schema but the wire supports more).
+_GROUND_DOWN = 30
+
+
+def _find_label_index(s: str, options: list) -> int | None:
+    """0-based index of the option whose ``label`` matches ``s`` exactly; ``None`` if
+    no exact match. Non-matching text is treated as a custom 'Other' typed answer, per
+    the answer_question contract."""
+    for i, opt in enumerate(options):
+        if isinstance(opt, dict) and str(opt.get("label", "")) == s:
+            return i
+    return None
+
+
+def _clean_text(s: str) -> str:
+    """Strip newlines/tabs from custom typed text. Enter is our navigation key, so a
+    stray newline in typed text would prematurely advance the modal."""
+    return s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+
+
+def build_answer_key_sequence(questions: list, answers: list) -> list:
+    """Compute the send-keys batches to answer a pending AskUserQuestion modal.
+
+    Returns a list of ``("keys"|"text", value)`` batches: ``keys`` is a list of tmux
+    key names (``["Down","Down","Enter"]``) sent as ``tmux send-keys ...``; ``text`` is
+    a string sent as ``tmux send-keys -l <text>`` (literal typing, no key-name parsing).
+
+    Modal layout (empirically verified with the user, 2026-07-13):
+      Single-select Q with P presets: positions 1..P (presets), P+1 (Other = typed
+        answer, focused by navigating to it), P+2 (Chat about this = dead-end sink).
+      Multi-select Q with P presets: 1..P (presets), P+1 (Other), P+2 (Next/Submit),
+        P+3 (Chat about this).
+
+    Navigation semantics:
+      - Down goes through everything in order, dead-ends at Chat about this.
+      - Up cycles within {presets + Other}, wrapping: from position 1 Up → Other.
+        For multi-select, Up from Chat first passes through Next then Other.
+      - Single-select: Enter on a preset selects AND advances.
+      - Multi-select: Enter (and Space) toggles a preset; advancement is via
+        Next/Submit + Enter. Typing in Other implicitly selects it (no extra key).
+      - After a question advances, focus resets to position 1 of the next question.
+      - After the last question advances, we're on the submission confirmation page;
+        one more Enter submits and closes the modal.
+
+    Strategy:
+      - Ground once at start: ``Left × num_questions`` (safety in case focus was on
+        a later question), then ``Down × _GROUND_DOWN`` (dead-ends at Chat of Q1).
+      - Q1: navigate from Chat (Up-arrow math).
+      - Q2+: navigate from position 1 (Down-arrow math + Up-wrap for Other).
+      - After last question: one final Enter to submit.
+    """
+    n = len(questions)
+    if n == 0:
+        return []
+
+    batches: list = [("keys", ["Left"] * n + ["Down"] * _GROUND_DOWN)]
+
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        opts = q.get("options") or []
+        P = len(opts)
+        is_multi = bool(q.get("multiSelect"))
+        from_chat = (i == 0)
+        if is_multi:
+            batches.extend(_multi_answer_batches(opts, P, a, from_chat))
+        else:
+            batches.extend(_single_answer_batches(opts, P, a, from_chat))
+
+    # Submission confirmation page → Enter to submit
+    batches.append(("keys", ["Enter"]))
+    return batches
+
+
+def _single_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
+    """Single-select: pick a preset (Enter selects + advances) or type into Other
+    (Enter submits typed text + advances)."""
+    a_str = a if isinstance(a, str) else (a[0] if isinstance(a, list) and a else "")
+    match = _find_label_index(a_str, options)
+
+    if from_chat:
+        # Chat position = P+2. Up N reaches position P+2-N.
+        if match is not None:
+            k = match + 1  # 1-indexed preset position
+            ups = P + 2 - k
+            return [("keys", ["Up"] * ups + ["Enter"])]
+        # Custom text → Other at position P+1. From Chat, Up 1 = Other.
+        return [
+            ("keys", ["Up"]),
+            ("text", _clean_text(a_str)),
+            ("keys", ["Enter"]),
+        ]
+    # From position 1 (post-auto-advance)
+    if match is not None:
+        k = match + 1
+        keys = (["Down"] * (k - 1) if k > 1 else []) + ["Enter"]
+        return [("keys", keys)]
+    # Custom text: Down P from position 1 to reach Other (P+1).
+    return [
+        ("keys", ["Down"] * P),
+        ("text", _clean_text(a_str)),
+        ("keys", ["Enter"]),
+    ]
+
+
+def _multi_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
+    """Multi-select: toggle each selected preset (Enter/Space toggles), optionally
+    type into Other (implicitly selects it), then navigate to Next/Submit and Enter."""
+    if isinstance(a, str):
+        selections = [a] if a else []
+    else:
+        selections = list(a) if isinstance(a, list) else []
+    preset_indexes: list[int] = []
+    custom_text: str | None = None
+    for sel in selections:
+        m = _find_label_index(sel, options)
+        if m is not None:
+            preset_indexes.append(m)
+        else:
+            custom_text = sel  # at-most-one; caller validated
+
+    batches: list = []
+    if from_chat:
+        # Chat position = P+3. Toggle each preset from Chat then re-ground for the next.
+        for m in preset_indexes:
+            k = m + 1
+            ups = P + 3 - k
+            batches.append(("keys", ["Up"] * ups + ["Enter"]))  # toggle
+            batches.append(("keys", ["Down"] * _GROUND_DOWN))    # re-ground to Chat
+        if custom_text is not None:
+            # From Chat, Up 2 = Other (P+1). Type → implicit-selects.
+            batches.append(("keys", ["Up"] * 2))
+            batches.append(("text", _clean_text(custom_text)))
+            batches.append(("keys", ["Down"] * _GROUND_DOWN))    # re-ground to Chat
+        # From Chat, Up 1 = Next/Submit. Enter → advances (to next Q or submission page).
+        batches.append(("keys", ["Up", "Enter"]))
+        return batches
+
+    # From position 1 (post-auto-advance): walk positions in ascending order.
+    pos = 1
+    sorted_presets = sorted(set(preset_indexes))
+    for m in sorted_presets:
+        k = m + 1
+        delta = k - pos
+        if delta > 0:
+            batches.append(("keys", ["Down"] * delta))
+        elif delta < 0:
+            batches.append(("keys", ["Up"] * (-delta)))
+        batches.append(("keys", ["Enter"]))  # toggle
+        pos = k
+    if custom_text is not None:
+        target = P + 1  # Other position
+        delta = target - pos
+        if delta > 0:
+            batches.append(("keys", ["Down"] * delta))
+        elif delta < 0:
+            batches.append(("keys", ["Up"] * (-delta)))
+        batches.append(("text", _clean_text(custom_text)))
+        pos = target
+    # Navigate to Next/Submit (position P+2) and Enter.
+    target = P + 2
+    delta = target - pos
+    if delta > 0:
+        batches.append(("keys", ["Down"] * delta))
+    elif delta < 0:
+        batches.append(("keys", ["Up"] * (-delta)))
+    batches.append(("keys", ["Enter"]))
+    return batches
+
+
+def answer_askuserquestion_via_tmux(
+    tmux_name: str, questions: list, answers: list
+) -> tuple[bool, str]:
+    """Deliver an answer to a pending AskUserQuestion modal via tmux send-keys.
+
+    Assumes the target's pane currently has the modal open (caller verified via
+    :func:`sb_notify.pending_tool_data`). Builds and sends the full key sequence.
+    Returns ``(ok, err)``.
+    """
+    try:
+        batches = build_answer_key_sequence(questions, answers)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"could not build key sequence: {exc}"
+    for kind, val in batches:
+        if kind == "keys":
+            if not val:
+                continue
+            args = ["send-keys", "-t", tmux_name] + list(val)
+            ok, err = _run_tmux(args)
+        else:  # "text"
+            if not val:
+                continue
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", val])
+        if not ok:
+            return False, err
+    return True, ""
+
+
 def wait_for_ready(
     tmux_name: str, timeout_s: float = DEFAULT_READY_TIMEOUT_S
 ) -> tuple[bool, str]:
