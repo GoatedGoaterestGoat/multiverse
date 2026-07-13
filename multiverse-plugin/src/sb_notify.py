@@ -489,29 +489,73 @@ def pending_tool_data(tool_use_id: str) -> dict | None:
 
 def find_pending_askuserquestion(cwd: str, agent_name: str) -> dict | None:
     """Locate the currently-pending AskUserQuestion for ``(cwd, agent_name)`` by scanning
-    ``pending_tools/``. An agent has AT MOST one pending AskUserQuestion at a time
-    (the tool blocks its turn), so a single match uniquely identifies the question the
-    caller wants to answer.
+    the agent's LIVE session JSONL for an ``AskUserQuestion`` tool_use with no matching
+    ``tool_result``. This is the authoritative ground truth — the JSONL is written by
+    Claude Code in real time, so the moment Claude starts the tool call, the tool_use
+    entry exists; the tool_result entry appears only after the modal is answered.
 
-    Used by ``answer_question`` when SB doesn't have (or doesn't send) a ``question_id``
-    — resolve-from-live-state fallback per the toolsmith's design improvement.
+    Reading live state instead of the ``pending_tools/`` cache side-steps two upstream
+    bugs the toolsmith E2E surfaced: (a) specific-matcher PreToolUse hooks not firing
+    for AskUserQuestion in this plugin config, and (b) the cache getting cleaned up
+    early. An agent has at most one pending AskUserQuestion at a time (the tool blocks
+    its turn), so a single match uniquely identifies it.
+
+    Returns a dict shaped like :func:`pending_tool_data` (``tool_use_id`` /
+    ``tool_name`` / ``tool_input`` / ``cwd`` / ``agent``) or ``None`` if none pending.
     """
-    d = pending_tools_dir()
-    if not d.is_dir():
+    # Late imports to keep sb_notify's top-level dependency-light for the hooks that
+    # import it (they'd otherwise pull in sessions + full_jsonl on every hook fire).
+    from .sessions import find_agent_by_name
+    from .full_jsonl import live_jsonl_path
+
+    target = find_agent_by_name(cwd, agent_name)
+    if target is None or not target.claude_uuid:
         return None
-    cwd_r = _resolve(cwd)
-    for p in d.glob("*.json"):
-        if p.name.endswith(".json.tmp"):
-            continue
-        rec = _read_json(p)
-        if not rec:
-            continue
-        if (
-            rec.get("cwd") == cwd_r
-            and rec.get("agent") == agent_name
-            and rec.get("tool_name") == "AskUserQuestion"
-        ):
-            return rec
+    jsonl = live_jsonl_path(target.claude_uuid, target.cwd)
+    if not jsonl.is_file():
+        return None
+
+    ask_uses: list[tuple[str, dict]] = []  # (tool_use_id, tool_input) in file order
+    resolved: set[str] = set()
+    try:
+        with jsonl.open() as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    entry = json.loads(stripped)
+                except json.JSONDecodeError:
+                    continue
+                msg = entry.get("message") or {}
+                content = msg.get("content") or []
+                if not isinstance(content, list):
+                    continue
+                for c in content:
+                    if not isinstance(c, dict):
+                        continue
+                    ctype = c.get("type")
+                    if ctype == "tool_use" and c.get("name") == "AskUserQuestion":
+                        tid = c.get("id") or ""
+                        if tid:
+                            ask_uses.append((tid, c.get("input") or {}))
+                    elif ctype == "tool_result":
+                        tid = c.get("tool_use_id") or ""
+                        if tid:
+                            resolved.add(tid)
+    except OSError:
+        return None
+
+    # The LAST tool_use without a matching tool_result is the currently-pending one.
+    for tool_use_id, tool_input in reversed(ask_uses):
+        if tool_use_id not in resolved:
+            return {
+                "cwd": _resolve(cwd),
+                "agent": agent_name,
+                "tool_use_id": tool_use_id,
+                "tool_name": "AskUserQuestion",
+                "tool_input": tool_input,
+            }
     return None
 
 
