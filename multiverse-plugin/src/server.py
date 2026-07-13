@@ -81,6 +81,117 @@ _SPAWN_PROGRESS_INTERVAL = 10.0
 _LISTENING_STATUS = "listening"
 
 
+def _resolve_self_identity() -> tuple[str | None, str | None]:
+    """Return ``(name, cwd)`` of the multiverse session this tool call
+    is actually being made from — bypassing MULTIVERSE_SESSION_NAME /
+    MULTIVERSE_SESSION_CWD env vars, which Claude Code's bg-pty-host
+    silently pollutes.
+
+    Background. When a claude session runs in ``sessionKind: "bg"``
+    (which happens after Claude Code's autocompact fires — the summarized
+    session continues as a background agent), all its tool calls are
+    dispatched through a shared bg-pty-host daemon. That daemon holds
+    frozen env vars from whichever session first spawned it. So reading
+    MULTIVERSE_SESSION_NAME here returns THE DAEMON OWNER's name, not
+    the caller's — every outgoing message_agent then stamps ``from:``
+    with the wrong identity. Symmetric problem for MULTIVERSE_SESSION_CWD.
+
+    The reliable ground truth is the JSONL file claude is currently
+    appending to: at the moment this tool call fires, claude has JUST
+    written a tool_use row into ``~/.claude/projects/<slug>/<uuid>.jsonl``.
+    That row carries ``sessionId``, which we cross-reference against
+    ``~/.multiverse/sessions/*/claude_uuid`` to find the multiverse
+    session dir, whose ``meta.json`` has the correct ``name`` and ``cwd``.
+
+    Falls back to env vars if any step of the lookup fails — the env
+    values are still correct for the vast majority of non-bg sessions.
+    """
+    env_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    env_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
+    try:
+        cfg = Path(
+            os.environ.get("CLAUDE_CONFIG_DIR")
+            or os.path.expanduser("~/.claude")
+        )
+        projects = cfg / "projects"
+        if not projects.is_dir():
+            return env_name, env_cwd
+        # Freshest JSONL across all project dirs. tool_use is written
+        # to disk before dispatch to the MCP server, so at call time
+        # OUR jsonl should have mtime within a second or two of now.
+        now = time.time()
+        best: tuple[float, Path] | None = None
+        for pd in projects.iterdir():
+            if not pd.is_dir():
+                continue
+            try:
+                jsonls = list(pd.glob("*.jsonl"))
+            except OSError:
+                continue
+            for j in jsonls:
+                try:
+                    mt = j.stat().st_mtime
+                except OSError:
+                    continue
+                # 10s window is generous: it comfortably includes the
+                # write-then-dispatch latency and any small clock skew,
+                # while still letting concurrent-tool-call races (where
+                # two sessions both have recent-mtime jsonls) resolve
+                # to the freshest one.
+                if now - mt > 10:
+                    continue
+                if best is None or mt > best[0]:
+                    best = (mt, j)
+        if best is None:
+            return env_name, env_cwd
+        # Read the first row's sessionId (sessionId is stable per file,
+        # so any row works; first is cheapest).
+        session_id: str | None = None
+        try:
+            with best[1].open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    sid = row.get("sessionId") or row.get("session_id")
+                    if sid:
+                        session_id = sid
+                        break
+        except OSError:
+            return env_name, env_cwd
+        if session_id is None:
+            return env_name, env_cwd
+        # Match against multiverse sessions.
+        mv_root = Path(
+            os.environ.get("MULTIVERSE_ROOT")
+            or os.path.expanduser("~/.multiverse")
+        )
+        for sess_dir in (mv_root / "sessions").iterdir():
+            if not sess_dir.is_dir():
+                continue
+            u_file = sess_dir / "claude_uuid"
+            if not u_file.is_file():
+                continue
+            try:
+                if u_file.read_text().strip() != session_id:
+                    continue
+                meta = json.loads((sess_dir / "meta.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            return (
+                meta.get("name") or env_name,
+                meta.get("cwd") or env_cwd,
+            )
+        # sessionId not in multiverse (session not multiverse-managed).
+        return env_name, env_cwd
+    except Exception:  # noqa: BLE001 — env fallback must never crash tool calls
+        return env_name, env_cwd
+
+
 def _write_session_status(status: str) -> None:
     """Write a status value to this session's status.json (best-effort).
 
@@ -230,8 +341,8 @@ def list_agents(
             workspace. When provided, lists agents in that workspace
             instead; the ``← this is you`` marker is suppressed.
     """
-    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    self_name = os.environ.get("MULTIVERSE_SESSION_NAME") or ""
+    self_name, self_cwd = _resolve_self_identity()
+    self_name = self_name or ""
 
     if working_directory:
         try:
@@ -395,8 +506,7 @@ def message_agent(
             provided, the target (and any auto-resume / inbox delivery)
             happens in that workspace instead.
     """
-    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    self_name, self_cwd = _resolve_self_identity()
     if not self_cwd or not self_name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
@@ -598,8 +708,7 @@ def check_inbox() -> str:
     Calling this **clears your inbox** — exactly like a hook delivery. So
     don't call it without intending to act on the messages.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    name, cwd = _resolve_self_identity()
     if not cwd or not name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
@@ -646,8 +755,7 @@ async def monitor_inbox(
             timeout, returns a "no new messages" notice — you can call
             again to keep waiting, or move on.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    name, cwd = _resolve_self_identity()
     if not cwd or not name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
@@ -726,8 +834,7 @@ def ask_agent(
             own workspace. When provided, looks up the target in that
             workspace instead.
     """
-    self_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    self_name, self_cwd = _resolve_self_identity()
     if not self_cwd or not self_name:
         return (
             "Error: this tool requires running inside a multiverse-managed "
@@ -817,8 +924,7 @@ async def spawn_agent(
             empty or already taken in this workspace, a random name is
             suggested instead.
     """
-    cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
+    self_name, cwd = _resolve_self_identity()
     caller_sid = os.environ.get("MULTIVERSE_SESSION_ID")
     if not cwd or not self_name or not caller_sid:
         return (
