@@ -306,24 +306,20 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
     with no marker in the JSONL (the full content stays on disk). Once
     that kicks in on a long session, the parser (which counts all the
     on-disk content) over-counts relative to the real context, so
-    ``usage_total - parser`` at the LAST request goes negative. But at
-    an EARLY request — before enough tool results accumulate to trigger
-    eviction — the parser still matches the real context and the
+    ``usage_total - parser`` at post-eviction requests goes negative.
+    But BEFORE any eviction — while usage grows monotonically request
+    over request — the parser matches the real context and the
     derivation is clean.
 
-    So we pick the snapshot by whether the session has been compacted
-    (by us — detected via ``msg_priv`` rows):
-
-    - Compacted session → the FIRST post-compaction request. Our
-      compaction reset the transcript and eviction state, and the
-      session was already running so its tools are loaded. This is the
-      reliable low-pressure point, and it's naturally stable until the
-      NEXT compaction rewrites the prefix (auto-refresh — exactly "re-
-      measure on the first turn after a compaction").
-    - Never-compacted session → the LAST request. A short fresh session
-      has no eviction yet, and the last request has the most tools
-      loaded (deferred tools / MCP connect over the first few turns, so
-      the first request would under-count structural).
+    So we walk the samples and take the PEAK of the monotonically-non-
+    decreasing prefix — the last request before any significant usage
+    drop. Sessions that never hit eviction (short, or without enough
+    tool results) get the last sample, which reflects the CURRENT
+    structural (including any deferred tools / MCP that loaded over
+    the first few turns, and — critically — any structural growth
+    since the last compaction). Sessions that did hit eviction get the
+    peak-just-before-drop, which is the last measurement the parser
+    can still trust.
 
     Returns 0 when no usable usage exists yet (freshly-compacted before
     its first post-compaction API call, or a brand-new session).
@@ -331,11 +327,8 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
     live = live_jsonl_path(claude_uuid, cwd)
     if not live.is_file():
         return 0
-    # One pass over raw rows: detect compaction (msg_priv present) and
-    # collect the FIRST and LAST real (non-msg_priv) usage snapshots.
-    has_compaction = False
-    first_snap: tuple[dict, str] | None = None
-    last_snap: tuple[dict, str] | None = None
+    # Collect real (non-msg_priv) usage snapshots in file order.
+    samples: list[tuple[dict, str, int]] = []  # (usage, uuid, total)
     try:
         with live.open() as f:
             for line in f:
@@ -351,7 +344,6 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
                 msg = row.get("message", {})
                 mid = msg.get("id", "")
                 if isinstance(mid, str) and mid.startswith("msg_priv"):
-                    has_compaction = True
                     continue
                 usage = msg.get("usage")
                 if not (isinstance(usage, dict)
@@ -360,21 +352,29 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
                 uuid = row.get("uuid")
                 if uuid is None:
                     continue
-                if first_snap is None:
-                    first_snap = (usage, uuid)
-                last_snap = (usage, uuid)
+                total = (
+                    usage["input_tokens"]
+                    + (usage.get("cache_creation_input_tokens") or 0)
+                    + (usage.get("cache_read_input_tokens") or 0)
+                )
+                samples.append((usage, uuid, total))
     except OSError:
         return 0
 
-    snap = first_snap if has_compaction else last_snap
-    if snap is None:
+    if not samples:
         return 0
-    snapshot_usage, snapshot_uuid = snap
-    usage_total = (
-        snapshot_usage.get("input_tokens", 0)
-        + (snapshot_usage.get("cache_creation_input_tokens") or 0)
-        + (snapshot_usage.get("cache_read_input_tokens") or 0)
-    )
+
+    # Walk forward; peak = last index that hasn't yet been undercut by a
+    # significant drop. A "significant" drop is claude's microcompaction
+    # dropping tool_results (typically tens of thousands of tokens); noise
+    # from streaming/thinking round-trips within a turn is well under 5k.
+    _EVICTION_DROP = 5000
+    peak_i = 0
+    for i in range(1, len(samples)):
+        if samples[i][2] < samples[i - 1][2] - _EVICTION_DROP:
+            break
+        peak_i = i
+    snapshot_usage, snapshot_uuid, usage_total = samples[peak_i]
     # Parser tokens for the same file state UP TO the snapshot's uuid —
     # a leaf whose source_uuids contains snapshot_uuid marks the point;
     # sum tokens for everything at-or-before it.
