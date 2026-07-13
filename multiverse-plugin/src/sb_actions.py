@@ -400,28 +400,55 @@ def answer_askuserquestion_via_tmux(
         log.info("answer_askuserquestion batches=%s", batches)
     except Exception:  # noqa: BLE001
         pass
-    for kind, val in batches:
+    # DIAGNOSTIC: capture the pane before we start so we can see the initial modal
+    # state and cursor position for comparison later.
+    _log_cursor(log, tmux_name, "initial")
+    for bi, (kind, val) in enumerate(batches):
         if kind == "keys":
             if not val:
                 continue
-            # Send each nav key as its own tmux invocation with a small sleep between,
-            # so the TUI has time to render each keystroke. Batching multiple nav keys
-            # into one send-keys call was causing keys to be dropped/coalesced.
+            # Send each nav key as its own tmux invocation with a sleep between so the
+            # TUI has time to render each keystroke.
             for i, key in enumerate(val):
-                if i > 0:
-                    time.sleep(_KEY_DELAY_S)
+                # Delay before EVERY key (including the first of a batch, so inter-batch
+                # timing matches inter-key timing).
+                time.sleep(_KEY_DELAY_S)
                 ok, err = _run_tmux(["send-keys", "-t", tmux_name, key])
                 if not ok:
                     return False, err
+                # DIAGNOSTIC: capture after each key so we can trace exactly which key
+                # moves the cursor and by how much.
+                _log_cursor(log, tmux_name, f"after batch{bi}[{i}]={key}")
         else:  # "text"
             if not val:
                 continue
-            # Text typing (Other free-text) doesn't need per-char delays — the input
-            # field buffers characters normally, unlike modal navigation.
+            time.sleep(_KEY_DELAY_S)
             ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", val])
             if not ok:
                 return False, err
+            _log_cursor(log, tmux_name, f"after batch{bi}[text]")
     return True, ""
+
+
+def _log_cursor(log, tmux_name: str, tag: str) -> None:
+    """Diagnostic helper: capture the pane and log the ``❯ N. Label`` line's index.
+
+    Silently no-ops on failure — this is instrumentation, not delivery. Logs the raw
+    cursor line so we can see the option label as rendered by the TUI.
+    """
+    try:
+        ok, pane = _run_tmux(["capture-pane", "-p", "-t", tmux_name], capture=True)
+        if not ok:
+            return
+        cursor_line = ""
+        for line in pane.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("❯"):
+                cursor_line = stripped
+                break
+        log.info("cursor %s: %r", tag, cursor_line)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def wait_for_ready(
