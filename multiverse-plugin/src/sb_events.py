@@ -192,6 +192,34 @@ def _last_assistant_line(full: str) -> str:
     return last[:160] if last else ""
 
 
+def workspace_connected_event_fields(
+    first_connect: bool, agents_summary: dict[str, str] | None = None
+) -> dict:
+    """``workspace.connected`` payload (DESIGN §4b).
+
+    Fires on EVERY successful (re)connect — SB uses it as a heartbeat/lifecycle signal
+    that Multiverse is online for this workspace. Contract locked with the SB design
+    agent (2026-07-12):
+
+    - First-ever connect: `{first_connect: True, workspace_summary: {<agent>: <text>, ...}}`.
+      The dict maps each named agent's name to their answer to
+      "Please give a concise summary of what you have achieved so far in this workspace."
+      (via Multiverse's ``ask_all`` fork). Failed asks (timeout, subprocess error, ...)
+      get a bracketed placeholder string like ``"[ask failed: timed out after 60s]"``.
+      Empty workspace (no agents) → ``workspace_summary`` present but ``{}``.
+    - Subsequent (re)connect: ``{}`` — payload is empty. SB reads absence of
+      ``first_connect`` as "reconnect" and delivers a minimal "workspace reconnected"
+      turn.
+
+    The explicit ``first_connect`` boolean (SB's option (a)) is what distinguishes the
+    two cases on the wire — a payload can't be told apart from `{}` otherwise, and
+    presence-of-key is more error-prone than an explicit flag.
+    """
+    if not first_connect:
+        return {}
+    return {"first_connect": True, "workspace_summary": agents_summary or {}}
+
+
 def agent_created_event_fields(initial_prompt: str | None = None) -> dict:
     """``agent.created`` payload (DESIGN §4b).
 
