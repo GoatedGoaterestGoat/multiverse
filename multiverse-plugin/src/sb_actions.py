@@ -175,12 +175,6 @@ def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
 
 
 #: Down-count large enough to always dead-end at "Chat about this" from anywhere in an
-#: AskUserQuestion modal — safe over-count. Reachable max positions per question is
-#: presets + Other + (Next|Submit) + Chat = P + 3 (multi) or P + 2 (single). 30 covers
-#: any reasonable P (SB caps 2..4 in the tool schema but the wire supports more).
-_GROUND_DOWN = 30
-
-
 def _find_label_index(s: str, options: list) -> int | None:
     """0-based index of the option whose ``label`` matches ``s`` exactly; ``None`` if
     no exact match. Non-matching text is treated as a custom 'Other' typed answer, per
@@ -223,7 +217,8 @@ def build_answer_key_sequence(questions: list, answers: list) -> list:
 
     Strategy:
       - Ground once at start: ``Left × num_questions`` (safety in case focus was on
-        a later question), then ``Down × _GROUND_DOWN`` (dead-ends at Chat of Q1).
+        a later question), then ``Down × (P + 1 or P + 2)`` (max needed to dead-end at
+        Chat of Q1).
       - Q1: navigate from Chat (Up-arrow math).
       - Q2+: navigate from position 1 (Down-arrow math + Up-wrap for Other).
       - After last question: one final Enter to submit.
@@ -232,7 +227,18 @@ def build_answer_key_sequence(questions: list, answers: list) -> list:
     if n == 0:
         return []
 
-    batches: list = [("keys", ["Left"] * n + ["Down"] * _GROUND_DOWN)]
+    # Grounding: navigate to Q1 (Left × n) then Down enough to dead-end at Chat about
+    # this of Q1. Max Downs needed from any starting position ≤ Chat is:
+    #   single-select: P + 1  (positions 1..P presets, P+1 Other, P+2 Chat)
+    #   multi-select:  P + 2  (positions 1..P, P+1 Other, P+2 Next/Submit, P+3 Chat)
+    # Down dead-ends at Chat, so overshooting is harmless; undershooting misaligns the
+    # Up-arrow math below. Use exact-max.
+    q1 = questions[0]
+    P1 = len(q1.get("options") or [])
+    q1_multi = bool(q1.get("multiSelect"))
+    ground_downs = P1 + 2 if q1_multi else P1 + 1
+
+    batches: list = [("keys", ["Left"] * n + ["Down"] * ground_downs)]
 
     for i, (q, a) in enumerate(zip(questions, answers)):
         opts = q.get("options") or []
@@ -299,16 +305,19 @@ def _multi_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
     batches: list = []
     if from_chat:
         # Chat position = P+3. Toggle each preset from Chat then re-ground for the next.
+        # Re-ground Downs: max from position 1 (top) to Chat = P + 2. Down dead-ends at
+        # Chat so overshooting is harmless.
+        reground = P + 2
         for m in preset_indexes:
             k = m + 1
             ups = P + 3 - k
             batches.append(("keys", ["Up"] * ups + ["Enter"]))  # toggle
-            batches.append(("keys", ["Down"] * _GROUND_DOWN))    # re-ground to Chat
+            batches.append(("keys", ["Down"] * reground))        # re-ground to Chat
         if custom_text is not None:
             # From Chat, Up 2 = Other (P+1). Type → implicit-selects.
             batches.append(("keys", ["Up"] * 2))
             batches.append(("text", _clean_text(custom_text)))
-            batches.append(("keys", ["Down"] * _GROUND_DOWN))    # re-ground to Chat
+            batches.append(("keys", ["Down"] * reground))        # re-ground to Chat
         # From Chat, Up 1 = Next/Submit. Enter → advances (to next Q or submission page).
         batches.append(("keys", ["Up", "Enter"]))
         return batches
@@ -354,10 +363,23 @@ def answer_askuserquestion_via_tmux(
     :func:`sb_notify.pending_tool_data`). Builds and sends the full key sequence.
     Returns ``(ok, err)``.
     """
+    import logging
+    log = logging.getLogger("sb_connector")
     try:
         batches = build_answer_key_sequence(questions, answers)
     except Exception as exc:  # noqa: BLE001
         return False, f"could not build key sequence: {exc}"
+    # DIAGNOSTIC: log input + full batch sequence to daemon.log for E2E debugging.
+    try:
+        q_summary = [
+            {"P": len(q.get("options") or []), "multi": bool(q.get("multiSelect")),
+             "labels": [o.get("label") for o in (q.get("options") or [])]}
+            for q in questions
+        ]
+        log.info("answer_askuserquestion questions=%s answers=%s", q_summary, answers)
+        log.info("answer_askuserquestion batches=%s", batches)
+    except Exception:  # noqa: BLE001
+        pass
     for kind, val in batches:
         if kind == "keys":
             if not val:
