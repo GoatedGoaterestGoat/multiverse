@@ -487,6 +487,34 @@ def pending_tool_data(tool_use_id: str) -> dict | None:
     return _read_json(path)
 
 
+def find_pending_askuserquestion(cwd: str, agent_name: str) -> dict | None:
+    """Locate the currently-pending AskUserQuestion for ``(cwd, agent_name)`` by scanning
+    ``pending_tools/``. An agent has AT MOST one pending AskUserQuestion at a time
+    (the tool blocks its turn), so a single match uniquely identifies the question the
+    caller wants to answer.
+
+    Used by ``answer_question`` when SB doesn't have (or doesn't send) a ``question_id``
+    — resolve-from-live-state fallback per the toolsmith's design improvement.
+    """
+    d = pending_tools_dir()
+    if not d.is_dir():
+        return None
+    cwd_r = _resolve(cwd)
+    for p in d.glob("*.json"):
+        if p.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(p)
+        if not rec:
+            continue
+        if (
+            rec.get("cwd") == cwd_r
+            and rec.get("agent") == agent_name
+            and rec.get("tool_name") == "AskUserQuestion"
+        ):
+            return rec
+    return None
+
+
 def cleanup_pending_tool(tool_use_id: str) -> None:
     """PostToolUse always calls this — whether or not a permission prompt happened."""
     d = pending_tools_dir()

@@ -1680,11 +1680,11 @@ class SBConnector:
                 p.ResultStatus.REJECTED,
                 error={"code": "forbidden", "message": "unknown/ungranted workspace"},
             ))
-        if not agent_name or not question_id or sb_answers is None:
+        if not agent_name or sb_answers is None:
             return await self._send(ws, _finalize(
                 p.ResultStatus.REJECTED,
                 error={"code": "bad_request",
-                       "message": "agent + question_id + answers required"},
+                       "message": "agent + answers required"},
             ))
         if not isinstance(sb_answers, list):
             return await self._send(ws, _finalize(
@@ -1722,7 +1722,14 @@ class SBConnector:
     ) -> tuple[str, str, str]:
         """Blocking body of answer_question: verify the pending AskUserQuestion, validate
         SB's answers against the pending questions[], and drive the modal via
-        :func:`sb_actions.answer_askuserquestion_via_tmux`. Returns ``(status, ok_text, err)``."""
+        :func:`sb_actions.answer_askuserquestion_via_tmux`. Returns ``(status, ok_text, err)``.
+
+        ``question_id`` is OPTIONAL (empty string when absent). When present, we verify
+        it matches the pending AskUserQuestion for this agent — an authoritative
+        "is-this-still-the-pending-one?" race guard. When absent, we resolve the pending
+        AskUserQuestion from live state (an agent has at most one pending AskUserQuestion
+        at a time — the tool blocks its turn). Toolsmith's design improvement, 2026-07-13.
+        """
         from . import sb_actions, sb_notify
         from .sessions import find_agent_by_name, current_host, tmux_session_exists
 
@@ -1730,30 +1737,39 @@ class SBConnector:
         if target is None:
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
 
-        # Verify the AskUserQuestion is still pending — the pending_tools/<id>.json file
-        # is written by the PreToolUse[.*] hook and cleaned up by PostToolUse[.*], so its
-        # presence means the tool is still in flight (i.e., agent is blocked waiting).
-        pending = sb_notify.pending_tool_data(question_id)
-        if pending is None:
-            return (
-                "no_pending_question", "",
-                f"no pending question with id '{question_id}' for '{agent_name}' "
-                "(agent may have moved on or the question was already answered)",
-            )
-        if pending.get("tool_name") != "AskUserQuestion":
-            return (
-                "no_pending_question", "",
-                f"pending tool for id '{question_id}' is "
-                f"'{pending.get('tool_name')}', not AskUserQuestion",
-            )
-        # Sanity: the pending record's agent must match — protects against a case where
-        # SB has an old question_id that happens to match a different agent's live tool.
-        if pending.get("agent") and pending.get("agent") != agent_name:
-            return (
-                "no_pending_question", "",
-                f"pending question '{question_id}' is for agent '{pending.get('agent')}', "
-                f"not '{agent_name}'",
-            )
+        # Locate the pending AskUserQuestion for this agent. Two paths:
+        #  (a) explicit question_id from SB → look up pending_tools/<id>.json + verify
+        #  (b) no question_id → scan pending_tools/ for THIS agent's live AskUserQuestion
+        if question_id:
+            pending = sb_notify.pending_tool_data(question_id)
+            if pending is None:
+                return (
+                    "no_pending_question", "",
+                    f"no pending question with id '{question_id}' for '{agent_name}' "
+                    "(agent may have moved on or the question was already answered)",
+                )
+            if pending.get("tool_name") != "AskUserQuestion":
+                return (
+                    "no_pending_question", "",
+                    f"pending tool for id '{question_id}' is "
+                    f"'{pending.get('tool_name')}', not AskUserQuestion",
+                )
+            # Guard: pending record's agent must match the requested target — protects
+            # against a stale question_id that happens to match a different agent's tool.
+            if pending.get("agent") and pending.get("agent") != agent_name:
+                return (
+                    "no_pending_question", "",
+                    f"pending question '{question_id}' is for agent "
+                    f"'{pending.get('agent')}', not '{agent_name}'",
+                )
+        else:
+            pending = sb_notify.find_pending_askuserquestion(cwd_abs, agent_name)
+            if pending is None:
+                return (
+                    "no_pending_question", "",
+                    f"no pending AskUserQuestion for '{agent_name}' in this workspace "
+                    "(agent may have moved on or the question was already answered)",
+                )
 
         tool_input = pending.get("tool_input") or {}
         questions = tool_input.get("questions") or []
