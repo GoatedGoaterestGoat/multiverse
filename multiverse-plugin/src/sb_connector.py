@@ -1408,9 +1408,16 @@ class SBConnector:
         if action.kind == p.ActionKind.ANSWER_QUESTION:
             asyncio.create_task(self._handle_answer_question_action(ws, action))
             return
+        # answer_spawn_request: enum not vendored yet (infra pending). Dispatch on the
+        # string value so we work now and only need to switch to enum-equality once
+        # ANSWER_SPAWN_REQUEST lands in protocol.py (same pattern used for ASK_AGENT
+        # before its enum landed).
+        kind_str = getattr(action.kind, "value", action.kind)
+        if kind_str == "answer_spawn_request":
+            asyncio.create_task(self._handle_answer_spawn_request_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
-        #   answer_question / answer_permission_prompt / answer_spawn_request /
-        #   message_agent / spawn_agent / ask_agent
+        #   answer_permission_prompt / message_agent / spawn_agent
         result = p.ActionResult(
             action_id=action.action_id,
             status=p.ResultStatus.REJECTED,
@@ -1796,6 +1803,194 @@ class SBConnector:
             return ("deliver_failed", "", err)
 
         return ("ok", _compose_answer_status(agent_name, questions, sb_answers), "")
+
+    async def _handle_answer_spawn_request_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Approve or decline a pending spawn_agent request (contract locked with the SB
+        toolsmith).
+
+        Delivery is FILE-BASED — the requesting spawn_agent MCP tool blocks reading a
+        specific resolution file, so we just write it via
+        :func:`spawn_requests.write_resolution` (O_EXCL-atomic — first writer wins).
+        No send-keys, no tmux, no modal navigation. And write_resolution internally
+        calls :func:`sb_notify.record_spawn_decision`, so the paired
+        ``user.spawn_decision`` event fires back to SB through the normal pipeline
+        without extra work.
+
+        Payload: ``{request_id, decision: "approve"|"decline", name?: str}``. ``name``
+        is only meaningful when approving; omitted/empty = keep the requester's
+        default_name. Errors: ``not_found`` / ``forbidden`` / ``already_decided`` /
+        ``bad_request`` / ``deliver_failed``.
+        """
+        payload = action.payload or {}
+        request_id = str(payload.get("request_id") or "").strip()
+        decision = str(payload.get("decision") or "").strip()
+        raw_name = payload.get("name")
+        name = str(raw_name).strip() if raw_name else ""
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        # Validate payload.
+        if not request_id:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "payload.request_id is required"},
+            ))
+        if decision not in ("approve", "decline"):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": f"payload.decision must be 'approve' or 'decline' (got {decision!r})"},
+            ))
+        if decision == "decline" and name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": "payload.name is only meaningful when decision is 'approve'"},
+            ))
+
+        # Workspace ACL from action.workspace_id.
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+
+        # File I/O + write_resolution are blocking (subprocess call to tmux for the
+        # caller-alive check). Run in the executor to keep the receiver responsive.
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err_code, err_msg = await loop.run_in_executor(
+                None, self._deliver_spawn_decision_blocking,
+                cwd_abs, request_id, decision, name,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface unexpected exceptions
+            log.exception("answer_spawn_request deliver crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("answer_spawn_request delivered: %s", status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": err_code, "message": err_msg},
+            ))
+            log.info("answer_spawn_request %s (request_id=%s): %s",
+                     err_code, request_id, err_msg)
+
+    def _deliver_spawn_decision_blocking(
+        self, cwd_abs: str, request_id: str, decision: str, name: str,
+    ) -> tuple[str, str, str, str]:
+        """Blocking body: read the spawn request, verify state, write resolution.
+
+        Returns ``(status, status_text, err_code, err_msg)`` where:
+          ``status='ok'``  → ``status_text`` is the success line for SB to render
+          ``status='err'`` → ``err_code`` / ``err_msg`` for the ActionResult error dict
+        """
+        from . import spawn_requests as sr
+
+        req_path = sr.request_path(request_id)
+        if not req_path.is_file():
+            return ("err", "", "not_found",
+                    f"no pending spawn request with id '{request_id}' "
+                    "(already resolved and cleaned up, or never existed)")
+
+        # Read the request to get default_name + caller_tmux for liveness.
+        try:
+            req = json.loads(req_path.read_text())
+        except (OSError, ValueError) as exc:
+            return ("err", "", "not_found",
+                    f"spawn request '{request_id}' is unreadable: {exc}")
+
+        # Workspace match: the request's cwd must equal the action's cwd. Defends
+        # against a misrouted request_id from a different workspace on the same device.
+        req_cwd = str(req.get("cwd") or "")
+        try:
+            req_cwd_abs = str(Path(req_cwd).expanduser().resolve()) if req_cwd else ""
+        except (OSError, RuntimeError):
+            req_cwd_abs = ""
+        if req_cwd_abs != cwd_abs:
+            return ("err", "", "forbidden",
+                    f"spawn request '{request_id}' is in a different workspace")
+
+        default_name = str(req.get("default_name") or "").strip()
+
+        # Caller liveness — if the requesting agent's tmux session died, the spawn tool
+        # can no longer receive the resolution. Report not_found so SB knows the pair is
+        # moot.
+        caller_tmux = str(req.get("caller_tmux_session") or "")
+        if not sr._caller_alive(caller_tmux):
+            return ("err", "", "not_found",
+                    f"spawn request '{request_id}' caller session died before it could "
+                    "receive the decision")
+
+        # Already-decided race check BEFORE writing. If someone already wrote a
+        # resolution (user clicked the dashboard widget, or a prior SB action landed,
+        # or ActionDedup missed a retry), we surface what won.
+        def _describe(res: dict) -> str:
+            st = str(res.get("status") or "").strip()
+            nm = res.get("name")
+            if st == "accepted":
+                if nm and nm != default_name:
+                    return f"approved with name '{nm}' (renamed from '{default_name}')"
+                return f"approved with name '{nm or default_name}'"
+            if st == "rejected":
+                return "declined"
+            return st or "unknown"
+
+        existing = sr.read_resolution(request_id)
+        if existing is not None:
+            return ("err", "", "already_decided",
+                    f"spawn request '{request_id}' was already resolved: {_describe(existing)}")
+
+        # Do the write. O_EXCL — if we race and lose, treat as already_decided too.
+        if decision == "approve":
+            final_name = name if name else default_name
+            wrote = sr.write_resolution(request_id, "accepted", final_name)
+        else:  # decline
+            final_name = ""
+            wrote = sr.write_resolution(request_id, "rejected", None)
+
+        if not wrote:
+            # Race lost. Read what won and surface it.
+            winner = sr.read_resolution(request_id) or {}
+            return ("err", "", "already_decided",
+                    f"spawn request '{request_id}' was resolved concurrently: {_describe(winner)}")
+
+        # Success — compose result string per the samples locked with toolsmith.
+        if decision == "approve":
+            if name and name != default_name:
+                text = f"Approved spawn of '{name}' (renamed from '{default_name}')."
+            else:
+                text = f"Approved spawn of '{final_name}' (requested name kept)."
+        else:
+            text = f"Declined spawn request for '{default_name}'."
+        return ("ok", text, "", "")
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""
