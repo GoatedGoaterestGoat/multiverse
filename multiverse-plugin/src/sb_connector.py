@@ -1408,12 +1408,7 @@ class SBConnector:
         if action.kind == p.ActionKind.ANSWER_QUESTION:
             asyncio.create_task(self._handle_answer_question_action(ws, action))
             return
-        # answer_spawn_request: enum not vendored yet (infra pending). Dispatch on the
-        # string value so we work now and only need to switch to enum-equality once
-        # ANSWER_SPAWN_REQUEST lands in protocol.py (same pattern used for ASK_AGENT
-        # before its enum landed).
-        kind_str = getattr(action.kind, "value", action.kind)
-        if kind_str == "answer_spawn_request":
+        if action.kind == p.ActionKind.ANSWER_SPAWN_REQUEST:
             asyncio.create_task(self._handle_answer_spawn_request_action(ws, action))
             return
         # TODO(binding): map the verb to a real Multiverse operation:

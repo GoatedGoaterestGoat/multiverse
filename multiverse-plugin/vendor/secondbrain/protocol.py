@@ -121,6 +121,9 @@ class EventKind(StrEnum):
     # closes agent.permission_request, keyed by tool_use_id
     USER_PERMISSION_DECISION = "user.permission_decision"
     USER_SPAWN_DECISION = "user.spawn_decision"
+    # System-synthesized (not from wire): user's status changed via the TUI (§7).
+    # Payload: {"from": <old>, "to": <new>, "guide": <expected-behavior text>}.
+    USER_STATUS_CHANGED = "user.status_changed"
 
 
 class ActionKind(StrEnum):
@@ -129,6 +132,7 @@ class ActionKind(StrEnum):
     PROMPT_AGENT = "prompt_agent"
     ANSWER_QUESTION = "answer_question"
     ANSWER_PERMISSION_PROMPT = "answer_permission_prompt"
+    ANSWER_SPAWN_REQUEST = "answer_spawn_request"  # approve/decline an agent's spawn request
     MESSAGE_AGENT = "message_agent"
     SPAWN_AGENT = "spawn_agent"
     # Reserved for later lifecycle verbs (§10.3 "(later)"):
