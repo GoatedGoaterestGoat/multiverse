@@ -34,8 +34,10 @@ from mcp.server.fastmcp import Context, FastMCP
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.sessions import (
+    RUNTIME_CLAUDE,
+    RUNTIME_CODEX,
+    all_session_names_in_cwd,
     create_session,
-    existing_names_in_cwd,
     find_agent_by_name,
     foreign_host_still_reported_live,
     kill_session,
@@ -161,9 +163,10 @@ def _auto_resume(target, cwd: str) -> None:
     bin/multiverse-session's inbox-prime then deliver the pending message
     without any user action.
     """
-    if target.claude_uuid is None:
+    session_id = target.session_id
+    if session_id is None:
         raise RuntimeError(
-            f"target '{target.name}' has no tracked claude UUID — "
+            f"target '{target.name}' has no tracked {target.runtime} session ID — "
             "cannot resume programmatically"
         )
     if target.session is not None and target.status == "ended":
@@ -176,11 +179,17 @@ def _auto_resume(target, cwd: str) -> None:
                 "inbox"
             )
         kill_session(target.session)
+    runtime_args = (
+        ["--resume", session_id]
+        if target.runtime == RUNTIME_CLAUDE
+        else ["resume", session_id]
+    )
     create_session(
         cwd=cwd,
-        claude_args=["--resume", target.claude_uuid],
-        resumed_from=target.claude_uuid,
+        claude_args=runtime_args,
+        resumed_from=session_id,
         name=target.name,
+        runtime=target.runtime,
     )
 
 
@@ -308,7 +317,10 @@ def list_agents(
     name_width = max(len(a.name) for a in visible)
     for a in visible:
         marker = "  ← this is you" if a.name == self_name_for_marker else ""
-        lines.append(f"- {a.name.ljust(name_width)}  {a.status}{marker}")
+        lines.append(
+            f"- {a.name.ljust(name_width)}  {a.runtime.ljust(6)}  "
+            f"{a.status}{marker}"
+        )
     if hidden:
         lines.append(
             f"  … and {hidden} more not shown "
@@ -741,6 +753,11 @@ def ask_agent(
             f"Call list_agents(working_directory='{cwd}') to see who's available."
         )
     if target.claude_uuid is None:
+        if target.runtime == RUNTIME_CODEX:
+            return (
+                f"Error: ask_agent does not support Codex sessions yet. "
+                f"Use message_agent to contact '{target_name}'."
+            )
         return (
             f"Error: '{target_name}' has no tracked claude UUID yet "
             "(may have just started). Try again in a moment."
@@ -798,6 +815,7 @@ async def spawn_agent(
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
     caller_sid = os.environ.get("MULTIVERSE_SESSION_ID")
+    caller_runtime = os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
     if not cwd or not self_name or not caller_sid:
         return (
             "Error: this tool requires running inside a multiverse-managed "
@@ -808,7 +826,7 @@ async def spawn_agent(
     if not instruction or not instruction.strip():
         return "Error: instruction cannot be empty."
 
-    existing = existing_names_in_cwd(cwd)
+    existing = all_session_names_in_cwd(cwd)
     requested = (name or "").strip()
     if requested and requested not in existing:
         default_name = requested
@@ -900,6 +918,7 @@ async def spawn_agent(
                 cwd=cwd,
                 claude_args=[],
                 name=chosen,
+                runtime=caller_runtime,
                 # Pass the instruction off-band via a state-dir file rather
                 # than as a CLI arg. This avoids: shell-escape bloat for
                 # apostrophe-heavy / long instructions, the multi-stage

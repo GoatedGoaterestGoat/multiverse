@@ -29,6 +29,12 @@ fi
 export MULTIVERSE_CLAUDE_BIN="${MULTIVERSE_CLAUDE_BIN:-claude}"
 CLAUDE_BIN="$MULTIVERSE_CLAUDE_BIN"
 
+# Codex sessions use a separate runtime adapter and plugin bundle. The plugin
+# path defaults to the sibling scaffold in this repository and can be
+# overridden for packaged installs or local development.
+export MULTIVERSE_CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
+export MULTIVERSE_CODEX_PLUGIN_ROOT="${MULTIVERSE_CODEX_PLUGIN_ROOT:-$(cd "$PLUGIN_ROOT/../plugins/multiverse-codex" 2>/dev/null && pwd || true)}"
+
 # Colon-separated extra plugin dirs loaded into interactive sessions
 # (in addition to the multiverse plugin itself). Exported for the same reason.
 export MULTIVERSE_EXTRA_PLUGIN_DIRS="${MULTIVERSE_EXTRA_PLUGIN_DIRS:-}"

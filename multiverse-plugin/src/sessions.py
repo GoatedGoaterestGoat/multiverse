@@ -9,6 +9,9 @@ The data sources are:
                                      and the SessionStart hook
   ~/.claude/projects/<encoded-cwd>/<claude-uuid>.jsonl
                                    — claude's own session transcripts
+  ~/.codex/sessions/**/rollout-<timestamp>-<codex-id>.jsonl
+                                   — codex's own session transcripts
+  ~/.codex/session_index.jsonl    — codex's user-assigned thread names
 """
 
 from __future__ import annotations
@@ -29,13 +32,27 @@ from typing import Any, Optional
 
 from . import forks
 from .compact_state import list_locked
-from .paths import claude_projects_dir, multiverse_dir
+from .paths import claude_projects_dir, codex_home, multiverse_dir
 
 
 MULTIVERSE_DIR = multiverse_dir()
 STATE_DIR = MULTIVERSE_DIR / "sessions"
 CLAUDE_PROJECTS_DIR = claude_projects_dir()
+CODEX_HOME = codex_home()
 TMUX_PREFIX = "multiverse-"
+RUNTIME_CLAUDE = "claude"
+RUNTIME_CODEX = "codex"
+RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX)
+
+
+def normalize_runtime(runtime: Optional[str]) -> str:
+    """Validate and normalize a persisted or user-selected runtime."""
+    value = (runtime or RUNTIME_CLAUDE).strip().lower()
+    if value not in RUNTIMES:
+        raise ValueError(
+            f"Unsupported runtime '{runtime}'. Expected one of: {', '.join(RUNTIMES)}"
+        )
+    return value
 
 
 def _encode_cwd(cwd: str) -> str:
@@ -180,6 +197,140 @@ def list_claude_sessions_in(cwd: str) -> list[dict]:
     return out
 
 
+_CODEX_METADATA_CACHE: dict[str, tuple[float, dict]] = {}
+_CODEX_DISCOVERY_CACHE: dict[str, tuple[float, list[dict]]] = {}
+_CODEX_DISCOVERY_TTL = 2.0
+
+
+def _read_codex_names() -> dict[str, str]:
+    """Return the last user-assigned name recorded for each Codex thread."""
+    names: dict[str, str] = {}
+    index_path = CODEX_HOME / "session_index.jsonl"
+    try:
+        with index_path.open() as fh:
+            for line in fh:
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                session_id = raw.get("id")
+                name = raw.get("thread_name")
+                if not isinstance(session_id, str):
+                    continue
+                if isinstance(name, str) and name:
+                    names[session_id] = name
+                elif name is None or name == "":
+                    names.pop(session_id, None)
+    except OSError:
+        pass
+    return names
+
+
+def _read_codex_session_metadata(path: Path) -> dict:
+    """Extract stable dashboard fields from a Codex rollout JSONL."""
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return {"id": None, "cwd": None, "preview": ""}
+
+    cached = _CODEX_METADATA_CACHE.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+
+    session_id: Optional[str] = None
+    cwd: Optional[str] = None
+    preview: Optional[str] = None
+    try:
+        with path.open() as fh:
+            for line in fh:
+                try:
+                    raw = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                typ = raw.get("type")
+                payload = raw.get("payload") or {}
+                if typ == "session_meta" and isinstance(payload, dict):
+                    value = payload.get("id")
+                    if isinstance(value, str):
+                        session_id = value
+                    value = payload.get("cwd")
+                    if isinstance(value, str):
+                        cwd = value
+                elif (
+                    preview is None
+                    and typ == "event_msg"
+                    and isinstance(payload, dict)
+                    and payload.get("type") == "user_message"
+                ):
+                    value = payload.get("message")
+                    if isinstance(value, str) and value.strip():
+                        preview = " ".join(value.split())
+                        if len(preview) > 80:
+                            preview = preview[:79] + "…"
+                if session_id and cwd and preview is not None:
+                    break
+    except OSError:
+        pass
+
+    result = {
+        "id": session_id,
+        "cwd": cwd,
+        "preview": preview or "(no user message)",
+    }
+    _CODEX_METADATA_CACHE[str(path)] = (mtime, result)
+    return result
+
+
+def list_codex_sessions_in(cwd: str) -> list[dict]:
+    """Return named Codex sessions under ``cwd``, newest first.
+
+    Codex stores the stable thread id and cwd in rollout metadata, while
+    explicit user-facing names live in ``session_index.jsonl``. Unnamed
+    threads are intentionally omitted, matching dormant Claude discovery.
+    """
+    try:
+        cwd_abs = str(Path(cwd).expanduser().resolve())
+    except OSError:
+        return []
+
+    now = time.monotonic()
+    cached = _CODEX_DISCOVERY_CACHE.get(cwd_abs)
+    if cached and now - cached[0] < _CODEX_DISCOVERY_TTL:
+        return [dict(item) for item in cached[1]]
+
+    names = _read_codex_names()
+    if not names:
+        _CODEX_DISCOVERY_CACHE[cwd_abs] = (now, [])
+        return []
+
+    sessions_dir = CODEX_HOME / "sessions"
+    by_id: dict[str, dict] = {}
+    if sessions_dir.is_dir():
+        for path in sessions_dir.rglob("rollout-*.jsonl"):
+            meta = _read_codex_session_metadata(path)
+            session_id = meta.get("id")
+            if session_id not in names or meta.get("cwd") != cwd_abs:
+                continue
+            try:
+                st = path.stat()
+            except OSError:
+                continue
+            found = {
+                "id": session_id,
+                "preview": meta.get("preview") or "(no user message)",
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "name": names[session_id],
+            }
+            previous = by_id.get(session_id)
+            if previous is None or found["mtime"] > previous["mtime"]:
+                by_id[session_id] = found
+    out = list(by_id.values())
+    out.sort(key=lambda d: d["mtime"], reverse=True)
+    _CODEX_DISCOVERY_CACHE[cwd_abs] = (now, out)
+    return [dict(item) for item in out]
+
+
 def existing_names_in_cwd(cwd: str) -> set[str]:
     """Return the set of multiverse session names already assigned in ``cwd``.
 
@@ -207,6 +358,27 @@ def existing_names_in_cwd(cwd: str) -> set[str]:
     return out
 
 
+def all_session_names_in_cwd(cwd: str) -> set[str]:
+    """Return wrapped and dormant native session names in ``cwd``.
+
+    Fresh name assignment uses this broader set so Claude and Codex share one
+    namespace. Resume flows use ``existing_names_in_cwd`` instead because the
+    dormant session being resumed is allowed to reclaim its own native name.
+    """
+    names = existing_names_in_cwd(cwd)
+    names.update(
+        str(info["name"])
+        for info in list_claude_sessions_in(cwd)
+        if info.get("name")
+    )
+    names.update(
+        str(info["name"])
+        for info in list_codex_sessions_in(cwd)
+        if info.get("name")
+    )
+    return names
+
+
 @dataclass
 class Session:
     id: str
@@ -216,7 +388,9 @@ class Session:
     status_ts: float = 0.0
     resumed_from: Optional[str] = None
     name: Optional[str] = None
+    runtime: str = RUNTIME_CLAUDE
     claude_uuid: Optional[str] = None
+    codex_session_id: Optional[str] = None
     # claude UUIDs that this multiverse session has superseded via
     # context_fold. Each entry: {"uuid": str, "folded_at": float}.
     superseded_uuids: list[dict] = field(default_factory=list)
@@ -251,7 +425,16 @@ class Session:
         ``resumed_from`` (valid for resumed sessions, which keep their UUID
         without ``--fork-session``).
         """
+        if self.runtime != RUNTIME_CLAUDE:
+            return None
         return self.claude_uuid or self.resumed_from
+
+    @property
+    def runtime_session_id(self) -> Optional[str]:
+        """Best-effort native session/thread id for this runtime."""
+        if self.runtime == RUNTIME_CODEX:
+            return self.codex_session_id or self.resumed_from
+        return self.effective_claude_uuid
 
 
 @dataclass
@@ -267,7 +450,9 @@ class DashboardRow:
     cwd: str
     status: str
     status_ts: float
+    runtime: str = RUNTIME_CLAUDE
     session: Optional[Session] = None
+    session_id: Optional[str] = None
     claude_uuid: Optional[str] = None
     preview: str = ""
     # True if this row represents a JSONL that was superseded by a
@@ -288,7 +473,7 @@ class DashboardRow:
     def row_key(self) -> str:
         if self.session is not None:
             return f"mv:{self.session.id}"
-        return f"cl:{self.claude_uuid}"
+        return f"{self.runtime[:2]}:{self.session_id or ''}"
 
 
 def _read_json(path: Path) -> Optional[dict]:
@@ -313,13 +498,19 @@ def load_session(session_id: str) -> Optional[Session]:
         return None
     raw_superseded = meta.get("superseded_uuids") or []
     superseded = [e for e in raw_superseded if isinstance(e, dict) and e.get("uuid")]
+    try:
+        runtime = normalize_runtime(meta.get("runtime"))
+    except ValueError:
+        return None
     s = Session(
         id=session_id,
         cwd=meta.get("cwd", "?"),
         created_at=meta.get("created_at", 0.0),
         resumed_from=meta.get("resumed_from"),
         name=meta.get("name"),
+        runtime=runtime,
         claude_uuid=_read_text_stripped(d / "claude_uuid"),
+        codex_session_id=_read_text_stripped(d / "runtime_session_id"),
         superseded_uuids=superseded,
         host=meta.get("host"),
     )
@@ -391,8 +582,7 @@ def build_dashboard_rows(
     cwd: str,
     hide_uuids: Optional[set[str]] = None,
 ) -> list[DashboardRow]:
-    """Compute the dashboard row list for ``cwd``: named multiverse sessions
-    in that cwd + dormant named claude sessions in that cwd.
+    """Compute named wrapped and dormant runtime rows for ``cwd``.
 
     ``sessions`` is expected to already be filtered to ``cwd``.
 
@@ -408,6 +598,7 @@ def build_dashboard_rows(
     rows: list[DashboardRow] = []
 
     wrapped_uuids: set[str] = set(hide_uuids or ())
+    wrapped_codex_ids: set[str] = set()
     # Ask-fork JSONLs inherit the origin's custom-title, so without this
     # they'd surface as phantom dormant agents. The on-disk fork registry
     # covers forks spawned by ANY process (TUI ask-all AND agent-initiated
@@ -417,6 +608,8 @@ def build_dashboard_rows(
         u = s.effective_claude_uuid
         if u:
             wrapped_uuids.add(u)
+        if s.runtime == RUNTIME_CODEX and s.runtime_session_id:
+            wrapped_codex_ids.add(s.runtime_session_id)
 
     # Map each superseded claude UUID to its fold timestamp. Used to render
     # those JSONLs as `Name (folded HH:MM)` ghost rows instead of plain
@@ -475,7 +668,9 @@ def build_dashboard_rows(
                 cwd=s.cwd,
                 status=s.status,
                 status_ts=s.status_ts,
+                runtime=s.runtime,
                 session=s,
+                session_id=s.runtime_session_id,
                 claude_uuid=s.effective_claude_uuid,
                 preview=preview,
             )
@@ -512,13 +707,32 @@ def build_dashboard_rows(
                     cwd=recorded_cwd or cwd,
                     status="dormant",
                     status_ts=status_ts,
+                    runtime=RUNTIME_CLAUDE,
                     session=None,
+                    session_id=uuid,
                     claude_uuid=uuid,
                     preview=meta.get("preview") or "",
                     is_ghost=ghost_ts is not None,
                     folded_at=ghost_ts,
                 )
             )
+
+    for info in list_codex_sessions_in(cwd):
+        session_id = info["id"]
+        if session_id in wrapped_codex_ids:
+            continue
+        rows.append(
+            DashboardRow(
+                name=info["name"],
+                cwd=cwd,
+                status="dormant",
+                status_ts=info["mtime"],
+                runtime=RUNTIME_CODEX,
+                session=None,
+                session_id=session_id,
+                preview=info.get("preview") or "",
+            )
+        )
 
     # Override status to "compacting" for any row whose claude_uuid holds
     # an active compaction lock. Cross-monitor: every monitor reads from
@@ -557,8 +771,18 @@ def wrapped_claude_uuids(sessions: list[Session]) -> set[str]:
     return out
 
 
+def wrapped_runtime_session_ids(sessions: list[Session]) -> set[tuple[str, str]]:
+    """Native ids already represented by multiverse session metadata."""
+    out: set[tuple[str, str]] = set()
+    for session in sessions:
+        session_id = session.runtime_session_id
+        if session_id:
+            out.add((session.runtime, session_id))
+    return out
+
+
 def list_named_agents_in_cwd(cwd: str) -> list[DashboardRow]:
-    """Named multiverse + dormant claude sessions for ``cwd``.
+    """Named Multiverse and dormant runtime sessions for ``cwd``.
 
     The agent registry seen by inter-agent tools (list_agents, ask_agent).
     Returns dashboard rows because the same dedup/scoping logic applies —
@@ -666,13 +890,15 @@ def create_session(
     resumed_from: Optional[str] = None,
     name: Optional[str] = None,
     initial_prompt: Optional[str] = None,
+    runtime: str = RUNTIME_CLAUDE,
 ) -> Session:
-    """Spawn a multiverse-managed claude session in a detached tmux session.
+    """Spawn a multiverse-managed runtime session in detached tmux.
 
     Used by the monitor (interactive: new session / resume from picker) and
     by the MCP server (programmatic: auto-resume dormant agent for inter-
     agent comms).
     """
+    runtime = normalize_runtime(runtime)
     sid = short_id()
     d = STATE_DIR / sid
     d.mkdir(parents=True, exist_ok=True)
@@ -687,16 +913,19 @@ def create_session(
     # in claude's default (prompt-for-everything) mode. Skipped if the
     # caller already specified a mode, so an explicit `multiverse
     # --permission-mode plan` (or similar) isn't silently overridden.
-    if not any(a == "--permission-mode" for a in claude_args):
+    if runtime == RUNTIME_CLAUDE and not any(
+        a == "--permission-mode" for a in claude_args
+    ):
         claude_args = [*claude_args, "--permission-mode", "auto"]
 
     now = time.time()
     meta: dict[str, Any] = {
         "cwd": cwd_abs,
         "created_at": now,
-        "claude_args": claude_args,
+        "runtime": runtime,
         "host": current_host(),
     }
+    meta[f"{runtime}_args"] = claude_args
     if resumed_from:
         meta["resumed_from"] = resumed_from
     if name:
@@ -709,10 +938,11 @@ def create_session(
     # annotation as soon as the original folding multiverse session is
     # reaped.
     resume_uuid: Optional[str] = None
-    for i, arg in enumerate(claude_args):
-        if arg == "--resume" and i + 1 < len(claude_args):
-            resume_uuid = claude_args[i + 1]
-            break
+    if runtime == RUNTIME_CLAUDE:
+        for i, arg in enumerate(claude_args):
+            if arg == "--resume" and i + 1 < len(claude_args):
+                resume_uuid = claude_args[i + 1]
+                break
     if resume_uuid:
         jsonl_path = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd_abs) / f"{resume_uuid}.jsonl"
         ancestors = detect_fold_ancestors(jsonl_path) if jsonl_path.exists() else []
@@ -722,9 +952,9 @@ def create_session(
     (d / "meta.json").write_text(json.dumps(meta))
     (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
 
-    # When a caller (e.g. spawn_agent) wants the new claude session to start
+    # When a caller (e.g. spawn_agent) wants the new runtime session to start
     # with a specific initial prompt, write the prompt to a file and let
-    # multiverse-session inject it as an argv positional at exec time. This
+    # its runner injects it as an argv positional at exec time. This
     # keeps the (potentially long, apostrophe-heavy, multi-line) prompt off
     # the tmux/shell command line entirely — no shlex round-trip, no
     # ARG_MAX risk, no /bin/sh re-parsing.
@@ -736,7 +966,12 @@ def create_session(
     plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
     if not plugin_root:
         raise RuntimeError("MULTIVERSE_PLUGIN_ROOT not set — launch via bin/multiverse")
-    inner = str(Path(plugin_root) / "bin" / "multiverse-session")
+    runner_name = (
+        "multiverse-codex-session"
+        if runtime == RUNTIME_CODEX
+        else "multiverse-session"
+    )
+    inner = str(Path(plugin_root) / "bin" / runner_name)
 
     inner_cmd = shlex.join([inner, *claude_args])
 
@@ -749,8 +984,20 @@ def create_session(
         "-e", f"MULTIVERSE_SESSION_ID={sid}",
         "-e", f"MULTIVERSE_SESSION_CWD={cwd_abs}",
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
+        "-e", f"MULTIVERSE_RUNTIME={runtime}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
     ]
+
+    codex_plugin_root = os.environ.get("MULTIVERSE_CODEX_PLUGIN_ROOT")
+    if not codex_plugin_root:
+        codex_plugin_root = str(
+            Path(plugin_root).parent / "plugins" / "multiverse-codex"
+        )
+    if runtime == RUNTIME_CODEX:
+        cmd += [
+            "-e", f"MULTIVERSE_CODEX_PLUGIN_ROOT={codex_plugin_root}",
+            "-e", f"MULTIVERSE_RUNTIME_SESSION_ID_PATH={d / 'runtime_session_id'}",
+        ]
 
     # Propagate the user's Claude install env so the inner `claude`
     # process resolves transcripts under the same projects dir the
@@ -761,8 +1008,9 @@ def create_session(
     # making cross-terminal resume produce a fresh JSONL instead of
     # picking up the existing one. PATH carries the bin dir of the
     # caller's `claude` so the inner shell finds the same binary.
-    for env_key in ("CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "PATH",
+    for env_key in ("CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
                     "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
+                    "MULTIVERSE_CODEX_BIN",
                     # Rate-limit retry tuning — see bin/multiverse for
                     # defaults + rationale. Propagated so interactive
                     # claude sessions inside tmux honor them, not just
@@ -818,6 +1066,7 @@ def create_session(
         status_ts=now,
         resumed_from=resumed_from,
         name=name,
+        runtime=runtime,
         host=meta["host"],
     )
 

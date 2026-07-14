@@ -1,15 +1,15 @@
-"""Multiverse monitor — Textual TUI for orchestrating multiple claude sessions.
+"""Multiverse monitor — Textual TUI for orchestrating runtime sessions.
 
-Each claude process runs inside a detached tmux session. The monitor tracks
+Each runtime process runs inside a detached tmux session. The monitor tracks
 them via per-session files under ``~/.multiverse/sessions/<id>/``:
 
-  meta.json    — cwd, created_at, claude_args (written on spawn)
+  meta.json    — cwd, runtime, created_at, runtime args (written on spawn)
   status.json  — {"status": ..., "ts": ...} (written by hook scripts)
-  claude_uuid  — current claude session UUID (written by SessionStart hook)
+  claude_uuid / runtime_session_id — native runtime session identifier
 
-The dashboard also surfaces *dormant* claude sessions: claude JSONLs with a
-user-assigned ``custom-title`` that aren't currently wrapped by a multiverse
-session. These can be resumed directly with Enter.
+The dashboard also surfaces dormant, named Claude and Codex sessions that are
+not currently wrapped by a Multiverse session. These can be resumed directly
+with Enter.
 
 Attach = ``tmux attach-session`` run while the Textual app is suspended.
 Detach with normal ``Ctrl-b d`` and you land back in the monitor.
@@ -63,10 +63,13 @@ from .paths import multiverse_dir
 from .inbox import list_pending_messages, pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
+    RUNTIME_CLAUDE,
+    RUNTIME_CODEX,
     STATE_DIR,
     TMUX_PREFIX,
     DashboardRow,
     Session,
+    all_session_names_in_cwd,
     build_dashboard_rows,
     create_session,
     current_host,
@@ -74,10 +77,11 @@ from .sessions import (
     foreign_host_still_reported_live,
     kill_session,
     list_claude_sessions_in,
+    list_codex_sessions_in,
     list_sessions,
     strip_fold_suffix,
     tmux_session_exists,
-    wrapped_claude_uuids,
+    wrapped_runtime_session_ids,
 )
 from .spawn_requests import (
     list_pending_requests,
@@ -160,15 +164,18 @@ class _SpawnAttachGuard:
                 return
 
 
-class NewSessionScreen(ModalScreen[Optional[str]]):
+class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
     """Prompt for a session name for a new session in the monitor's cwd."""
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "submit", "Create", show=False, priority=True),
+    ]
 
     def __init__(self, cwd: str) -> None:
         super().__init__()
         self.cwd = cwd
-        suggestion = pick_random_name(existing_names_in_cwd(cwd))
+        suggestion = pick_random_name(all_session_names_in_cwd(cwd))
         self.default_name = suggestion or ""
 
     def compose(self) -> ComposeResult:
@@ -177,8 +184,17 @@ class NewSessionScreen(ModalScreen[Optional[str]]):
             Static(f"[dim]cwd: {self.cwd}[/]"),
             Static("Session name:"),
             Input(value=self.default_name, id="new-name"),
+            Static("Runtime:"),
+            RadioSet(
+                RadioButton("Claude", value=True, id="new-runtime-claude"),
+                RadioButton("Codex", id="new-runtime-codex"),
+                id="new-runtime",
+            ),
             Static("", id="new-error"),
-            Static("Esc to go back", id="new-hint"),
+            Static(
+                "Tab to choose runtime · Enter to create · Esc to go back",
+                id="new-hint",
+            ),
             id="new-dialog",
         )
 
@@ -188,18 +204,26 @@ class NewSessionScreen(ModalScreen[Optional[str]]):
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._try_submit()
 
+    def action_submit(self) -> None:
+        self._try_submit()
+
     def _try_submit(self) -> None:
         name = self.query_one("#new-name", Input).value.strip()
         err = self.query_one("#new-error", Static)
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
             return
-        self.dismiss(name)
+        runtime = (
+            RUNTIME_CODEX
+            if self.query_one("#new-runtime-codex", RadioButton).value
+            else RUNTIME_CLAUDE
+        )
+        self.dismiss((name, runtime))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -223,8 +247,9 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
         self.cwd = cwd
         self.request = request
         seeded = (request.get("default_name") or "").strip()
-        if not seeded or seeded in existing_names_in_cwd(cwd):
-            seeded = pick_random_name(existing_names_in_cwd(cwd)) or ""
+        names = all_session_names_in_cwd(cwd)
+        if not seeded or seeded in names:
+            seeded = pick_random_name(names) or ""
         self.default_name = seeded
 
     def compose(self) -> ComposeResult:
@@ -261,7 +286,7 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace.[/]"
             )
@@ -310,7 +335,7 @@ class NameInputScreen(ModalScreen[Optional[str]]):
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
@@ -410,8 +435,10 @@ class ConfirmForceKillScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
-class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
-    """Browse claude sessions in the monitor's cwd and pick one to resume.
+class ResumeSessionScreen(
+    ModalScreen[Optional[tuple[str, str, Optional[str]]]]
+):
+    """Browse runtime sessions in the monitor's cwd and pick one to resume.
 
     Hides sessions already wrapped by a live or ended multiverse session —
     those are surfaced on the dashboard itself.
@@ -419,15 +446,15 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, cwd: str, hide_uuids: set[str]) -> None:
+    def __init__(self, cwd: str, hide_ids: set[tuple[str, str]]) -> None:
         super().__init__()
         self.cwd = cwd
-        self.hide_uuids = hide_uuids
+        self.hide_ids = hide_ids
         self.sessions_info: list[dict] = []
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Static("Resume claude session — pick one:"),
+            Static("Resume session — pick one:"),
             Static(f"[dim]cwd: {self.cwd}[/]"),
             DataTable(cursor_type="row", zebra_stripes=True, id="resume-table"),
             Static("Enter on a row to resume · Esc to go back", id="resume-hint"),
@@ -436,7 +463,7 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
 
     def on_mount(self) -> None:
         table = self.query_one("#resume-table", DataTable)
-        table.add_columns("UUID", "Name", "Preview", "Updated")
+        table.add_columns("Runtime", "ID", "Name", "Preview", "Updated")
         self._populate()
         table.focus()
         if self.sessions_info:
@@ -453,31 +480,59 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
         key = event.row_key.value if event.row_key is not None else None
         if not key:
             return
-        claude_name: Optional[str] = None
+        runtime: Optional[str] = None
+        session_id: Optional[str] = None
+        session_name: Optional[str] = None
         for info in self.sessions_info:
-            if info["uuid"] == key:
-                claude_name = info.get("name")
+            if info["row_key"] == key:
+                runtime = info["runtime"]
+                session_id = info["id"]
+                session_name = info.get("name")
                 break
-        self.dismiss((str(key), claude_name))
+        if runtime and session_id:
+            self.dismiss((runtime, session_id, session_name))
 
     def _populate(self) -> None:
-        all_sessions = list_claude_sessions_in(self.cwd)
+        all_sessions: list[dict] = []
+        for info in list_claude_sessions_in(self.cwd):
+            session_id = info["uuid"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_CLAUDE,
+                    "id": session_id,
+                    "row_key": f"{RUNTIME_CLAUDE}:{session_id}",
+                }
+            )
+        for info in list_codex_sessions_in(self.cwd):
+            session_id = info["id"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_CODEX,
+                    "row_key": f"{RUNTIME_CODEX}:{session_id}",
+                }
+            )
+        all_sessions.sort(key=lambda info: info["mtime"], reverse=True)
         self.sessions_info = [
-            info for info in all_sessions if info["uuid"] not in self.hide_uuids
+            info
+            for info in all_sessions
+            if (info["runtime"], info["id"]) not in self.hide_ids
         ]
         table = self.query_one("#resume-table", DataTable)
         table.clear()
         now = time.time()
         for info in self.sessions_info:
             preview = info["preview"] or "(empty)"
-            claude_name = info.get("name")
-            name_cell = claude_name if claude_name else "[dim](unnamed)[/]"
+            session_name = info.get("name")
+            name_cell = session_name if session_name else "[dim](unnamed)[/]"
             table.add_row(
-                info["uuid"][:8],
+                info["runtime"],
+                info["id"][:8],
                 name_cell,
                 preview,
                 _ago(now - info["mtime"]),
-                key=info["uuid"],
+                key=info["row_key"],
             )
 
     def action_cancel(self) -> None:
@@ -2444,6 +2499,10 @@ class MonitorApp(App):
         height: auto;
         padding-top: 1;
     }
+    #new-runtime {
+        height: auto;
+        padding-bottom: 1;
+    }
     #new-hint {
         color: $text-muted;
         padding-top: 1;
@@ -2776,7 +2835,10 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
-        table.add_columns("ID", "Name", "Inbox", "Build", "Status", "Tokens", "Updated", "Preview")
+        table.add_columns(
+            "ID", "Name", "Runtime", "Inbox", "Build", "Status", "Tokens",
+            "Updated", "Preview",
+        )
         yield table
         yield Footer()
 
@@ -2953,8 +3015,8 @@ class MonitorApp(App):
             if e.session is not None:
                 id_cell = e.session.id
             else:
-                uuid = e.claude_uuid or ""
-                id_cell = f"[dim]{uuid[:8]}[/]"
+                session_id = e.session_id or ""
+                id_cell = f"[dim]{session_id[:8]}[/]"
             pending = pending_inbox_count(e.cwd, e.name)
             inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
             if e.claude_uuid and auto_build_enabled(e.claude_uuid):
@@ -2977,8 +3039,8 @@ class MonitorApp(App):
             if len(preview) > 60:
                 preview = preview[:59] + "…"
             table.add_row(
-                id_cell, e.name, inbox_cell, build_cell, status_cell, tokens_cell,
-                updated, preview,
+                id_cell, e.name, e.runtime, inbox_cell, build_cell, status_cell,
+                tokens_cell, updated, preview,
                 key=e.row_key,
             )
         if self.entries:
@@ -2998,43 +3060,52 @@ class MonitorApp(App):
         return None
 
     def action_new_session(self) -> None:
-        def cb(name: Optional[str]) -> None:
-            if not name:
+        def cb(result: Optional[tuple[str, str]]) -> None:
+            if not result:
                 return
+            name, runtime = result
+            runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
             try:
-                create_session(self.monitor_cwd, self.claude_args, name=name)
+                create_session(
+                    self.monitor_cwd,
+                    runtime_args,
+                    name=name,
+                    runtime=runtime,
+                )
             except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
                 self.notify(f"Spawn failed: {e}", severity="error")
                 return
             self.refresh_sessions()
-            self.notify(f"Spawned {name}")
+            self.notify(f"Spawned {name} with {runtime}")
 
         self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
 
     def action_resume_session(self) -> None:
-        hide = wrapped_claude_uuids(self.sessions)
+        hide = wrapped_runtime_session_ids(self.sessions)
         with self._fork_lock:
-            hide = hide | self._active_fork_uuids
+            hide |= {(RUNTIME_CLAUDE, uuid) for uuid in self._active_fork_uuids}
 
-        def on_picked(result: Optional[tuple[str, Optional[str]]]) -> None:
+        def on_picked(result: Optional[tuple[str, str, Optional[str]]]) -> None:
             if not result:
                 return
-            uuid, claude_name = result
+            runtime, session_id, session_name = result
 
             existing = existing_names_in_cwd(self.monitor_cwd)
-            if claude_name and claude_name not in existing:
-                self._spawn_resumed(self.monitor_cwd, uuid, claude_name)
+            if session_name and session_name not in existing:
+                self._spawn_resumed(
+                    self.monitor_cwd, runtime, session_id, session_name
+                )
                 return
 
-            if claude_name:
+            if session_name:
                 reason = (
-                    f"'{claude_name}' is already used in this workspace. "
+                    f"'{session_name}' is already used in this workspace. "
                     "Pick a different name for this session:"
                 )
-                default_name = claude_name
+                default_name = session_name
             else:
                 reason = (
-                    "This claude session has no name yet. "
+                    f"This {runtime} session has no name yet. "
                     "Assign a name for the multiverse session:"
                 )
                 default_name = pick_random_name(existing) or ""
@@ -3042,7 +3113,9 @@ class MonitorApp(App):
             def on_name(name: Optional[str]) -> None:
                 if not name:
                     return
-                self._spawn_resumed(self.monitor_cwd, uuid, name)
+                self._spawn_resumed(
+                    self.monitor_cwd, runtime, session_id, name
+                )
 
             self.push_screen(
                 NameInputScreen(self.monitor_cwd, default_name, reason), on_name
@@ -3071,19 +3144,31 @@ class MonitorApp(App):
                 "will reattach when the queue clears."
             )
 
-    def _spawn_resumed(self, cwd: str, uuid: str, name: str) -> None:
+    def _spawn_resumed(
+        self, cwd: str, runtime: str, session_id: str, name: str
+    ) -> None:
         # Strip ghost-row display suffixes — passing the literal "step2b
         # (folded 02:33)" as `--name` would write that into the new
         # session's custom-title and the dashboard would re-suffix it on
         # the next refresh, accumulating ad infinitum.
-        name = strip_fold_suffix(name) or name
+        if runtime == RUNTIME_CLAUDE:
+            name = strip_fold_suffix(name) or name
+            runtime_args = ["--resume", session_id]
+        else:
+            runtime_args = ["resume", session_id]
         try:
-            create_session(cwd, ["--resume", uuid], resumed_from=uuid, name=name)
+            create_session(
+                cwd,
+                runtime_args,
+                resumed_from=session_id,
+                name=name,
+                runtime=runtime,
+            )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
             self.notify(f"Resume failed: {e}", severity="error")
             return
         self.refresh_sessions()
-        self.notify(f"Resumed {uuid[:8]} as {name}")
+        self.notify(f"Resumed {runtime} {session_id[:8]} as {name}")
 
     def action_primary(self) -> None:
         """Enter: attach for live sessions, resume for dormant/ended ones."""
@@ -3107,11 +3192,12 @@ class MonitorApp(App):
             self.refresh_sessions()
             return
 
-        # Dormant or ended — resume the underlying claude session.
-        uuid = e.claude_uuid
-        if not uuid:
+        # Dormant or ended — resume the underlying runtime session.
+        session_id = e.session_id
+        if not session_id:
             self.notify(
-                "No claude UUID tracked for this row — cannot resume", severity="warning"
+                f"No {e.runtime} session ID tracked for this row — cannot resume",
+                severity="warning",
             )
             return
 
@@ -3130,7 +3216,7 @@ class MonitorApp(App):
                 return
             kill_session(e.session)
 
-        self._spawn_resumed(e.cwd, uuid, e.name)
+        self._spawn_resumed(e.cwd, e.runtime, session_id, e.name)
 
     def _register_fork(self, fork_uuid: str, active: bool) -> None:
         with self._fork_lock:

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "multiverse": {
+      "command": "${PLUGIN_ROOT}/scripts/mcp-server"
+    }
+  }
+}

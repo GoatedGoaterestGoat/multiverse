@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# multiverse-codex-session — inner loop that wraps one Codex process.
+
+set -euo pipefail
+
+CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
+
+if ! command -v "$CODEX_BIN" &>/dev/null; then
+  echo "[multiverse-codex-session] '$CODEX_BIN' CLI not found in PATH" >&2
+  exit 1
+fi
+
+: "${MULTIVERSE_STATUS:?multiverse-codex-session must be launched by the monitor}"
+: "${MULTIVERSE_CODEX_PLUGIN_ROOT:?Codex plugin root is not configured}"
+
+HOOK_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/session-hook.py"
+MCP_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/mcp-server"
+if [ ! -x "$HOOK_SCRIPT" ] || [ ! -x "$MCP_SCRIPT" ]; then
+  echo "[multiverse-codex-session] incomplete Codex plugin at $MULTIVERSE_CODEX_PLUGIN_ROOT" >&2
+  exit 1
+fi
+
+# Codex does not expose a development-mode --plugin-dir flag. Inject the same
+# hook and MCP definitions bundled by the local plugin so wrapper sessions use
+# the checked-out implementation even before the plugin is installed.
+HOOK_COMMAND=$(printf '%s' "$HOOK_SCRIPT" | jq -Rs .)
+MCP_COMMAND=$(printf '%s' "$MCP_SCRIPT" | jq -Rs .)
+CODEX_CONFIG_ARGS=(
+  --dangerously-bypass-hook-trust
+  -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PermissionRequest=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PreToolUse=[{matcher=\".*\",hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PostToolUse=[{matcher=\".*\",hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.Stop=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "mcp_servers.multiverse.command=$MCP_COMMAND"
+)
+
+CODEX_ARGS=("$@")
+
+INITIAL_PROMPT=""
+if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
+  INITIAL_PROMPT=$(< "$MULTIVERSE_INITIAL_PROMPT_FILE")
+  rm -f "$MULTIVERSE_INITIAL_PROMPT_FILE" 2>/dev/null || true
+  unset MULTIVERSE_INITIAL_PROMPT_FILE
+fi
+
+resolve_multiverse_root() {
+  if [ -n "${MULTIVERSE_ROOT:-}" ]; then
+    printf '%s' "$MULTIVERSE_ROOT"
+  else
+    printf '%s' "$(dirname "$(dirname "$(dirname "$MULTIVERSE_STATUS")")")"
+  fi
+}
+
+build_inbox_prompt() {
+  [ -z "${MULTIVERSE_SESSION_NAME:-}" ] && return 0
+  [ -z "${MULTIVERSE_SESSION_CWD:-}" ] && return 0
+
+  local mv_root inbox_dir enc count plural
+  mv_root=$(resolve_multiverse_root)
+  enc=$(printf '%s' "$MULTIVERSE_SESSION_CWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  inbox_dir="$mv_root/inbox/$enc/$MULTIVERSE_SESSION_NAME"
+  [ -d "$inbox_dir" ] || return 0
+  count=$(find "$inbox_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$count" = "0" ] && return 0
+
+  plural="messages"
+  [ "$count" = "1" ] && plural="message"
+  printf '%s' "You have $count pending inbox $plural from other agents in your workspace. Call the multiverse check_inbox tool to read and clear them, then respond or act as appropriate."
+}
+
+PROMPT="$INITIAL_PROMPT"
+INBOX_PROMPT=$(build_inbox_prompt)
+if [ -n "$INBOX_PROMPT" ]; then
+  if [ -n "$PROMPT" ]; then
+    PROMPT="$PROMPT"$'\n\n'"$INBOX_PROMPT"
+  else
+    PROMPT="$INBOX_PROMPT"
+  fi
+fi
+
+PROMPT_ARGS=()
+if [ -n "$PROMPT" ]; then
+  PROMPT_ARGS=("$PROMPT")
+fi
+
+"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" "${CODEX_ARGS[@]}" \
+  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
+
+TS=$(date +%s)
+printf '{"status":"ended","ts":%d}\n' "$TS" > "$MULTIVERSE_STATUS" || true
