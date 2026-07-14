@@ -1411,8 +1411,11 @@ class SBConnector:
         if action.kind == p.ActionKind.ANSWER_SPAWN_REQUEST:
             asyncio.create_task(self._handle_answer_spawn_request_action(ws, action))
             return
+        if action.kind == p.ActionKind.SPAWN_AGENT:
+            asyncio.create_task(self._handle_spawn_agent_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
-        #   answer_permission_prompt / message_agent / spawn_agent
+        #   answer_permission_prompt / message_agent
         result = p.ActionResult(
             action_id=action.action_id,
             status=p.ResultStatus.REJECTED,
@@ -1986,6 +1989,123 @@ class SBConnector:
         else:
             text = f"Declined spawn request for '{default_name}'."
         return ("ok", text, "", "")
+
+    async def _handle_spawn_agent_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """SB-initiated spawn of a new named agent (contract locked with toolsmith).
+
+        Distinct from the ``spawn_agent`` MCP tool that Multiverse agents call: THAT
+        writes a spawn_request file the user must approve; THIS one goes straight to
+        :func:`sessions.create_session` under SB's own permission grant. So NO
+        agent.spawn_request / user.spawn_decision pair fires — but the normal
+        firsthand agent.created event (and user.prompt if instruction given) still
+        flows back to SB as observation.
+
+        Payload: ``{name, instruction?}``. ``name`` REQUIRED, unique in the workspace.
+        ``instruction`` OPTIONAL — if provided, delivered as the new agent's first
+        user turn via bin/multiverse-session's positional-prompt path.
+
+        Result on ok: ``{status, spawned_name}``. Errors: ``duplicate_name`` /
+        ``bad_request`` / ``forbidden`` / ``deliver_failed``.
+        """
+        payload = action.payload or {}
+        name = str(payload.get("name") or "").strip()
+        raw_instr = payload.get("instruction")
+        instruction = str(raw_instr).strip() if raw_instr is not None else ""
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        if not name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "payload.name is required (non-empty)"},
+            ))
+
+        # Workspace ACL from action.workspace_id.
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+
+        # create_session forks tmux + a subprocess — not instantaneous. Run blocking.
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, spawned_name, err_code, err_msg = await loop.run_in_executor(
+                None, self._deliver_spawn_blocking,
+                cwd_abs, name, instruction,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface unexpected exceptions
+            log.exception("spawn_agent deliver crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK,
+                result={"status": status_text, "spawned_name": spawned_name},
+            ))
+            log.info("spawn_agent delivered: %s", status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": err_code, "message": err_msg},
+            ))
+            log.info("spawn_agent %s (name=%s): %s", err_code, name, err_msg)
+
+    def _deliver_spawn_blocking(
+        self, cwd_abs: str, name: str, instruction: str,
+    ) -> tuple[str, str, str, str, str]:
+        """Blocking body: duplicate check + create_session.
+
+        Returns ``(status, status_text, spawned_name, err_code, err_msg)`` where:
+          ``status='ok'``  → ``status_text`` and ``spawned_name`` populate the result
+          ``status='err'`` → ``err_code`` / ``err_msg`` populate the error dict
+        """
+        from . import sessions
+
+        # Duplicate check — find_agent_by_name spans the whole roster (live + dormant),
+        # so we catch collisions with agents the user or a prior SB action created.
+        existing = sessions.find_agent_by_name(cwd_abs, name)
+        if existing is not None:
+            return ("err", "", "", "duplicate_name",
+                    f"an agent named '{name}' already exists in this workspace")
+
+        try:
+            sessions.create_session(
+                cwd=cwd_abs, claude_args=[], name=name,
+                initial_prompt=(instruction or None),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface whatever create_session raised
+            return ("err", "", "", "deliver_failed", f"create_session failed: {exc}")
+
+        label = Path(cwd_abs).name or cwd_abs
+        if instruction:
+            text = f"Spawned '{name}' in '{label}' with an initial task."
+        else:
+            text = f"Spawned '{name}' idle in '{label}' (no initial task)."
+        return ("ok", text, name, "", "")
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""
