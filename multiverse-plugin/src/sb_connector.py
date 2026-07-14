@@ -76,6 +76,38 @@ log = logging.getLogger("sb_connector")
 #: enough the fork is stuck and cutting it is the right call.
 _ASK_TIMEOUT = 90.0
 
+#: Per-ask timeout for the first-connect workspace summary fan-out. Must EXCEED
+#: Claude Code's persistent-retry budget (:envvar:`CLAUDE_CODE_UNATTENDED_RETRY` caps
+#: total wait at 6 hours), otherwise ``subprocess.run`` would kill a still-retrying
+#: fork mid-backoff and lose the summary to a rate-limit blip. 7 hours gives the CLI
+#: room to burn its full retry envelope before we cut it.
+_WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
+
+#: Parallel-ask concurrency for the workspace summary fan-out. Match Multiverse's
+#: ``ask_all`` default (5) — high enough to finish a typical workspace fast, low
+#: enough not to flood the API with N simultaneous requests all vying for the same
+#: rate-limit bucket.
+_WORKSPACE_MAX_PARALLEL = 5
+
+
+def _ensure_claude_retry_env() -> None:
+    """Guarantee the daemon's forks inherit Multiverse's rate-limit retry tuning.
+
+    Interactive sessions launched via ``bin/multiverse`` get these vars exported by
+    the launcher itself. But the SB connector daemon may be spawned outside that
+    path (via ``sb_control.start()``, systemd, a dev-container init, etc.), and if
+    its parent shell doesn't have these set, ``ask_all`` forks would fall back to
+    the ``claude`` CLI's default 10-attempt retry with a short exponential backoff
+    — a single rate-limit blip on a workspace-summary ask would surface as
+    ``[ask failed: claude exited 1]`` in ``workspace.connected`` instead of
+    retrying through it.
+
+    Sets only if unset (respects an explicit operator override).
+    """
+    # Values kept in sync with bin/multiverse:52-53.
+    os.environ.setdefault("CLAUDE_CODE_MAX_RETRIES", "30")
+    os.environ.setdefault("CLAUDE_CODE_UNATTENDED_RETRY", "1")
+
 
 def _validate_answers_against_questions(questions: list, answers: list) -> tuple[bool, str]:
     """Validate SB's ``answers`` against the pending AskUserQuestion ``questions`` shape.
@@ -1000,15 +1032,30 @@ class SBConnector:
                 log.debug("marker init failed for %s/%s", cwd, row.name, exc_info=True)
 
     async def _gather_workspace_summary(self, cwd: str) -> dict[str, str]:
-        """Run ``ask_all`` across every named agent in ``cwd`` with the fixed
+        """Run per-agent asks across every named agent in ``cwd`` with the fixed
         workspace-summary question, returning a per-agent dict for the first-connect
         payload. Blocking work runs in an executor thread.
 
         Empty workspace (no named agents with a claude_uuid) → ``{}`` (payload will
         carry ``workspace_summary: {}`` on the wire). Individual ask failures land as
         bracketed placeholder strings SB renders as-is, keeping the dict shape uniform.
+
+        Rate-limit resilience:
+          - :func:`_ensure_claude_retry_env` guarantees ``CLAUDE_CODE_MAX_RETRIES`` /
+            ``CLAUDE_CODE_UNATTENDED_RETRY`` are set in the daemon's process env so
+            the ``claude`` CLI's persistent-retry mode kicks in inside every fork.
+          - Per-ask timeout is generous (:const:`_WORKSPACE_ASK_TIMEOUT_S`) — must
+            EXCEED the CLI's retry budget, otherwise ``subprocess.run`` would kill a
+            still-retrying fork mid-backoff.
+          - We fan out with :class:`ThreadPoolExecutor` directly (rather than
+            ``ask_all``) so we can log each ask's outcome as it lands — the user
+            sees real-time progress in ``daemon.log`` instead of one final line
+            after the slowest ask finishes.
         """
-        from .ask_agents import AskTarget, ask_all
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+
+        from .ask_agents import AskTarget, _ask_one
         from .sessions import list_named_agents_in_cwd
 
         question = (
@@ -1029,20 +1076,58 @@ class SBConnector:
             if not targets:
                 log.info("workspace summary: %s has no askable agents (empty workspace)", cwd)
                 return {}
-            log.info("workspace summary: asking %d agents in %s", len(targets), cwd)
-            try:
-                results = ask_all(question, targets, timeout=60.0)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("workspace summary: ask_all failed for %s: %s", cwd, exc)
-                return {t.name: f"[ask failed: {exc}]" for t in targets}
+
+            log.info(
+                "workspace summary: asking %d agents in %s (per-ask timeout %ds, "
+                "%d parallel, retry env: MAX_RETRIES=%s UNATTENDED=%s)",
+                len(targets), cwd, int(_WORKSPACE_ASK_TIMEOUT_S), _WORKSPACE_MAX_PARALLEL,
+                os.environ.get("CLAUDE_CODE_MAX_RETRIES", "unset"),
+                os.environ.get("CLAUDE_CODE_UNATTENDED_RETRY", "unset"),
+            )
+            t0 = time.monotonic()
+            plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
             out: dict[str, str] = {}
-            for r in results:
-                if r.error:
-                    out[r.name] = f"[ask failed: {r.error}]"
-                elif r.response:
-                    out[r.name] = r.response
-                else:
-                    out[r.name] = "[ask failed: empty response]"
+            done = 0
+            with ThreadPoolExecutor(max_workers=_WORKSPACE_MAX_PARALLEL) as ex:
+                futures = {
+                    ex.submit(_ask_one, t, question, plugin_root,
+                              _WORKSPACE_ASK_TIMEOUT_S, None): t
+                    for t in targets
+                }
+                for f in as_completed(futures):
+                    t = futures[f]
+                    done += 1
+                    try:
+                        r = f.result()
+                    except Exception as exc:  # noqa: BLE001
+                        out[t.name] = f"[ask failed: {exc}]"
+                        log.info("workspace summary [%d/%d]: %s FAILED after threw: %s",
+                                 done, len(targets), t.name, exc)
+                        continue
+                    if r.error:
+                        out[r.name] = f"[ask failed: {r.error}]"
+                        log.info(
+                            "workspace summary [%d/%d]: %s FAILED in %.1fs: %s",
+                            done, len(targets), r.name, r.elapsed, r.error,
+                        )
+                    elif r.response:
+                        out[r.name] = r.response
+                        log.info(
+                            "workspace summary [%d/%d]: %s ok in %.1fs (%d chars)",
+                            done, len(targets), r.name, r.elapsed, len(r.response),
+                        )
+                    else:
+                        out[r.name] = "[ask failed: empty response]"
+                        log.info(
+                            "workspace summary [%d/%d]: %s empty response in %.1fs",
+                            done, len(targets), r.name, r.elapsed,
+                        )
+            wall = time.monotonic() - t0
+            n_ok = sum(1 for v in out.values() if not v.startswith("[ask failed:"))
+            log.info(
+                "workspace summary: %d/%d agents summarized in %.1fs wall time",
+                n_ok, len(targets), wall,
+            )
             return out
 
         loop = asyncio.get_running_loop()
@@ -2317,6 +2402,10 @@ async def _run_daemon() -> int:
         log.error("another connector daemon is live (host=%s pid=%s)",
                   holder.get("host"), holder.get("pid"))
         return 3
+
+    # Set Claude Code retry env BEFORE spawning any forks — the workspace-summary
+    # ask_all + future ask_agent forks both inherit these.
+    _ensure_claude_retry_env()
 
     identity = load_identity()
     cfg = load_config()
