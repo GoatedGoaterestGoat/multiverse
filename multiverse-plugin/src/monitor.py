@@ -807,6 +807,7 @@ class SecondBrainScreen(ModalScreen[None]):
         Binding("enter", "primary", "Enroll/Connect"),
         Binding("e", "reenroll", "Re-enroll"),
         Binding("d", "disconnect", "Disconnect"),
+        Binding("r", "reload", "Reload daemon"),
     ]
 
     def __init__(self, cwd: str) -> None:
@@ -835,7 +836,12 @@ class SecondBrainScreen(ModalScreen[None]):
                 Static("[dim]Workspaces to expose (comma-separated abs paths):[/]"),
                 Input(value=self.cwd, id="sb-workspaces"),
                 Static("[dim]— Cloudflare Access service token (wss:// only; blank = keep/none) —[/]"),
-                Input(value=sb_control.get_cf_client_id(), placeholder="CF-Access-Client-Id",
+                # Deliberately NOT prefilling client_id from storage: our validation
+                # is both-or-neither, so a prefilled id + empty secret would force
+                # the user to hand-delete the id every time they open the widget
+                # just to keep existing creds. Leave both blank to keep; fill both
+                # to rotate.
+                Input(placeholder="CF-Access-Client-Id (leave blank to keep stored)",
                       id="sb-cf-id"),
                 Input(placeholder="CF-Access-Client-Secret (leave blank to keep stored)",
                       password=True, id="sb-cf-secret"),
@@ -871,13 +877,18 @@ class SecondBrainScreen(ModalScreen[None]):
             lines.append(
                 f"CF token: {'[green]stored[/]' if st.get('has_cf_creds') else '[dim]none[/]'}"
             )
+            if st.get("code_stale"):
+                lines.append(
+                    "[yellow]⚠ On-disk code is newer than the running daemon "
+                    "— press [b]r[/b] to reload.[/]"
+                )
         else:
             lines.append("[dim]Not enrolled yet — fill the form and press Enter to enroll.[/]")
         self.query_one("#sb-status", Static).update("\n".join(lines))
 
         running = st.get("running")
         if running:
-            hint = "[b]d[/] disconnect · [b]e[/] re-enroll · [b]Esc[/] close (daemon keeps running)"
+            hint = "[b]d[/] disconnect · [b]e[/] re-enroll · [b]r[/] reload · [b]Esc[/] close (daemon keeps running)"
         elif st.get("enrolled"):
             hint = "[b]Enter[/] connect · [b]e[/] re-enroll · [b]Esc[/] close"
         else:
@@ -920,6 +931,10 @@ class SecondBrainScreen(ModalScreen[None]):
         if not self._busy:
             self._start_worker("disconnect")
 
+    def action_reload(self) -> None:
+        if not self._busy:
+            self._start_worker("reload")
+
     def _start_worker(self, op: str) -> None:
         url = self._val("url")
         if op in ("connect", "enroll") and not url:
@@ -929,14 +944,18 @@ class SecondBrainScreen(ModalScreen[None]):
         if cf_err:
             self._set_error(cf_err)
             return
-        code = fingerprint = name = ""
+        code = fingerprint = ""
+        # Always grab the name field: for enroll it goes to SB + gets persisted; for
+        # connect we persist locally so subsequent widget openings prefill correctly
+        # (legacy sidecars pre-device_name-persistence carry an empty name and would
+        # otherwise fall back to the container hostname every time).
+        name = self._val("name") or ""
         workspaces: list[str] = []
         if op == "enroll":
             code, fingerprint = self._val("code"), self._val("fingerprint")
             if not code or not fingerprint:
                 self._set_error("Pairing code and fingerprint are required to enroll.")
                 return
-            name = self._val("name") or ""
             workspaces = [w.strip() for w in self._val("workspaces").replace(",", " ").split()]
         self._busy = True
         self.query_one("#sb-hint", Static).update("[cyan]working… (this can take a few seconds)[/]")
@@ -958,7 +977,15 @@ class SecondBrainScreen(ModalScreen[None]):
                 )
                 sb_control.start(url)
             elif op == "connect":
+                # Persist any device name the user typed before starting the daemon.
+                # save_device_name is a no-op if unchanged or unenrolled.
+                if name:
+                    sb_control.save_device_name(name)
                 sb_control.start(url)
+            elif op == "reload":
+                if name:
+                    sb_control.save_device_name(name)
+                sb_control.reload()
             elif op == "disconnect":
                 sb_control.stop()
         except Exception as exc:  # surface enroll/connect failures to the panel

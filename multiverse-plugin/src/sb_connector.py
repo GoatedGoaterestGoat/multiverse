@@ -554,6 +554,31 @@ def release_lock() -> None:
 # --------------------------------------------------------------------------------------
 
 
+def code_mtime() -> float:
+    """Latest modification time (epoch seconds) across every ``*.py`` file in this
+    plugin's ``src/`` directory.
+
+    The widget compares this against the running daemon's ``started_at`` to detect
+    when the on-disk code has been updated (i.e. after a ``git pull``) but the
+    daemon is still running the old code — a subtle footgun the user hit on their
+    remote (restarting a specific agent's wrapper doesn't restart the SB daemon;
+    the daemon is a device-level singleton with its own lifecycle). When stale,
+    the widget surfaces a warning + offers the ``r`` reload shortcut.
+    """
+    src = _PLUGIN_ROOT / "src"
+    if not src.is_dir():
+        return 0.0
+    latest = 0.0
+    for path in src.rglob("*.py"):
+        try:
+            mt = path.stat().st_mtime
+        except OSError:
+            continue
+        if mt > latest:
+            latest = mt
+    return latest
+
+
 def load_or_create_device_key(path: str | os.PathLike[str]) -> ed25519.Ed25519PrivateKey:
     """Load the device's Ed25519 private key, generating it 0600 on first run."""
     p_ = Path(path)
@@ -2661,6 +2686,8 @@ def main() -> None:
 
     sub.add_parser("stream", help="run the connector daemon (after enrollment)")
     sub.add_parser("status", help="print current status JSON")
+    sub.add_parser("reload", help="stop the running daemon and start a fresh one "
+                                  "(picks up new on-disk code after a git pull)")
 
     args = parser.parse_args()
 
@@ -2683,6 +2710,13 @@ def main() -> None:
         raise SystemExit(asyncio.run(_run_daemon()))
     elif args.cmd == "status":
         print(json.dumps(read_status(), indent=2))
+    elif args.cmd == "reload":
+        # Import lazily so `enroll` / `status` / `stream` don't pull in sb_control's
+        # Textual-adjacent chain (the widget imports sb_control which imports us; a
+        # normal `stream` path shouldn't need the reverse trip).
+        from . import sb_control
+        result = sb_control.reload()
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":

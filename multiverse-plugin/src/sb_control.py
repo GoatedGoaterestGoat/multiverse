@@ -61,7 +61,13 @@ def is_running() -> bool:
 
 def status() -> dict:
     """A normalized status dict for the widget. Cross-checks the daemon's self-reported
-    state against the live singleton lock, so a crashed daemon reads ``stopped``."""
+    state against the live singleton lock, so a crashed daemon reads ``stopped``.
+
+    Also computes ``code_stale`` — ``True`` when the on-disk connector code has been
+    modified after the running daemon started (typical shape: user ran ``git pull``
+    but the daemon is still running the old code because they restarted an agent's
+    wrapper, not the SB daemon itself). The widget surfaces this with a warning +
+    the ``r`` reload shortcut."""
     if not C.is_enrolled():
         return {
             "state": "unenrolled",
@@ -70,6 +76,7 @@ def status() -> dict:
             "detail": "",
             "base_url": C.load_config()["base_url"],
             "has_cf_creds": C.load_cf_creds() is not None,
+            "code_stale": False,
         }
 
     identity = C.load_identity()
@@ -84,6 +91,18 @@ def status() -> dict:
         # Just launched, hasn't written a live state yet.
         state, detail = "connecting", "starting"
 
+    # code_stale detection: read the lock's started_at + compare to the on-disk
+    # code's latest mtime. A running daemon whose code predates a recent git pull
+    # should be reloaded.
+    code_stale = False
+    if running:
+        holder = C.lock_holder() or {}
+        started = C._parse_iso(str(holder.get("started_at") or ""))
+        if started:
+            latest = C.code_mtime()
+            if latest and latest > started:
+                code_stale = True
+
     return {
         "state": state,
         "detail": detail,
@@ -95,6 +114,7 @@ def status() -> dict:
         "has_cf_creds": C.load_cf_creds() is not None,
         "ts": st.get("ts", ""),
         "host": st.get("host", ""),
+        "code_stale": code_stale,
     }
 
 
@@ -156,6 +176,42 @@ def stop() -> dict:
             break
         time.sleep(0.1)
     return status()
+
+
+def reload() -> dict:
+    """Stop the running daemon (if any) and start a fresh one — the intended way to
+    pick up new on-disk code after a ``git pull``.
+
+    Restarting the multiverse monitor or a specific agent's wrapper does NOT restart
+    the SB daemon: the daemon is a device-level singleton with its own lifecycle.
+    This helper does the stop→start atomically so the widget's ``r`` binding + the
+    ``python -m src.sb_connector reload`` CLI don't require the caller to know that
+    detail.
+    """
+    if is_running():
+        stop()
+    return start()
+
+
+def save_device_name(name: str) -> None:
+    """Persist the device name to the identity sidecar without a full re-enroll.
+
+    Legacy sidecars from before device_name persistence come up with an empty
+    ``device_name`` — the widget's Device name field then falls back to the
+    ephemeral container hostname, which the user has to keep re-typing whenever
+    they enroll from a new container. This lets the widget save whatever they
+    type on connect so subsequent widget openings prefill correctly.
+
+    No-op if the value equals what's already stored, or if the caller isn't
+    enrolled yet (the enroll flow itself already writes device_name).
+    """
+    if not C.is_enrolled() or not name:
+        return
+    ident = C.load_identity()
+    if ident.device_name == name:
+        return
+    ident.device_name = name
+    ident.save(C.device_key_path())
 
 
 # --------------------------------------------------------------------------------------
