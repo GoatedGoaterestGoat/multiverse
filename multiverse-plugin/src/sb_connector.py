@@ -429,13 +429,64 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+#: The daemon refreshes the lock's ``heartbeat`` field every ``_HEARTBEAT_INTERVAL_S``
+#: seconds. A lock whose heartbeat hasn't been touched in ``_HEARTBEAT_STALE_S`` is
+#: considered dead — either the daemon crashed (missed heartbeats), or the entire host
+#: is gone (foreign-container killed abruptly). The stale threshold is >3x the
+#: interval to tolerate one missed write + normal clock skew between shared-FS hosts.
+_HEARTBEAT_INTERVAL_S = 30.0
+_HEARTBEAT_STALE_S = 120.0
+
+
+def _parse_iso(s: str) -> float | None:
+    """Parse an ISO-8601 UTC timestamp (as written by :func:`_now_iso`) to epoch seconds.
+
+    Returns ``None`` on any parse failure so callers can treat missing/malformed
+    timestamps as "unknown, treat as stale".
+    """
+    if not s:
+        return None
+    try:
+        from datetime import datetime, timezone
+        # _now_iso() writes YYYY-MM-DDTHH:MM:SSZ (no fractional part, trailing Z).
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _lock_is_fresh(data: dict) -> bool:
+    """True if the lock's heartbeat is recent enough that we should treat it as live.
+
+    Missing heartbeat → stale (locks written before the heartbeat feature landed, OR
+    any daemon that died between acquire and the first heartbeat write; either way
+    the safe read is "no live daemon behind this lock, take over").
+    """
+    import time
+    hb = _parse_iso(data.get("heartbeat", ""))
+    if hb is None:
+        return False
+    return (time.time() - hb) < _HEARTBEAT_STALE_S
+
+
 def lock_holder() -> dict | None:
     """The live daemon holding the singleton lock, or None.
 
-    A lock whose holder is on THIS host but whose pid is dead is stale (reaped).
-    A lock held on a DIFFERENT host is trusted as live — a bare pid isn't
-    meaningful across hosts on a shared ~/.multiverse, exactly the case
-    sessions.py's host guard exists for.
+    Live-detection combines two signals so a lock from a dead-and-gone remote host
+    doesn't wedge the widget forever:
+
+    * **Same host**: PID probe (``kill(pid, 0)``) — cheap and authoritative.
+    * **Any host** (foreign or same, belt-and-suspenders): the daemon refreshes a
+      ``heartbeat`` timestamp every ``_HEARTBEAT_INTERVAL_S``. A lock whose
+      heartbeat is older than ``_HEARTBEAT_STALE_S`` is stale even if the recorded
+      PID is alive on another host (or on this host but wedged), and even if the
+      lock has no ``heartbeat`` field at all (legacy schema → treated as stale).
+
+    Both signals must agree: on same-host, PID probe is required (a wedged
+    heartbeat writer looks dead-but-not-really). On foreign-host, heartbeat is the
+    only signal we have (a bare PID is meaningless across hosts on a shared
+    ``~/.multiverse``).
     """
     data = _read_json(lock_path())
     if not data:
@@ -443,22 +494,50 @@ def lock_holder() -> dict | None:
     host = data.get("host")
     pid = int(data.get("pid", 0))
     if host == current_host():
+        # Same host: PID probe is authoritative; heartbeat is a secondary "and the
+        # process is actually doing work" signal. We use PID here — a live daemon
+        # briefly stalled between heartbeat writes shouldn't be reaped.
         return data if _pid_alive(pid) else None
-    return data  # foreign host — cannot probe its pid; assume alive
+    # Foreign host: PID is meaningless, heartbeat is the only proof of life.
+    return data if _lock_is_fresh(data) else None
 
 
 def acquire_lock() -> bool:
-    """Claim the singleton lock for this process. False if a live daemon holds it."""
+    """Claim the singleton lock for this process. False if a live daemon holds it.
+
+    Writes an initial ``heartbeat`` immediately so a concurrent second start on
+    another host reads us as live without waiting ``_HEARTBEAT_INTERVAL_S`` for
+    the first refresh.
+    """
     holder = lock_holder()
     if holder is not None and not (
         holder.get("host") == current_host() and holder.get("pid") == os.getpid()
     ):
         return False
+    now = _now_iso()
     _atomic_write_json(
         lock_path(),
-        {"host": current_host(), "pid": os.getpid(), "started_at": _now_iso()},
+        {
+            "host": current_host(),
+            "pid": os.getpid(),
+            "started_at": now,
+            "heartbeat": now,
+        },
     )
     return True
+
+
+def refresh_heartbeat() -> None:
+    """Rewrite the lock file with a fresh heartbeat. Preserves ``started_at``.
+
+    No-op if the lock has been taken over by a different (host, pid) — protects
+    against stepping on a legitimate concurrent owner that reaped us as stale.
+    """
+    data = _read_json(lock_path()) or {}
+    if data.get("host") != current_host() or int(data.get("pid", 0)) != os.getpid():
+        return
+    data["heartbeat"] = _now_iso()
+    _atomic_write_json(lock_path(), data)
 
 
 def release_lock() -> None:
@@ -2444,12 +2523,29 @@ async def _run_daemon() -> int:
     # Multiverse substrate and enqueues events, which buffer durably while disconnected.
     producer_task = asyncio.ensure_future(conn.run_producer())
 
+    # Heartbeat refresher: rewrites the lock's ``heartbeat`` timestamp every
+    # ``_HEARTBEAT_INTERVAL_S``. A dead-and-gone remote container (or a SIGKILLed
+    # local daemon) will stop refreshing, and after ``_HEARTBEAT_STALE_S`` the next
+    # daemon anywhere can take over — no manual `rm ~/.multiverse/secondbrain/lock`
+    # required.
+    async def _heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                refresh_heartbeat()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a disk error shouldn't kill the daemon
+                log.exception("heartbeat refresh failed")
+    heartbeat_task = asyncio.ensure_future(_heartbeat())
+
     def _shutdown() -> None:
         # Graceful: flag stop + send a proper 1000 close (which also unblocks a parked
         # recv), so run() breaks on its own. A watchdog force-cancels if the close hangs.
         async def _go() -> None:
             await conn.aclose()
             producer_task.cancel()
+            heartbeat_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(run_task), timeout=8.0)
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
@@ -2470,7 +2566,8 @@ async def _run_daemon() -> int:
         return 0
     finally:
         producer_task.cancel()
-        await asyncio.gather(producer_task, return_exceptions=True)
+        heartbeat_task.cancel()
+        await asyncio.gather(producer_task, heartbeat_task, return_exceptions=True)
         write_status("stopped", detail="daemon exited", device_id=identity.device_id)
         release_lock()
 
