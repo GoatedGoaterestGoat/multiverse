@@ -575,6 +575,14 @@ class DeviceIdentity:
     private_key: ed25519.Ed25519PrivateKey
     pinned_server_fingerprint: str
     granted_workspaces: list[str] = field(default_factory=list)
+    #: The human-readable label the user chose at enroll time (e.g. "goat-macbook").
+    #: SB stores its own copy in its trust-store (that's what shows up in SB's device
+    #: registry), so this field is a local-only convenience for the widget to prefill
+    #: on subsequent runs — a user opening the widget from a different remote in a
+    #: shared-~/.multiverse deployment doesn't want to see their new container's
+    #: hostname suggested as if a re-enroll were expected. Empty string on legacy
+    #: sidecars that predate this field.
+    device_name: str = ""
 
     @property
     def device_pubkey_b64(self) -> str:
@@ -591,6 +599,7 @@ class DeviceIdentity:
                     "device_id": self.device_id,
                     "pinned_server_fingerprint": self.pinned_server_fingerprint,
                     "granted_workspaces": self.granted_workspaces,
+                    "device_name": self.device_name,
                 },
                 indent=2,
             ),
@@ -606,6 +615,7 @@ class DeviceIdentity:
             private_key=priv,
             pinned_server_fingerprint=data["pinned_server_fingerprint"],
             granted_workspaces=data.get("granted_workspaces", []),
+            device_name=data.get("device_name", ""),  # legacy sidecars: no name stored
         )
 
 
@@ -693,6 +703,7 @@ async def enroll(
             private_key=priv,
             pinned_server_fingerprint=pinned_fingerprint,
             granted_workspaces=resp.granted_workspaces,
+            device_name=device_name,
         )
         identity.save(key_path)
         log.info("enrolled device_id=%s granted=%s", resp.device_id, resp.granted_workspaces)

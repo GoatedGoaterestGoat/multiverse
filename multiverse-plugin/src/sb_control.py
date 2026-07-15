@@ -221,6 +221,15 @@ def get_cf_client_id() -> str:
     return creds["client_id"] if creds else ""
 
 
+def get_device_name() -> str:
+    """The device name the user chose at enroll time, for widget prefill on subsequent
+    remotes in a shared-``~/.multiverse`` deployment. Empty if unenrolled or if the
+    sidecar predates the ``device_name`` field."""
+    if not C.is_enrolled():
+        return ""
+    return C.load_identity().device_name
+
+
 def save_cf_creds(client_id: str, client_secret: str) -> None:
     C.save_cf_creds(client_id, client_secret)
 

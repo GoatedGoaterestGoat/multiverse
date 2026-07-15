@@ -831,7 +831,7 @@ class SecondBrainScreen(ModalScreen[None]):
                 Static("[dim]SB server fingerprint (pin, from `sb-pair`):[/]"),
                 Input(placeholder="XXXX-XXXX-XXXX-XXXX", id="sb-fingerprint"),
                 Static("[dim]Device name:[/]"),
-                Input(value=_socket.gethostname(), id="sb-name"),
+                Input(value=(sb_control.get_device_name() or _socket.gethostname()), id="sb-name"),
                 Static("[dim]Workspaces to expose (comma-separated abs paths):[/]"),
                 Input(value=self.cwd, id="sb-workspaces"),
                 Static("[dim]— Cloudflare Access service token (wss:// only; blank = keep/none) —[/]"),
