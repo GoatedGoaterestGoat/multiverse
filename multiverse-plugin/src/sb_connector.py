@@ -90,6 +90,26 @@ _WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
 _WORKSPACE_MAX_PARALLEL = 5
 
 
+def _ssl_for(url: str) -> "ssl.SSLContext | None":
+    """Build an SSL context for a ``wss://`` URL using certifi's CA bundle.
+
+    Returns ``None`` for a plaintext ``ws://`` URL (websockets skips TLS).
+
+    Uses certifi's bundle instead of the system default because minimal dev
+    containers (Debian/Ubuntu slim images, some Kubernetes runtimes) often
+    lack ``ca-certificates`` in Python's default trust-store search paths,
+    yielding ``[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer
+    certificate`` on every enroll/connect. certifi ships Mozilla's root store
+    with the wheel — no OS package required — so we get consistent trust
+    regardless of the host's ca-certificates state.
+    """
+    if not url.lower().startswith("wss://"):
+        return None
+    import ssl
+    import certifi
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _ensure_claude_retry_env() -> None:
     """Guarantee the daemon's forks inherit Multiverse's rate-limit retry tuning.
 
@@ -539,7 +559,12 @@ async def enroll(
     priv = load_or_create_device_key(key_path)
     device_pubkey = auth.b64e(priv.public_key().public_bytes_raw())
 
-    async with connect(url, max_size=p.MAX_FRAME_BYTES, additional_headers=cf_access) as ws:
+    async with connect(
+        url,
+        max_size=p.MAX_FRAME_BYTES,
+        additional_headers=cf_access,
+        ssl=_ssl_for(url),
+    ) as ws:
         x_priv, epk_c = auth.generate_ephemeral()
         await ws.send(
             p.encode(
@@ -819,6 +844,7 @@ class SBConnector:
                     stream_url(self.base_url),
                     max_size=p.MAX_FRAME_BYTES,
                     additional_headers=self.cf_access,
+                    ssl=_ssl_for(stream_url(self.base_url)),
                 ) as ws:
                     self._ws = ws  # exposed to aclose() for a graceful 1000 close
                     try:

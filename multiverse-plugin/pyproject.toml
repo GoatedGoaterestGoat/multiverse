@@ -8,6 +8,7 @@ dependencies = [
     "textual>=0.80",
     "websockets>=13",
     "cryptography>=42",
+    "certifi>=2024.7.4",
 ]
 
 [project.scripts]

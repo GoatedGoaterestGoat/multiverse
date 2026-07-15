@@ -354,6 +354,7 @@ name = "multiverse-plugin"
 version = "0.3.0"
 source = { editable = "." }
 dependencies = [
+    { name = "certifi" },
     { name = "cryptography" },
     { name = "mcp" },
     { name = "textual" },
@@ -362,6 +363,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "certifi", specifier = ">=2024.7.4" },
     { name = "cryptography", specifier = ">=42" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "textual", specifier = ">=0.80" },
