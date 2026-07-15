@@ -38,6 +38,25 @@ def main() -> None:
     if not text:
         return  # nothing to observe
 
+    # Ignore Claude Code's synthetic system-injected "user messages" — these fire
+    # UserPromptSubmit but semantically aren't user prompts, so SB shouldn't see them
+    # as user.prompt events. Also skipping the signal here means we don't advance the
+    # transcript delivery marker — the next real agent.response peek will include this
+    # content in its `full` naturally (SB can filter on ingest if it wants to).
+    #
+    # Currently-known synthetic wrappers (Claude Code source: LocalShellTask.tsx,
+    # utils/hooks.ts, promptShellExecution.ts):
+    #   <task-notification> ... </task-notification>  — background-shell completion,
+    #     monitor stream end, interactive-input stall detection.
+    #   <local-command-caveat> — surfaces around slash-command outputs.
+    # Left in the transcript source-of-truth (the JSONL is Claude Code's, not ours);
+    # just not surfaced as their own user.prompt event.
+    stripped = text.lstrip()
+    if stripped.startswith("<task-notification>") or stripped.startswith(
+        "<local-command-caveat>"
+    ):
+        return
+
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
         from src import sb_notify
