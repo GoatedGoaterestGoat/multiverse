@@ -1348,7 +1348,16 @@ class SBConnector:
         """Turn each fast turn-end signal (from the Stop hook) into an ``agent.response``
         event: generate the partial transcript (peek), compose the payload, buffer it,
         commit the marker, then drop the signal. Marker is committed AFTER the event is
-        durably buffered, so a crash re-delivers (SB dedups), never a gap."""
+        durably buffered, so a crash re-delivers (SB dedups), never a gap.
+
+        Empty-peek suppression: when multiple Stop hooks fire before the producer's poll
+        iteration (rapid-succession turns, or a batch of signals queued while the daemon
+        was reconnecting), the FIRST peek drains all new content and advances the marker.
+        Subsequent signals in the same iteration peek an already-current marker → empty
+        text → useless event with empty ``full`` and a template ``summary`` reading
+        ``agent 'X' finished a turn``. Skip those (still delete the signal + commit the
+        marker as a no-op so we don't loop) — the first non-empty event already covers
+        the same turns."""
         from . import sb_events, sb_notify, sb_transcript
 
         for sig in sb_notify.list_response_signals():
@@ -1360,6 +1369,19 @@ class SBConnector:
                 sb_notify.delete_response_signal(sig)
                 continue
             text, cursor = peeked
+            if not text:
+                # No new content since the last delivery. Emitting a bare event with
+                # empty full + template summary is worse than staying silent — SB has
+                # no way to inspect it, and the SB agent would see identical noise.
+                log.info(
+                    "agent.response: %s has no new content since last marker "
+                    "(likely batched with an earlier signal that already drained it); "
+                    "suppressing event",
+                    agent,
+                )
+                sb_transcript.commit_marker(cwd, agent, cursor)  # no-op / re-anchor
+                sb_notify.delete_response_signal(sig)
+                continue
             payload = sb_events.agent_response_event_fields(agent, text)
             self.make_event(
                 workspace_id=sig.get("workspace_id", ""),
@@ -1371,7 +1393,10 @@ class SBConnector:
             )
             sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
             sb_notify.delete_response_signal(sig)
-            log.info("relayed agent.response (idle) for %s", agent)
+            log.info(
+                "relayed agent.response (idle) for %s (%d chars full)",
+                agent, len(text),
+            )
 
     def _consume_user_prompt_signals(self) -> None:
         """Turn each turn-start signal (from the UserPromptSubmit hook) into a
