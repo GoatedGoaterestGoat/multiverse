@@ -258,11 +258,25 @@ def _effective_after_index(forest, marker: dict | None, parent_of: dict[str, str
       3. Neither resolves → ``None`` (whole forest).
     """
     marker_turn_id = marker.get("turn_id") if marker else None
+    marker_row_uuid = marker.get("row_uuid") if marker else None
 
     # 1. Fast path: marked turn still on the live chain.
     if marker_turn_id is not None:
         for i, turn in enumerate(forest):
             if turn.turn_id == marker_turn_id:
+                # Repair legacy stale markers: if the marker's row_uuid doesn't match
+                # this turn's CURRENT tip, the marker was committed when the turn was
+                # still partial (a pre-8dab34a bug — old peek anchored the cursor onto
+                # a partial tail turn's user_prompt row before the assistant leaves
+                # existed). Now that leaves are here, treat the turn as only partially
+                # delivered: return i-1 so the caller re-emits it in full. The next
+                # commit_marker will write a tip-anchored row_uuid, healing the marker.
+                # Idempotent — a well-anchored marker (row_uuid == current tip) still
+                # returns i.
+                if marker_row_uuid:
+                    current_tip = _turn_tip_uuid(turn)
+                    if current_tip and marker_row_uuid != current_tip:
+                        return i - 1  # forest[i:] re-includes this turn from the start
                 return i
 
     # 2. Revert walk: map every on-chain row uuid → its turn index, then climb.
