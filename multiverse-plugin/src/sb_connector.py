@@ -1369,15 +1369,37 @@ class SBConnector:
                 sb_notify.delete_response_signal(sig)
                 continue
             text, cursor = peeked
-            if not text:
-                # No new content since the last delivery. Emitting a bare event with
-                # empty full + template summary is worse than staying silent — SB has
-                # no way to inspect it, and the SB agent would see identical noise.
+            # Content-emptiness check: skip if the peek has nothing meaningful.
+            # Two shapes qualify:
+            #   1) truly empty ("") — batched-signal case (a prior signal drained it)
+            #   2) only structural [turn] headers, no [user]/[assistant]/[tool:] lines
+            #      — happens when parse_session yields turns whose leaves all got
+            #      dropped by filter_compactable (structural noise like task_reminder,
+            #      skill_listing, deferred-tools; or an all-thinking turn with no
+            #      asst_text; or a turn whose only content is tool_result which
+            #      _render_leaf drops). Suppress it — the event would carry a full of
+            #      just "[turn]\n[turn]" (SB caches it but has_full renders False for
+            #      whitespace-only content) and the composer's _last_assistant_line
+            #      falls back to the placeholder template.
+            has_meaningful = any(
+                line.startswith("[user] ")
+                or line.startswith("[assistant] ")
+                or line.startswith("[tool:")
+                or line.startswith("[tool-result]")
+                for line in text.splitlines()
+            )
+            if not text or not has_meaningful:
+                # Rich diagnostic so we can see WHY the peek is content-less. Include
+                # the peek length + line counts so SB-side reports have something to
+                # correlate against.
+                stem = Path(sig["_path"]).stem[:8]
+                lines = text.splitlines()
+                n_turn = sum(1 for l in lines if l.startswith("[turn"))
                 log.info(
-                    "agent.response: %s has no new content since last marker "
-                    "(likely batched with an earlier signal that already drained it); "
-                    "suppressing event",
-                    agent,
+                    "agent.response: %s SUPPRESSED (aresp:%s..., %d chars, %d lines, "
+                    "%d [turn] headers, 0 meaningful content lines); marker committed "
+                    "as no-op / re-anchor",
+                    agent, stem, len(text), len(lines), n_turn,
                 )
                 sb_transcript.commit_marker(cwd, agent, cursor)  # no-op / re-anchor
                 sb_notify.delete_response_signal(sig)
@@ -1393,9 +1415,17 @@ class SBConnector:
             )
             sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
             sb_notify.delete_response_signal(sig)
+            # Rich per-emission log: byte length + counts so SB-side "empty full"
+            # reports can be correlated against what we actually sent.
+            n_asst = text.count("\n[assistant] ") + (
+                1 if text.startswith("[assistant] ") else 0
+            )
+            n_tool = text.count("\n[tool:") + (1 if text.startswith("[tool:") else 0)
+            n_user = text.count("\n[user] ") + (1 if text.startswith("[user] ") else 0)
             log.info(
-                "relayed agent.response (idle) for %s (%d chars full)",
-                agent, len(text),
+                "relayed agent.response (idle) for %s (%d chars full, "
+                "%d asst, %d tool, %d user)",
+                agent, len(text), n_asst, n_tool, n_user,
             )
 
     def _consume_user_prompt_signals(self) -> None:
