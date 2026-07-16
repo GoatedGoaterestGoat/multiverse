@@ -86,6 +86,21 @@ def _run_hook() -> None:
         return
     status_path = Path(status_value)
     event_name = event.get("hook_event_name")
+    if event_name == "SessionStart":
+        session_id = event.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            id_path = Path(
+                os.environ.get("MULTIVERSE_RUNTIME_SESSION_ID_PATH")
+                or status_path.parent / "runtime_session_id"
+            )
+            try:
+                id_path.write_text(session_id + "\n")
+            except OSError:
+                pass
+
+    # Write SessionStart's idle state after its native ID. The runner watches
+    # for that ID as its readiness signal, so this ordering prevents an older
+    # starting value from winning a startup race.
     status = STATUS_BY_EVENT.get(event_name)
     if status:
         _write_status(status_path, status)
@@ -95,15 +110,6 @@ def _run_hook() -> None:
     session_id = event.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return
-
-    id_path = Path(
-        os.environ.get("MULTIVERSE_RUNTIME_SESSION_ID_PATH")
-        or status_path.parent / "runtime_session_id"
-    )
-    try:
-        id_path.write_text(session_id + "\n")
-    except OSError:
-        pass
 
     name = os.environ.get("MULTIVERSE_SESSION_NAME")
     if name:

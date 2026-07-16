@@ -83,14 +83,29 @@ class RuntimeMetadataTests(unittest.TestCase):
                 )
                 + "\n"
             )
+            (rollouts / "rollout-c-unnamed-id.jsonl").write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": "unnamed-id", "cwd": cwd},
+                    }
+                )
+                + "\n"
+            )
 
             with patch.object(sessions, "CODEX_HOME", codex_home):
                 found = sessions.list_codex_sessions_in(cwd)
+                all_found = sessions.list_codex_sessions_in(
+                    cwd, include_unnamed=True
+                )
 
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0]["id"], "named-id")
         self.assertEqual(found[0]["name"], "codex-agent")
         self.assertEqual(found[0]["preview"], "First Codex prompt")
+        self.assertEqual(
+            {item["id"] for item in all_found}, {"named-id", "unnamed-id"}
+        )
 
     def test_dashboard_deduplicates_wrapped_codex_thread(self) -> None:
         wrapped = sessions.Session(
@@ -123,6 +138,7 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].runtime, sessions.RUNTIME_CODEX)
         self.assertEqual(rows[0].session_id, "codex-thread")
+        self.assertEqual(rows[0].preview, "hello")
 
     def test_all_session_names_share_one_runtime_namespace(self) -> None:
         with (
@@ -337,6 +353,93 @@ class CodexRunnerTests(unittest.TestCase):
                 ["resume", "codex-thread"],
             )
             self.assertEqual(json.loads(status.read_text())["status"], "ended")
+
+    def test_ready_watcher_advances_unchanged_starting_status(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            native_id = temp_dir / "runtime_session_id"
+            observed = temp_dir / "observed-status.txt"
+            status.write_text(json.dumps({"status": "starting", "ts": 1}))
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' codex-thread > \"$MULTIVERSE_RUNTIME_SESSION_ID_PATH\"\n"
+                "attempt=0\n"
+                "while [ \"$attempt\" -lt 100 ]; do\n"
+                "  current=$(jq -r '.status' \"$MULTIVERSE_STATUS\")\n"
+                "  if [ \"$current\" = idle ]; then\n"
+                "    printf '%s\\n' \"$current\" > \"$OBSERVED_STATUS\"\n"
+                "    exit 0\n"
+                "  fi\n"
+                "  attempt=$((attempt + 1))\n"
+                "  sleep 0.02\n"
+                "done\n"
+                "exit 1\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(native_id),
+                "OBSERVED_STATUS": str(observed),
+            }
+
+            proc = subprocess.run(
+                [str(runner)],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(observed.read_text().strip(), "idle")
+
+    def test_ready_watcher_does_not_overwrite_working_status(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            native_id = temp_dir / "runtime_session_id"
+            observed = temp_dir / "observed-status.txt"
+            status.write_text(json.dumps({"status": "working", "ts": 1}))
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' codex-thread > \"$MULTIVERSE_RUNTIME_SESSION_ID_PATH\"\n"
+                "sleep 0.15\n"
+                "jq -r '.status' \"$MULTIVERSE_STATUS\" > \"$OBSERVED_STATUS\"\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(native_id),
+                "OBSERVED_STATUS": str(observed),
+            }
+
+            proc = subprocess.run(
+                [str(runner)],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(observed.read_text().strip(), "working")
 
 
 if __name__ == "__main__":

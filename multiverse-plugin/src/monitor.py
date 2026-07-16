@@ -504,7 +504,7 @@ class ResumeSessionScreen(
                     "row_key": f"{RUNTIME_CLAUDE}:{session_id}",
                 }
             )
-        for info in list_codex_sessions_in(self.cwd):
+        for info in list_codex_sessions_in(self.cwd, include_unnamed=True):
             session_id = info["id"]
             all_sessions.append(
                 {

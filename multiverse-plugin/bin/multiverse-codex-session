@@ -85,8 +85,37 @@ if [ -n "$PROMPT" ]; then
   PROMPT_ARGS=("$PROMPT")
 fi
 
-"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" "${CODEX_ARGS[@]}" \
+# SessionStart records the native thread ID when Codex is ready. Keep a
+# bounded fallback beside the hook: if the ID appears while status is still
+# the spawn-time `starting`, advance it to `idle`. Never overwrite `working`
+# or `waiting`, which may already have been written for an initial prompt.
+mark_ready_when_session_id_appears() {
+  local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
+  [ -z "$id_path" ] && return 0
+  local attempt=0 current ts
+  while [ "$attempt" -lt 200 ]; do
+    attempt=$((attempt + 1))
+    if [ -s "$id_path" ]; then
+      current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
+      if [ "$current" = "starting" ]; then
+        ts=$(date +%s)
+        printf '{"status":"idle","ts":%d}\n' "$ts" > "$MULTIVERSE_STATUS"
+      fi
+      return 0
+    fi
+    sleep 0.05
+  done
+}
+
+mark_ready_when_session_id_appears &
+READY_WATCHER_PID=$!
+
+"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
+  ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} \
   ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
+
+kill "$READY_WATCHER_PID" 2>/dev/null || true
+wait "$READY_WATCHER_PID" 2>/dev/null || true
 
 TS=$(date +%s)
 printf '{"status":"ended","ts":%d}\n' "$TS" > "$MULTIVERSE_STATUS" || true

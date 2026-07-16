@@ -281,12 +281,14 @@ def _read_codex_session_metadata(path: Path) -> dict:
     return result
 
 
-def list_codex_sessions_in(cwd: str) -> list[dict]:
-    """Return named Codex sessions under ``cwd``, newest first.
+def list_codex_sessions_in(
+    cwd: str, *, include_unnamed: bool = False
+) -> list[dict]:
+    """Return Codex sessions under ``cwd``, newest first.
 
     Codex stores the stable thread id and cwd in rollout metadata, while
     explicit user-facing names live in ``session_index.jsonl``. Unnamed
-    threads are intentionally omitted, matching dormant Claude discovery.
+    threads are omitted unless ``include_unnamed`` is true.
     """
     try:
         cwd_abs = str(Path(cwd).expanduser().resolve())
@@ -296,20 +298,19 @@ def list_codex_sessions_in(cwd: str) -> list[dict]:
     now = time.monotonic()
     cached = _CODEX_DISCOVERY_CACHE.get(cwd_abs)
     if cached and now - cached[0] < _CODEX_DISCOVERY_TTL:
-        return [dict(item) for item in cached[1]]
+        out = cached[1]
+        if not include_unnamed:
+            out = [item for item in out if item.get("name")]
+        return [dict(item) for item in out]
 
     names = _read_codex_names()
-    if not names:
-        _CODEX_DISCOVERY_CACHE[cwd_abs] = (now, [])
-        return []
-
     sessions_dir = CODEX_HOME / "sessions"
     by_id: dict[str, dict] = {}
     if sessions_dir.is_dir():
         for path in sessions_dir.rglob("rollout-*.jsonl"):
             meta = _read_codex_session_metadata(path)
             session_id = meta.get("id")
-            if session_id not in names or meta.get("cwd") != cwd_abs:
+            if not session_id or meta.get("cwd") != cwd_abs:
                 continue
             try:
                 st = path.stat()
@@ -320,7 +321,7 @@ def list_codex_sessions_in(cwd: str) -> list[dict]:
                 "preview": meta.get("preview") or "(no user message)",
                 "mtime": st.st_mtime,
                 "size": st.st_size,
-                "name": names[session_id],
+                "name": names.get(session_id),
             }
             previous = by_id.get(session_id)
             if previous is None or found["mtime"] > previous["mtime"]:
@@ -328,6 +329,8 @@ def list_codex_sessions_in(cwd: str) -> list[dict]:
     out = list(by_id.values())
     out.sort(key=lambda d: d["mtime"], reverse=True)
     _CODEX_DISCOVERY_CACHE[cwd_abs] = (now, out)
+    if not include_unnamed:
+        out = [item for item in out if item.get("name")]
     return [dict(item) for item in out]
 
 
@@ -639,6 +642,8 @@ def build_dashboard_rows(
                 ghost_map[uid] = 0.0
 
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
+    codex_sessions = list_codex_sessions_in(cwd, include_unnamed=True)
+    codex_by_id = {info["id"]: info for info in codex_sessions}
 
     if project_dir.is_dir():
         for path in project_dir.glob("*.jsonl"):
@@ -655,13 +660,17 @@ def build_dashboard_rows(
     for s in sessions:
         if not s.name:
             continue
-        # Look up the live session's JSONL preview if we know the claude UUID.
+        # Look up the native transcript preview for either runtime.
         preview = ""
         u = s.effective_claude_uuid
         if u and project_dir.is_dir():
             jsonl = project_dir / f"{u}.jsonl"
             if jsonl.exists():
                 preview = _read_session_metadata(jsonl).get("preview") or ""
+        elif s.runtime == RUNTIME_CODEX and s.runtime_session_id:
+            info = codex_by_id.get(s.runtime_session_id)
+            if info:
+                preview = info.get("preview") or ""
         rows.append(
             DashboardRow(
                 name=s.name,
@@ -717,9 +726,9 @@ def build_dashboard_rows(
                 )
             )
 
-    for info in list_codex_sessions_in(cwd):
+    for info in codex_sessions:
         session_id = info["id"]
-        if session_id in wrapped_codex_ids:
+        if session_id in wrapped_codex_ids or not info.get("name"):
             continue
         rows.append(
             DashboardRow(
