@@ -26,6 +26,12 @@ live Codex terminal with a prompt to call `check_inbox`. A dormant or ended
 Codex agent is resumed with that prompt as its first user turn. Starting,
 approval-waiting, and user-attached sessions are left queued.
 
+The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
+Claude-to-Codex messages. Cross-workspace messages retain the sender workspace
+so `check_inbox` can tell the recipient how to route a reply. Internal delivery
+logs include caller and recipient runtimes, but the agent-facing registry and
+message payload format remain runtime-neutral.
+
 During repository development, `multiverse-codex-session` injects these same
 hook and MCP definitions into the wrapped Codex process. Installing the plugin
 is therefore not required to exercise the wrapper from this checkout.

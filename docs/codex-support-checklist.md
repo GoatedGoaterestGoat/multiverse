@@ -122,21 +122,21 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 ## MCP Tool: `message_agent`
 
-- [ ] Send durable Codex-to-Codex messages.
-- [ ] Send durable Codex-to-Claude messages.
-- [ ] Receive durable Claude-to-Codex messages.
-- [ ] Preserve the existing atomic inbox file format.
-- [ ] Preserve cross-workspace routing and reply instructions.
-- [ ] Deliver queued messages into the Codex agent's context exactly once.
+- [x] Send durable Codex-to-Codex messages.
+- [x] Send durable Codex-to-Claude messages.
+- [x] Receive durable Claude-to-Codex messages.
+- [x] Preserve the existing atomic inbox file format.
+- [x] Preserve cross-workspace routing and reply instructions.
+- [x] Deliver queued messages into the Codex agent's context exactly once.
 - [ ] Ensure delivered messages persist in the Codex conversation history.
 - [x] Define Codex inbox delivery as explicit pull via `check_inbox`; passive
       lifecycle-hook delivery is not required.
-- [ ] Support `push_notification=True` for dormant Codex agents.
-- [ ] Support push delivery to live, unattached Codex agents.
-- [ ] Avoid clobbering input when a user is attached to the Codex terminal.
-- [ ] Treat an agent in `monitor_inbox` as already listening.
-- [ ] Report the actual delivery route in the tool result.
-- [ ] Preserve inter-agent send, route, and delivery logs.
+- [x] Support `push_notification=True` for dormant Codex agents.
+- [x] Support push delivery to live, unattached Codex agents.
+- [x] Avoid clobbering input when a user is attached to the Codex terminal.
+- [x] Treat an agent in `monitor_inbox` as already listening.
+- [x] Report the actual delivery route in the tool result.
+- [x] Preserve inter-agent send, route, and delivery logs.
 
 ## MCP Tools: `check_inbox` and `monitor_inbox`
 
@@ -235,13 +235,13 @@ feature set present when the branches are integrated.
 
 - [x] Reuse `MULTIVERSE_ROOT` as the single absolute state root for both runtimes.
 - [ ] Keep all cross-process writes atomic.
-- [ ] Preserve inbox exactly-once claim behavior under mixed-runtime races.
+- [x] Preserve inbox exactly-once claim behavior under mixed-runtime races.
 - [x] Preserve host-aware liveness checks on shared storage.
 - [ ] Recover cleanly when a Codex process exits without a lifecycle callback.
 - [ ] Recover cleanly when tmux exists but the Codex process has died.
 - [x] Avoid reaping a Codex session that is live on another host.
 - [ ] Keep runtime-specific temporary files from appearing as dormant agents.
-- [ ] Add enough runtime information to inter-agent logs to diagnose mixed-runtime
+- [x] Add enough runtime information to inter-agent logs to diagnose mixed-runtime
       delivery failures.
 
 ## Verification
@@ -253,9 +253,9 @@ feature set present when the branches are integrated.
 - [ ] Unit-test Codex temporary-session registration and cleanup.
 - [ ] End-to-end test Codex plugin loading inside a wrapped session.
 - [ ] End-to-end test all six MCP tools from a Codex session.
-- [ ] Test the communication matrix: Claude-to-Claude, Claude-to-Codex,
+- [x] Test the communication matrix: Claude-to-Claude, Claude-to-Codex,
       Codex-to-Claude, and Codex-to-Codex.
-- [ ] Test passive and push delivery for live, dormant, attached, and listening agents.
+- [x] Test passive and push delivery for live, dormant, attached, and listening agents.
 - [ ] Test mixed-runtime ask-all.
 - [ ] Test Codex spawn approval, rejection, cancellation, and orphan cleanup.
 - [ ] Test monitor restart while Codex sessions remain live.

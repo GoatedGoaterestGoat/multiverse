@@ -72,6 +72,9 @@ class CodexCheckInboxTests(unittest.TestCase):
         self.assertEqual(
             log_delivery.call_args.kwargs["hook_event"], "check_inbox_tool"
         )
+        self.assertEqual(
+            log_delivery.call_args.kwargs["recipient_runtime"], "codex"
+        )
 
     def test_racing_check_inbox_calls_deliver_each_message_once(self) -> None:
         bodies = [f"message-{index}" for index in range(24)]

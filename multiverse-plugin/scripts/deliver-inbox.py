@@ -68,7 +68,13 @@ def main() -> None:
     hook_input = _read_input()
     event = hook_input.get("hook_event_name") or "UserPromptSubmit"
 
-    log_inbox_delivered(recipient=name, cwd=cwd, hook_event=event, messages=messages)
+    log_inbox_delivered(
+        recipient=name,
+        cwd=cwd,
+        hook_event=event,
+        messages=messages,
+        recipient_runtime=os.environ.get("MULTIVERSE_RUNTIME", "claude"),
+    )
 
     body = render_messages_as_system_reminder(messages)
 

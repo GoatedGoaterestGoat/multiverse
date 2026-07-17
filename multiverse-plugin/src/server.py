@@ -27,6 +27,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Optional
 
 from mcp.server.fastmcp import Context, FastMCP
 
@@ -193,6 +194,20 @@ def _auto_resume(target, cwd: str) -> None:
     )
 
 
+def _queued_next_step(runtime: str, *, dormant: bool = False) -> str:
+    """Describe how an inbox-only message will reach the target."""
+    if runtime == RUNTIME_CODEX:
+        if dormant:
+            return (
+                "It will remain queued until the user resumes that session; "
+                "the Codex wrapper will then prompt it to call check_inbox."
+            )
+        return "It will remain queued until Codex calls check_inbox."
+    if dormant:
+        return "It will be delivered when the user next resumes that session."
+    return "It will be delivered on the recipient's next turn."
+
+
 _DEFAULT_MAX_AGENTS = 15
 
 _STATUS_PRIORITY = {
@@ -357,13 +372,11 @@ def message_agent(
 
     DELIVERY TIMING is controlled by ``push_notification``:
 
-    ``push_notification=False`` (default) — passive delivery. The message
-    waits in the inbox and is delivered on the recipient's next natural
-    turn boundary (Stop / UserPromptSubmit / SessionStart hook). A dormant
-    recipient stays dormant — the message sits on disk (dashboard shows a
-    📩 badge) and is delivered only when the USER next resumes that session.
-    Use this for non-urgent messages where it's fine to wait for the
-    recipient (or the user) to get to it.
+    ``push_notification=False`` (default) — queue only. Claude receives the
+    message through its next inbox hook. Codex receives it only when it calls
+    ``check_inbox``; a user-initiated resume prompts dormant Codex sessions to
+    do so. A dormant recipient stays dormant and the dashboard shows its
+    pending-inbox badge. Use this for non-urgent messages.
 
     ``push_notification=True`` — active delivery: wake the recipient now,
     no user needed. Behavior depends on the recipient's state:
@@ -372,10 +385,11 @@ def message_agent(
       - idle or working, with NO user attached to its terminal → it's
         pinged via its terminal to check its inbox immediately.
       - idle or working, but a user IS attached to its terminal → falls
-        back to passive delivery (we won't disrupt the attached user); the
-        message still arrives on the recipient's next turn.
+        back to queued delivery without disrupting the attached user.
       - listening (parked in ``monitor_inbox``) → it's already watching its
         inbox and picks the message up within a second; no wake needed.
+      - starting or waiting for approval → remains queued; no terminal input
+        is sent while the TUI is not ready for a normal prompt.
       - compacting → the agent is locked (its terminal is killed and even
         the user can't interact with it during compaction), so it is NOT
         woken; the message queues and is delivered once compaction finishes
@@ -393,7 +407,7 @@ def message_agent(
             instructions, code, anything.
         push_notification: If True, actively wake the recipient to deliver
             now (see above). If False (default), leave it in the inbox for
-            passive delivery on their next turn / user-initiated resume.
+            its runtime-specific pull or hook delivery path.
         push_notifications: Accepted alias for ``push_notification`` (either
             spelling works; they're OR'd together).
         working_directory: Optional absolute path to another workspace. When
@@ -440,10 +454,10 @@ def message_agent(
             "available."
         )
 
-    # Always write the inbox file first — and, critically, BEFORE any
-    # auto-resume, so the resumed agent's SessionStart hook sees it. For a
-    # cross-workspace message, stamp our own workspace so the recipient
-    # knows where to reply.
+    # Always write the inbox file before any auto-resume. Claude's SessionStart
+    # hook and Codex's wrapper-side startup prompt must both observe the queued
+    # message. For cross-workspace sends, stamp the sender workspace so replies
+    # can route back correctly.
     inbox_file = write_message_to_inbox(
         sender_name=self_name,
         recipient_name=target_name,
@@ -453,6 +467,9 @@ def message_agent(
     )
     # Accept either spelling — models frequently pluralize "notification".
     push = bool(push_notification) or bool(push_notifications)
+    caller_runtime = os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
+    if caller_runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
+        caller_runtime = RUNTIME_CLAUDE
 
     log_message_sent(
         sender=self_name,
@@ -461,7 +478,20 @@ def message_agent(
         push_notification=push,
         message_id=inbox_file.stem,
         message=message,
+        sender_runtime=caller_runtime,
+        recipient_runtime=target.runtime,
     )
+
+    def log_route(route: str, success: Optional[bool] = None) -> None:
+        log_notification_routed(
+            sender=self_name,
+            recipient=target_name,
+            cwd=cwd,
+            route=route,
+            success=success,
+            sender_runtime=caller_runtime,
+            recipient_runtime=target.runtime,
+        )
 
     is_dormant = target.session is None or target.status == "ended"
 
@@ -477,10 +507,7 @@ def message_agent(
     # and the session resumes. Checked against the compaction lock directly
     # (authoritative) rather than the status string.
     if target.claude_uuid and is_locked(target.claude_uuid):
-        log_notification_routed(
-            sender=self_name, recipient=target_name, cwd=cwd,
-            route="passive_fallback_compacting",
-        )
+        log_route("passive_fallback_compacting")
         return (
             f"Message queued for '{target_name}' — it's currently compacting "
             "(locked), so the message will be delivered once compaction "
@@ -489,13 +516,21 @@ def message_agent(
 
     if not push:
         if is_dormant:
+            if target.runtime == RUNTIME_CLAUDE:
+                return (
+                    f"Message queued for '{target_name}' (dormant — it will be "
+                    "delivered when the user next resumes that session)."
+                    + reply_hint
+                )
             return (
-                f"Message queued for '{target_name}' (dormant — it will be "
-                "delivered when the user next resumes that session)." + reply_hint
+                f"Message queued for '{target_name}' (dormant). "
+                + _queued_next_step(target.runtime, dormant=True)
+                + reply_hint
             )
         return (
-            f"Message queued for '{target_name}'. It will be delivered on the "
-            "recipient's next turn." + reply_hint
+            f"Message queued for '{target_name}'. "
+            + _queued_next_step(target.runtime)
+            + reply_hint
         )
 
     # push enabled — actively wake the recipient.
@@ -503,19 +538,25 @@ def message_agent(
         try:
             _auto_resume(target, cwd)
         except Exception as e:  # noqa: BLE001 — surface as tool error text
-            log_notification_routed(
-                sender=self_name, recipient=target_name, cwd=cwd,
-                route="auto_resume", success=False,
-            )
+            log_route("auto_resume", success=False)
+            if target.runtime == RUNTIME_CLAUDE:
+                return (
+                    f"Message queued for '{target_name}', but auto-resume failed "
+                    f"({e}). It will be delivered when the session is next "
+                    "resumed." + reply_hint
+                )
             return (
                 f"Message queued for '{target_name}', but auto-resume failed "
-                f"({e}). It will be delivered when the session is next "
-                "resumed." + reply_hint
+                f"({e}). "
+                + _queued_next_step(target.runtime, dormant=True)
+                + reply_hint
             )
-        log_notification_routed(
-            sender=self_name, recipient=target_name, cwd=cwd,
-            route="auto_resume", success=True,
-        )
+        log_route("auto_resume", success=True)
+        if target.runtime == RUNTIME_CODEX:
+            return (
+                f"Woke '{target_name}' (it was dormant) and prompted Codex "
+                "to call check_inbox on startup." + reply_hint
+            )
         return (
             f"Woke '{target_name}' (it was dormant) and delivered your "
             "message — it will process it on startup." + reply_hint
@@ -524,48 +565,97 @@ def message_agent(
     status = target.status
 
     if status == "listening":
-        log_notification_routed(
-            sender=self_name, recipient=target_name, cwd=cwd,
-            route="already_listening",
-        )
+        log_route("already_listening")
+        if target.runtime == RUNTIME_CLAUDE:
+            return (
+                f"Delivered to '{target_name}' — it was already listening on its "
+                "inbox and will pick the message up within a second." + reply_hint
+            )
         return (
-            f"Delivered to '{target_name}' — it was already listening on its "
-            "inbox and will pick the message up within a second." + reply_hint
+            f"Message queued for '{target_name}' — it was already listening "
+            "on its inbox and will detect it within a second." + reply_hint
+        )
+
+    if status in ("starting", "waiting"):
+        log_route(f"passive_fallback_{status}")
+        if target.runtime == RUNTIME_CLAUDE:
+            if status == "waiting":
+                return (
+                    f"Message queued for '{target_name}' — it's currently blocked "
+                    "on a user permission/input prompt, so it can't be pushed. "
+                    "The message will be delivered the moment the user resolves "
+                    "the prompt and the turn continues." + reply_hint
+                )
+            return (
+                f"Message queued for '{target_name}' (status: {status}). It will "
+                "be delivered on the recipient's next turn." + reply_hint
+            )
+        if status == "starting":
+            reason = "it is still starting"
+        else:
+            reason = "it is waiting for a user permission/input decision"
+        return (
+            f"Message queued for '{target_name}' — {reason}, so no terminal "
+            "ping was sent. "
+            + _queued_next_step(target.runtime)
+            + reply_hint
         )
 
     if status in ("idle", "working"):
         tmux_name = target.session.tmux_name
         if _client_attached(tmux_name):
-            log_notification_routed(
-                sender=self_name, recipient=target_name, cwd=cwd,
-                route="passive_fallback_client_attached",
-            )
+            log_route("passive_fallback_client_attached")
+            if target.runtime == RUNTIME_CLAUDE:
+                return (
+                    f"Message queued for '{target_name}' — a user is attached to "
+                    "its terminal, so it falls back to passive delivery (delivered "
+                    "on the recipient's next turn) rather than a terminal ping."
+                    + reply_hint
+                )
             return (
                 f"Message queued for '{target_name}' — a user is attached to "
-                "its terminal, so it falls back to passive delivery (delivered "
-                "on the recipient's next turn) rather than a terminal ping."
+                "its terminal, so no terminal ping was sent. "
+                + _queued_next_step(target.runtime)
                 + reply_hint
             )
         woke = _wake_via_tmux(tmux_name)
-        log_notification_routed(
-            sender=self_name, recipient=target_name, cwd=cwd,
-            route="wake_tmux", success=woke,
-        )
+        log_route("wake_tmux", success=woke)
         if woke:
+            if target.runtime == RUNTIME_CODEX:
+                return (
+                    f"Message queued for '{target_name}' and its terminal was "
+                    f"pinged to call check_inbox now (it was {status})."
+                    + reply_hint
+                )
             return (
                 f"Delivered to '{target_name}' and pinged its terminal to "
                 f"check its inbox now (it was {status})." + reply_hint
             )
         return (
-            f"Message queued for '{target_name}', but the terminal ping "
-            "failed — it will be delivered on the recipient's next turn."
+            (
+                f"Message queued for '{target_name}', but the terminal ping "
+                "failed — it will be delivered on the recipient's next turn."
+                if target.runtime == RUNTIME_CLAUDE
+                else (
+                    f"Message queued for '{target_name}', but the terminal ping "
+                    "failed. " + _queued_next_step(target.runtime)
+                )
+            )
             + reply_hint
         )
 
-    # starting / unknown / other live states — let the normal hooks deliver.
+    # Unknown or future live states are never safe targets for terminal input.
+    log_route("passive_fallback_status")
+    if target.runtime == RUNTIME_CLAUDE:
+        return (
+            f"Message queued for '{target_name}' (status: {status}). It will be "
+            "delivered on the recipient's next turn." + reply_hint
+        )
     return (
-        f"Message queued for '{target_name}' (status: {status}). It will be "
-        "delivered on the recipient's next turn." + reply_hint
+        f"Message queued for '{target_name}' (status: {status}); no terminal "
+        "ping was sent. "
+        + _queued_next_step(target.runtime)
+        + reply_hint
     )
 
 
@@ -603,7 +693,11 @@ def check_inbox() -> str:
         return "You have no pending inbox messages."
 
     log_inbox_delivered(
-        recipient=name, cwd=cwd, hook_event="check_inbox_tool", messages=messages
+        recipient=name,
+        cwd=cwd,
+        hook_event="check_inbox_tool",
+        messages=messages,
+        recipient_runtime=os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE),
     )
     return render_messages_as_tool_result(messages)
 
