@@ -24,19 +24,44 @@ import sys
 from pathlib import Path
 
 
+_SCRIPT = "sb-emit-user-prompt"
+
+
 def main() -> None:
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     agent = os.environ.get("MULTIVERSE_SESSION_NAME")
+    # Import sb_notify eagerly (needed for log_hook_outcome even on env-drop). Any
+    # exception here means the plugin's Python isn't reachable — swallow silently as
+    # the hook contract says.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    try:
+        from src import sb_notify
+    except Exception:  # noqa: BLE001
+        return
+
     if not cwd or not agent:
-        return  # not a named multiverse-managed session — nothing to report
+        # This is THE canonical "hook fired but hooks-based session tracking is off"
+        # case — the wrapper (bin/multiverse-session) didn't set MULTIVERSE_SESSION_*,
+        # or Claude was launched outside the wrapper entirely. Log it so SB-side
+        # missing-event reports have a definitive trace.
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "no-multiverse-env",
+            cwd=cwd or "", agent=agent or "",
+            detail=f"cwd_set={bool(cwd)} agent_set={bool(agent)}",
+        )
+        return
 
     try:
         data = json.loads(sys.stdin.read() or "{}")
-    except (ValueError, OSError):
+    except (ValueError, OSError) as exc:
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "stdin-parse-error", cwd=cwd, agent=agent, detail=str(exc)[:200],
+        )
         return
     text = str(data.get("prompt") or "")
     if not text:
-        return  # nothing to observe
+        sb_notify.log_hook_outcome(_SCRIPT, "empty-prompt", cwd=cwd, agent=agent)
+        return
 
     # Ignore Claude Code's synthetic system-injected "user messages" — these fire
     # UserPromptSubmit but semantically aren't user prompts, so SB shouldn't see them
@@ -52,18 +77,27 @@ def main() -> None:
     # Left in the transcript source-of-truth (the JSONL is Claude Code's, not ours);
     # just not surfaced as their own user.prompt event.
     stripped = text.lstrip()
-    if stripped.startswith("<task-notification>") or stripped.startswith(
-        "<local-command-caveat>"
-    ):
+    if stripped.startswith("<task-notification>"):
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "filter-task-notification", cwd=cwd, agent=agent,
+        )
+        return
+    if stripped.startswith("<local-command-caveat>"):
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "filter-local-command-caveat", cwd=cwd, agent=agent,
+        )
         return
 
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
-        from src import sb_notify
-
         sb_notify.record_user_prompt_signal(cwd, agent, text)
-    except Exception:  # noqa: BLE001 - never break the user's prompt
-        pass
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "recorded", cwd=cwd, agent=agent,
+            detail=f"text_len={len(text)}",
+        )
+    except Exception as exc:  # noqa: BLE001 - never break the user's prompt
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "exception", cwd=cwd, agent=agent, detail=str(exc)[:200],
+        )
 
 
 if __name__ == "__main__":

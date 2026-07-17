@@ -23,20 +23,34 @@ import sys
 from pathlib import Path
 
 
+_SCRIPT = "sb-emit-response"
+
+
 def main() -> None:
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     agent = os.environ.get("MULTIVERSE_SESSION_NAME")
-    if not cwd or not agent:
-        return  # not a named multiverse-managed session — nothing to report
-
-    # sb_notify is pure/light (no websockets/cryptography) — importable under system python.
+    # sb_notify is pure/light — importable under system python.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     try:
         from src import sb_notify
+    except Exception:  # noqa: BLE001
+        return
 
+    if not cwd or not agent:
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "no-multiverse-env",
+            cwd=cwd or "", agent=agent or "",
+            detail=f"cwd_set={bool(cwd)} agent_set={bool(agent)}",
+        )
+        return
+
+    try:
         sb_notify.record_response_signal(cwd, agent)
-    except Exception:  # noqa: BLE001 - never break the agent's turn
-        pass
+        sb_notify.log_hook_outcome(_SCRIPT, "recorded", cwd=cwd, agent=agent)
+    except Exception as exc:  # noqa: BLE001 - never break the agent's turn
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "exception", cwd=cwd, agent=agent, detail=str(exc)[:200],
+        )
 
 
 if __name__ == "__main__":

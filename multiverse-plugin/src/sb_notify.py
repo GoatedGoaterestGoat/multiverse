@@ -101,6 +101,50 @@ def _recordable_workspace_id(cwd: str) -> str | None:
     return workspace_id if workspace_id in _seeded() else None
 
 
+def _hook_log_path() -> Path:
+    """Diagnostic log for hook invocations. Separate from ``daemon.log`` because hooks
+    are short-lived subprocesses that CAN'T share the daemon's Python logger — this
+    file is what a user greps to answer "did hook X fire for agent Y and what
+    happened?" when SB reports a missing event.
+    """
+    return _sb_dir() / "hooks.log"
+
+
+def log_hook_outcome(
+    script: str,
+    outcome: str,
+    *,
+    cwd: str = "",
+    agent: str = "",
+    detail: str = "",
+) -> None:
+    """Append a single line to ``hooks.log`` describing what a hook decided.
+
+    Format: ``<iso-ts> <script> agent=<a> cwd=<c> outcome=<o> detail=<d>``. Callers
+    should pass a compact ``outcome`` slug (``recorded`` / ``no-multiverse-env`` /
+    ``empty-prompt`` / ``filter-task-notification`` / ``filter-local-command-caveat``
+    / ``gate-drop-workspace-not-seeded`` / ``no-device-identity`` / ``exception``)
+    and any free-form context in ``detail``.
+
+    Silent on failure — a hook diagnostic that CRASHED the hook would be worse
+    than the drop it was trying to explain.
+    """
+    try:
+        line = (
+            f"{_now_iso()} {script} agent={agent or '<unset>'} "
+            f"cwd={cwd or '<unset>'} outcome={outcome}"
+        )
+        if detail:
+            line += f" detail={detail}"
+        line += "\n"
+        p = _hook_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---- writing pending records ---------------------------------------------------------
 
 
@@ -173,6 +217,18 @@ def record_response_signal(cwd: str, agent_name: str) -> None:
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None:
+            # Log why so the hooks.log distinguishes "no device identity" (not enrolled)
+            # from "workspace not seeded yet" (enrolled but never connected). Captures
+            # THIS function's name (the record_*_signal we're in) as the script tag —
+            # currentframe() is our own frame; the caller's frame is one up but that's
+            # not what we want to display.
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            import inspect
+            frm = inspect.currentframe()
+            fn = frm.f_code.co_name if frm else "record_*"
+            # agent_name is the standard positional arg of every record_*_signal
+            agent = str(frm.f_locals.get("agent_name") or "") if frm else ""
+            log_hook_outcome(f"sb_notify.{fn}", reason, cwd=cwd, agent=agent)
             return
         d = response_signals_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -230,6 +286,18 @@ def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None:
+            # Log why so the hooks.log distinguishes "no device identity" (not enrolled)
+            # from "workspace not seeded yet" (enrolled but never connected). Captures
+            # THIS function's name (the record_*_signal we're in) as the script tag —
+            # currentframe() is our own frame; the caller's frame is one up but that's
+            # not what we want to display.
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            import inspect
+            frm = inspect.currentframe()
+            fn = frm.f_code.co_name if frm else "record_*"
+            # agent_name is the standard positional arg of every record_*_signal
+            agent = str(frm.f_locals.get("agent_name") or "") if frm else ""
+            log_hook_outcome(f"sb_notify.{fn}", reason, cwd=cwd, agent=agent)
             return
         d = user_prompt_signals_dir()
         d.mkdir(parents=True, exist_ok=True)
