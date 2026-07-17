@@ -44,12 +44,10 @@ import itertools
 import json
 import logging
 import os
-import dataclasses
 import signal
 import socket
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -809,31 +807,6 @@ class OutboundBuffer:
     def replay_from(self, from_seq: int) -> list[p.Event]:
         return [e for e in self._events if e.seq > from_seq]
 
-    def rewind_and_drain(self, from_seq: int) -> list[p.Event]:
-        """Rewind the seq counter to just past ``from_seq`` and drain the buffer,
-        returning the drained events for the caller to re-emit with fresh seqs.
-
-        Used at reconnect time to prepend ``workspace.connected`` ahead of any events
-        that queued up during the disconnect: caller drains, produces
-        ``workspace.connected`` (its :meth:`next_seq` returns ``from_seq + 1``), then
-        re-appends the drained events (getting the next seqs after that). Result: on the
-        wire SB sees ``workspace.connected`` before the queued events, in the right seq
-        order. Safe because none of the drained events have been acked yet — SB never
-        saw them with their old seqs — so renumbering doesn't violate the "seq stable
-        per event once observed" invariant.
-
-        Persistence is atomically consistent: the buffer file is rewritten empty
-        immediately, and the seq_hw callback fires on each subsequent :meth:`next_seq`
-        as the caller re-produces. If the daemon dies mid-repack, restart sees an empty
-        buffer + seq_hw at the reset point + acked cursor unchanged → the replayed
-        events simply weren't in flight, and their source (if any) will re-produce them.
-        """
-        drained = list(self._events)
-        self._events = []
-        self._persist()
-        self._seq = itertools.count(from_seq + 1)
-        return drained
-
     def pending_after(self, seq: int) -> list[p.Event]:
         """Buffered events with ``seq`` greater than ``seq`` (the unsent tail)."""
         return [e for e in self._events if e.seq > seq]
@@ -1059,99 +1032,69 @@ class SBConnector:
 
     # ---- one real event: workspace.connected (liveness proof) ---------------------
 
-    async def _emit_workspace_connected(self, from_seq: int) -> None:
-        """Enqueue ``workspace.connected`` for every granted workspace on every
-        successful (re)connect (contract locked with SB, DESIGN §4b).
+    async def _emit_workspace_connected(self, from_seq: int) -> None:  # noqa: ARG002
+        """Enqueue ``workspace.connected`` for every FIRST-EVER granted workspace
+        (SB, 2026-07-16: reconnect events are net-negative and now silently dropped
+        on the SB side; only first-ever carries decision-relevant signal).
 
         **First-ever connect** (this ``(device, workspace)`` pair not yet in
         ``_seeded``):
           - Initialize transcript delivery markers for every named agent in the
-            workspace to their latest jsonl entry. This runs BEFORE any events fire so
-            subsequent transcript-bearing events (agent.response / user.prompt / etc.)
-            cover "from now on," not the pre-existing backlog.
-          - Run Multiverse's ``ask_all`` fork against every named agent with a fixed
-            question ("Please give a concise summary of what you have achieved so far
-            in this workspace.") — up to 60s per agent, 5-parallel. Failed asks land
-            as bracketed placeholder strings, matching what SB rendered as-is.
+            workspace to their latest jsonl entry, BEFORE any events fire — so
+            subsequent transcript-bearing events (agent.response / user.prompt /
+            agent.question / agent.permission_request) cover "from now on," not
+            the pre-existing backlog.
+          - Run Multiverse's ``ask_all`` fork against every named agent with a
+            fixed question ("Please give a concise summary of what you have
+            achieved so far in this workspace.") — up to 60s per agent,
+            5-parallel. Failed asks land as bracketed placeholder strings.
           - Emit event with payload ``{first_connect: True, workspace_summary: {…}}``
-            (or ``workspace_summary: {}`` for an empty workspace).
-          - Add to ``_seeded`` + persist — enables durable event queueing for this
-            workspace on future disconnects.
+            (or ``workspace_summary: {}`` for an empty workspace). Stable
+            ``event_id=wsconn-first:<workspace_id>`` — a mid-flow crash + restart
+            is idempotent under SB's dedup.
+          - Add to ``_seeded`` + persist — enables durable event queueing for
+            this workspace on future disconnects.
 
         **Subsequent (re)connect** (already seeded):
-          - Emit event with empty payload ``{}``. SB's ingest reads absence of
-            ``first_connect`` as "reconnect" and delivers a minimal turn.
-          - No marker init, no ask_all — sub-second.
+          - Emit NOTHING. No marker init, no ask_all. Sub-microsecond.
 
-        **Ordering — the trickier bit.** Events that queued in the durable outbox
-        during downtime carry seqs assigned at production time (lower than any new seq
-        we'd assign now). If we just fire ``workspace.connected`` at this point it'd
-        get the highest seq and SB (which orders by seq) would show it AFTER the
-        during-downtime events. That's the opposite of what we want: the SB agent
-        should see "workspace connected" BEFORE the batch of things that piled up.
-
-        Fix: rewind the buffer's seq counter to just past the acked cursor
-        (``from_seq``) via :meth:`OutboundBuffer.rewind_and_drain`, produce all the
-        workspace.connected events first (getting the lowest new seqs), then re-emit
-        the drained during-downtime events with fresh seqs that continue from there.
-        Because none of the drained events were ever acked, SB never observed them
-        with their old seqs; renumbering preserves the "seq stable per event once
-        observed" invariant. Dedup is by ``event_id``, so idempotency is unchanged.
+        ``from_seq`` is kept in the signature for the caller's ergonomics (matches
+        the surrounding ``_handshake`` return type) but is no longer used — the
+        pre-2026-07-16 rewind-and-re-emit logic that used it existed only to make
+        reconnect ``workspace.connected`` precede downtime backlog on the wire,
+        and there's no reconnect emission any more.
         """
         from . import sb_events
 
-        granted = [
+        # Fast path: nothing new to bootstrap. Every workspace already seeded means
+        # this is a plain reconnect — SB drops those events, and we no longer emit
+        # them, so we're done.
+        pending_first = [
             (cwd, f"{self.identity.device_id}:{cwd}")
             for cwd in self.identity.granted_workspaces
+            if f"{self.identity.device_id}:{cwd}" not in self._seeded
         ]
+        if not pending_first:
+            return
 
-        # Do the blocking first-ever work UP FRONT (before the rewind + emit), so the
-        # rewind window itself is instant and doesn't overlap with a slow ask_all.
-        first_ever_summaries: dict[str, dict[str, str]] = {}
-        for cwd, workspace_id in granted:
-            if workspace_id in self._seeded:
-                continue
+        # First-ever bootstrap: marker init + ask_all (blocking, potentially slow),
+        # then a single workspace.connected event per new workspace.
+        for cwd, workspace_id in pending_first:
             self._init_markers_for_workspace(cwd)
-            first_ever_summaries[workspace_id] = await self._gather_workspace_summary(cwd)
-
-        # Rewind: drain queued events, reset seq counter to acked cursor.
-        drained = self.buffer.rewind_and_drain(from_seq)
-
-        # Emit workspace.connected for every granted workspace — first-ever gets the
-        # summary payload with a stable event_id (so a mid-flow crash + restart is
-        # idempotent under SB's dedup), subsequent gets an empty payload with a unique
-        # event_id per firing (so distinct reconnects don't collapse).
-        for cwd, workspace_id in granted:
-            if workspace_id in first_ever_summaries:
-                payload = sb_events.workspace_connected_event_fields(
-                    first_connect=True,
-                    agents_summary=first_ever_summaries[workspace_id],
-                )
-                event_id = f"wsconn-first:{workspace_id}"
-            else:
-                payload = sb_events.workspace_connected_event_fields(first_connect=False)
-                event_id = f"wsconn:{uuid.uuid4().hex}"
+            summary = await self._gather_workspace_summary(cwd)
             self.make_event(
                 workspace_id=workspace_id,
                 workspace_label=_workspace_label(cwd),
                 kind=p.EventKind.WORKSPACE_CONNECTED,
-                payload=payload,
-                event_id=event_id,
+                payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
+                event_id=f"wsconn-first:{workspace_id}",
             )
-
-        # Mark first-ever workspaces as seeded (+ marker-inited) and persist state.
-        for workspace_id in first_ever_summaries:
             self._seeded.add(workspace_id)
             self._marker_inited.add(workspace_id)
-        if first_ever_summaries:
-            self._state["seeded"] = sorted(self._seeded)
-            save_conn_state(self._state)
 
-        # Re-emit the drained during-downtime events with fresh higher seqs so they
-        # arrive at SB AFTER all the workspace.connected events, preserving order.
-        for old in drained:
-            new_seq = self.buffer.next_seq()
-            self.buffer.append(dataclasses.replace(old, seq=new_seq))
+        # Persist the seeded set so a subsequent restart doesn't re-fire first-ever.
+        self._state["seeded"] = sorted(self._seeded)
+        save_conn_state(self._state)
 
     def _init_markers_for_workspace(self, cwd: str) -> None:
         """Initialize sb_transcript markers to the latest jsonl entry for every named
