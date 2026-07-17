@@ -37,6 +37,32 @@ CODEX_CONFIG_ARGS=(
 )
 
 CODEX_ARGS=("$@")
+RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
+READY_WATCHER_PID=""
+
+write_status() {
+  local status="$1" ts tmp
+  ts=$(date +%s)
+  tmp="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
+  if printf '{"status":"%s","ts":%d}\n' "$status" "$ts" > "$tmp"; then
+    mv -f "$tmp" "$MULTIVERSE_STATUS"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  if [ -n "$READY_WATCHER_PID" ]; then
+    kill "$READY_WATCHER_PID" 2>/dev/null || true
+    wait "$READY_WATCHER_PID" 2>/dev/null || true
+  fi
+  write_status ended || true
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 INITIAL_PROMPT=""
 if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
@@ -92,14 +118,13 @@ fi
 mark_ready_when_session_id_appears() {
   local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
   [ -z "$id_path" ] && return 0
-  local attempt=0 current ts
+  local attempt=0 current
   while [ "$attempt" -lt 200 ]; do
     attempt=$((attempt + 1))
     if [ -s "$id_path" ]; then
       current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
       if [ "$current" = "starting" ]; then
-        ts=$(date +%s)
-        printf '{"status":"idle","ts":%d}\n' "$ts" > "$MULTIVERSE_STATUS"
+        write_status idle
       fi
       return 0
     fi
@@ -110,12 +135,20 @@ mark_ready_when_session_id_appears() {
 mark_ready_when_session_id_appears &
 READY_WATCHER_PID=$!
 
-"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
+# Keep Codex in the pane's foreground process group. The tiny foreground
+# launcher records its own PID and then execs Codex, so the PID remains stable
+# for liveness checks without changing terminal input or job-control behavior.
+/bin/sh -c '
+  pid_path=$1
+  shift
+  tmp="${pid_path}.$$.tmp"
+  if printf "%s\n" "$$" > "$tmp"; then
+    mv -f "$tmp" "$pid_path"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  exec "$@"
+' multiverse-codex-exec "$RUNTIME_PID_PATH" \
+  "$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
   ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} \
   ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
-
-kill "$READY_WATCHER_PID" 2>/dev/null || true
-wait "$READY_WATCHER_PID" 2>/dev/null || true
-
-TS=$(date +%s)
-printf '{"status":"ended","ts":%d}\n' "$TS" > "$MULTIVERSE_STATUS" || true

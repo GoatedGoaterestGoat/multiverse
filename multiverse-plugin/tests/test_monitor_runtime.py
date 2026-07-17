@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from textual.app import App
@@ -75,6 +76,39 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
             results,
             [(monitor.RUNTIME_CODEX, "codex-thread", "codex-agent")],
         )
+
+    async def test_k_confirms_and_deletes_dormant_codex_thread(self) -> None:
+        row = monitor.DashboardRow(
+            name="codex-agent",
+            cwd="/workspace",
+            status="dormant",
+            status_ts=1,
+            runtime=monitor.RUNTIME_CODEX,
+            session_id="codex-thread",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "sessions"
+            with (
+                patch.object(monitor, "STATE_DIR", state_dir),
+                patch.object(monitor, "list_sessions", return_value=[]),
+                patch.object(monitor, "build_dashboard_rows", return_value=[row]),
+                patch.object(monitor, "list_pending_requests", return_value=[]),
+                patch.object(monitor.web_share, "status", return_value=None),
+                patch.object(monitor, "pending_inbox_count", return_value=0),
+                patch.object(monitor, "delete_codex_thread") as delete_thread,
+                patch.dict(
+                    "os.environ", {"MULTIVERSE_ORIG_CWD": "/workspace"}
+                ),
+            ):
+                app = monitor.MonitorApp([])
+                async with app.run_test() as pilot:
+                    await pilot.press("k")
+                    await pilot.pause()
+                    self.assertIsInstance(app.screen, monitor.ConfirmDeleteScreen)
+                    await pilot.press("enter")
+                    await pilot.pause()
+
+        delete_thread.assert_called_once_with("codex-thread")
 
 
 if __name__ == "__main__":

@@ -73,6 +73,7 @@ from .sessions import (
     build_dashboard_rows,
     create_session,
     current_host,
+    delete_codex_thread,
     existing_names_in_cwd,
     foreign_host_still_reported_live,
     kill_session,
@@ -347,7 +348,7 @@ class NameInputScreen(ModalScreen[Optional[str]]):
 
 
 class ConfirmDeleteScreen(ModalScreen[bool]):
-    """Yes/no confirmation before deleting a dormant session's JSONL.
+    """Yes/no confirmation before deleting a dormant native session.
 
     Returns ``True`` on confirm (Enter), ``False`` on cancel (Esc).
     """
@@ -357,19 +358,24 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         Binding("enter", "confirm", "Confirm"),
     ]
 
-    def __init__(self, display_name: str) -> None:
+    def __init__(self, display_name: str, runtime: str = RUNTIME_CLAUDE) -> None:
         super().__init__()
         self.display_name = display_name
+        self.runtime = runtime
 
     def compose(self) -> ComposeResult:
+        description = (
+            "This permanently deletes its Codex conversation data. "
+            if self.runtime == RUNTIME_CODEX
+            else "This permanently deletes its JSONL from disk. "
+        )
         yield Vertical(
             Static(
                 f"Delete dormant session [bold]'{self.display_name}'[/]?",
                 id="confirm-delete-header",
             ),
             Static(
-                "This permanently deletes its JSONL from disk. "
-                "This cannot be undone.",
+                description + "This cannot be undone.",
                 id="confirm-delete-body",
             ),
             Static("Enter to confirm · Esc to cancel", id="confirm-delete-hint"),
@@ -2857,20 +2863,6 @@ class MonitorApp(App):
         # Scope to the monitor's cwd — other multiverse instances own sessions
         # in other cwds.
         self.sessions = [s for s in all_sessions if s.cwd == self.monitor_cwd]
-        for s in self.sessions:
-            # Only trust "local tmux doesn't have it" as proof of death
-            # for sessions THIS host created. A session created on a
-            # different host (shared MULTIVERSE_ROOT deployments) is
-            # invisible to our local tmux by construction — showing it
-            # as "ended" here would be wrong, and would invite an Enter
-            # press that reaps a session that's still very much alive
-            # elsewhere. See foreign_host_still_reported_live.
-            if (
-                s.status not in ("ended",)
-                and (not s.host or s.host == current_host())
-                and not tmux_session_exists(s.tmux_name)
-            ):
-                s.status = "ended"
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
         self.entries = build_dashboard_rows(
@@ -3319,33 +3311,39 @@ class MonitorApp(App):
             )
             return
         if e.session is None:
-            claude_uuid = e.claude_uuid
+            native_session_id = e.session_id
             cwd = e.cwd
             display_name = e.name
+            runtime = e.runtime
 
             def _on_close(confirmed: Optional[bool]) -> None:
                 if not confirmed:
                     return
-                if not claude_uuid:
+                if not native_session_id:
                     self.notify(
-                        "No claude UUID tracked for this row — cannot delete",
+                        f"No {runtime} session ID tracked for this row — cannot delete",
                         severity="error",
                     )
                     return
-                jsonl = live_jsonl_path(claude_uuid, cwd)
-                if not jsonl.is_file():
-                    self.notify("JSONL already gone", severity="warning")
-                    self.refresh_sessions()
-                    return
                 try:
-                    jsonl.unlink()
-                except OSError as exc:
+                    if runtime == RUNTIME_CODEX:
+                        delete_codex_thread(native_session_id)
+                    else:
+                        jsonl = live_jsonl_path(native_session_id, cwd)
+                        if not jsonl.is_file():
+                            self.notify("JSONL already gone", severity="warning")
+                            self.refresh_sessions()
+                            return
+                        jsonl.unlink()
+                except (OSError, RuntimeError, ValueError) as exc:
                     self.notify(f"Failed to delete: {exc}", severity="error")
                     return
                 self.notify(f"Deleted dormant session '{display_name}'")
                 self.refresh_sessions()
 
-            self.push_screen(ConfirmDeleteScreen(display_name), _on_close)
+            self.push_screen(
+                ConfirmDeleteScreen(display_name, runtime), _on_close
+            )
             return
         if foreign_host_still_reported_live(e.session):
             # Session was created on a different host and never wrote

@@ -73,9 +73,9 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Auto-resume a dormant Codex session for an urgent inbox message.
 - [x] End a Codex wrapper process cleanly and record `ended` status.
 - [x] Kill a live Codex tmux session and remove only its Multiverse wrapper state.
-- [ ] Delete a dormant Codex session only after the existing confirmation flow.
+- [x] Delete a dormant Codex session only after the existing confirmation flow.
 - [x] Preserve the current cross-host liveness safeguards.
-- [ ] Prevent two wrappers from claiming the same Codex session and agent name.
+- [x] Prevent two wrappers from claiming the same Codex session and agent name.
 - [x] Preserve sessions when the monitor exits.
 - [ ] Verify attach and detach behavior through tmux.
 - [ ] Verify tmux mouse/scroll behavior in Codex sessions.
@@ -95,7 +95,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
       registry by using non-materialized ephemeral threads.
 - [x] Ensure `Enter` attaches to a live Codex session and resumes an ended/dormant one.
 - [x] Ensure `R` can filter or select resumable sessions by runtime.
-- [ ] Ensure `k` follows the same live/ended/dormant safety rules for Codex.
+- [x] Ensure `k` follows the same live/ended/dormant safety rules for Codex.
 
 ## Status Tracking
 
@@ -106,7 +106,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Record `idle` after a normal completed turn.
 - [x] Record `listening` while `monitor_inbox` is active.
 - [x] Record `ended` when the Codex process exits.
-- [ ] Avoid stale live-looking statuses after crashes.
+- [x] Avoid stale live-looking statuses after crashes.
 - [x] Avoid status writes from ephemeral side-question processes into the caller's
       session directory.
 
@@ -190,7 +190,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] `a`: ask all named agents across both runtimes.
 - [x] `i`: inspect a Codex agent's pending inbox without consuming it.
 - [x] `Enter`: attach to or resume the selected Codex session.
-- [ ] `k`: kill or delete a Codex session with the correct safety flow.
+- [x] `k`: kill or delete a Codex session with the correct safety flow.
 - [x] `r`: refresh mixed-runtime state.
 - [x] `q`: leave all Claude and Codex sessions running.
 - [x] `w`: expose the mixed-runtime monitor through the existing web share.
@@ -238,8 +238,8 @@ feature set present when the branches are integrated.
 - [ ] Keep all cross-process writes atomic.
 - [x] Preserve inbox exactly-once claim behavior under mixed-runtime races.
 - [x] Preserve host-aware liveness checks on shared storage.
-- [ ] Recover cleanly when a Codex process exits without a lifecycle callback.
-- [ ] Recover cleanly when tmux exists but the Codex process has died.
+- [x] Recover cleanly when a Codex process exits without a lifecycle callback.
+- [x] Recover cleanly when tmux exists but the Codex process has died.
 - [x] Avoid reaping a Codex session that is live on another host.
 - [x] Keep runtime-specific temporary files from appearing as dormant agents.
 - [x] Add enough runtime information to inter-agent logs to diagnose mixed-runtime
@@ -249,7 +249,7 @@ feature set present when the branches are integrated.
 
 - [x] Unit-test legacy session metadata defaulting to Claude.
 - [x] Unit-test mixed-runtime session discovery and name collision handling.
-- [ ] Unit-test Codex status mapping and crash correction.
+- [x] Unit-test Codex status mapping and crash correction.
 - [x] Unit-test Codex inbox delivery and atomic claims.
 - [x] Unit-test Codex ephemeral-session isolation and process cleanup.
 - [ ] End-to-end test Codex plugin loading inside a wrapped session.

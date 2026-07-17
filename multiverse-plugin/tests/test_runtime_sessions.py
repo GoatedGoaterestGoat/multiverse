@@ -5,7 +5,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -163,6 +166,101 @@ class RuntimeMetadataTests(unittest.TestCase):
         )
 
 
+class RuntimeLivenessTests(unittest.TestCase):
+    def _write_session(
+        self,
+        state_dir: Path,
+        *,
+        runtime: str = sessions.RUNTIME_CODEX,
+        status: str = "idle",
+        host: str = "local-host",
+    ) -> Path:
+        session_dir = state_dir / "wrapped"
+        session_dir.mkdir()
+        (session_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "cwd": "/workspace",
+                    "created_at": 1,
+                    "name": "agent",
+                    "runtime": runtime,
+                    "host": host,
+                }
+            )
+        )
+        (session_dir / "status.json").write_text(
+            json.dumps({"status": status, "ts": 2})
+        )
+        return session_dir
+
+    def test_missing_local_tmux_is_persisted_as_ended(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir)
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=False),
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "ended")
+            persisted = json.loads((session_dir / "status.json").read_text())
+            self.assertEqual(persisted["status"], "ended")
+
+    def test_foreign_host_status_is_not_corrected_from_local_tmux(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir, host="other-host")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists") as tmux_exists,
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "idle")
+            self.assertEqual(
+                json.loads((session_dir / "status.json").read_text())["status"],
+                "idle",
+            )
+            tmux_exists.assert_not_called()
+
+    def test_dead_codex_pid_is_corrected_even_when_tmux_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir)
+            (session_dir / "runtime_pid").write_text("4242\n")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=True),
+                patch.object(sessions, "_pid_alive", return_value=False),
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "ended")
+            self.assertEqual(
+                json.loads((session_dir / "status.json").read_text())["status"],
+                "ended",
+            )
+
+    def test_live_codex_pid_keeps_current_status(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            self._write_session(state_dir)
+            (state_dir / "wrapped" / "runtime_pid").write_text("4242\n")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=True),
+                patch.object(sessions, "_pid_alive", return_value=True),
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "idle")
+
+
 class RuntimeLaunchTests(unittest.TestCase):
     def _create_with_runtime(self, runtime: str, runtime_args: list[str]):
         temp = tempfile.TemporaryDirectory()
@@ -224,6 +322,151 @@ class RuntimeLaunchTests(unittest.TestCase):
             meta["claude_args"], ["--permission-mode", "auto"]
         )
         self.assertIn("multiverse-session --permission-mode auto", tmux_cmd[-1])
+
+    def test_duplicate_codex_name_and_native_thread_claims_are_rejected(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        state_dir = root / "state"
+        plugin_root = root / "multiverse-plugin"
+        (plugin_root / "bin").mkdir(parents=True)
+        env = {
+            "MULTIVERSE_PLUGIN_ROOT": str(plugin_root),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        ids = iter(("first", "same-name", "same-native", "reclaimed"))
+        with (
+            patch.object(sessions, "STATE_DIR", state_dir),
+            patch.object(sessions, "MULTIVERSE_DIR", root),
+            patch.object(sessions, "short_id", side_effect=lambda: next(ids)),
+            patch.object(
+                sessions.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "", ""),
+            ),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            first = sessions.create_session(
+                str(root),
+                ["resume", "thread-one"],
+                resumed_from="thread-one",
+                name="agent-one",
+                runtime=sessions.RUNTIME_CODEX,
+            )
+            with self.assertRaisesRegex(RuntimeError, "already claimed"):
+                sessions.create_session(
+                    str(root),
+                    ["resume", "thread-two"],
+                    resumed_from="thread-two",
+                    name="agent-one",
+                    runtime=sessions.RUNTIME_CODEX,
+                )
+            with self.assertRaisesRegex(RuntimeError, "already claimed"):
+                sessions.create_session(
+                    str(root),
+                    ["resume", "thread-one"],
+                    resumed_from="thread-one",
+                    name="agent-two",
+                    runtime=sessions.RUNTIME_CODEX,
+                )
+            sessions.kill_session(first)
+            sessions.create_session(
+                str(root),
+                ["resume", "thread-one"],
+                resumed_from="thread-one",
+                name="agent-one",
+                runtime=sessions.RUNTIME_CODEX,
+            )
+
+        self.assertEqual(
+            sorted(path.name for path in state_dir.iterdir()), ["reclaimed"]
+        )
+
+    def test_concurrent_claim_has_exactly_one_winner(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "sessions"
+            (state_dir / "one").mkdir(parents=True)
+            (state_dir / "two").mkdir()
+            barrier = threading.Barrier(2)
+
+            def acquire(owner: str) -> str:
+                barrier.wait()
+                try:
+                    sessions._acquire_claim(claim_path, owner)
+                except RuntimeError:
+                    return "rejected"
+                return "acquired"
+
+            with patch.object(sessions, "STATE_DIR", state_dir):
+                claim_path = sessions._claim_path("name", "/workspace\0agent")
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(acquire, ("one", "two")))
+
+            self.assertEqual(sorted(results), ["acquired", "rejected"])
+            self.assertIn(os.readlink(claim_path), {"one", "two"})
+
+    def test_failed_tmux_launch_releases_claims_and_state(self) -> None:
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        state_dir = root / "state"
+        plugin_root = root / "multiverse-plugin"
+        (plugin_root / "bin").mkdir(parents=True)
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:2] == ["tmux", "new-session"]:
+                raise subprocess.CalledProcessError(1, cmd, stderr="launch failed")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        env = {
+            "MULTIVERSE_PLUGIN_ROOT": str(plugin_root),
+            "PATH": os.environ.get("PATH", ""),
+        }
+        with (
+            patch.object(sessions, "STATE_DIR", state_dir),
+            patch.object(sessions, "MULTIVERSE_DIR", root),
+            patch.object(sessions, "short_id", return_value="failed"),
+            patch.object(sessions.subprocess, "run", side_effect=fake_run),
+            patch.dict(os.environ, env, clear=True),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                sessions.create_session(
+                    str(root),
+                    ["resume", "thread-one"],
+                    resumed_from="thread-one",
+                    name="agent-one",
+                    runtime=sessions.RUNTIME_CODEX,
+                )
+
+        self.assertFalse((state_dir / "failed").exists())
+        claims_dir = state_dir.parent / "session_claims"
+        self.assertEqual(list(claims_dir.iterdir()), [])
+
+
+class CodexDeletionTests(unittest.TestCase):
+    def test_delete_codex_thread_uses_app_server_protocol(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            capture = temp_dir / "requests.jsonl"
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "cat > \"$CAPTURE_PATH\"\n"
+                "printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "CAPTURE_PATH": str(capture),
+            }
+            with patch.dict(os.environ, env, clear=True):
+                sessions.delete_codex_thread("codex-thread")
+
+            requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            delete = next(item for item in requests if item.get("id") == 2)
+            self.assertEqual(delete["method"], "thread/delete")
+            self.assertEqual(delete["params"], {"threadId": "codex-thread"})
 
 
 class CodexHookTests(unittest.TestCase):
@@ -440,6 +683,54 @@ class CodexRunnerTests(unittest.TestCase):
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(observed.read_text().strip(), "working")
+
+    def test_runner_records_foreground_codex_pid_until_exit(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            runtime_pid = temp_dir / "runtime_pid"
+            release = temp_dir / "release"
+            status.write_text(json.dumps({"status": "starting", "ts": 1}))
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "while [ ! -f \"$RELEASE_PATH\" ]; do sleep 0.02; done\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_PID_PATH": str(runtime_pid),
+                "RELEASE_PATH": str(release),
+            }
+            proc = subprocess.Popen(
+                [str(runner)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            try:
+                deadline = time.monotonic() + 3
+                while not runtime_pid.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(runtime_pid.is_file())
+                self.assertTrue(sessions._pid_alive(int(runtime_pid.read_text())))
+                release.touch()
+                _, stderr = proc.communicate(timeout=3)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+            self.assertEqual(proc.returncode, 0, stderr)
+            self.assertEqual(json.loads(status.read_text())["status"], "ended")
 
 
 if __name__ == "__main__":

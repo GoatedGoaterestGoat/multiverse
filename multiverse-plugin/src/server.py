@@ -21,7 +21,6 @@ Hosts the agent-facing tools for the multiverse plugin:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import subprocess
 import sys
@@ -43,6 +42,7 @@ from src.sessions import (
     foreign_host_still_reported_live,
     kill_session,
     list_named_agents_in_cwd,
+    write_status_path,
 )
 from src.inbox import (
     claim_pending_messages,
@@ -96,8 +96,7 @@ def _write_session_status(status: str) -> None:
     if not status_path:
         return
     try:
-        with open(status_path, "w") as f:
-            json.dump({"status": status, "ts": int(time.time())}, f)
+        write_status_path(Path(status_path), status, int(time.time()))
     except OSError:
         pass
 

@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,7 +25,41 @@ STATUS_BY_EVENT = {
 def _write_status(status_path: Path, status: str) -> None:
     try:
         status_path.parent.mkdir(parents=True, exist_ok=True)
-        status_path.write_text(json.dumps({"status": status, "ts": int(time.time())}))
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{status_path.name}.",
+            suffix=".tmp",
+            dir=status_path.parent,
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                json.dump({"status": status, "ts": int(time.time())}, handle)
+            os.replace(temp_path, status_path)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
+    except OSError:
+        pass
+
+
+def _write_text(path: Path, value: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temp_path = Path(temp_name)
+        try:
+            with os.fdopen(fd, "w") as handle:
+                handle.write(value)
+            os.replace(temp_path, path)
+        finally:
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                pass
     except OSError:
         pass
 
@@ -93,10 +128,7 @@ def _run_hook() -> None:
                 os.environ.get("MULTIVERSE_RUNTIME_SESSION_ID_PATH")
                 or status_path.parent / "runtime_session_id"
             )
-            try:
-                id_path.write_text(session_id + "\n")
-            except OSError:
-                pass
+            _write_text(id_path, session_id + "\n")
 
     # Write SessionStart's idle state after its native ID. The runner watches
     # for that ID as its readiness signal, so this ordering prevents an older

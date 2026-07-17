@@ -16,6 +16,7 @@ The data sources are:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -43,6 +44,8 @@ TMUX_PREFIX = "multiverse-"
 RUNTIME_CLAUDE = "claude"
 RUNTIME_CODEX = "codex"
 RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX)
+_STARTING_LIVENESS_GRACE_SECONDS = 10.0
+_CLAIM_DIR_NAME = "session_claims"
 
 
 def normalize_runtime(runtime: Optional[str]) -> str:
@@ -417,6 +420,10 @@ class Session:
         return self.dir / "status.json"
 
     @property
+    def runtime_pid_path(self) -> Path:
+        return self.dir / "runtime_pid"
+
+    @property
     def meta_path(self) -> Path:
         return self.dir / "meta.json"
 
@@ -494,6 +501,94 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
+def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
+    """Replace a JSON file without exposing a partially-written value."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_name(
+        f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
+    )
+    try:
+        temp.write_text(json.dumps(value))
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink()
+        except OSError:
+            pass
+
+
+def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
+    """Atomically persist the common Multiverse status shape."""
+    _atomic_write_json(
+        path,
+        {"status": status, "ts": time.time() if ts is None else ts},
+    )
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _mark_session_ended(s: Session) -> None:
+    now = time.time()
+    try:
+        write_status_path(s.status_path, "ended", now)
+    except OSError:
+        pass
+    s.status = "ended"
+    s.status_ts = now
+
+
+def _correct_local_liveness(s: Session) -> bool:
+    """Persist ``ended`` when local process evidence proves a row is stale.
+
+    A foreign host's tmux server is intentionally unobservable here, so its
+    durable status remains authoritative. New sessions also receive a short
+    grace period between reserving their state directory and creating tmux.
+    Codex runners record the foreground Codex PID, allowing correction even
+    when an abnormal wrapper leaves its tmux pane behind.
+    """
+    if s.status == "ended" or (s.host and s.host != current_host()):
+        return False
+
+    within_startup_grace = (
+        s.status == "starting"
+        and time.time() - max(s.created_at, s.status_ts) < _STARTING_LIVENESS_GRACE_SECONDS
+    )
+    if not tmux_session_exists(s.tmux_name):
+        if within_startup_grace:
+            return False
+        _mark_session_ended(s)
+        return True
+
+    if s.runtime != RUNTIME_CODEX:
+        return False
+    raw_pid = _read_text_stripped(s.runtime_pid_path)
+    if not raw_pid:
+        # Backward compatibility for sessions launched before runtime PID
+        # tracking was introduced. Their runner still writes `ended` itself.
+        return False
+    try:
+        runtime_pid = int(raw_pid)
+    except ValueError:
+        runtime_pid = -1
+    if runtime_pid > 0 and _pid_alive(runtime_pid):
+        return False
+    if within_startup_grace:
+        return False
+
+    _mark_session_ended(s)
+    return True
+
+
 def load_session(session_id: str) -> Optional[Session]:
     d = STATE_DIR / session_id
     meta = _read_json(d / "meta.json")
@@ -533,6 +628,7 @@ def list_sessions() -> list[Session]:
             continue
         s = load_session(entry.name)
         if s is not None:
+            _correct_local_liveness(s)
             out.append(s)
     out.sort(key=lambda s: s.created_at)
     return out
@@ -893,6 +989,111 @@ def detect_fold_ancestors(jsonl_path: Path) -> list[dict]:
     return out
 
 
+def _claim_path(kind: str, value: str) -> Path:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return STATE_DIR.parent / _CLAIM_DIR_NAME / f"{kind}-{digest}.claim"
+
+
+def _session_claim_specs(
+    cwd: str,
+    runtime: str,
+    name: Optional[str],
+    native_session_id: Optional[str],
+) -> list[tuple[str, str]]:
+    specs: list[tuple[str, str]] = []
+    if name:
+        specs.append(("name", f"{cwd}\0{name}"))
+    if native_session_id:
+        specs.append(("native", f"{runtime}\0{native_session_id}"))
+    return sorted(specs)
+
+
+def _acquire_claim(path: Path, session_id: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    for _ in range(2):
+        try:
+            # symlink creation is atomic and its target carries the owner ID;
+            # unlike an O_EXCL JSON file, there is no visible empty-file window.
+            path.symlink_to(session_id)
+        except FileExistsError:
+            try:
+                owner = os.readlink(path)
+            except OSError:
+                owner = ""
+            if owner and (STATE_DIR / owner).exists():
+                raise RuntimeError(
+                    f"Session is already claimed by Multiverse wrapper {owner}"
+                )
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        return
+    raise RuntimeError("Could not acquire Multiverse session claim")
+
+
+def _release_claim(path: Path, session_id: str) -> None:
+    try:
+        owner = os.readlink(path)
+    except OSError:
+        return
+    if owner != session_id:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _assert_no_existing_wrapper_claim(
+    session_id: str,
+    cwd: str,
+    runtime: str,
+    name: Optional[str],
+    native_session_id: Optional[str],
+) -> None:
+    """Catch wrappers created before claim files were introduced."""
+    if not STATE_DIR.exists():
+        return
+    for entry in STATE_DIR.iterdir():
+        if not entry.is_dir() or entry.name == session_id:
+            continue
+        meta = _read_json(entry / "meta.json")
+        if not meta or meta.get("cwd") != cwd:
+            continue
+        if name and meta.get("name") == name:
+            raise RuntimeError(
+                f"Agent name '{name}' is already claimed by wrapper {entry.name}"
+            )
+        if not native_session_id:
+            continue
+        try:
+            existing_runtime = normalize_runtime(meta.get("runtime"))
+        except ValueError:
+            continue
+        if existing_runtime != runtime:
+            continue
+        existing_native_id = _read_text_stripped(entry / "runtime_session_id")
+        if not existing_native_id:
+            existing_native_id = meta.get("resumed_from")
+        if existing_native_id == native_session_id:
+            raise RuntimeError(
+                f"{runtime} session '{native_session_id}' is already claimed "
+                f"by wrapper {entry.name}"
+            )
+
+
+def _release_session_claims(s: Session) -> None:
+    for kind, value in _session_claim_specs(
+        s.cwd,
+        s.runtime,
+        s.name,
+        s.runtime_session_id,
+    ):
+        _release_claim(_claim_path(kind, value), s.id)
+
+
 def create_session(
     cwd: str,
     claude_args: list[str],
@@ -908,13 +1109,32 @@ def create_session(
     agent comms).
     """
     runtime = normalize_runtime(runtime)
-    sid = short_id()
-    d = STATE_DIR / sid
-    d.mkdir(parents=True, exist_ok=True)
-
     cwd_abs = str(Path(cwd).expanduser().resolve())
     if not Path(cwd_abs).is_dir():
         raise ValueError(f"Not a directory: {cwd_abs}")
+    plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
+    if not plugin_root:
+        raise RuntimeError("MULTIVERSE_PLUGIN_ROOT not set — launch via bin/multiverse")
+
+    sid = short_id()
+    d = STATE_DIR / sid
+    d.mkdir(parents=True, exist_ok=False)
+    claim_paths: list[Path] = []
+    try:
+        for kind, value in _session_claim_specs(
+            cwd_abs, runtime, name, resumed_from
+        ):
+            path = _claim_path(kind, value)
+            _acquire_claim(path, sid)
+            claim_paths.append(path)
+        _assert_no_existing_wrapper_claim(
+            sid, cwd_abs, runtime, name, resumed_from
+        )
+    except Exception:
+        for path in claim_paths:
+            _release_claim(path, sid)
+        shutil.rmtree(d, ignore_errors=True)
+        raise
 
     # Default every spawned session to auto permission mode — a brand new
     # session, and a resume after compaction (which claude treats as a new
@@ -958,8 +1178,14 @@ def create_session(
         if ancestors:
             meta["superseded_uuids"] = ancestors
 
-    (d / "meta.json").write_text(json.dumps(meta))
-    (d / "status.json").write_text(json.dumps({"status": "starting", "ts": now}))
+    try:
+        _atomic_write_json(d / "meta.json", meta)
+        write_status_path(d / "status.json", "starting", now)
+    except Exception:
+        for path in claim_paths:
+            _release_claim(path, sid)
+        shutil.rmtree(d, ignore_errors=True)
+        raise
 
     # When a caller (e.g. spawn_agent) wants the new runtime session to start
     # with a specific initial prompt, write the prompt to a file and let
@@ -970,11 +1196,14 @@ def create_session(
     initial_prompt_file: Optional[Path] = None
     if initial_prompt:
         initial_prompt_file = d / "initial_prompt.txt"
-        initial_prompt_file.write_text(initial_prompt)
+        try:
+            initial_prompt_file.write_text(initial_prompt)
+        except OSError:
+            for path in claim_paths:
+                _release_claim(path, sid)
+            shutil.rmtree(d, ignore_errors=True)
+            raise
 
-    plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
-    if not plugin_root:
-        raise RuntimeError("MULTIVERSE_PLUGIN_ROOT not set — launch via bin/multiverse")
     runner_name = (
         "multiverse-codex-session"
         if runtime == RUNTIME_CODEX
@@ -1006,6 +1235,7 @@ def create_session(
         cmd += [
             "-e", f"MULTIVERSE_CODEX_PLUGIN_ROOT={codex_plugin_root}",
             "-e", f"MULTIVERSE_RUNTIME_SESSION_ID_PATH={d / 'runtime_session_id'}",
+            "-e", f"MULTIVERSE_RUNTIME_PID_PATH={d / 'runtime_pid'}",
         ]
 
     # Propagate the user's Claude install env so the inner `claude`
@@ -1036,12 +1266,26 @@ def create_session(
     cmd.append(inner_cmd)
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
+    except (OSError, subprocess.CalledProcessError) as e:
         # tmux's stderr is the real diagnostic — callers (e.g. spawn_agent)
         # were previously seeing only the CalledProcessError repr, which
         # makes it nearly impossible to tell `tmux: error connecting…` from
         # `bin/multiverse-session: not found` from `session already exists`.
-        detail = (e.stderr or "").strip() or (e.stdout or "").strip() or str(e)
+        if isinstance(e, subprocess.CalledProcessError):
+            detail = (e.stderr or "").strip() or (e.stdout or "").strip() or str(e)
+        else:
+            detail = str(e)
+        try:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", tmux_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        for path in claim_paths:
+            _release_claim(path, sid)
+        shutil.rmtree(d, ignore_errors=True)
         raise RuntimeError(f"tmux new-session failed: {detail[:600]}") from e
 
     # Per-session mouse mode: scroll wheel scrolls the pane history naturally
@@ -1127,6 +1371,68 @@ def foreign_host_still_reported_live(s: Session) -> bool:
     return fresh.status != "ended"
 
 
+def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
+    """Permanently delete a dormant Codex thread through the app server."""
+    if not thread_id:
+        raise ValueError("Codex thread ID is required")
+    codex_bin = os.environ.get("MULTIVERSE_CODEX_BIN", "codex")
+    requests = [
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "multiverse", "version": "0.1.0"}
+            },
+        },
+        {"method": "initialized"},
+        {
+            "id": 2,
+            "method": "thread/delete",
+            "params": {"threadId": thread_id},
+        },
+    ]
+    payload = "".join(json.dumps(item) + "\n" for item in requests)
+    try:
+        proc = subprocess.Popen(
+            [codex_bin, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Could not start Codex app server: {exc}") from exc
+    try:
+        output, stderr = proc.communicate(payload, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError("Codex thread deletion timed out") from exc
+
+    response: Optional[dict[str, Any]] = None
+    for line in output.splitlines():
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("id") == 2:
+            response = item
+            break
+    if response is None:
+        detail = stderr.strip() or f"app server exited with status {proc.returncode}"
+        raise RuntimeError(f"Codex did not confirm thread deletion: {detail[:600]}")
+    if "error" in response:
+        error = response.get("error")
+        if isinstance(error, dict):
+            detail = str(error.get("message") or error)
+        else:
+            detail = str(error)
+        raise RuntimeError(f"Codex thread deletion failed: {detail}")
+
+    _CODEX_METADATA_CACHE.clear()
+    _CODEX_DISCOVERY_CACHE.clear()
+
+
 def kill_session(s: Session) -> None:
     """Tear down a multiverse session: kill tmux + remove state dir."""
     if tmux_session_exists(s.tmux_name):
@@ -1135,7 +1441,5 @@ def kill_session(s: Session) -> None:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-    try:
-        shutil.rmtree(s.dir)
-    except OSError:
-        pass
+    shutil.rmtree(s.dir, ignore_errors=True)
+    _release_session_claims(s)
