@@ -451,8 +451,15 @@ class CodexDeletionTests(unittest.TestCase):
             fake_codex = temp_dir / "codex"
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
-                "cat > \"$CAPTURE_PATH\"\n"
-                "printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
+                "while IFS= read -r line; do\n"
+                "  printf '%s\\n' \"$line\" >> \"$CAPTURE_PATH\"\n"
+                "  id=$(printf '%s' \"$line\" | jq -r '.id // empty')\n"
+                "  if [ \"$id\" = 1 ]; then\n"
+                "    printf '%s\\n' '{\"id\":1,\"result\":{}}'\n"
+                "  elif [ \"$id\" = 2 ]; then\n"
+                "    printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
+                "  fi\n"
+                "done\n"
             )
             fake_codex.chmod(0o755)
             env = {

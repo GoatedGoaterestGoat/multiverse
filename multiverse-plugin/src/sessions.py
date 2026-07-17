@@ -1375,59 +1375,51 @@ def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
     """Permanently delete a dormant Codex thread through the app server."""
     if not thread_id:
         raise ValueError("Codex thread ID is required")
-    codex_bin = os.environ.get("MULTIVERSE_CODEX_BIN", "codex")
-    requests = [
-        {
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "clientInfo": {"name": "multiverse", "version": "0.1.0"}
-            },
-        },
-        {"method": "initialized"},
-        {
-            "id": 2,
-            "method": "thread/delete",
-            "params": {"threadId": thread_id},
-        },
-    ]
-    payload = "".join(json.dumps(item) + "\n" for item in requests)
-    try:
-        proc = subprocess.Popen(
-            [codex_bin, "app-server", "--listen", "stdio://"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except OSError as exc:
-        raise RuntimeError(f"Could not start Codex app server: {exc}") from exc
-    try:
-        output, stderr = proc.communicate(payload, timeout=timeout_seconds)
-    except subprocess.TimeoutExpired as exc:
-        proc.kill()
-        proc.communicate()
-        raise RuntimeError("Codex thread deletion timed out") from exc
+    # Reuse the interactive protocol client that powers Codex ask_agent.
+    # Closing stdin immediately after a batch write can make the real app
+    # server exit before it processes thread/delete.
+    from .ask_agents import (
+        _CodexProtocolError,
+        _JsonLineProcess,
+        _wait_for_response,
+    )
 
-    response: Optional[dict[str, Any]] = None
-    for line in output.splitlines():
-        try:
-            item = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if item.get("id") == 2:
-            response = item
-            break
-    if response is None:
-        detail = stderr.strip() or f"app server exited with status {proc.returncode}"
-        raise RuntimeError(f"Codex did not confirm thread deletion: {detail[:600]}")
-    if "error" in response:
-        error = response.get("error")
-        if isinstance(error, dict):
-            detail = str(error.get("message") or error)
-        else:
-            detail = str(error)
-        raise RuntimeError(f"Codex thread deletion failed: {detail}")
+    codex_bin = os.environ.get("MULTIVERSE_CODEX_BIN", "codex")
+    deadline = time.monotonic() + timeout_seconds
+    client: Optional[_JsonLineProcess] = None
+    try:
+        client = _JsonLineProcess(
+            [codex_bin, "app-server", "--listen", "stdio://"],
+            os.getcwd(),
+            dict(os.environ),
+        )
+        client.send(
+            {
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "clientInfo": {"name": "multiverse", "version": "0.1.0"},
+                    "capabilities": {"experimentalApi": True},
+                },
+            }
+        )
+        _wait_for_response(client, 1, deadline)
+        client.send({"method": "initialized"})
+        client.send(
+            {
+                "id": 2,
+                "method": "thread/delete",
+                "params": {"threadId": thread_id},
+            }
+        )
+        _wait_for_response(client, 2, deadline)
+    except TimeoutError as exc:
+        raise RuntimeError("Codex thread deletion timed out") from exc
+    except (OSError, _CodexProtocolError) as exc:
+        raise RuntimeError(f"Codex thread deletion failed: {exc}") from exc
+    finally:
+        if client is not None:
+            client.close()
 
     _CODEX_METADATA_CACHE.clear()
     _CODEX_DISCOVERY_CACHE.clear()
