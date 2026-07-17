@@ -25,6 +25,8 @@ fi
 # the checked-out implementation even before the plugin is installed.
 HOOK_COMMAND=$(printf '%s' "$HOOK_SCRIPT" | jq -Rs .)
 MCP_COMMAND=$(printf '%s' "$MCP_SCRIPT" | jq -Rs .)
+RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
+export MULTIVERSE_RUNTIME_PID_PATH="$RUNTIME_PID_PATH"
 CODEX_CONFIG_ARGS=(
   --dangerously-bypass-hook-trust
   -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
@@ -36,8 +38,46 @@ CODEX_CONFIG_ARGS=(
   -c "mcp_servers.multiverse.command=$MCP_COMMAND"
 )
 
+# Codex launches stdio MCP servers with a sanitized environment. Explicitly
+# pass the managed-session identity plus the runtime configuration needed by
+# tool paths that discover, resume, or spawn agents. JSON strings are valid
+# TOML values and avoid quoting/path issues in `-c key=value` overrides.
+add_mcp_env_override() {
+  local name="$1" value encoded
+  value="${!name-}"
+  [ -z "$value" ] && return 0
+  encoded=$(printf '%s' "$value" | jq -Rs .)
+  CODEX_CONFIG_ARGS+=(
+    -c "mcp_servers.multiverse.env.${name}=${encoded}"
+  )
+}
+
+for MCP_ENV_NAME in \
+  MULTIVERSE_ROOT \
+  MULTIVERSE_SESSION_ID \
+  MULTIVERSE_SESSION_CWD \
+  MULTIVERSE_SESSION_NAME \
+  MULTIVERSE_STATUS \
+  MULTIVERSE_RUNTIME \
+  MULTIVERSE_RUNTIME_PID_PATH \
+  MULTIVERSE_RUNTIME_SESSION_ID_PATH \
+  MULTIVERSE_PLUGIN_ROOT \
+  MULTIVERSE_CODEX_PLUGIN_ROOT \
+  MULTIVERSE_CLAUDE_BIN \
+  MULTIVERSE_CODEX_BIN \
+  MULTIVERSE_EXTRA_PLUGIN_DIRS \
+  CLAUDE_CONFIG_DIR \
+  CLAUDE_LOCAL_DATA_DIR \
+  CODEX_HOME \
+  PATH \
+  CLAUDE_CODE_MAX_RETRIES \
+  CLAUDE_CODE_UNATTENDED_RETRY
+do
+  add_mcp_env_override "$MCP_ENV_NAME"
+done
+unset MCP_ENV_NAME
+
 CODEX_ARGS=("$@")
-RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
 READY_WATCHER_PID=""
 
 write_status() {

@@ -575,6 +575,15 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
                 "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_ROOT": str(temp_dir / "multiverse-state"),
+                "MULTIVERSE_SESSION_ID": "wrapper-id",
+                "MULTIVERSE_SESSION_CWD": str(temp_dir),
+                "MULTIVERSE_SESSION_NAME": "codex-agent",
+                "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
+                "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime_pid"),
+                "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(
+                    temp_dir / "runtime_session_id"
+                ),
                 "CAPTURE_PATH": str(capture),
             }
 
@@ -594,6 +603,21 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(
                 args[resume_index : resume_index + 2],
                 ["resume", "codex-thread"],
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_SESSION_CWD="
+                + json.dumps(str(temp_dir)),
+                args,
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_SESSION_NAME="
+                + json.dumps("codex-agent"),
+                args,
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_RUNTIME_PID_PATH="
+                + json.dumps(str(temp_dir / "runtime_pid")),
+                args,
             )
             self.assertEqual(json.loads(status.read_text())["status"], "ended")
 
