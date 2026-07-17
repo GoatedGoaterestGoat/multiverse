@@ -793,11 +793,11 @@ def ask_agent(
     cross-workspace questions are allowed (read-only, ephemeral). Use
     ``list_agents(working_directory=...)`` to discover targets there.
 
-    Mechanism: spawns a forked, one-shot ``claude -p`` subprocess against
-    the target's session (same approach as the monitor's ``a`` keybinding,
-    but for a single agent). The target's main session is NOT involved —
-    no notification, no entry in their conversation history. The question
-    is purely sidechannel.
+    Mechanism: spawns a forked, one-shot subprocess against the target's
+    native Claude or Codex session (same approach as the monitor's ``a``
+    keybinding, but for a single agent). The target's main session is NOT
+    involved — no notification, no entry in their conversation history.
+    The question is purely sidechannel.
 
     This call BLOCKS until the target responds or the timeout elapses.
 
@@ -847,14 +847,9 @@ def ask_agent(
             f"Error: no agent named '{target_name}' in workspace '{cwd}'. "
             f"Call list_agents(working_directory='{cwd}') to see who's available."
         )
-    if target.claude_uuid is None:
-        if target.runtime == RUNTIME_CODEX:
-            return (
-                f"Error: ask_agent does not support Codex sessions yet. "
-                f"Use message_agent to contact '{target_name}'."
-            )
+    if target.session_id is None and target.claude_uuid is None:
         return (
-            f"Error: '{target_name}' has no tracked claude UUID yet "
+            f"Error: '{target_name}' has no tracked {target.runtime} session id yet "
             "(may have just started). Try again in a moment."
         )
 
@@ -862,7 +857,11 @@ def ask_agent(
     result = ask_one(
         question=question,
         target=AskTarget(
-            name=target.name, cwd=target.cwd, claude_uuid=target.claude_uuid
+            name=target.name,
+            cwd=target.cwd,
+            claude_uuid=target.claude_uuid,
+            runtime=target.runtime,
+            session_id=target.session_id,
         ),
         timeout=float(timeout),
     )

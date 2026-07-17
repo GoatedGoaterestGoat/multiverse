@@ -8,7 +8,7 @@ Three things, all designed to scale past the limits of a single `claude` process
 
 **1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `listening` / `dormant` / `ended` / `compacting`) is driven by hooks, the MCP server, and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
 
-**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Claude receives queued messages through hooks; Codex explicitly claims them with `check_inbox`, prompted by push notifications and wrapper resumes when necessary. Ephemeral questions use forked claude subprocesses that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
+**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Claude receives queued messages through hooks; Codex explicitly claims them with `check_inbox`, prompted by push notifications and wrapper resumes when necessary. Ephemeral questions use native Claude or Codex forks that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
 
 **3. Frontier-coherent compaction.** A bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
 
@@ -70,6 +70,7 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 | Variable | Default | What it does |
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
+| `MULTIVERSE_CODEX_BIN` | `codex` | The Codex binary used for interactive sessions, native naming, and ephemeral `ask_agent` app-server forks. |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
 | `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
 | `CLAUDE_CODE_MAX_RETRIES` | `30` | Rate-limit / transient-error retry count for the underlying claude CLI (its own default is 10). Multiverse tends to saturate rate limits — many active agents plus a background tree-build worker per session, all hitting one account — so claude's 10-retry / ~8-min ceiling burns through fast under a real traffic wave. This raises the ceiling. Set to `10` to restore claude's default; only takes effect on rate-limit / 5xx / connection failures, so a healthy request never touches it. |
@@ -151,7 +152,7 @@ The tool result reports exactly which path was taken (woke a dormant agent, ping
 - Target answers from their existing context only — **no tools available**
 - Target's main session is NOT involved (no notification, no entry in their conversation history)
 - Blocking — returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
-- Works regardless of target state (idle, working, dormant) — uses a forked claude subprocess that doesn't disturb the target's main process
+- Works regardless of target state (idle, working, dormant) — uses the target runtime's native fork mechanism without disturbing its main process
 
 **`check_inbox()`** — read your pending inbox messages on demand, mid-turn, without waiting for a hook to fire. Returns the queued messages (plain-text tool result) or `"You have no pending inbox messages."`, and **clears the inbox** just like a hook delivery. Use it when you just sent a `message_agent` and suspect a reply landed, or want to drain anything that piled up during a long task.
 
@@ -425,12 +426,13 @@ Codex uses the parallel `multiverse-codex-session` behavior: if inbox files are 
 
 ### What happens during an `ask_agent` call
 
-1. `ask_agent(target, question)` looks up the target's `claude_uuid`
-2. Spawns subprocess: `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1 -p "<wrapped question>"` with `MULTIVERSE_*` env vars **stripped** (so the fork's hooks don't corrupt the caller's state dir)
-3. The fork creates a **new** JSONL (the `<fresh>` UUID), reads the target's existing context, denies all tools, caps at one turn
-4. Target's main session is unaffected — works regardless of whether the target is idle, working, or dormant
-5. Subprocess exits with the answer on stdout; the fork JSONL is unlinked in a `finally` block
-6. Tool returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
+1. `ask_agent(target, question)` looks up the target's runtime and native session ID.
+2. Claude spawns `claude -p --resume <uuid> --fork-session --session-id <fresh> --tools "" --max-turns 1 -p "<wrapped question>"`.
+3. Codex starts an app-server, calls `thread/fork` with `ephemeral: true`, then submits one `turn/start` to the returned thread. The fork is never materialized as a rollout file.
+4. The Codex fork disables tool-bearing features, MCP servers, apps, hooks, web search, filesystem access, and network access. If the event stream still reports an action item, Multiverse fails the ask and terminates the process instead of accepting the result.
+5. Both subprocesses receive an environment with all `MULTIVERSE_*` variables stripped, so side-question lifecycle activity cannot overwrite the caller's wrapper state.
+6. The target's main session is unaffected regardless of whether it is idle, working, or dormant. Claude's temporary JSONL is deleted; Codex's in-memory ephemeral thread disappears with its dedicated app-server process.
+7. The tool returns the single final answer inline, or `'<agent>' did not respond within Ns` on timeout.
 
 ### What happens during a `spawn_agent` call
 
@@ -453,8 +455,8 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 - **Names are first-class.** Sessions without names don't show on the dashboard and aren't reachable by inter-agent tools. Naming is the primary way agents identify each other.
 - **Two messaging modes for two use cases.** Durable (`message_agent`, full tools, persistent) vs ephemeral (`ask_agent`, no tools, blocking, fork-based). Use the cheap one for fact-gathering, the heavy one for delegation.
 - **No "respond" tool.** Replies are just messages back at the sender. This avoids async-mailbox complexity (no ask records, no response routing, no waiter state). The cost: the sender doesn't know automatically when a response arrives — but their next inbox check picks it up like any other message.
-- **Fork doesn't interrupt the target.** `ask_agent` and the `a` ask-all both use `--fork-session` against the target's UUID. Multiple claude processes reading the same JSONL is safe; the fork writes to a new session file, so no contention.
-- **Ask-forks are hidden via an on-disk registry.** A `--fork-session` JSONL inherits the origin's `custom-title`, so a leftover would masquerade as a phantom dormant agent. Each fork UUID is registered as a file under `~/.multiverse/forks/` before spawn and removed after cleanup (`src/forks.py`); the dashboard + `list_agents` skip any registered UUID. Unlike the monitor's old in-memory set, this works for forks spawned by *any* process (agent-initiated `ask_agent` too) and survives a kill mid-ask — a GC sweep reaps orphaned registry entries and their JSONLs.
+- **Fork doesn't interrupt the target.** `ask_agent` and the `a` ask-all fork the target's native session. Claude uses `--fork-session`; Codex uses an ephemeral app-server `thread/fork`. Neither path writes to the target's main conversation.
+- **Ask-forks stay out of discovery.** A Claude `--fork-session` JSONL inherits the origin's `custom-title`, so its UUID is registered under `~/.multiverse/forks/` before spawn and removed after cleanup (`src/forks.py`); dashboard discovery skips registered UUIDs and GC removes orphans. Codex requests `ephemeral: true`, which never materializes a rollout file and therefore needs no discovery registry entry.
 - **Graceful degradation.** Without the wrapper the plugin still loads, but the inter-agent tools error (they need the `MULTIVERSE_*` env vars the monitor injects) and there's no monitor UI. Auto tree-building works via hooks alone if you create the marker file by hand.
 - **Concurrent-safe.** Each session has its own state directory and its own env vars (injected via `tmux new-session -e`); nothing leaks between sessions.
 - **Cross-process path coherence.** All state paths — including `MULTIVERSE_ROOT` (the `~/.multiverse` directory itself) — flow as absolute paths via `tmux -e` rather than being derived from `HOME` in each process. This matters in deployments where the monitor and the spawned claude processes have different `HOME` values (e.g. containers where a wrapper sets `HOME=/weka/...` for claude so `~/.claude` lands on persistent storage); without an explicit `MULTIVERSE_ROOT` the inbox and spawn-request directories silently diverge between the two sides.

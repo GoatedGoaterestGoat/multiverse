@@ -3228,9 +3228,15 @@ class MonitorApp(App):
     def action_ask_all(self) -> None:
         targets: list[AskTarget] = []
         for e in self.entries:
-            if e.claude_uuid:
+            if e.session_id or e.claude_uuid:
                 targets.append(
-                    AskTarget(name=e.name, cwd=e.cwd, claude_uuid=e.claude_uuid)
+                    AskTarget(
+                        name=e.name,
+                        cwd=e.cwd,
+                        claude_uuid=e.claude_uuid,
+                        runtime=e.runtime,
+                        session_id=e.session_id,
+                    )
                 )
         if not targets:
             self.notify("No named sessions to ask", severity="warning")

@@ -42,3 +42,19 @@ is therefore not required to exercise the wrapper from this checkout.
 callers from either runtime can discover every named agent. Its text format is
 unchanged from the Claude-only tool: entries include the agent name and status,
 but intentionally do not expose which runtime backs an agent.
+
+## Ephemeral questions
+
+`ask_agent()` and the dashboard's ask-all action can target Codex threads as
+well as Claude sessions. A Codex target is cloned through the app-server
+`thread/fork` method with `ephemeral: true`; one question is submitted to that
+in-memory fork and the final answer is returned to the caller. The target's
+interactive thread is neither interrupted nor changed.
+
+Side-question forks run with tool-bearing Codex features, hooks, MCP servers,
+apps, web search, filesystem access, and network access disabled. Multiverse
+also rejects the result and terminates the fork if an action item appears in
+the event stream. All caller-scoped `MULTIVERSE_*` variables are stripped from
+the fork process. The same primitive powers MCP `ask_agent`, mixed-runtime
+dashboard ask-all, SecondBrain `ask_agent`, and first-connect workspace
+summaries.

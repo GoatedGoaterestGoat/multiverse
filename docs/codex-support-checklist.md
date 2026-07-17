@@ -91,8 +91,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Add a Runtime column or another unambiguous Claude/Codex indicator.
 - [x] Include Codex sessions in workspace filtering and sorting.
 - [x] Deduplicate wrapped Codex sessions from the dormant-session picker.
-- [ ] Keep temporary Codex side-question sessions out of the dashboard and agent
-      registry.
+- [x] Keep temporary Codex side-question sessions out of the dashboard and agent
+      registry by using non-materialized ephemeral threads.
 - [x] Ensure `Enter` attaches to a live Codex session and resumes an ended/dormant one.
 - [x] Ensure `R` can filter or select resumable sessions by runtime.
 - [ ] Ensure `k` follows the same live/ended/dormant safety rules for Codex.
@@ -107,7 +107,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Record `listening` while `monitor_inbox` is active.
 - [x] Record `ended` when the Codex process exits.
 - [ ] Avoid stale live-looking statuses after crashes.
-- [ ] Avoid status writes from ephemeral side-question processes into the caller's
+- [x] Avoid status writes from ephemeral side-question processes into the caller's
       session directory.
 
 ## MCP Tool: `list_agents`
@@ -116,7 +116,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Mark the calling Codex agent as `this is you`.
 - [x] Preserve status-priority sorting and `max_agents` truncation.
 - [x] Support cross-workspace listing with `working_directory`.
-- [ ] Exclude temporary side-question sessions and legacy folded ghost rows.
+- [x] Exclude temporary side-question sessions and legacy folded ghost rows.
 - [x] Return the same user-facing text shape from Claude and Codex without
       exposing each agent's runtime.
 
@@ -152,20 +152,21 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 ## MCP Tool: `ask_agent`
 
-- [ ] Ask a Codex agent an ephemeral question from a Codex caller.
-- [ ] Ask a Codex agent from a Claude caller.
-- [ ] Ask a Claude agent from a Codex caller.
-- [ ] Run the question against the target's existing conversation context.
-- [ ] Prevent tools and additional agentic turns in the side-question session.
-- [ ] Avoid interrupting or mutating the target's main session.
-- [ ] Enforce the configured timeout.
-- [ ] Clean up temporary session artifacts on success, failure, and timeout.
-- [ ] Register temporary artifacts before launch so the dashboard can hide them.
-- [ ] Strip caller-scoped Multiverse environment variables from the temporary
+- [x] Ask a Codex agent an ephemeral question from a Codex caller.
+- [x] Ask a Codex agent from a Claude caller.
+- [x] Ask a Claude agent from a Codex caller.
+- [x] Run the question against the target's existing conversation context.
+- [x] Prevent tools and additional agentic turns in the side-question session.
+- [x] Avoid interrupting or mutating the target's main session.
+- [x] Enforce the configured timeout.
+- [x] Clean up temporary session artifacts on success, failure, and timeout.
+- [x] Register materialized Claude fork artifacts before launch; Codex forks use
+      `ephemeral: true` and do not create a rollout artifact to register.
+- [x] Strip caller-scoped Multiverse environment variables from the temporary
       process.
-- [ ] Support cross-workspace questions.
-- [ ] Define an explicit fallback if Codex cannot fork an existing session without
-      mutating it.
+- [x] Support cross-workspace questions.
+- [x] Fail the ask explicitly rather than resume or mutate the target if Codex cannot
+      create a non-mutating ephemeral fork.
 
 ## MCP Tool: `spawn_agent`
 
@@ -186,7 +187,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 - [x] `n`: create a named Codex session.
 - [x] `R`: resume a dormant Codex session.
-- [ ] `a`: ask all named agents across both runtimes.
+- [x] `a`: ask all named agents across both runtimes.
 - [x] `i`: inspect a Codex agent's pending inbox without consuming it.
 - [x] `Enter`: attach to or resume the selected Codex session.
 - [ ] `k`: kill or delete a Codex session with the correct safety flow.
@@ -204,12 +205,12 @@ feature set present when the branches are integrated.
 
 - [ ] Include Codex sessions in `get_dashboard`, `list_agents`, and `get_status`.
 - [ ] Include runtime information in SecondBrain session data if the protocol permits.
-- [ ] Support SecondBrain `ask_agent` queries targeting Codex agents.
+- [x] Support SecondBrain `ask_agent` queries targeting Codex agents.
 - [ ] Support SecondBrain `prompt_agent` actions targeting live Codex agents.
 - [ ] Support SecondBrain `prompt_agent` actions that resume dormant Codex agents.
 - [ ] Preserve typed-but-unsent Codex terminal input when injecting a live prompt, or
       use a safer runtime API if available.
-- [ ] Emit `workspace.connected` summaries from mixed Claude/Codex workspaces.
+- [x] Emit `workspace.connected` summaries from mixed Claude/Codex workspaces.
 - [ ] Emit `agent.created` for new Codex agents.
 - [ ] Emit `user.prompt` for Codex user turns.
 - [ ] Emit `agent.response` when Codex finishes a normal turn.
@@ -240,7 +241,7 @@ feature set present when the branches are integrated.
 - [ ] Recover cleanly when a Codex process exits without a lifecycle callback.
 - [ ] Recover cleanly when tmux exists but the Codex process has died.
 - [x] Avoid reaping a Codex session that is live on another host.
-- [ ] Keep runtime-specific temporary files from appearing as dormant agents.
+- [x] Keep runtime-specific temporary files from appearing as dormant agents.
 - [x] Add enough runtime information to inter-agent logs to diagnose mixed-runtime
       delivery failures.
 
@@ -250,13 +251,13 @@ feature set present when the branches are integrated.
 - [x] Unit-test mixed-runtime session discovery and name collision handling.
 - [ ] Unit-test Codex status mapping and crash correction.
 - [x] Unit-test Codex inbox delivery and atomic claims.
-- [ ] Unit-test Codex temporary-session registration and cleanup.
+- [x] Unit-test Codex ephemeral-session isolation and process cleanup.
 - [ ] End-to-end test Codex plugin loading inside a wrapped session.
 - [ ] End-to-end test all six MCP tools from a Codex session.
 - [x] Test the communication matrix: Claude-to-Claude, Claude-to-Codex,
       Codex-to-Claude, and Codex-to-Codex.
 - [x] Test passive and push delivery for live, dormant, attached, and listening agents.
-- [ ] Test mixed-runtime ask-all.
+- [x] Test mixed-runtime ask-all.
 - [ ] Test Codex spawn approval, rejection, cancellation, and orphan cleanup.
 - [ ] Test monitor restart while Codex sessions remain live.
 - [ ] Test Codex resume from a different terminal.
@@ -287,7 +288,7 @@ feature set present when the branches are integrated.
 - [x] Use an explicit Runtime column in the dashboard.
 - [x] Share one agent-name namespace across runtimes within a workspace.
 - [ ] What Codex-native session metadata can be treated as stable public API?
-- [ ] What is the required semantic fallback if Codex cannot provide a non-mutating
-      fork for `ask_agent`?
+- [x] If Codex cannot provide a non-mutating ephemeral fork, return an explicit ask
+      error; never fall back to resuming or mutating the target thread.
 - [ ] Which Codex lifecycle events are reliable enough to drive status and
       SecondBrain observation without terminal scraping?

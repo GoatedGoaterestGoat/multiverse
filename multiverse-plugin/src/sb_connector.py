@@ -926,7 +926,7 @@ class SBConnector:
         workspace-summary question, returning a per-agent dict for the first-connect
         payload. Blocking work runs in an executor thread.
 
-        Empty workspace (no named agents with a claude_uuid) → ``{}`` (payload will
+        Empty workspace (no named agents with a native session id) → ``{}`` (payload will
         carry ``workspace_summary: {}`` on the wire). Individual ask failures land as
         bracketed placeholder strings SB renders as-is, keeping the dict shape uniform.
         """
@@ -945,8 +945,14 @@ class SBConnector:
                 log.info("workspace summary: agent enumeration failed for %s: %s", cwd, exc)
                 return {}
             targets = [
-                AskTarget(name=a.name, cwd=a.cwd, claude_uuid=a.claude_uuid)
-                for a in agents if a.claude_uuid
+                AskTarget(
+                    name=a.name,
+                    cwd=a.cwd,
+                    claude_uuid=a.claude_uuid,
+                    runtime=a.runtime,
+                    session_id=a.session_id,
+                )
+                for a in agents if a.session_id or a.claude_uuid
             ]
             if not targets:
                 log.info("workspace summary: %s has no askable agents (empty workspace)", cwd)
@@ -1586,7 +1592,7 @@ class SBConnector:
 
         Contract with toolsmith: params ``{agent, question}``; workspace_id ACL-gated to
         this device's granted workspaces. Reply ``{answer}`` on ok; on failure, error
-        codes ``not_found`` (agent missing / no runnable claude_uuid), ``timeout`` (fork
+        codes ``not_found`` (agent missing / no runnable native session id), ``timeout`` (fork
         exceeded ``_ASK_TIMEOUT``), ``ask_failed`` (spawn or protocol failure), ``busy``
         (concurrency cap hit — SB will see this as a fast, retriable reject).
         """
@@ -1618,15 +1624,22 @@ class SBConnector:
             target = find_agent_by_name(cwd, agent_name)
             if target is None:
                 return ("not_found", None, f"no agent '{agent_name}' in this workspace")
-            if not target.claude_uuid:
+            if not target.session_id and not target.claude_uuid:
                 return (
                     "not_found",
                     None,
-                    f"agent '{agent_name}' has no tracked claude UUID yet (just started?)",
+                    f"agent '{agent_name}' has no tracked {target.runtime} session id yet "
+                    "(just started?)",
                 )
             r = ask_one(
                 question=question_text,
-                target=AskTarget(name=target.name, cwd=target.cwd, claude_uuid=target.claude_uuid),
+                target=AskTarget(
+                    name=target.name,
+                    cwd=target.cwd,
+                    claude_uuid=target.claude_uuid,
+                    runtime=target.runtime,
+                    session_id=target.session_id,
+                ),
                 timeout=_ASK_TIMEOUT,
             )
             if r.error:
