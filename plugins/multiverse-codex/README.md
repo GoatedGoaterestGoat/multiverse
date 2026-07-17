@@ -29,3 +29,10 @@ approval-waiting, and user-attached sessions are left queued.
 During repository development, `multiverse-codex-session` injects these same
 hook and MCP definitions into the wrapped Codex process. Installing the plugin
 is therefore not required to exercise the wrapper from this checkout.
+
+## Agent discovery
+
+`list_agents()` uses one workspace registry for Claude and Codex sessions, so
+callers from either runtime can discover every named agent. Its text format is
+unchanged from the Claude-only tool: entries include the agent name and status,
+but intentionally do not expose which runtime backs an agent.

@@ -227,7 +227,8 @@ def list_agents(
 
     Your own entry is marked with ``← this is you`` (only when listing your
     own workspace). The list is sorted with you first, then live agents,
-    then ended/dormant.
+    then ended/dormant. Claude and Codex agents share this registry, but the
+    output intentionally does not expose an agent's runtime.
 
     Args:
         max_agents: Maximum entries to show before truncating with "and N
@@ -317,10 +318,7 @@ def list_agents(
     name_width = max(len(a.name) for a in visible)
     for a in visible:
         marker = "  ← this is you" if a.name == self_name_for_marker else ""
-        lines.append(
-            f"- {a.name.ljust(name_width)}  {a.runtime.ljust(6)}  "
-            f"{a.status}{marker}"
-        )
+        lines.append(f"- {a.name.ljust(name_width)}  {a.status}{marker}")
     if hidden:
         lines.append(
             f"  … and {hidden} more not shown "

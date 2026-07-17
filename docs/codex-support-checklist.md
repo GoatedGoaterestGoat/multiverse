@@ -117,7 +117,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Preserve status-priority sorting and `max_agents` truncation.
 - [x] Support cross-workspace listing with `working_directory`.
 - [ ] Exclude temporary side-question sessions and legacy folded ghost rows.
-- [ ] Return the same user-facing text shape from Claude and Codex.
+- [x] Return the same user-facing text shape from Claude and Codex without
+      exposing each agent's runtime.
 
 ## MCP Tool: `message_agent`
 
