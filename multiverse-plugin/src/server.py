@@ -3,9 +3,9 @@
 Hosts the agent-facing tools for the multiverse plugin:
   - list_agents                   — discover other agents in workspace
   - message_agent                 — send a persistent message to another
-                                    agent (delivered via inbox + hook
-                                    injection; recipient may use tools and
-                                    reply by calling message_agent back)
+                                    agent through its durable inbox;
+                                    recipient may use tools and reply by
+                                    calling message_agent back
   - ask_agent                     — quick ephemeral question to another
                                     agent (forked side-question, no tools,
                                     blocking with timeout)
@@ -86,9 +86,9 @@ _LISTENING_STATUS = "listening"
 def _write_session_status(status: str) -> None:
     """Write a status value to this session's status.json (best-effort).
 
-    The MCP server inherits MULTIVERSE_STATUS from the claude process the
-    monitor spawned. No-op outside the wrapper (env var unset). Matches the
-    ``{"status": ..., "ts": ...}`` shape set-status.sh writes, so hook-driven
+    The MCP server inherits MULTIVERSE_STATUS from the managed Claude or
+    Codex process. No-op outside the wrapper (env var unset). Matches the
+    ``{"status": ..., "ts": ...}`` shape lifecycle hooks write, so hook-driven
     and tool-driven status updates are interchangeable.
     """
     status_path = os.environ.get("MULTIVERSE_STATUS")
@@ -102,9 +102,9 @@ def _write_session_status(status: str) -> None:
 
 
 # Prompt typed into an idle/working agent's tmux pane to wake it for a
-# push-notified message. The actual message content is injected separately
-# by the recipient's UserPromptSubmit → deliver-inbox.py hook; this is just
-# the trigger that makes the turn happen.
+# push-notified message. Claude may also receive the message through its
+# UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
+# the message remains durable until that tool atomically claims it.
 _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
 
 
@@ -575,18 +575,20 @@ def message_agent(
 def check_inbox() -> str:
     """Read pending inbox messages now, without waiting for a hook to fire.
 
-    Normally inbox messages are delivered automatically as a system-reminder
-    on your next ``SessionStart`` / ``UserPromptSubmit`` / ``Stop`` hook. If
-    you want to check mid-turn — say, you just sent a ``message_agent`` and
-    suspect a reply has arrived, or you're in a long-running task and want
-    to drain anything that piled up — call this.
+    Codex sessions use this as their explicit inbox-delivery path. Call it
+    when a push notification or resume prompt asks you to check your inbox,
+    after ``monitor_inbox`` reports a message, or whenever you suspect a
+    reply arrived during a long-running turn. Claude sessions can use the
+    same tool mid-turn in addition to their automatic hook delivery.
 
     Returns either a system-reminder block (identical to the hook-delivered
     format) containing every pending message, OR the literal string
     ``"You have no pending inbox messages."`` when the inbox is empty.
 
-    Calling this **clears your inbox** — exactly like a hook delivery. So
-    don't call it without intending to act on the messages.
+    Calling this **clears your inbox**. Each pending file is atomically
+    claimed before it is returned, so racing tools or processes cannot
+    deliver the same message twice. Don't call it without intending to act
+    on the messages.
     """
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     name = os.environ.get("MULTIVERSE_SESSION_NAME")
@@ -622,7 +624,8 @@ async def monitor_inbox(
 
     This tool does NOT consume or return the message contents — it only
     waits and tells you something arrived. After it returns with a new
-    message, call ``check_inbox`` to actually read (and clear) your inbox.
+    message, call ``check_inbox`` to atomically read and clear your inbox.
+    This behavior is identical in managed Claude and Codex sessions.
 
     If you already have pending messages when you call this, it returns
     immediately telling you to check — it never makes you wait when there's

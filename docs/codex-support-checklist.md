@@ -41,8 +41,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
       Multiverse wrapper.
 - [ ] Add Codex-side instructions that explain when to use durable messages, side
       questions, inbox monitoring, and fresh-agent spawning.
-- [ ] Determine which Claude hooks have direct Codex equivalents.
-- [ ] Implement non-hook fallbacks for required lifecycle or inbox behavior where
+- [x] Determine which Claude hooks have direct Codex equivalents.
+- [x] Implement non-hook fallbacks for required lifecycle or inbox behavior where
       Codex has no equivalent extension point.
 
 ## Wrapper Configuration and Setup
@@ -128,7 +128,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [ ] Preserve cross-workspace routing and reply instructions.
 - [ ] Deliver queued messages into the Codex agent's context exactly once.
 - [ ] Ensure delivered messages persist in the Codex conversation history.
-- [ ] Support passive delivery at the next natural turn boundary.
+- [x] Define Codex inbox delivery as explicit pull via `check_inbox`; passive
+      lifecycle-hook delivery is not required.
 - [ ] Support `push_notification=True` for dormant Codex agents.
 - [ ] Support push delivery to live, unattached Codex agents.
 - [ ] Avoid clobbering input when a user is attached to the Codex terminal.
@@ -138,15 +139,15 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 ## MCP Tools: `check_inbox` and `monitor_inbox`
 
-- [ ] Let a Codex agent claim and read pending messages mid-turn with
+- [x] Let a Codex agent claim and read pending messages mid-turn with
       `check_inbox`.
-- [ ] Preserve atomic claim semantics so racing processes cannot double-deliver.
-- [ ] Return the same empty-inbox response as the Claude tool.
-- [ ] Let a Codex agent block asynchronously in `monitor_inbox`.
-- [ ] Return immediately when messages are already pending.
-- [ ] Preserve timeout behavior and interruptibility.
-- [ ] Display `listening` while the Codex agent is parked.
-- [ ] Restore the appropriate status after the wait returns or is cancelled.
+- [x] Preserve atomic claim semantics so racing processes cannot double-deliver.
+- [x] Return the same empty-inbox response as the Claude tool.
+- [x] Let a Codex agent block asynchronously in `monitor_inbox`.
+- [x] Return immediately when messages are already pending.
+- [x] Preserve timeout behavior and interruptibility.
+- [x] Display `listening` while the Codex agent is parked.
+- [x] Restore the appropriate status after the wait returns or is cancelled.
 
 ## MCP Tool: `ask_agent`
 
@@ -247,7 +248,7 @@ feature set present when the branches are integrated.
 - [x] Unit-test legacy session metadata defaulting to Claude.
 - [x] Unit-test mixed-runtime session discovery and name collision handling.
 - [ ] Unit-test Codex status mapping and crash correction.
-- [ ] Unit-test Codex inbox delivery and atomic claims.
+- [x] Unit-test Codex inbox delivery and atomic claims.
 - [ ] Unit-test Codex temporary-session registration and cleanup.
 - [ ] End-to-end test Codex plugin loading inside a wrapped session.
 - [ ] End-to-end test all six MCP tools from a Codex session.
