@@ -151,28 +151,40 @@ if [ -n "$PROMPT" ]; then
   PROMPT_ARGS=("$PROMPT")
 fi
 
-# SessionStart records the native thread ID when Codex is ready. Keep a
-# bounded fallback beside the hook: if the ID appears while status is still
-# the spawn-time `starting`, advance it to `idle`. Never overwrite `working`
-# or `waiting`, which may already have been written for an initial prompt.
-mark_ready_when_session_id_appears() {
+# Codex does not fire SessionStart for an interactive resume until the first
+# prompt is submitted. Watch both the native ID (the hook-backed fast path)
+# and the TUI's bottom-line `Ready` state so an untouched resumed session can
+# still leave `starting`. Never overwrite a hook-written busy/waiting state.
+mark_idle_when_codex_is_ready() {
   local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
-  [ -z "$id_path" ] && return 0
-  local attempt=0 current
-  while [ "$attempt" -lt 200 ]; do
+  local tmux_name="multiverse-${MULTIVERSE_SESSION_ID:-}"
+  local attempt=0 current footer
+  while [ "$attempt" -lt 2400 ]; do
     attempt=$((attempt + 1))
-    if [ -s "$id_path" ]; then
-      current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
-      if [ "$current" = "starting" ]; then
-        write_status idle
-      fi
+    current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
+    [ "$current" != "starting" ] && return 0
+    if [ -n "$id_path" ] && [ -s "$id_path" ]; then
+      write_status idle
       return 0
     fi
-    sleep 0.05
+    if [ "$tmux_name" != "multiverse-" ]; then
+      footer=$(
+        tmux capture-pane -p -t "$tmux_name" -S -5 2>/dev/null \
+          | awk 'NF { line=$0 } END { print line }' \
+          || true
+      )
+      case "$footer" in
+        *" · Ready · "*)
+          write_status idle
+          return 0
+          ;;
+      esac
+    fi
+    sleep 0.25
   done
 }
 
-mark_ready_when_session_id_appears &
+mark_idle_when_codex_is_ready &
 READY_WATCHER_PID=$!
 
 # Keep Codex in the pane's foreground process group. The tiny foreground

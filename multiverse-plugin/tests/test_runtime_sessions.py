@@ -669,6 +669,62 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(observed.read_text().strip(), "idle")
 
+    def test_ready_watcher_detects_idle_resume_before_first_hook(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            observed = temp_dir / "observed-status.txt"
+            status.write_text(json.dumps({"status": "starting", "ts": 1}))
+            fake_tmux = temp_dir / "tmux"
+            fake_tmux.write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' 'gpt-5 · Multiverse · main · Ready · Context 90%'\n"
+            )
+            fake_tmux.chmod(0o755)
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "attempt=0\n"
+                "while [ \"$attempt\" -lt 100 ]; do\n"
+                "  current=$(jq -r '.status' \"$MULTIVERSE_STATUS\")\n"
+                "  if [ \"$current\" = idle ]; then\n"
+                "    printf '%s\\n' \"$current\" > \"$OBSERVED_STATUS\"\n"
+                "    exit 0\n"
+                "  fi\n"
+                "  attempt=$((attempt + 1))\n"
+                "  sleep 0.02\n"
+                "done\n"
+                "exit 1\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{temp_dir}:{os.environ.get('PATH', '')}",
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_SESSION_ID": "wrapper-id",
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(
+                    temp_dir / "missing-runtime-session-id"
+                ),
+                "OBSERVED_STATUS": str(observed),
+            }
+
+            proc = subprocess.run(
+                [str(runner), "resume", "codex-thread"],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(observed.read_text().strip(), "idle")
+
     def test_ready_watcher_does_not_overwrite_working_status(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
