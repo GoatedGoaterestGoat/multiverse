@@ -15,6 +15,8 @@ Three things, all designed to scale past the limits of a single `claude` process
 ## Prerequisites
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- Codex installed and authenticated if you plan to run Codex sessions; Claude-only
+  operation does not require it
 - Python 3.11+
 - A system package manager for `multiverse setup` to install the rest: Homebrew (macOS), `apt`/`dnf`/`pacman` (Linux). If you'd rather install manually, the deps are [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/), and [tmux](https://github.com/tmux/tmux) ≥ 3.2.
 
@@ -44,7 +46,7 @@ git clone https://github.com/Silicon23/Multiverse.git
 export PATH="/path/to/Multiverse/multiverse-plugin/bin:$PATH"
 
 # 3. One-time setup: installs tmux, jq, uv (prompting before each),
-#    then runs `uv sync` to install Python deps.
+#    runs `uv sync`, and reports Codex CLI/plugin readiness.
 multiverse setup
 
 # 4. Launch the monitor in a workspace
@@ -52,7 +54,9 @@ cd /path/to/your/project
 multiverse
 ```
 
-`multiverse setup` is idempotent — re-run it anytime to sync Python deps after a pull.
+`multiverse setup` is idempotent — re-run it anytime to sync Python deps after a
+pull. A missing Codex CLI or plugin bundle is reported without failing setup, so a
+Claude-only installation remains usable.
 
 **Updating.** The plugin is under active development; to pull the latest changes from origin:
 
@@ -71,21 +75,32 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
 | `MULTIVERSE_CODEX_BIN` | `codex` | The Codex binary used for interactive sessions, native naming, and ephemeral `ask_agent` app-server forks. |
+| `CODEX_HOME` | *(unset → `~/.codex`)* | Standard Codex configuration and session root. Set it when Codex uses a non-default home so discovery and resume target the same native sessions. |
+| `MULTIVERSE_CODEX_PLUGIN_ROOT` | sibling `plugins/multiverse-codex` | Codex plugin bundle injected into wrapped sessions. Override it for packaged installs or a separate development checkout. |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
 | `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
 | `CLAUDE_CODE_MAX_RETRIES` | `30` | Rate-limit / transient-error retry count for the underlying claude CLI (its own default is 10). Multiverse tends to saturate rate limits — many active agents plus a background tree-build worker per session, all hitting one account — so claude's 10-retry / ~8-min ceiling burns through fast under a real traffic wave. This raises the ceiling. Set to `10` to restore claude's default; only takes effect on rate-limit / 5xx / connection failures, so a healthy request never touches it. |
 | `CLAUDE_CODE_UNATTENDED_RETRY` | `1` | Enables claude's persistent-retry mode: backoff caps at 5min per attempt, total wait at 6 hours, with a heartbeat yield every 30s so the session isn't declared idle mid-wait. Ideal for background tree-build workers and long-running agents where waiting through a traffic wave beats failing outright. Feature-gated inside the claude CLI itself — harmless no-op on builds that don't have it compiled in. Set to `0` to opt out. |
 
-Example — use an alternate `claude` binary and load an extra local dev plugin:
+Example — use alternate Claude and Codex installations and load an extra local
+Claude plugin:
 
 ```bash
 # multiverse-plugin/bin/multiverse.local — gitignored, per-machine.
 export MULTIVERSE_CLAUDE_BIN="my-claude-build"
+export MULTIVERSE_CODEX_BIN="my-codex-build"
 export MULTIVERSE_EXTRA_PLUGIN_DIRS="/path/to/another-plugin"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.my-claude}"
+export CODEX_HOME="${CODEX_HOME:-$HOME/.my-codex}"
 ```
 
 These values are exported by `bin/multiverse` and propagated into every spawned session (the monitor adds them to each `tmux new-session -e` env), so a single edit reaches the monitor, interactive sessions, the inter-agent fork path, and compaction.
+
+The launcher also atomically snapshots effective Codex configuration to
+`$MULTIVERSE_ROOT/codex-env.sh`. From a later terminal with neither `CODEX_HOME`
+nor `MULTIVERSE_CODEX_BIN` configured, it restores the saved home, binary, and
+binary PATH before discovering or resuming sessions. Explicit environment values
+or `bin/multiverse.local` settings take precedence and refresh the snapshot.
 
 ## Usage
 
@@ -340,10 +355,14 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 | `MULTIVERSE_SESSION_NAME=<name>` | inter-agent tools (caller identity) |
 | `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
 | `MULTIVERSE_STATUS=…/status.json` | hook scripts |
+| `MULTIVERSE_RUNTIME=claude|codex` | selects runtime-specific lifecycle, discovery, and launch behavior |
 | `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir`) |
 | `MULTIVERSE_CLAUDE_BIN=<binary>` | inner script + fork/compaction paths — which Claude binary to run (default `claude`; see [Machine-local config](#machine-local-config-binmultiverselocal)) |
+| `MULTIVERSE_CODEX_BIN=<binary>` | Codex runner, native naming, and ephemeral app-server forks |
+| `MULTIVERSE_CODEX_PLUGIN_ROOT=<plugin_dir>` | Codex hook and MCP bundle injected into wrapped Codex sessions |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS=<dir:dir>` | inner script — extra `--plugin-dir` entries for interactive sessions |
 | `CLAUDE_CONFIG_DIR` / `CLAUDE_LOCAL_DATA_DIR` / `PATH` | propagated when set so spawned sessions resolve transcripts under the same Claude config dir (and find the same binary) the monitor used |
+| `CODEX_HOME` | propagated when set so Codex discovery, resume, and spawned sessions use the same native session root |
 
 ### MCP server: tools
 

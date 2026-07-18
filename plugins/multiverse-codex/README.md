@@ -8,6 +8,14 @@ The plugin bundles:
 - the existing Multiverse MCP server, exposed to Codex sessions;
 - native thread naming for Multiverse-managed Codex sessions.
 
+## Shared tool guidance
+
+Codex and Claude load the same Multiverse MCP server. Tool names, schemas,
+response semantics, and agent-facing usage guidance therefore come from the same
+`src/server.py` definitions. The Codex plugin does not duplicate those
+instructions; only runtime-specific lifecycle and inbox behavior is documented
+here.
+
 ## Inbox tools
 
 Codex inbox delivery is explicitly pull-based. Pending messages remain in the

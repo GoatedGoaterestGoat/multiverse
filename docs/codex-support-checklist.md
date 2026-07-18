@@ -33,14 +33,15 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Add the required Codex plugin manifest and directory structure.
 - [x] Add a Codex-side MCP server entry point.
 - [x] Expose the Multiverse MCP tools in Codex-managed sessions.
-- [ ] Give the tools the same names, argument shapes, and response semantics as the
+- [x] Give the tools the same names, argument shapes, and response semantics as the
       Claude plugin where Codex permits it.
 - [x] Ensure plugin paths resolve independently of the user's current directory.
 - [x] Ensure the plugin receives the session-scoped `MULTIVERSE_*` environment.
 - [x] Ensure the plugin is a no-op or returns a clear error when used outside the
       Multiverse wrapper.
-- [ ] Add Codex-side instructions that explain when to use durable messages, side
-      questions, inbox monitoring, and fresh-agent spawning.
+- [x] Reuse the shared MCP tool descriptions in Codex so guidance for durable
+      messages, side questions, inbox monitoring, and fresh-agent spawning cannot
+      drift between runtimes.
 - [x] Determine which Claude hooks have direct Codex equivalents.
 - [x] Implement non-hook fallbacks for required lifecycle or inbox behavior where
       Codex has no equivalent extension point.
@@ -49,8 +50,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 - [x] Add a configurable Codex executable, such as `MULTIVERSE_CODEX_BIN`.
 - [x] Preserve `MULTIVERSE_CLAUDE_BIN` and existing Claude configuration behavior.
-- [ ] Extend `multiverse setup` to detect and report Codex prerequisites.
-- [ ] Persist or restore the Codex configuration needed to resume sessions from a
+- [x] Extend `multiverse setup` to detect and report Codex prerequisites.
+- [x] Persist or restore the Codex configuration needed to resume sessions from a
       different terminal.
 - [x] Keep Claude arguments from being forwarded accidentally to Codex sessions.
 - [ ] Define how runtime-specific default arguments are configured.

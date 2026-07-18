@@ -2,7 +2,8 @@
 # multiverse — launcher for the multiverse monitor TUI, and setup dispatcher.
 #
 # Subcommands:
-#   setup       Install system dependencies (tmux, jq, uv) and run `uv sync`.
+#   setup       Install system dependencies, sync Python deps, and report
+#               Codex runtime availability.
 #   update      Pull the latest changes from origin (dev-mode install only).
 #   (default)   Launch the monitor TUI. Extra args forward to claude when the
 #               user spawns a new session from the monitor.
@@ -32,6 +33,10 @@ CLAUDE_BIN="$MULTIVERSE_CLAUDE_BIN"
 # Codex sessions use a separate runtime adapter and plugin bundle. The plugin
 # path defaults to the sibling scaffold in this repository and can be
 # overridden for packaged installs or local development.
+_MULTIVERSE_CODEX_BIN_WAS_SET=0
+if [ -n "${MULTIVERSE_CODEX_BIN:-}" ]; then
+  _MULTIVERSE_CODEX_BIN_WAS_SET=1
+fi
 export MULTIVERSE_CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
 export MULTIVERSE_CODEX_PLUGIN_ROOT="${MULTIVERSE_CODEX_PLUGIN_ROOT:-$(cd "$PLUGIN_ROOT/../plugins/multiverse-codex" 2>/dev/null && pwd || true)}"
 
@@ -116,6 +121,47 @@ if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
     && mv "$MULTIVERSE_ENV_FILE.tmp" "$MULTIVERSE_ENV_FILE"
 fi
 
+# Snapshot/restore the user's Codex install for the same cross-terminal reason
+# as the Claude environment above. CODEX_HOME controls both native session
+# discovery and resume, while MULTIVERSE_CODEX_BIN plus its PATH entry ensures
+# the same CLI can be launched from a terminal that has not loaded the user's
+# Codex shell configuration.
+#
+# An explicitly supplied CODEX_HOME or MULTIVERSE_CODEX_BIN always wins. When
+# neither is supplied, restore the last-known-good snapshot (if any). Launching
+# once from a configured shell refreshes the snapshot and is the switch
+# mechanism for a different Codex install.
+MULTIVERSE_CODEX_ENV_FILE="${MULTIVERSE_ROOT}/codex-env.sh"
+if [ -f "$MULTIVERSE_CODEX_ENV_FILE" ] \
+   && [ -z "${CODEX_HOME:-}" ] \
+   && [ "$_MULTIVERSE_CODEX_BIN_WAS_SET" -eq 0 ]; then
+  # shellcheck disable=SC1090
+  . "$MULTIVERSE_CODEX_ENV_FILE"
+fi
+if [ -n "${CODEX_HOME:-}" ] \
+   || command -v "$MULTIVERSE_CODEX_BIN" >/dev/null 2>&1; then
+  mkdir -p "$MULTIVERSE_ROOT"
+  MULTIVERSE_CODEX_ENV_TMP="${MULTIVERSE_CODEX_ENV_FILE}.$$.$RANDOM.tmp"
+  if {
+    echo "# Auto-saved by bin/multiverse so multiverse can resume Codex sessions"
+    echo "# from a different terminal than the one they were started in."
+    echo "# Re-run \`multiverse\` from a Codex-configured shell to refresh."
+    [ -n "${CODEX_HOME:-}" ] \
+      && printf 'export CODEX_HOME=%q\n' "$CODEX_HOME"
+    printf 'export MULTIVERSE_CODEX_BIN=%q\n' "$MULTIVERSE_CODEX_BIN"
+    if command -v "$MULTIVERSE_CODEX_BIN" >/dev/null 2>&1; then
+      printf 'export PATH=%q:"${PATH-}"\n' \
+        "$(dirname "$(command -v "$MULTIVERSE_CODEX_BIN")")"
+    fi
+  } > "$MULTIVERSE_CODEX_ENV_TMP"; then
+    mv -f "$MULTIVERSE_CODEX_ENV_TMP" "$MULTIVERSE_CODEX_ENV_FILE"
+  else
+    rm -f "$MULTIVERSE_CODEX_ENV_TMP"
+  fi
+  unset MULTIVERSE_CODEX_ENV_TMP
+fi
+unset _MULTIVERSE_CODEX_BIN_WAS_SET
+
 # Optional: remote web-share config (the `w` action in the monitor). If
 # present, source it so the monitor — and the ttyd / cloudflared it spawns,
 # and the dedicated web monitor inside them — all inherit the backbone
@@ -153,6 +199,48 @@ install_pkg() {
     dnf)    sudo dnf install -y "$1" ;;
     pacman) sudo pacman -S --noconfirm "$1" ;;
   esac
+}
+
+report_codex_setup() {
+  local codex_path codex_version effective_home
+  effective_home="${CODEX_HOME:-$HOME/.codex}"
+
+  if codex_path=$(command -v "$MULTIVERSE_CODEX_BIN" 2>/dev/null); then
+    codex_version=$("$MULTIVERSE_CODEX_BIN" --version 2>&1 || true)
+    codex_version=${codex_version%%$'\n'*}
+    if [ -n "$codex_version" ]; then
+      echo "[multiverse setup] Codex CLI OK: $codex_path ($codex_version)"
+    else
+      echo "[multiverse setup] Codex CLI OK: $codex_path"
+    fi
+  else
+    echo "[multiverse setup] Codex CLI not found: '$MULTIVERSE_CODEX_BIN'." >&2
+    echo "[multiverse setup]   Claude sessions remain available; install Codex or set MULTIVERSE_CODEX_BIN to enable Codex sessions." >&2
+  fi
+  echo "[multiverse setup] Codex home: $effective_home"
+
+  local missing=() rel
+  for rel in \
+    .codex-plugin/plugin.json \
+    .mcp.json \
+    hooks/hooks.json; do
+    if [ ! -r "$MULTIVERSE_CODEX_PLUGIN_ROOT/$rel" ]; then
+      missing+=("$rel")
+    elif ! jq empty "$MULTIVERSE_CODEX_PLUGIN_ROOT/$rel" >/dev/null 2>&1; then
+      missing+=("$rel (invalid JSON)")
+    fi
+  done
+  for rel in scripts/mcp-server scripts/session-hook.py; do
+    [ -x "$MULTIVERSE_CODEX_PLUGIN_ROOT/$rel" ] || missing+=("$rel (not executable)")
+  done
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    echo "[multiverse setup] Codex plugin bundle OK: $MULTIVERSE_CODEX_PLUGIN_ROOT"
+  else
+    echo "[multiverse setup] Codex plugin bundle incomplete: $MULTIVERSE_CODEX_PLUGIN_ROOT" >&2
+    printf '[multiverse setup]   Missing: %s\n' "${missing[@]}" >&2
+    echo "[multiverse setup]   Claude sessions remain available; Codex sessions will fail until the bundle is repaired." >&2
+  fi
 }
 
 run_setup() {
@@ -201,6 +289,8 @@ run_setup() {
 
   echo "[multiverse setup] Running 'uv sync' in $PLUGIN_ROOT..."
   (cd "$PLUGIN_ROOT" && uv sync)
+
+  report_codex_setup
 
   # Optional deps for remote web sharing (the `w` action). Not required for
   # core monitor use, so advise rather than fail.
