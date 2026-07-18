@@ -101,6 +101,50 @@ def _recordable_workspace_id(cwd: str) -> str | None:
     return workspace_id if workspace_id in _seeded() else None
 
 
+def _hook_log_path() -> Path:
+    """Diagnostic log for hook invocations. Separate from ``daemon.log`` because hooks
+    are short-lived subprocesses that CAN'T share the daemon's Python logger — this
+    file is what a user greps to answer "did hook X fire for agent Y and what
+    happened?" when SB reports a missing event.
+    """
+    return _sb_dir() / "hooks.log"
+
+
+def log_hook_outcome(
+    script: str,
+    outcome: str,
+    *,
+    cwd: str = "",
+    agent: str = "",
+    detail: str = "",
+) -> None:
+    """Append a single line to ``hooks.log`` describing what a hook decided.
+
+    Format: ``<iso-ts> <script> agent=<a> cwd=<c> outcome=<o> detail=<d>``. Callers
+    should pass a compact ``outcome`` slug (``recorded`` / ``no-multiverse-env`` /
+    ``empty-prompt`` / ``filter-task-notification`` / ``filter-local-command-caveat``
+    / ``gate-drop-workspace-not-seeded`` / ``no-device-identity`` / ``exception``)
+    and any free-form context in ``detail``.
+
+    Silent on failure — a hook diagnostic that CRASHED the hook would be worse
+    than the drop it was trying to explain.
+    """
+    try:
+        line = (
+            f"{_now_iso()} {script} agent={agent or '<unset>'} "
+            f"cwd={cwd or '<unset>'} outcome={outcome}"
+        )
+        if detail:
+            line += f" detail={detail}"
+        line += "\n"
+        p = _hook_log_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 # ---- writing pending records ---------------------------------------------------------
 
 
@@ -173,6 +217,18 @@ def record_response_signal(cwd: str, agent_name: str) -> None:
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None:
+            # Log why so the hooks.log distinguishes "no device identity" (not enrolled)
+            # from "workspace not seeded yet" (enrolled but never connected). Captures
+            # THIS function's name (the record_*_signal we're in) as the script tag —
+            # currentframe() is our own frame; the caller's frame is one up but that's
+            # not what we want to display.
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            import inspect
+            frm = inspect.currentframe()
+            fn = frm.f_code.co_name if frm else "record_*"
+            # agent_name is the standard positional arg of every record_*_signal
+            agent = str(frm.f_locals.get("agent_name") or "") if frm else ""
+            log_hook_outcome(f"sb_notify.{fn}", reason, cwd=cwd, agent=agent)
             return
         d = response_signals_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -230,6 +286,18 @@ def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None:
+            # Log why so the hooks.log distinguishes "no device identity" (not enrolled)
+            # from "workspace not seeded yet" (enrolled but never connected). Captures
+            # THIS function's name (the record_*_signal we're in) as the script tag —
+            # currentframe() is our own frame; the caller's frame is one up but that's
+            # not what we want to display.
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            import inspect
+            frm = inspect.currentframe()
+            fn = frm.f_code.co_name if frm else "record_*"
+            # agent_name is the standard positional arg of every record_*_signal
+            agent = str(frm.f_locals.get("agent_name") or "") if frm else ""
+            log_hook_outcome(f"sb_notify.{fn}", reason, cwd=cwd, agent=agent)
             return
         d = user_prompt_signals_dir()
         d.mkdir(parents=True, exist_ok=True)
@@ -474,6 +542,51 @@ def mark_permission_requested(tool_use_id: str) -> None:
 
 def had_permission_prompt(tool_use_id: str) -> bool:
     return (pending_tools_dir() / f"{_safe(tool_use_id)}.perm").exists()
+
+
+def pending_tool_data(tool_use_id: str) -> dict | None:
+    """Return the PreToolUse-recorded candidate JSON for this ``tool_use_id`` if it's
+    still in flight (present between the PreToolUse and PostToolUse hook fires), else
+    ``None``. Used by ``answer_question`` to verify the target AskUserQuestion is still
+    pending AND to read its ``tool_input.questions`` for shape validation."""
+    path = pending_tools_dir() / f"{_safe(tool_use_id)}.json"
+    if not path.is_file():
+        return None
+    return _read_json(path)
+
+
+def find_pending_askuserquestion(cwd: str, agent_name: str) -> dict | None:
+    """Locate the currently-pending AskUserQuestion for ``(cwd, agent_name)`` by scanning
+    ``pending_tools/`` for a stashed AskUserQuestion candidate matching this agent.
+
+    The stashed record is written by ``sb-emit-question.py`` (PreToolUse[AskUserQuestion])
+    and removed by ``sb-emit-answered.py`` (PostToolUse[AskUserQuestion]) — so its
+    presence is a reliable signal that the modal is currently blocking the agent's turn.
+    An agent has at most one pending AskUserQuestion at a time, so a single match
+    uniquely identifies it.
+
+    Used by ``answer_question`` when SB doesn't have (or doesn't send) a ``question_id``.
+
+    Returns a dict shaped like :func:`pending_tool_data` (``tool_use_id`` /
+    ``tool_name`` / ``tool_input`` / ``cwd`` / ``agent``) or ``None`` if none pending.
+    """
+    d = pending_tools_dir()
+    if not d.is_dir():
+        return None
+    cwd_r = _resolve(cwd)
+    for p in d.glob("*.json"):
+        if p.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(p)
+        if not rec:
+            continue
+        if (
+            rec.get("cwd") == cwd_r
+            and rec.get("agent") == agent_name
+            and rec.get("tool_name") == "AskUserQuestion"
+        ):
+            return rec
+    return None
 
 
 def cleanup_pending_tool(tool_use_id: str) -> None:

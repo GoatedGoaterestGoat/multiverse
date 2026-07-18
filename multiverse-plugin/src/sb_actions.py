@@ -174,6 +174,289 @@ def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
     return True, saved, ""
 
 
+#: Down-count large enough to always dead-end at "Chat about this" from anywhere in an
+def _find_label_index(s: str, options: list) -> int | None:
+    """0-based index of the option whose ``label`` matches ``s`` exactly; ``None`` if
+    no exact match. Non-matching text is treated as a custom 'Other' typed answer, per
+    the answer_question contract."""
+    for i, opt in enumerate(options):
+        if isinstance(opt, dict) and str(opt.get("label", "")) == s:
+            return i
+    return None
+
+
+def _clean_text(s: str) -> str:
+    """Strip newlines/tabs from custom typed text. Enter is our navigation key, so a
+    stray newline in typed text would prematurely advance the modal."""
+    return s.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+
+
+def build_answer_key_sequence(questions: list, answers: list) -> list:
+    """Compute the send-keys batches to answer a pending AskUserQuestion modal.
+
+    Returns a list of ``("keys"|"text", value)`` batches: ``keys`` is a list of tmux
+    key names (``["Down","Down","Enter"]``) sent as ``tmux send-keys ...``; ``text`` is
+    a string sent as ``tmux send-keys -l <text>`` (literal typing, no key-name parsing).
+
+    Modal layout (empirically verified with the user, 2026-07-13):
+      Single-select Q with P presets: positions 1..P (presets), P+1 (Other = typed
+        answer, focused by navigating to it), P+2 (Chat about this = dead-end sink).
+      Multi-select Q with P presets: 1..P (presets), P+1 (Other), P+2 (Next/Submit),
+        P+3 (Chat about this).
+
+    Navigation semantics:
+      - Down goes through everything in order, dead-ends at Chat about this.
+      - Up cycles within {presets + Other}, wrapping: from position 1 Up → Other.
+        For multi-select, Up from Chat first passes through Next then Other.
+      - Single-select: Enter on a preset selects AND advances.
+      - Multi-select: Enter (and Space) toggles a preset; advancement is via
+        Next/Submit + Enter. Typing in Other implicitly selects it (no extra key).
+      - After a question advances, focus resets to position 1 of the next question.
+      - After the last question advances, we're on the submission confirmation page;
+        one more Enter submits and closes the modal.
+
+    Strategy:
+      - Ground once at start: ``Left × num_questions`` (safety in case focus was on
+        a later question), then ``Down × (P + 1 or P + 2)`` (max needed to dead-end at
+        Chat of Q1).
+      - Q1: navigate from Chat (Up-arrow math).
+      - Q2+: navigate from position 1 (Down-arrow math + Up-wrap for Other).
+      - After last question: one final Enter to submit.
+    """
+    n = len(questions)
+    if n == 0:
+        return []
+
+    # Grounding: navigate to Q1 (Left × n) then Down enough to dead-end at Chat about
+    # this of Q1. Max Downs needed from any starting position ≤ Chat is:
+    #   single-select: P + 1  (positions 1..P presets, P+1 Other, P+2 Chat)
+    #   multi-select:  P + 2  (positions 1..P, P+1 Other, P+2 Next/Submit, P+3 Chat)
+    # Down dead-ends at Chat, so overshooting is harmless; undershooting misaligns the
+    # Up-arrow math below. Use exact-max.
+    q1 = questions[0]
+    P1 = len(q1.get("options") or [])
+    q1_multi = bool(q1.get("multiSelect"))
+    ground_downs = P1 + 2 if q1_multi else P1 + 1
+
+    batches: list = [("keys", ["Left"] * n + ["Down"] * ground_downs)]
+
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        opts = q.get("options") or []
+        P = len(opts)
+        is_multi = bool(q.get("multiSelect"))
+        from_chat = (i == 0)
+        if is_multi:
+            batches.extend(_multi_answer_batches(opts, P, a, from_chat))
+        else:
+            batches.extend(_single_answer_batches(opts, P, a, from_chat))
+
+    # Submission confirmation page → Enter to submit
+    batches.append(("keys", ["Enter"]))
+    return batches
+
+
+def _single_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
+    """Single-select: pick a preset (Enter selects + advances) or type into Other
+    (Enter submits typed text + advances).
+
+    Modal layout (user-confirmed 2026-07-13):
+      positions 1..P (presets), P+1 (Other = free-text input, arrow-navigable),
+      P+2 (Chat about this = Down dead-end).
+    """
+    a_str = a if isinstance(a, str) else (a[0] if isinstance(a, list) and a else "")
+    match = _find_label_index(a_str, options)
+
+    if from_chat:
+        # Chat position = P+2. Up N reaches position P+2-N.
+        if match is not None:
+            k = match + 1  # 1-indexed preset position
+            ups = P + 2 - k
+            return [("keys", ["Up"] * ups + ["Enter"])]
+        # Custom text path: NOT YET REVALIDATED against the corrected model. Fall back
+        # to the old assumption (Up 1 = Other) — if empirical testing shows Other is
+        # reachable via a different key, update here.
+        return [
+            ("keys", ["Up"]),
+            ("text", _clean_text(a_str)),
+            ("keys", ["Enter"]),
+        ]
+    # From position 1 (post-auto-advance)
+    if match is not None:
+        k = match + 1
+        keys = (["Down"] * (k - 1) if k > 1 else []) + ["Enter"]
+        return [("keys", keys)]
+    # Custom text: NOT YET REVALIDATED (see above).
+    return [
+        ("keys", ["Down"] * P),
+        ("text", _clean_text(a_str)),
+        ("keys", ["Enter"]),
+    ]
+
+
+def _multi_answer_batches(options: list, P: int, a, from_chat: bool) -> list:
+    """Multi-select: toggle each selected preset (Enter/Space toggles), optionally
+    type into Other (implicitly selects it), then navigate to Next/Submit and Enter."""
+    if isinstance(a, str):
+        selections = [a] if a else []
+    else:
+        selections = list(a) if isinstance(a, list) else []
+    preset_indexes: list[int] = []
+    custom_text: str | None = None
+    for sel in selections:
+        m = _find_label_index(sel, options)
+        if m is not None:
+            preset_indexes.append(m)
+        else:
+            custom_text = sel  # at-most-one; caller validated
+
+    batches: list = []
+    if from_chat:
+        # Multi-select layout (mirrors user-confirmed single-select correction):
+        # positions 1..P (presets), P+1 (Other), P+2 (Next/Submit), P+3 (Chat about
+        # this = dead-end). Up N from Chat reaches position P+3-N.
+        reground = P + 2  # Down count to reach Chat from position 1
+        for m in preset_indexes:
+            k = m + 1
+            ups = P + 3 - k
+            batches.append(("keys", ["Up"] * ups + ["Enter"]))  # toggle
+            batches.append(("keys", ["Down"] * reground))        # re-ground to Chat
+        if custom_text is not None:
+            # From Chat (P+3), Up 2 = Other (P+1). Type → implicit-selects.
+            batches.append(("keys", ["Up", "Up"]))
+            batches.append(("text", _clean_text(custom_text)))
+            batches.append(("keys", ["Down"] * reground))
+        # From Chat, Up 1 = Next/Submit. Enter → advances.
+        batches.append(("keys", ["Up", "Enter"]))
+        return batches
+
+    # From position 1 (post-auto-advance): walk positions in ascending order.
+    pos = 1
+    sorted_presets = sorted(set(preset_indexes))
+    for m in sorted_presets:
+        k = m + 1
+        delta = k - pos
+        if delta > 0:
+            batches.append(("keys", ["Down"] * delta))
+        elif delta < 0:
+            batches.append(("keys", ["Up"] * (-delta)))
+        batches.append(("keys", ["Enter"]))  # toggle
+        pos = k
+    if custom_text is not None:
+        target = P + 1  # Other position
+        delta = target - pos
+        if delta > 0:
+            batches.append(("keys", ["Down"] * delta))
+        elif delta < 0:
+            batches.append(("keys", ["Up"] * (-delta)))
+        batches.append(("text", _clean_text(custom_text)))
+        pos = target
+    # Navigate to Next/Submit (position P+2) and Enter.
+    target = P + 2
+    delta = target - pos
+    if delta > 0:
+        batches.append(("keys", ["Down"] * delta))
+    elif delta < 0:
+        batches.append(("keys", ["Up"] * (-delta)))
+    batches.append(("keys", ["Enter"]))
+    return batches
+
+
+#: Delay between individual navigation keys (Up/Down/Left/Enter/etc.). Claude Code's
+#: TUI needs a render cycle between keystrokes; without a delay, keys sent in one
+#: ``tmux send-keys`` batch arrive within microseconds and can be coalesced or dropped,
+#: producing off-by-N errors that vary with system load. During the answer_question
+#: debugging phase this is intentionally slow (300ms/key) so the user watching the
+#: pane can actually track which keys land where. Can be reduced (e.g. 50ms) once
+#: the arithmetic is confirmed correct.
+_KEY_DELAY_S = 0.30
+
+
+def answer_askuserquestion_via_tmux(
+    tmux_name: str, questions: list, answers: list
+) -> tuple[bool, str]:
+    """Deliver an answer to a pending AskUserQuestion modal via tmux send-keys.
+
+    Assumes the target's pane currently has the modal open (caller verified via
+    :func:`sb_notify.pending_tool_data`). Builds and sends the full key sequence.
+    Returns ``(ok, err)``.
+    """
+    import logging
+    log = logging.getLogger("sb_connector")
+    try:
+        batches = build_answer_key_sequence(questions, answers)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"could not build key sequence: {exc}"
+    # DIAGNOSTIC: log input + full batch sequence to daemon.log for E2E debugging.
+    try:
+        q_summary = [
+            {"P": len(q.get("options") or []), "multi": bool(q.get("multiSelect")),
+             "labels": [o.get("label") for o in (q.get("options") or [])]}
+            for q in questions
+        ]
+        log.info("answer_askuserquestion questions=%s answers=%s", q_summary, answers)
+        log.info("answer_askuserquestion batches=%s", batches)
+    except Exception:  # noqa: BLE001
+        pass
+    # DIAGNOSTIC: capture the pane before we start so we can see the initial modal
+    # state and cursor position for comparison later.
+    _log_cursor(log, tmux_name, "initial")
+    for bi, (kind, val) in enumerate(batches):
+        if kind == "keys":
+            if not val:
+                continue
+            # Send each nav key as its own tmux invocation with a sleep between so the
+            # TUI has time to render each keystroke.
+            for i, key in enumerate(val):
+                # Delay before EVERY key (including the first of a batch, so inter-batch
+                # timing matches inter-key timing).
+                time.sleep(_KEY_DELAY_S)
+                ok, err = _run_tmux(["send-keys", "-t", tmux_name, key])
+                if not ok:
+                    return False, err
+                # DIAGNOSTIC: capture after each key so we can trace exactly which key
+                # moves the cursor and by how much.
+                _log_cursor(log, tmux_name, f"after batch{bi}[{i}]={key}")
+        else:  # "text"
+            if not val:
+                continue
+            time.sleep(_KEY_DELAY_S)
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", val])
+            if not ok:
+                return False, err
+            _log_cursor(log, tmux_name, f"after batch{bi}[text]")
+    return True, ""
+
+
+#: Match a modal cursor line like ``❯ 1. Alpha`` (possibly indented, possibly inside a
+#: box border ``│ ❯ 1. Alpha    │``). Requires the ``❯`` to be followed by a numbered
+#: menu entry — distinguishes the modal from a stray ``❯`` character in scrollback
+#: (e.g. an inter-agent message quote or a shell prompt).
+_MODAL_CURSOR_RE = re.compile(r"❯\s+(\d+\.\s+.+?)(?:\s{2,}│|\s*$)")
+
+
+def _log_cursor(log, tmux_name: str, tag: str) -> None:
+    """Diagnostic helper: capture the pane and log the modal cursor line.
+
+    Silently no-ops on failure — this is instrumentation, not delivery. Scans the pane
+    for a ``❯ N. Label`` line matching :data:`_MODAL_CURSOR_RE` (bottom-up so the LAST
+    match wins — the modal is always at the bottom of the pane, so a ``❯`` earlier in
+    scrollback like an inter-agent message quote won't be preferred).
+    """
+    try:
+        ok, pane = _run_tmux(["capture-pane", "-p", "-t", tmux_name], capture=True)
+        if not ok:
+            return
+        cursor = ""
+        for line in reversed(pane.splitlines()):
+            m = _MODAL_CURSOR_RE.search(line)
+            if m:
+                cursor = m.group(1).strip()
+                break
+        log.info("cursor %s: %r", tag, cursor)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def wait_for_ready(
     tmux_name: str, timeout_s: float = DEFAULT_READY_TIMEOUT_S
 ) -> tuple[bool, str]:

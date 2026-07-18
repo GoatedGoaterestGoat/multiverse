@@ -690,9 +690,19 @@ def _priv_cli_request_merge(
     timeout_seconds: int = 300,
 ) -> tuple[int, int, str]:
     """Invoke `claude --resume <id> -p <instruction>` for one merge call."""
+    # POSIX command-line arguments are NUL-terminated at the kernel level,
+    # so subprocess.run refuses to exec if any arg contains "\x00" (raises
+    # ValueError: embedded null byte from _fork_exec). NULs can leak into
+    # `instruction` via a leaf preview whose source tool_result was e.g. a
+    # Bash on a binary file or a Read on a file with a stray \x00 in it.
+    # They're meaningless as text so stripping is safe. Sanitize every str
+    # in the arg list for safety; anything else is preserved unchanged.
+    def _strip_nul(s: str) -> str:
+        return s.replace("\x00", "") if isinstance(s, str) else s
+
     cmd = [
         os.environ.get("MULTIVERSE_CLAUDE_BIN") or "claude",
-        "-p", instruction,
+        "-p", _strip_nul(instruction),
         "--resume", session_id,
         "--no-session-persistence",
         "--disable-slash-commands",
@@ -701,7 +711,7 @@ def _priv_cli_request_merge(
         "--max-turns", "1",
         "--output-format", "json",
         "--model", cfg.model,
-        "--system-prompt", CLI_SYSTEM_PROMPT,
+        "--system-prompt", _strip_nul(CLI_SYSTEM_PROMPT),
     ]
 
     proc = subprocess.run(

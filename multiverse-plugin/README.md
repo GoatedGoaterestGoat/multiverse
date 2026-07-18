@@ -158,7 +158,9 @@ Several MCP tools are available to any agent running under the wrapper. They def
 | `True` | idle / working, **no user attached** | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately. |
 | `True` | idle / working, **user attached** | Remains queued — we don't disrupt the attached user's pane. |
 | `True` | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
-| `True` | starting / waiting for approval | Remains queued; no terminal input is sent while the TUI is not ready for a normal prompt. |
+| `True` | starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
+| `True` | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
+| `True` | compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
 
 The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, fell back to passive, etc.). Use `push_notification=True` for time-sensitive work or when you're blocked on the recipient acting; leave it `False` when it's fine to wait for the recipient (or the user) to get to it.
 
@@ -429,9 +431,11 @@ If the user presses Esc during the running phase, the runner sets a cancellation
    - `True` + idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter`. Claude's prompt hook injects the message; Codex is explicitly told to call `check_inbox`.
    - `True` + idle/working + client attached → no ping (would clobber the user's input); the message remains queued.
    - `True` + listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
-   - `True` + starting/waiting → no ping; the message remains queued.
-3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive / already listening).
-4. A Claude recipient's next firing hook (`SessionStart`, `Stop`, or `UserPromptSubmit`) runs `deliver-inbox.py`, which:
+   - `True` + starting → no ping while the runtime TUI is starting; the message remains queued.
+   - `True` + waiting (blocked on a permission/input prompt) → passive delivery; a terminal ping would land on the prompt as random keys, not go through, so we don't try.
+   - `True` + compacting (`is_locked(uuid)` — checked before any state-based branching) → passive delivery; the pane is killed for the duration.
+3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive because attached-user / waiting / compacting / etc.).
+4. For a Claude recipient, the next firing hook (`SessionStart` if just resumed, `Stop` after the current turn, or `UserPromptSubmit` on the next input or a push ping) runs `deliver-inbox.py`, which:
    - Reads all pending messages in the recipient's inbox
    - Formats them as one `<system-reminder>` block
    - Returns the right injection JSON for the firing event (`additionalContext` for SessionStart/UserPromptSubmit, `decision: "block"` with the body as `reason` for Stop)

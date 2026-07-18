@@ -258,11 +258,25 @@ def _effective_after_index(forest, marker: dict | None, parent_of: dict[str, str
       3. Neither resolves → ``None`` (whole forest).
     """
     marker_turn_id = marker.get("turn_id") if marker else None
+    marker_row_uuid = marker.get("row_uuid") if marker else None
 
     # 1. Fast path: marked turn still on the live chain.
     if marker_turn_id is not None:
         for i, turn in enumerate(forest):
             if turn.turn_id == marker_turn_id:
+                # Repair legacy stale markers: if the marker's row_uuid doesn't match
+                # this turn's CURRENT tip, the marker was committed when the turn was
+                # still partial (a pre-8dab34a bug — old peek anchored the cursor onto
+                # a partial tail turn's user_prompt row before the assistant leaves
+                # existed). Now that leaves are here, treat the turn as only partially
+                # delivered: return i-1 so the caller re-emits it in full. The next
+                # commit_marker will write a tip-anchored row_uuid, healing the marker.
+                # Idempotent — a well-anchored marker (row_uuid == current tip) still
+                # returns i.
+                if marker_row_uuid:
+                    current_tip = _turn_tip_uuid(turn)
+                    if current_tip and marker_row_uuid != current_tip:
+                        return i - 1  # forest[i:] re-includes this turn from the start
                 return i
 
     # 2. Revert walk: map every on-chain row uuid → its turn index, then climb.
@@ -448,7 +462,28 @@ def peek_partial_transcript(cwd: str, agent_name: str) -> tuple[str, dict] | Non
 
     if new_turns:
         text = _render_forest(new_turns, ts_of)
-        anchor_turn = new_turns[-1]
+        # Which turn to anchor the cursor onto (commit_marker persists this so the next
+        # peek's _effective_after_index knows what's already been delivered):
+        # normally the LAST new turn. EXCEPT when that last new turn is "partial" —
+        # it has a user_prompt row but no assistant leaves yet (a user.prompt event
+        # firing between UserPromptSubmit and Stop, before the agent has responded).
+        # If we advanced the marker into a partial turn, _effective_after_index would
+        # match it by turn_id on the NEXT peek and treat the whole turn as delivered,
+        # losing the agent's response when Stop later fires. Anchor on the previous
+        # turn (fully-delivered) instead — SB gets deliberate redundancy in the next
+        # event (per the "cheap-now-LLM-later" full-is-view-on-demand design), and
+        # nothing is dropped.
+        last_turn = new_turns[-1]
+        if not last_turn.leaves and len(new_turns) > 1:
+            anchor_turn = new_turns[-2]  # skip the partial tail
+        elif not last_turn.leaves:
+            # only one new turn and it's partial → don't advance at all; re-anchor onto
+            # the pre-marker turn so agent.response gets the whole (soon-to-be-complete)
+            # turn on its next peek. If idx is None (fresh marker, no prior turn), just
+            # leave the cursor where the marker was — commit becomes a no-op.
+            anchor_turn = forest[idx] if (idx is not None and forest) else None
+        else:
+            anchor_turn = last_turn
     else:
         text = ""
         # Caught up. Re-anchor onto the current chain: if the revert walk landed us on

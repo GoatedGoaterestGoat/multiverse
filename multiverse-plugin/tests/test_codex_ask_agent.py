@@ -395,15 +395,15 @@ class SecondBrainCodexAskTests(unittest.IsolatedAsyncioTestCase):
         )
         captured: list[ask_agents.AskTarget] = []
 
-        def fake_ask_all(question, targets, timeout=60.0):
-            captured.extend(targets)
-            return [completed]
+        def fake_ask_one(target, question, plugin_root, timeout, cancel_event):
+            captured.append(target)
+            return completed
 
         with (
             patch.object(
                 sessions, "list_named_agents_in_cwd", return_value=[self._codex_row()]
             ),
-            patch.object(ask_agents, "ask_all", side_effect=fake_ask_all),
+            patch.object(ask_agents, "_ask_one", side_effect=fake_ask_one),
         ):
             summary = await self.connector._gather_workspace_summary(self.cwd)
 

@@ -44,12 +44,10 @@ import itertools
 import json
 import logging
 import os
-import dataclasses
 import signal
 import socket
 import sys
 import time
-import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -75,6 +73,136 @@ log = logging.getLogger("sb_connector")
 #: + seam roundtrip). Side-questions to a tool-less fork should return fast; if 90s isn't
 #: enough the fork is stuck and cutting it is the right call.
 _ASK_TIMEOUT = 90.0
+
+#: Per-ask timeout for the first-connect workspace summary fan-out. Must EXCEED
+#: Claude Code's persistent-retry budget (:envvar:`CLAUDE_CODE_UNATTENDED_RETRY` caps
+#: total wait at 6 hours), otherwise ``subprocess.run`` would kill a still-retrying
+#: fork mid-backoff and lose the summary to a rate-limit blip. 7 hours gives the CLI
+#: room to burn its full retry envelope before we cut it.
+_WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
+
+#: Parallel-ask concurrency for the workspace summary fan-out. Match Multiverse's
+#: ``ask_all`` default (5) — high enough to finish a typical workspace fast, low
+#: enough not to flood the API with N simultaneous requests all vying for the same
+#: rate-limit bucket.
+_WORKSPACE_MAX_PARALLEL = 5
+
+
+def _ssl_for(url: str) -> "ssl.SSLContext | None":
+    """Build an SSL context for a ``wss://`` URL using certifi's CA bundle.
+
+    Returns ``None`` for a plaintext ``ws://`` URL (websockets skips TLS).
+
+    Uses certifi's bundle instead of the system default because minimal dev
+    containers (Debian/Ubuntu slim images, some Kubernetes runtimes) often
+    lack ``ca-certificates`` in Python's default trust-store search paths,
+    yielding ``[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer
+    certificate`` on every enroll/connect. certifi ships Mozilla's root store
+    with the wheel — no OS package required — so we get consistent trust
+    regardless of the host's ca-certificates state.
+    """
+    if not url.lower().startswith("wss://"):
+        return None
+    import ssl
+    import certifi
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+def _ensure_claude_retry_env() -> None:
+    """Guarantee the daemon's forks inherit Multiverse's rate-limit retry tuning.
+
+    Interactive sessions launched via ``bin/multiverse`` get these vars exported by
+    the launcher itself. But the SB connector daemon may be spawned outside that
+    path (via ``sb_control.start()``, systemd, a dev-container init, etc.), and if
+    its parent shell doesn't have these set, ``ask_all`` forks would fall back to
+    the ``claude`` CLI's default 10-attempt retry with a short exponential backoff
+    — a single rate-limit blip on a workspace-summary ask would surface as
+    ``[ask failed: claude exited 1]`` in ``workspace.connected`` instead of
+    retrying through it.
+
+    Sets only if unset (respects an explicit operator override).
+    """
+    # Values kept in sync with bin/multiverse:52-53.
+    os.environ.setdefault("CLAUDE_CODE_MAX_RETRIES", "30")
+    os.environ.setdefault("CLAUDE_CODE_UNATTENDED_RETRY", "1")
+
+
+def _validate_answers_against_questions(questions: list, answers: list) -> tuple[bool, str]:
+    """Validate SB's ``answers`` against the pending AskUserQuestion ``questions`` shape.
+
+    Returns ``(ok, err)`` — the ``err`` is the human message SB will surface on
+    ``bad_request``. Checks: same length; per-question shape matches ``multiSelect``
+    (string vs. list); at most one non-matching entry per multi-select (only one Other
+    slot per question).
+    """
+    if not isinstance(answers, list):
+        return False, "answers must be a list"
+    if len(answers) != len(questions):
+        return False, (
+            f"answers length ({len(answers)}) doesn't match questions length "
+            f"({len(questions)})"
+        )
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        options = q.get("options") or []
+        labels = {opt.get("label", "") for opt in options if isinstance(opt, dict) and opt.get("label")}
+        is_multi = bool(q.get("multiSelect"))
+        if is_multi:
+            if not isinstance(a, list):
+                return False, (
+                    f"answers[{i}] must be a list (question {i} is multiSelect); got "
+                    f"{type(a).__name__}"
+                )
+            non_matching = [s for s in a if s not in labels]
+            if len(non_matching) > 1:
+                return False, (
+                    f"answers[{i}] has {len(non_matching)} entries that don't match any "
+                    "option label; at most one Other (custom text) allowed per question"
+                )
+        else:
+            if not isinstance(a, str):
+                return False, (
+                    f"answers[{i}] must be a string (question {i} is single-select); "
+                    f"got {type(a).__name__}"
+                )
+    return True, ""
+
+
+def _compose_answer_status(agent_name: str, questions: list, answers: list) -> str:
+    """Human-readable status text for the ``answer_question`` ActionResult — embedded
+    verbatim in SB's tool return. Distinguishes preset picks from typed 'Other' text so
+    the SB agent (and the user reading its output) can see when a custom answer was
+    typed vs. one of the offered options selected."""
+
+    def _fmt_entry(a, labels: set[str]) -> str:
+        if isinstance(a, list):
+            parts = []
+            for s in a:
+                if s in labels:
+                    parts.append(f"'{s}'")
+                else:
+                    parts.append(f"'{s}' (typed)")
+            return ", ".join(parts) if parts else "(no selection)"
+        s = a if isinstance(a, str) else ""
+        if s in labels:
+            return f"'{s}'"
+        return f"'{s}' (typed)"
+
+    if len(questions) == 1:
+        q = questions[0]
+        labels = {
+            opt.get("label", "") for opt in (q.get("options") or [])
+            if isinstance(opt, dict) and opt.get("label")
+        }
+        return f"Answered '{agent_name}''s question with {_fmt_entry(answers[0], labels)}."
+
+    parts: list[str] = []
+    for i, (q, a) in enumerate(zip(questions, answers)):
+        labels = {
+            opt.get("label", "") for opt in (q.get("options") or [])
+            if isinstance(opt, dict) and opt.get("label")
+        }
+        parts.append(f"Q{i + 1} → {_fmt_entry(a, labels)}")
+    return f"Answered '{agent_name}''s question: {'; '.join(parts)}."
 
 
 def _now_iso() -> str:
@@ -299,13 +427,64 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+#: The daemon refreshes the lock's ``heartbeat`` field every ``_HEARTBEAT_INTERVAL_S``
+#: seconds. A lock whose heartbeat hasn't been touched in ``_HEARTBEAT_STALE_S`` is
+#: considered dead — either the daemon crashed (missed heartbeats), or the entire host
+#: is gone (foreign-container killed abruptly). The stale threshold is >3x the
+#: interval to tolerate one missed write + normal clock skew between shared-FS hosts.
+_HEARTBEAT_INTERVAL_S = 30.0
+_HEARTBEAT_STALE_S = 120.0
+
+
+def _parse_iso(s: str) -> float | None:
+    """Parse an ISO-8601 UTC timestamp (as written by :func:`_now_iso`) to epoch seconds.
+
+    Returns ``None`` on any parse failure so callers can treat missing/malformed
+    timestamps as "unknown, treat as stale".
+    """
+    if not s:
+        return None
+    try:
+        from datetime import datetime, timezone
+        # _now_iso() writes YYYY-MM-DDTHH:MM:SSZ (no fractional part, trailing Z).
+        return datetime.strptime(s, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        ).timestamp()
+    except (ValueError, TypeError):
+        return None
+
+
+def _lock_is_fresh(data: dict) -> bool:
+    """True if the lock's heartbeat is recent enough that we should treat it as live.
+
+    Missing heartbeat → stale (locks written before the heartbeat feature landed, OR
+    any daemon that died between acquire and the first heartbeat write; either way
+    the safe read is "no live daemon behind this lock, take over").
+    """
+    import time
+    hb = _parse_iso(data.get("heartbeat", ""))
+    if hb is None:
+        return False
+    return (time.time() - hb) < _HEARTBEAT_STALE_S
+
+
 def lock_holder() -> dict | None:
     """The live daemon holding the singleton lock, or None.
 
-    A lock whose holder is on THIS host but whose pid is dead is stale (reaped).
-    A lock held on a DIFFERENT host is trusted as live — a bare pid isn't
-    meaningful across hosts on a shared ~/.multiverse, exactly the case
-    sessions.py's host guard exists for.
+    Live-detection combines two signals so a lock from a dead-and-gone remote host
+    doesn't wedge the widget forever:
+
+    * **Same host**: PID probe (``kill(pid, 0)``) — cheap and authoritative.
+    * **Any host** (foreign or same, belt-and-suspenders): the daemon refreshes a
+      ``heartbeat`` timestamp every ``_HEARTBEAT_INTERVAL_S``. A lock whose
+      heartbeat is older than ``_HEARTBEAT_STALE_S`` is stale even if the recorded
+      PID is alive on another host (or on this host but wedged), and even if the
+      lock has no ``heartbeat`` field at all (legacy schema → treated as stale).
+
+    Both signals must agree: on same-host, PID probe is required (a wedged
+    heartbeat writer looks dead-but-not-really). On foreign-host, heartbeat is the
+    only signal we have (a bare PID is meaningless across hosts on a shared
+    ``~/.multiverse``).
     """
     data = _read_json(lock_path())
     if not data:
@@ -313,22 +492,50 @@ def lock_holder() -> dict | None:
     host = data.get("host")
     pid = int(data.get("pid", 0))
     if host == current_host():
+        # Same host: PID probe is authoritative; heartbeat is a secondary "and the
+        # process is actually doing work" signal. We use PID here — a live daemon
+        # briefly stalled between heartbeat writes shouldn't be reaped.
         return data if _pid_alive(pid) else None
-    return data  # foreign host — cannot probe its pid; assume alive
+    # Foreign host: PID is meaningless, heartbeat is the only proof of life.
+    return data if _lock_is_fresh(data) else None
 
 
 def acquire_lock() -> bool:
-    """Claim the singleton lock for this process. False if a live daemon holds it."""
+    """Claim the singleton lock for this process. False if a live daemon holds it.
+
+    Writes an initial ``heartbeat`` immediately so a concurrent second start on
+    another host reads us as live without waiting ``_HEARTBEAT_INTERVAL_S`` for
+    the first refresh.
+    """
     holder = lock_holder()
     if holder is not None and not (
         holder.get("host") == current_host() and holder.get("pid") == os.getpid()
     ):
         return False
+    now = _now_iso()
     _atomic_write_json(
         lock_path(),
-        {"host": current_host(), "pid": os.getpid(), "started_at": _now_iso()},
+        {
+            "host": current_host(),
+            "pid": os.getpid(),
+            "started_at": now,
+            "heartbeat": now,
+        },
     )
     return True
+
+
+def refresh_heartbeat() -> None:
+    """Rewrite the lock file with a fresh heartbeat. Preserves ``started_at``.
+
+    No-op if the lock has been taken over by a different (host, pid) — protects
+    against stepping on a legitimate concurrent owner that reaped us as stale.
+    """
+    data = _read_json(lock_path()) or {}
+    if data.get("host") != current_host() or int(data.get("pid", 0)) != os.getpid():
+        return
+    data["heartbeat"] = _now_iso()
+    _atomic_write_json(lock_path(), data)
 
 
 def release_lock() -> None:
@@ -343,6 +550,31 @@ def release_lock() -> None:
 # --------------------------------------------------------------------------------------
 # Device identity (device key + enrollment result) — persisted 0600 on this device
 # --------------------------------------------------------------------------------------
+
+
+def code_mtime() -> float:
+    """Latest modification time (epoch seconds) across every ``*.py`` file in this
+    plugin's ``src/`` directory.
+
+    The widget compares this against the running daemon's ``started_at`` to detect
+    when the on-disk code has been updated (i.e. after a ``git pull``) but the
+    daemon is still running the old code — a subtle footgun the user hit on their
+    remote (restarting a specific agent's wrapper doesn't restart the SB daemon;
+    the daemon is a device-level singleton with its own lifecycle). When stale,
+    the widget surfaces a warning + offers the ``r`` reload shortcut.
+    """
+    src = _PLUGIN_ROOT / "src"
+    if not src.is_dir():
+        return 0.0
+    latest = 0.0
+    for path in src.rglob("*.py"):
+        try:
+            mt = path.stat().st_mtime
+        except OSError:
+            continue
+        if mt > latest:
+            latest = mt
+    return latest
 
 
 def load_or_create_device_key(path: str | os.PathLike[str]) -> ed25519.Ed25519PrivateKey:
@@ -366,6 +598,14 @@ class DeviceIdentity:
     private_key: ed25519.Ed25519PrivateKey
     pinned_server_fingerprint: str
     granted_workspaces: list[str] = field(default_factory=list)
+    #: The human-readable label the user chose at enroll time (e.g. "goat-macbook").
+    #: SB stores its own copy in its trust-store (that's what shows up in SB's device
+    #: registry), so this field is a local-only convenience for the widget to prefill
+    #: on subsequent runs — a user opening the widget from a different remote in a
+    #: shared-~/.multiverse deployment doesn't want to see their new container's
+    #: hostname suggested as if a re-enroll were expected. Empty string on legacy
+    #: sidecars that predate this field.
+    device_name: str = ""
 
     @property
     def device_pubkey_b64(self) -> str:
@@ -382,6 +622,7 @@ class DeviceIdentity:
                     "device_id": self.device_id,
                     "pinned_server_fingerprint": self.pinned_server_fingerprint,
                     "granted_workspaces": self.granted_workspaces,
+                    "device_name": self.device_name,
                 },
                 indent=2,
             ),
@@ -397,6 +638,7 @@ class DeviceIdentity:
             private_key=priv,
             pinned_server_fingerprint=data["pinned_server_fingerprint"],
             granted_workspaces=data.get("granted_workspaces", []),
+            device_name=data.get("device_name", ""),  # legacy sidecars: no name stored
         )
 
 
@@ -429,7 +671,12 @@ async def enroll(
     priv = load_or_create_device_key(key_path)
     device_pubkey = auth.b64e(priv.public_key().public_bytes_raw())
 
-    async with connect(url, max_size=p.MAX_FRAME_BYTES, additional_headers=cf_access) as ws:
+    async with connect(
+        url,
+        max_size=p.MAX_FRAME_BYTES,
+        additional_headers=cf_access,
+        ssl=_ssl_for(url),
+    ) as ws:
         x_priv, epk_c = auth.generate_ephemeral()
         await ws.send(
             p.encode(
@@ -479,6 +726,7 @@ async def enroll(
             private_key=priv,
             pinned_server_fingerprint=pinned_fingerprint,
             granted_workspaces=resp.granted_workspaces,
+            device_name=device_name,
         )
         identity.save(key_path)
         log.info("enrolled device_id=%s granted=%s", resp.device_id, resp.granted_workspaces)
@@ -558,31 +806,6 @@ class OutboundBuffer:
 
     def replay_from(self, from_seq: int) -> list[p.Event]:
         return [e for e in self._events if e.seq > from_seq]
-
-    def rewind_and_drain(self, from_seq: int) -> list[p.Event]:
-        """Rewind the seq counter to just past ``from_seq`` and drain the buffer,
-        returning the drained events for the caller to re-emit with fresh seqs.
-
-        Used at reconnect time to prepend ``workspace.connected`` ahead of any events
-        that queued up during the disconnect: caller drains, produces
-        ``workspace.connected`` (its :meth:`next_seq` returns ``from_seq + 1``), then
-        re-appends the drained events (getting the next seqs after that). Result: on the
-        wire SB sees ``workspace.connected`` before the queued events, in the right seq
-        order. Safe because none of the drained events have been acked yet — SB never
-        saw them with their old seqs — so renumbering doesn't violate the "seq stable
-        per event once observed" invariant.
-
-        Persistence is atomically consistent: the buffer file is rewritten empty
-        immediately, and the seq_hw callback fires on each subsequent :meth:`next_seq`
-        as the caller re-produces. If the daemon dies mid-repack, restart sees an empty
-        buffer + seq_hw at the reset point + acked cursor unchanged → the replayed
-        events simply weren't in flight, and their source (if any) will re-produce them.
-        """
-        drained = list(self._events)
-        self._events = []
-        self._persist()
-        self._seq = itertools.count(from_seq + 1)
-        return drained
 
     def pending_after(self, seq: int) -> list[p.Event]:
         """Buffered events with ``seq`` greater than ``seq`` (the unsent tail)."""
@@ -709,6 +932,7 @@ class SBConnector:
                     stream_url(self.base_url),
                     max_size=p.MAX_FRAME_BYTES,
                     additional_headers=self.cf_access,
+                    ssl=_ssl_for(stream_url(self.base_url)),
                 ) as ws:
                     self._ws = ws  # exposed to aclose() for a graceful 1000 close
                     try:
@@ -808,99 +1032,69 @@ class SBConnector:
 
     # ---- one real event: workspace.connected (liveness proof) ---------------------
 
-    async def _emit_workspace_connected(self, from_seq: int) -> None:
-        """Enqueue ``workspace.connected`` for every granted workspace on every
-        successful (re)connect (contract locked with SB, DESIGN §4b).
+    async def _emit_workspace_connected(self, from_seq: int) -> None:  # noqa: ARG002
+        """Enqueue ``workspace.connected`` for every FIRST-EVER granted workspace
+        (SB, 2026-07-16: reconnect events are net-negative and now silently dropped
+        on the SB side; only first-ever carries decision-relevant signal).
 
         **First-ever connect** (this ``(device, workspace)`` pair not yet in
         ``_seeded``):
           - Initialize transcript delivery markers for every named agent in the
-            workspace to their latest jsonl entry. This runs BEFORE any events fire so
-            subsequent transcript-bearing events (agent.response / user.prompt / etc.)
-            cover "from now on," not the pre-existing backlog.
-          - Run Multiverse's ``ask_all`` fork against every named agent with a fixed
-            question ("Please give a concise summary of what you have achieved so far
-            in this workspace.") — up to 60s per agent, 5-parallel. Failed asks land
-            as bracketed placeholder strings, matching what SB rendered as-is.
+            workspace to their latest jsonl entry, BEFORE any events fire — so
+            subsequent transcript-bearing events (agent.response / user.prompt /
+            agent.question / agent.permission_request) cover "from now on," not
+            the pre-existing backlog.
+          - Run Multiverse's ``ask_all`` fork against every named agent with a
+            fixed question ("Please give a concise summary of what you have
+            achieved so far in this workspace.") — up to 60s per agent,
+            5-parallel. Failed asks land as bracketed placeholder strings.
           - Emit event with payload ``{first_connect: True, workspace_summary: {…}}``
-            (or ``workspace_summary: {}`` for an empty workspace).
-          - Add to ``_seeded`` + persist — enables durable event queueing for this
-            workspace on future disconnects.
+            (or ``workspace_summary: {}`` for an empty workspace). Stable
+            ``event_id=wsconn-first:<workspace_id>`` — a mid-flow crash + restart
+            is idempotent under SB's dedup.
+          - Add to ``_seeded`` + persist — enables durable event queueing for
+            this workspace on future disconnects.
 
         **Subsequent (re)connect** (already seeded):
-          - Emit event with empty payload ``{}``. SB's ingest reads absence of
-            ``first_connect`` as "reconnect" and delivers a minimal turn.
-          - No marker init, no ask_all — sub-second.
+          - Emit NOTHING. No marker init, no ask_all. Sub-microsecond.
 
-        **Ordering — the trickier bit.** Events that queued in the durable outbox
-        during downtime carry seqs assigned at production time (lower than any new seq
-        we'd assign now). If we just fire ``workspace.connected`` at this point it'd
-        get the highest seq and SB (which orders by seq) would show it AFTER the
-        during-downtime events. That's the opposite of what we want: the SB agent
-        should see "workspace connected" BEFORE the batch of things that piled up.
-
-        Fix: rewind the buffer's seq counter to just past the acked cursor
-        (``from_seq``) via :meth:`OutboundBuffer.rewind_and_drain`, produce all the
-        workspace.connected events first (getting the lowest new seqs), then re-emit
-        the drained during-downtime events with fresh seqs that continue from there.
-        Because none of the drained events were ever acked, SB never observed them
-        with their old seqs; renumbering preserves the "seq stable per event once
-        observed" invariant. Dedup is by ``event_id``, so idempotency is unchanged.
+        ``from_seq`` is kept in the signature for the caller's ergonomics (matches
+        the surrounding ``_handshake`` return type) but is no longer used — the
+        pre-2026-07-16 rewind-and-re-emit logic that used it existed only to make
+        reconnect ``workspace.connected`` precede downtime backlog on the wire,
+        and there's no reconnect emission any more.
         """
         from . import sb_events
 
-        granted = [
+        # Fast path: nothing new to bootstrap. Every workspace already seeded means
+        # this is a plain reconnect — SB drops those events, and we no longer emit
+        # them, so we're done.
+        pending_first = [
             (cwd, f"{self.identity.device_id}:{cwd}")
             for cwd in self.identity.granted_workspaces
+            if f"{self.identity.device_id}:{cwd}" not in self._seeded
         ]
+        if not pending_first:
+            return
 
-        # Do the blocking first-ever work UP FRONT (before the rewind + emit), so the
-        # rewind window itself is instant and doesn't overlap with a slow ask_all.
-        first_ever_summaries: dict[str, dict[str, str]] = {}
-        for cwd, workspace_id in granted:
-            if workspace_id in self._seeded:
-                continue
+        # First-ever bootstrap: marker init + ask_all (blocking, potentially slow),
+        # then a single workspace.connected event per new workspace.
+        for cwd, workspace_id in pending_first:
             self._init_markers_for_workspace(cwd)
-            first_ever_summaries[workspace_id] = await self._gather_workspace_summary(cwd)
-
-        # Rewind: drain queued events, reset seq counter to acked cursor.
-        drained = self.buffer.rewind_and_drain(from_seq)
-
-        # Emit workspace.connected for every granted workspace — first-ever gets the
-        # summary payload with a stable event_id (so a mid-flow crash + restart is
-        # idempotent under SB's dedup), subsequent gets an empty payload with a unique
-        # event_id per firing (so distinct reconnects don't collapse).
-        for cwd, workspace_id in granted:
-            if workspace_id in first_ever_summaries:
-                payload = sb_events.workspace_connected_event_fields(
-                    first_connect=True,
-                    agents_summary=first_ever_summaries[workspace_id],
-                )
-                event_id = f"wsconn-first:{workspace_id}"
-            else:
-                payload = sb_events.workspace_connected_event_fields(first_connect=False)
-                event_id = f"wsconn:{uuid.uuid4().hex}"
+            summary = await self._gather_workspace_summary(cwd)
             self.make_event(
                 workspace_id=workspace_id,
                 workspace_label=_workspace_label(cwd),
                 kind=p.EventKind.WORKSPACE_CONNECTED,
-                payload=payload,
-                event_id=event_id,
+                payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
+                event_id=f"wsconn-first:{workspace_id}",
             )
-
-        # Mark first-ever workspaces as seeded (+ marker-inited) and persist state.
-        for workspace_id in first_ever_summaries:
             self._seeded.add(workspace_id)
             self._marker_inited.add(workspace_id)
-        if first_ever_summaries:
-            self._state["seeded"] = sorted(self._seeded)
-            save_conn_state(self._state)
 
-        # Re-emit the drained during-downtime events with fresh higher seqs so they
-        # arrive at SB AFTER all the workspace.connected events, preserving order.
-        for old in drained:
-            new_seq = self.buffer.next_seq()
-            self.buffer.append(dataclasses.replace(old, seq=new_seq))
+        # Persist the seeded set so a subsequent restart doesn't re-fire first-ever.
+        self._state["seeded"] = sorted(self._seeded)
+        save_conn_state(self._state)
 
     def _init_markers_for_workspace(self, cwd: str) -> None:
         """Initialize sb_transcript markers to the latest jsonl entry for every named
@@ -922,15 +1116,30 @@ class SBConnector:
                 log.debug("marker init failed for %s/%s", cwd, row.name, exc_info=True)
 
     async def _gather_workspace_summary(self, cwd: str) -> dict[str, str]:
-        """Run ``ask_all`` across every named agent in ``cwd`` with the fixed
+        """Run per-agent asks across every named agent in ``cwd`` with the fixed
         workspace-summary question, returning a per-agent dict for the first-connect
         payload. Blocking work runs in an executor thread.
 
         Empty workspace (no named agents with a native session id) → ``{}`` (payload will
         carry ``workspace_summary: {}`` on the wire). Individual ask failures land as
         bracketed placeholder strings SB renders as-is, keeping the dict shape uniform.
+
+        Rate-limit resilience:
+          - :func:`_ensure_claude_retry_env` guarantees ``CLAUDE_CODE_MAX_RETRIES`` /
+            ``CLAUDE_CODE_UNATTENDED_RETRY`` are set in the daemon's process env so
+            the ``claude`` CLI's persistent-retry mode kicks in inside every fork.
+          - Per-ask timeout is generous (:const:`_WORKSPACE_ASK_TIMEOUT_S`) — must
+            EXCEED the CLI's retry budget, otherwise ``subprocess.run`` would kill a
+            still-retrying fork mid-backoff.
+          - We fan out with :class:`ThreadPoolExecutor` directly (rather than
+            ``ask_all``) so we can log each ask's outcome as it lands — the user
+            sees real-time progress in ``daemon.log`` instead of one final line
+            after the slowest ask finishes.
         """
-        from .ask_agents import AskTarget, ask_all
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import time
+
+        from .ask_agents import AskTarget, _ask_one
         from .sessions import list_named_agents_in_cwd
 
         question = (
@@ -957,20 +1166,58 @@ class SBConnector:
             if not targets:
                 log.info("workspace summary: %s has no askable agents (empty workspace)", cwd)
                 return {}
-            log.info("workspace summary: asking %d agents in %s", len(targets), cwd)
-            try:
-                results = ask_all(question, targets, timeout=60.0)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("workspace summary: ask_all failed for %s: %s", cwd, exc)
-                return {t.name: f"[ask failed: {exc}]" for t in targets}
+
+            log.info(
+                "workspace summary: asking %d agents in %s (per-ask timeout %ds, "
+                "%d parallel, retry env: MAX_RETRIES=%s UNATTENDED=%s)",
+                len(targets), cwd, int(_WORKSPACE_ASK_TIMEOUT_S), _WORKSPACE_MAX_PARALLEL,
+                os.environ.get("CLAUDE_CODE_MAX_RETRIES", "unset"),
+                os.environ.get("CLAUDE_CODE_UNATTENDED_RETRY", "unset"),
+            )
+            t0 = time.monotonic()
+            plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
             out: dict[str, str] = {}
-            for r in results:
-                if r.error:
-                    out[r.name] = f"[ask failed: {r.error}]"
-                elif r.response:
-                    out[r.name] = r.response
-                else:
-                    out[r.name] = "[ask failed: empty response]"
+            done = 0
+            with ThreadPoolExecutor(max_workers=_WORKSPACE_MAX_PARALLEL) as ex:
+                futures = {
+                    ex.submit(_ask_one, t, question, plugin_root,
+                              _WORKSPACE_ASK_TIMEOUT_S, None): t
+                    for t in targets
+                }
+                for f in as_completed(futures):
+                    t = futures[f]
+                    done += 1
+                    try:
+                        r = f.result()
+                    except Exception as exc:  # noqa: BLE001
+                        out[t.name] = f"[ask failed: {exc}]"
+                        log.info("workspace summary [%d/%d]: %s FAILED after threw: %s",
+                                 done, len(targets), t.name, exc)
+                        continue
+                    if r.error:
+                        out[r.name] = f"[ask failed: {r.error}]"
+                        log.info(
+                            "workspace summary [%d/%d]: %s FAILED in %.1fs: %s",
+                            done, len(targets), r.name, r.elapsed, r.error,
+                        )
+                    elif r.response:
+                        out[r.name] = r.response
+                        log.info(
+                            "workspace summary [%d/%d]: %s ok in %.1fs (%d chars)",
+                            done, len(targets), r.name, r.elapsed, len(r.response),
+                        )
+                    else:
+                        out[r.name] = "[ask failed: empty response]"
+                        log.info(
+                            "workspace summary [%d/%d]: %s empty response in %.1fs",
+                            done, len(targets), r.name, r.elapsed,
+                        )
+            wall = time.monotonic() - t0
+            n_ok = sum(1 for v in out.values() if not v.startswith("[ask failed:"))
+            log.info(
+                "workspace summary: %d/%d agents summarized in %.1fs wall time",
+                n_ok, len(targets), wall,
+            )
             return out
 
         loop = asyncio.get_running_loop()
@@ -1075,7 +1322,16 @@ class SBConnector:
         """Turn each fast turn-end signal (from the Stop hook) into an ``agent.response``
         event: generate the partial transcript (peek), compose the payload, buffer it,
         commit the marker, then drop the signal. Marker is committed AFTER the event is
-        durably buffered, so a crash re-delivers (SB dedups), never a gap."""
+        durably buffered, so a crash re-delivers (SB dedups), never a gap.
+
+        Empty-peek suppression: when multiple Stop hooks fire before the producer's poll
+        iteration (rapid-succession turns, or a batch of signals queued while the daemon
+        was reconnecting), the FIRST peek drains all new content and advances the marker.
+        Subsequent signals in the same iteration peek an already-current marker → empty
+        text → useless event with empty ``full`` and a template ``summary`` reading
+        ``agent 'X' finished a turn``. Skip those (still delete the signal + commit the
+        marker as a no-op so we don't loop) — the first non-empty event already covers
+        the same turns."""
         from . import sb_events, sb_notify, sb_transcript
 
         for sig in sb_notify.list_response_signals():
@@ -1087,6 +1343,41 @@ class SBConnector:
                 sb_notify.delete_response_signal(sig)
                 continue
             text, cursor = peeked
+            # Content-emptiness check: skip if the peek has nothing meaningful.
+            # Two shapes qualify:
+            #   1) truly empty ("") — batched-signal case (a prior signal drained it)
+            #   2) only structural [turn] headers, no [user]/[assistant]/[tool:] lines
+            #      — happens when parse_session yields turns whose leaves all got
+            #      dropped by filter_compactable (structural noise like task_reminder,
+            #      skill_listing, deferred-tools; or an all-thinking turn with no
+            #      asst_text; or a turn whose only content is tool_result which
+            #      _render_leaf drops). Suppress it — the event would carry a full of
+            #      just "[turn]\n[turn]" (SB caches it but has_full renders False for
+            #      whitespace-only content) and the composer's _last_assistant_line
+            #      falls back to the placeholder template.
+            has_meaningful = any(
+                line.startswith("[user] ")
+                or line.startswith("[assistant] ")
+                or line.startswith("[tool:")
+                or line.startswith("[tool-result]")
+                for line in text.splitlines()
+            )
+            if not text or not has_meaningful:
+                # Rich diagnostic so we can see WHY the peek is content-less. Include
+                # the peek length + line counts so SB-side reports have something to
+                # correlate against.
+                stem = Path(sig["_path"]).stem[:8]
+                lines = text.splitlines()
+                n_turn = sum(1 for l in lines if l.startswith("[turn"))
+                log.info(
+                    "agent.response: %s SUPPRESSED (aresp:%s..., %d chars, %d lines, "
+                    "%d [turn] headers, 0 meaningful content lines); marker committed "
+                    "as no-op / re-anchor",
+                    agent, stem, len(text), len(lines), n_turn,
+                )
+                sb_transcript.commit_marker(cwd, agent, cursor)  # no-op / re-anchor
+                sb_notify.delete_response_signal(sig)
+                continue
             payload = sb_events.agent_response_event_fields(agent, text)
             self.make_event(
                 workspace_id=sig.get("workspace_id", ""),
@@ -1098,7 +1389,18 @@ class SBConnector:
             )
             sb_transcript.commit_marker(cwd, agent, cursor)  # after durable buffer
             sb_notify.delete_response_signal(sig)
-            log.info("relayed agent.response (idle) for %s", agent)
+            # Rich per-emission log: byte length + counts so SB-side "empty full"
+            # reports can be correlated against what we actually sent.
+            n_asst = text.count("\n[assistant] ") + (
+                1 if text.startswith("[assistant] ") else 0
+            )
+            n_tool = text.count("\n[tool:") + (1 if text.startswith("[tool:") else 0)
+            n_user = text.count("\n[user] ") + (1 if text.startswith("[user] ") else 0)
+            log.info(
+                "relayed agent.response (idle) for %s (%d chars full, "
+                "%d asst, %d tool, %d user)",
+                agent, len(text), n_asst, n_tool, n_user,
+            )
 
     def _consume_user_prompt_signals(self) -> None:
         """Turn each turn-start signal (from the UserPromptSubmit hook) into a
@@ -1333,9 +1635,17 @@ class SBConnector:
             # to other frames (events, queries). The task dedups + sends the result.
             asyncio.create_task(self._handle_prompt_agent_action(ws, action))
             return
+        if action.kind == p.ActionKind.ANSWER_QUESTION:
+            asyncio.create_task(self._handle_answer_question_action(ws, action))
+            return
+        if action.kind == p.ActionKind.ANSWER_SPAWN_REQUEST:
+            asyncio.create_task(self._handle_answer_spawn_request_action(ws, action))
+            return
+        if action.kind == p.ActionKind.SPAWN_AGENT:
+            asyncio.create_task(self._handle_spawn_agent_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
-        #   answer_question / answer_permission_prompt / answer_spawn_request /
-        #   message_agent / spawn_agent / ask_agent
+        #   answer_permission_prompt / message_agent
         result = p.ActionResult(
             action_id=action.action_id,
             status=p.ResultStatus.REJECTED,
@@ -1495,13 +1805,30 @@ class SBConnector:
             )
         tmux_name = session.tmux_name
 
-        # `starting` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
-        # Also gate this on the tmux session actually existing (defensive).
+        # Gate on the tmux session actually existing (defensive).
         if not tmux_session_exists(tmux_name):
             return (
                 "deliver_failed", "",
                 f"tmux session for '{agent_name}' is missing (was it just reaped?)",
             )
+
+        # A ``waiting`` agent has a modal UI open — either AskUserQuestion (multi-choice
+        # question) or a permission prompt — and Claude Code's TUI is actively consuming
+        # keystrokes to navigate it. Send-keys here would corrupt the modal rather than
+        # deliver a user-style prompt. Refuse cleanly; SB can call ``answer_question`` /
+        # ``answer_permission_prompt`` first to close the modal, then retry ``prompt_agent``.
+        #
+        # Contrast with ``listening`` (blocked in monitor_inbox): that path shows no
+        # interactive modal, so send-keys buffered in the terminal is picked up naturally
+        # when the blocking tool call returns — the user confirmed that's fine to deliver.
+        if target.status == "waiting":
+            return (
+                "waiting", "",
+                f"'{agent_name}' is currently waiting for user input (a question or "
+                "permission prompt); the prompt cannot be delivered until they respond.",
+            )
+
+        # ``starting`` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
         if target.status == "starting":
             ok, err = sb_actions.wait_for_ready(tmux_name)
             if not ok:
@@ -1542,6 +1869,473 @@ class SBConnector:
             name=target.name,
             initial_prompt=prompt,
         )
+
+    async def _handle_answer_question_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Answer a pending AskUserQuestion on the target agent (contract locked with the
+        SB toolsmith). Runs as a background task off the receiver.
+
+        Payload: ``{question_id, answers}`` where ``answers[i]`` pairs with the pending
+        ``tool_input.questions[i]``. Each entry is a string (single-select — matching a
+        label picks the preset; non-match is typed into Other) or a list of strings
+        (multi-select, same rule per item, at most one Other per question).
+
+        Errors: ``not_found`` (agent missing) | ``no_pending_question`` (no such AskUser
+        Question pending for this agent) | ``forbidden`` (workspace ACL) | ``bad_request``
+        (shape / length / multi-Other) | ``deliver_failed`` (tmux / send-keys failure).
+        """
+        payload = action.payload or {}
+        question_id = str(payload.get("question_id") or "").strip()
+        sb_answers = payload.get("answers")
+        agent_name = str(action.agent or "").strip()
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+        if not agent_name or sb_answers is None:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": "agent + answers required"},
+            ))
+        if not isinstance(sb_answers, list):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "answers must be a list"},
+            ))
+
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err = await loop.run_in_executor(
+                None, self._deliver_answer_blocking,
+                cwd_abs, agent_name, question_id, sb_answers,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("answer_question crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("answer_question delivered to %s: %s", agent_name, status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": status_str, "message": err or ""},
+            ))
+            log.info("answer_question %s for %s: %s", status_str, agent_name, err)
+
+    def _deliver_answer_blocking(
+        self, cwd_abs: str, agent_name: str, question_id: str, sb_answers: list,
+    ) -> tuple[str, str, str]:
+        """Blocking body of answer_question: verify the pending AskUserQuestion, validate
+        SB's answers against the pending questions[], and drive the modal via
+        :func:`sb_actions.answer_askuserquestion_via_tmux`. Returns ``(status, ok_text, err)``.
+
+        ``question_id`` is OPTIONAL (empty string when absent). When present, we verify
+        it matches the pending AskUserQuestion for this agent — an authoritative
+        "is-this-still-the-pending-one?" race guard. When absent, we resolve the pending
+        AskUserQuestion from live state (an agent has at most one pending AskUserQuestion
+        at a time — the tool blocks its turn). Toolsmith's design improvement, 2026-07-13.
+        """
+        from . import sb_actions, sb_notify
+        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+
+        target = find_agent_by_name(cwd_abs, agent_name)
+        if target is None:
+            return ("not_found", "", f"no agent '{agent_name}' in this workspace")
+
+        # Locate the pending AskUserQuestion for this agent. Two paths:
+        #  (a) explicit question_id from SB → look up pending_tools/<id>.json + verify
+        #  (b) no question_id → scan pending_tools/ for THIS agent's live AskUserQuestion
+        if question_id:
+            pending = sb_notify.pending_tool_data(question_id)
+            if pending is None:
+                return (
+                    "no_pending_question", "",
+                    f"no pending question with id '{question_id}' for '{agent_name}' "
+                    "(agent may have moved on or the question was already answered)",
+                )
+            if pending.get("tool_name") != "AskUserQuestion":
+                return (
+                    "no_pending_question", "",
+                    f"pending tool for id '{question_id}' is "
+                    f"'{pending.get('tool_name')}', not AskUserQuestion",
+                )
+            # Guard: pending record's agent must match the requested target — protects
+            # against a stale question_id that happens to match a different agent's tool.
+            if pending.get("agent") and pending.get("agent") != agent_name:
+                return (
+                    "no_pending_question", "",
+                    f"pending question '{question_id}' is for agent "
+                    f"'{pending.get('agent')}', not '{agent_name}'",
+                )
+        else:
+            pending = sb_notify.find_pending_askuserquestion(cwd_abs, agent_name)
+            if pending is None:
+                return (
+                    "no_pending_question", "",
+                    f"no pending AskUserQuestion for '{agent_name}' in this workspace "
+                    "(agent may have moved on or the question was already answered)",
+                )
+
+        tool_input = pending.get("tool_input") or {}
+        questions = tool_input.get("questions") or []
+        ok, err = _validate_answers_against_questions(questions, sb_answers)
+        if not ok:
+            return ("bad_request", "", err)
+
+        # Live target guards.
+        if target.session is None:
+            return ("deliver_failed", "",
+                    f"'{agent_name}' has no live session to answer the question in")
+        if target.session.host and target.session.host != current_host():
+            return (
+                "deliver_failed", "",
+                f"'{agent_name}' is running on host '{target.session.host}', not this host",
+            )
+        tmux_name = target.session.tmux_name
+        if not tmux_session_exists(tmux_name):
+            return ("deliver_failed", "",
+                    f"tmux session for '{agent_name}' is missing (was it just reaped?)")
+
+        ok, err = sb_actions.answer_askuserquestion_via_tmux(tmux_name, questions, sb_answers)
+        if not ok:
+            return ("deliver_failed", "", err)
+
+        return ("ok", _compose_answer_status(agent_name, questions, sb_answers), "")
+
+    async def _handle_answer_spawn_request_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Approve or decline a pending spawn_agent request (contract locked with the SB
+        toolsmith).
+
+        Delivery is FILE-BASED — the requesting spawn_agent MCP tool blocks reading a
+        specific resolution file, so we just write it via
+        :func:`spawn_requests.write_resolution` (O_EXCL-atomic — first writer wins).
+        No send-keys, no tmux, no modal navigation. And write_resolution internally
+        calls :func:`sb_notify.record_spawn_decision`, so the paired
+        ``user.spawn_decision`` event fires back to SB through the normal pipeline
+        without extra work.
+
+        Payload: ``{request_id, decision: "approve"|"decline", name?: str}``. ``name``
+        is only meaningful when approving; omitted/empty = keep the requester's
+        default_name. Errors: ``not_found`` / ``forbidden`` / ``already_decided`` /
+        ``bad_request`` / ``deliver_failed``.
+        """
+        payload = action.payload or {}
+        request_id = str(payload.get("request_id") or "").strip()
+        decision = str(payload.get("decision") or "").strip()
+        raw_name = payload.get("name")
+        name = str(raw_name).strip() if raw_name else ""
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        # Validate payload.
+        if not request_id:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "payload.request_id is required"},
+            ))
+        if decision not in ("approve", "decline"):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": f"payload.decision must be 'approve' or 'decline' (got {decision!r})"},
+            ))
+        if decision == "decline" and name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": "payload.name is only meaningful when decision is 'approve'"},
+            ))
+
+        # Workspace ACL from action.workspace_id.
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+
+        # File I/O + write_resolution are blocking (subprocess call to tmux for the
+        # caller-alive check). Run in the executor to keep the receiver responsive.
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err_code, err_msg = await loop.run_in_executor(
+                None, self._deliver_spawn_decision_blocking,
+                cwd_abs, request_id, decision, name,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface unexpected exceptions
+            log.exception("answer_spawn_request deliver crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("answer_spawn_request delivered: %s", status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": err_code, "message": err_msg},
+            ))
+            log.info("answer_spawn_request %s (request_id=%s): %s",
+                     err_code, request_id, err_msg)
+
+    def _deliver_spawn_decision_blocking(
+        self, cwd_abs: str, request_id: str, decision: str, name: str,
+    ) -> tuple[str, str, str, str]:
+        """Blocking body: read the spawn request, verify state, write resolution.
+
+        Returns ``(status, status_text, err_code, err_msg)`` where:
+          ``status='ok'``  → ``status_text`` is the success line for SB to render
+          ``status='err'`` → ``err_code`` / ``err_msg`` for the ActionResult error dict
+        """
+        from . import spawn_requests as sr
+
+        req_path = sr.request_path(request_id)
+        if not req_path.is_file():
+            return ("err", "", "not_found",
+                    f"no pending spawn request with id '{request_id}' "
+                    "(already resolved and cleaned up, or never existed)")
+
+        # Read the request to get default_name + caller_tmux for liveness.
+        try:
+            req = json.loads(req_path.read_text())
+        except (OSError, ValueError) as exc:
+            return ("err", "", "not_found",
+                    f"spawn request '{request_id}' is unreadable: {exc}")
+
+        # Workspace match: the request's cwd must equal the action's cwd. Defends
+        # against a misrouted request_id from a different workspace on the same device.
+        req_cwd = str(req.get("cwd") or "")
+        try:
+            req_cwd_abs = str(Path(req_cwd).expanduser().resolve()) if req_cwd else ""
+        except (OSError, RuntimeError):
+            req_cwd_abs = ""
+        if req_cwd_abs != cwd_abs:
+            return ("err", "", "forbidden",
+                    f"spawn request '{request_id}' is in a different workspace")
+
+        default_name = str(req.get("default_name") or "").strip()
+
+        # Caller liveness — if the requesting agent's tmux session died, the spawn tool
+        # can no longer receive the resolution. Report not_found so SB knows the pair is
+        # moot.
+        caller_tmux = str(req.get("caller_tmux_session") or "")
+        if not sr._caller_alive(caller_tmux):
+            return ("err", "", "not_found",
+                    f"spawn request '{request_id}' caller session died before it could "
+                    "receive the decision")
+
+        # Already-decided race check BEFORE writing. If someone already wrote a
+        # resolution (user clicked the dashboard widget, or a prior SB action landed,
+        # or ActionDedup missed a retry), we surface what won.
+        def _describe(res: dict) -> str:
+            st = str(res.get("status") or "").strip()
+            nm = res.get("name")
+            if st == "accepted":
+                if nm and nm != default_name:
+                    return f"approved with name '{nm}' (renamed from '{default_name}')"
+                return f"approved with name '{nm or default_name}'"
+            if st == "rejected":
+                return "declined"
+            return st or "unknown"
+
+        existing = sr.read_resolution(request_id)
+        if existing is not None:
+            return ("err", "", "already_decided",
+                    f"spawn request '{request_id}' was already resolved: {_describe(existing)}")
+
+        # Do the write. O_EXCL — if we race and lose, treat as already_decided too.
+        if decision == "approve":
+            final_name = name if name else default_name
+            wrote = sr.write_resolution(request_id, "accepted", final_name)
+        else:  # decline
+            final_name = ""
+            wrote = sr.write_resolution(request_id, "rejected", None)
+
+        if not wrote:
+            # Race lost. Read what won and surface it.
+            winner = sr.read_resolution(request_id) or {}
+            return ("err", "", "already_decided",
+                    f"spawn request '{request_id}' was resolved concurrently: {_describe(winner)}")
+
+        # Success — compose result string per the samples locked with toolsmith.
+        if decision == "approve":
+            if name and name != default_name:
+                text = f"Approved spawn of '{name}' (renamed from '{default_name}')."
+            else:
+                text = f"Approved spawn of '{final_name}' (requested name kept)."
+        else:
+            text = f"Declined spawn request for '{default_name}'."
+        return ("ok", text, "", "")
+
+    async def _handle_spawn_agent_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """SB-initiated spawn of a new named agent (contract locked with toolsmith).
+
+        Distinct from the ``spawn_agent`` MCP tool that Multiverse agents call: THAT
+        writes a spawn_request file the user must approve; THIS one goes straight to
+        :func:`sessions.create_session` under SB's own permission grant. So NO
+        agent.spawn_request / user.spawn_decision pair fires — but the normal
+        firsthand agent.created event (and user.prompt if instruction given) still
+        flows back to SB as observation.
+
+        Payload: ``{name, instruction?}``. ``name`` REQUIRED, unique in the workspace.
+        ``instruction`` OPTIONAL — if provided, delivered as the new agent's first
+        user turn via bin/multiverse-session's positional-prompt path.
+
+        Result on ok: ``{status, spawned_name}``. Errors: ``duplicate_name`` /
+        ``bad_request`` / ``forbidden`` / ``deliver_failed``.
+        """
+        payload = action.payload or {}
+        name = str(payload.get("name") or "").strip()
+        raw_instr = payload.get("instruction")
+        instruction = str(raw_instr).strip() if raw_instr is not None else ""
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        if not name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "payload.name is required (non-empty)"},
+            ))
+
+        # Workspace ACL from action.workspace_id.
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+
+        # create_session forks tmux + a subprocess — not instantaneous. Run blocking.
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, spawned_name, err_code, err_msg = await loop.run_in_executor(
+                None, self._deliver_spawn_blocking,
+                cwd_abs, name, instruction,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface unexpected exceptions
+            log.exception("spawn_agent deliver crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK,
+                result={"status": status_text, "spawned_name": spawned_name},
+            ))
+            log.info("spawn_agent delivered: %s", status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": err_code, "message": err_msg},
+            ))
+            log.info("spawn_agent %s (name=%s): %s", err_code, name, err_msg)
+
+    def _deliver_spawn_blocking(
+        self, cwd_abs: str, name: str, instruction: str,
+    ) -> tuple[str, str, str, str, str]:
+        """Blocking body: duplicate check + create_session.
+
+        Returns ``(status, status_text, spawned_name, err_code, err_msg)`` where:
+          ``status='ok'``  → ``status_text`` and ``spawned_name`` populate the result
+          ``status='err'`` → ``err_code`` / ``err_msg`` populate the error dict
+        """
+        from . import sessions
+
+        # Duplicate check — find_agent_by_name spans the whole roster (live + dormant),
+        # so we catch collisions with agents the user or a prior SB action created.
+        existing = sessions.find_agent_by_name(cwd_abs, name)
+        if existing is not None:
+            return ("err", "", "", "duplicate_name",
+                    f"an agent named '{name}' already exists in this workspace")
+
+        try:
+            sessions.create_session(
+                cwd=cwd_abs, claude_args=[], name=name,
+                initial_prompt=(instruction or None),
+            )
+        except Exception as exc:  # noqa: BLE001 - surface whatever create_session raised
+            return ("err", "", "", "deliver_failed", f"create_session failed: {exc}")
+
+        label = Path(cwd_abs).name or cwd_abs
+        if instruction:
+            text = f"Spawned '{name}' in '{label}' with an initial task."
+        else:
+            text = f"Spawned '{name}' idle in '{label}' (no initial task)."
+        return ("ok", text, name, "", "")
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""
@@ -1761,6 +2555,10 @@ async def _run_daemon() -> int:
                   holder.get("host"), holder.get("pid"))
         return 3
 
+    # Set Claude Code retry env BEFORE spawning any forks — the workspace-summary
+    # ask_all + future ask_agent forks both inherit these.
+    _ensure_claude_retry_env()
+
     identity = load_identity()
     cfg = load_config()
     creds = load_cf_creds()
@@ -1772,12 +2570,29 @@ async def _run_daemon() -> int:
     # Multiverse substrate and enqueues events, which buffer durably while disconnected.
     producer_task = asyncio.ensure_future(conn.run_producer())
 
+    # Heartbeat refresher: rewrites the lock's ``heartbeat`` timestamp every
+    # ``_HEARTBEAT_INTERVAL_S``. A dead-and-gone remote container (or a SIGKILLed
+    # local daemon) will stop refreshing, and after ``_HEARTBEAT_STALE_S`` the next
+    # daemon anywhere can take over — no manual `rm ~/.multiverse/secondbrain/lock`
+    # required.
+    async def _heartbeat() -> None:
+        while True:
+            try:
+                await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+                refresh_heartbeat()
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - a disk error shouldn't kill the daemon
+                log.exception("heartbeat refresh failed")
+    heartbeat_task = asyncio.ensure_future(_heartbeat())
+
     def _shutdown() -> None:
         # Graceful: flag stop + send a proper 1000 close (which also unblocks a parked
         # recv), so run() breaks on its own. A watchdog force-cancels if the close hangs.
         async def _go() -> None:
             await conn.aclose()
             producer_task.cancel()
+            heartbeat_task.cancel()
             try:
                 await asyncio.wait_for(asyncio.shield(run_task), timeout=8.0)
             except (asyncio.TimeoutError, Exception):  # noqa: BLE001
@@ -1798,7 +2613,8 @@ async def _run_daemon() -> int:
         return 0
     finally:
         producer_task.cancel()
-        await asyncio.gather(producer_task, return_exceptions=True)
+        heartbeat_task.cancel()
+        await asyncio.gather(producer_task, heartbeat_task, return_exceptions=True)
         write_status("stopped", detail="daemon exited", device_id=identity.device_id)
         release_lock()
 
@@ -1826,6 +2642,8 @@ def main() -> None:
 
     sub.add_parser("stream", help="run the connector daemon (after enrollment)")
     sub.add_parser("status", help="print current status JSON")
+    sub.add_parser("reload", help="stop the running daemon and start a fresh one "
+                                  "(picks up new on-disk code after a git pull)")
 
     args = parser.parse_args()
 
@@ -1848,6 +2666,13 @@ def main() -> None:
         raise SystemExit(asyncio.run(_run_daemon()))
     elif args.cmd == "status":
         print(json.dumps(read_status(), indent=2))
+    elif args.cmd == "reload":
+        # Import lazily so `enroll` / `status` / `stream` don't pull in sb_control's
+        # Textual-adjacent chain (the widget imports sb_control which imports us; a
+        # normal `stream` path shouldn't need the reverse trip).
+        from . import sb_control
+        result = sb_control.reload()
+        print(json.dumps(result, indent=2))
 
 
 if __name__ == "__main__":
