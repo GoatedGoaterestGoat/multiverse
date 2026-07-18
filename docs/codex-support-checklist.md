@@ -172,7 +172,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 - [x] Allow a Codex agent to request a fresh subagent.
 - [x] Reuse the existing filesystem request and monitor approval protocol.
-- [ ] Show the caller runtime and proposed child runtime in the approval modal.
+- [x] Show the caller runtime and proposed child runtime in the approval modal.
 - [x] Let the user accept, rename, reject, or cancel the request.
 - [x] Keep concurrent spawn requests FIFO and single-modal.
 - [x] Preserve forced detach and automatic reattach while approval is required.

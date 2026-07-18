@@ -203,20 +203,20 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 **Flow:**
 
 1. Agent calls `spawn_agent(instruction, name="<preferred>")`.
-2. MCP tool writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name, and the caller's tmux session name.
+2. MCP tool writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name, caller runtime, and caller's tmux session name.
 3. Tool fires `tmux display-message` on the caller's pane so a user attached to the caller's tmux session sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve in the monitor." — best-effort status-line notification.
-4. Tool polls `<req-id>.resolved.json` every 250ms (timeout: 300s).
+4. Tool polls `<req-id>.resolved.json` every 250ms indefinitely, with periodic MCP progress notifications. Cancelling the tool call cleans up the request.
 5. Monitor scans `spawn_requests/` on each 1s tick. Enqueues new cwd-matching, unresolved requests into a per-monitor queue. Only one modal at a time; if multiple requests arrive concurrently they queue behind the active modal. Modal only opens when no other modal is already open.
-6. Modal shows `'<from>' wants to spawn a subagent:` + truncated instruction preview + name input seeded with the caller's preferred name (or a random one if that's taken). User hits Enter to accept, Esc to reject.
-7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
-8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[instruction], name=chosen)` — the instruction becomes a positional arg to `claude`, which auto-submits it as the first user message (verified via `claude-code-src/screens/REPL.tsx`'s `initialMessage` effect). Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject/timeout, returns an error string.
+6. Modal shows the caller runtime, truncated instruction preview, name input seeded with the caller's preferred name (or a random one if that's taken), and a Claude/Codex selector defaulted to the caller's runtime. User hits Enter to accept or Esc to reject.
+7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>", runtime: "<chosen-runtime>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
+8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[], name=chosen, runtime=chosen_runtime, initial_prompt=instruction)`. The instruction is carried in a state-dir file and auto-submitted as the first Claude or Codex user message without appearing on the shell command line. Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject, returns an error string.
 9. Tool cleans up both files on exit.
 
 **Summarization is deliberately out of scope for v1.** Claude-code's `/compact` is in-process (hot-swaps `messagesRef`) and can't be triggered externally. Instead, the tool's docstring tells the agent to include a targeted summary in the instruction itself if prior context matters — the caller knows its own context best.
 
 **Multi-monitor coordination:** all cwd-matching monitors enqueue the same request and all pop their own modal when their queue is empty. First monitor to write the resolution file wins via `O_EXCL`; losers detect the external resolution on their next tick and dismiss their modal. A monitor whose modal is dismissed before its user has typed anything writes a `rejected` resolution that `O_EXCL`-no-ops. On concurrent acceptance, the losing monitor's user sees a "another monitor already accepted this spawn as 'X'" notification.
 
-**Stale request handling:** the MCP tool writes a timeout resolution on its way out, so any monitor with the modal still open dismisses cleanly. Stale request files (tool crashed before cleanup) are skipped by `list_pending_requests` via the `timeout_seconds` field vs `ts` comparison.
+**Orphan request handling:** requests remain pending until resolved. If the caller is hard-killed before its `finally` cleanup runs, `list_pending_requests` filters the orphan once the caller's tmux session no longer exists.
 
 **Context assembly note:** the subagent has zero memory of the caller's conversation. If it needs context, the caller must put it in the `instruction`. This is a hard boundary — principled, not a limitation — and it means spawned subagents start from a clean prompt cache rather than a forked one.
 

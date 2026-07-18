@@ -162,7 +162,7 @@ The tool result reports exactly which path was taken (woke a dormant agent, ping
 
 - `instruction` becomes the subagent's first user message, auto-submitted on startup
 - The subagent has **no memory of your conversation** — include any relevant context directly in `instruction` if it matters
-- User brokers the creation: the monitor pops a naming widget showing your instruction + a suggested name (your `name` arg, or random if unset/taken). User accepts, edits, or rejects
+- User brokers the creation: the monitor pops a widget showing the caller runtime, your instruction, a suggested name (your `name` arg, or random if unset/taken), and a Claude/Codex selector defaulted to the caller's runtime. User accepts, edits, chooses the child runtime, or rejects
 - Blocking, **no timeout** — the request waits until the user resolves it. Returns `"Spawned agent with name '<chosen>'"` on acceptance; on reject returns an error and no subagent is created. The caller can interrupt the wait (Esc) to cancel the request. Orphaned requests (caller hard-killed without cleaning up) are reaped by a caller-liveness check, not a timeout.
 - Concurrent spawn requests from multiple agents queue in the monitor — one modal at a time, FIFO
 - If you're attached to any multiverse-managed tmux session when a spawn request arrives, the monitor force-detaches you back to itself so you see the modal; it reattaches you to the same session automatically once the queue clears
@@ -356,7 +356,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 | `check_inbox()` | Read + clear pending inbox messages on demand |
 | `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible; shows as `listening`) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
-| `spawn_agent(instruction, name)` | Spawn a fresh subagent with the instruction as its first user message; user-brokered naming in the monitor |
+| `spawn_agent(instruction, name)` | Spawn a fresh subagent with the instruction as its first user message; user-brokered naming and runtime selection in the monitor |
 
 ### Hooks
 
@@ -436,13 +436,13 @@ Codex uses the parallel `multiverse-codex-session` behavior: if inbox files are 
 
 ### What happens during a `spawn_agent` call
 
-1. `spawn_agent(instruction, name)` writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name (caller's `name` arg if free, else random), and the caller's tmux session id
+1. `spawn_agent(instruction, name)` writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name (caller's `name` arg if free, else random), caller runtime, and caller tmux session id
 2. Tool fires `tmux display-message` on the caller's tmux pane so a user attached there sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve"
 3. Tool (async) polls `<req-id>.resolved.json` every 250ms, **indefinitely** — no timeout. A user Esc on the tool call cancels the wait: `CancelledError` propagates through the `finally` that cleans up the request file, and the monitor dismisses any open modal once that file is gone.
-4. All cwd-matching monitors scan `spawn_requests/` on each 1s tick and enqueue new, unresolved requests (skipping any whose caller tmux session no longer exists — orphan reaping without a timeout). When a monitor has no modal open and its queue is non-empty, it pops the next request's naming widget — seeded with the default name, showing the instruction preview
-5. User hits Enter to accept (writes `{status: "accepted", name: "<chosen>"}` to `<req-id>.resolved.json`, `O_EXCL`-atomic) or Esc to reject
+4. All cwd-matching monitors scan `spawn_requests/` on each 1s tick and enqueue new, unresolved requests (skipping any whose caller tmux session no longer exists — orphan reaping without a timeout). When a monitor has no modal open and its queue is non-empty, it pops the next request's approval widget — seeded with the default name and caller runtime, and showing the caller runtime plus instruction preview
+5. User chooses Claude or Codex and hits Enter to accept (writes `{status: "accepted", name: "<chosen>", runtime: "<chosen-runtime>"}` to `<req-id>.resolved.json`, `O_EXCL`-atomic) or Esc to reject
 6. First monitor to write the resolution wins via `O_EXCL`; other monitors detect the external resolution on their next tick and dismiss their modal. If their user had already been typing, they get a notification that another monitor accepted first
-7. Tool reads the resolution. On accept → `create_session(cwd, name=chosen, initial_prompt=instruction)` writes the instruction to a state-dir file (`initial_prompt.txt`) and passes its path via `MULTIVERSE_INITIAL_PROMPT_FILE`; `multiverse-session` reads the file and hands the content to claude as a positional arg (auto-submitted as the first user message). The instruction never travels on a shell command line — no shlex escaping, no `/bin/sh` re-parse, no ARG_MAX limit — so long, apostrophe-heavy, multi-line instructions arrive intact. On reject → returns an error, no subagent created
+7. Tool reads the resolution. On accept → `create_session(cwd, name=chosen, runtime=chosen_runtime, initial_prompt=instruction)` writes the instruction to a state-dir file (`initial_prompt.txt`) and passes its path via `MULTIVERSE_INITIAL_PROMPT_FILE`; the selected runtime runner reads the file and hands the content to Claude or Codex as a positional arg (auto-submitted as the first user message). The instruction never travels on a shell command line — no shlex escaping, no `/bin/sh` re-parse, no ARG_MAX limit — so long, apostrophe-heavy, multi-line instructions arrive intact. On reject → returns an error, no subagent created
 8. Tool cleans up both files on exit
 
 **Auto-detach/reattach:** if the user is attached to any multiverse-managed tmux session when step 1 writes a request file, the monitor's sidecar guard (`_SpawnAttachGuard`) detects it within 1s and runs `tmux detach-client -s <attached-session>`, forcing the user back into the monitor. Textual's event loop is paused during attach, so this external detach is the only way to wake the modal. Once the spawn queue fully drains (all modals accepted/rejected), the monitor auto-reattaches the user to the tmux session they were booted out of. Skipped with a heads-up if that session was killed while they were away.

@@ -262,7 +262,12 @@ class RuntimeLivenessTests(unittest.TestCase):
 
 
 class RuntimeLaunchTests(unittest.TestCase):
-    def _create_with_runtime(self, runtime: str, runtime_args: list[str]):
+    def _create_with_runtime(
+        self,
+        runtime: str,
+        runtime_args: list[str],
+        initial_prompt: str | None = None,
+    ):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(temp.name)
@@ -295,6 +300,7 @@ class RuntimeLaunchTests(unittest.TestCase):
                 resumed_from="native-thread" if runtime_args else None,
                 name="named-agent",
                 runtime=runtime,
+                initial_prompt=initial_prompt,
             )
         meta = json.loads((state_dir / "session-id" / "meta.json").read_text())
         return created, meta, calls[0]
@@ -311,6 +317,27 @@ class RuntimeLaunchTests(unittest.TestCase):
         self.assertIn("MULTIVERSE_RUNTIME=codex", tmux_cmd)
         self.assertIn("MULTIVERSE_RUNTIME_SESSION_ID_PATH=", " ".join(tmux_cmd))
         self.assertIn("multiverse-codex-session resume native-thread", tmux_cmd[-1])
+
+    def test_codex_launch_keeps_name_and_initial_prompt_off_command_line(
+        self,
+    ) -> None:
+        prompt = "First line with apostrophe's.\nSecond line."
+        _, _, tmux_cmd = self._create_with_runtime(
+            sessions.RUNTIME_CODEX,
+            [],
+            initial_prompt=prompt,
+        )
+
+        self.assertIn("MULTIVERSE_SESSION_NAME=named-agent", tmux_cmd)
+        prompt_env = next(
+            part
+            for part in tmux_cmd
+            if part.startswith("MULTIVERSE_INITIAL_PROMPT_FILE=")
+        )
+        prompt_path = Path(prompt_env.split("=", 1)[1])
+        self.assertEqual(prompt_path.read_text(), prompt)
+        self.assertNotIn(prompt, tmux_cmd[-1])
+        self.assertIn("multiverse-codex-session", tmux_cmd[-1])
 
     def test_claude_launch_keeps_existing_permission_and_runner_behavior(self) -> None:
         created, meta, tmux_cmd = self._create_with_runtime(

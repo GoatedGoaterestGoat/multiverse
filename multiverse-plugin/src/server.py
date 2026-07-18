@@ -42,6 +42,7 @@ from src.sessions import (
     foreign_host_still_reported_live,
     kill_session,
     list_named_agents_in_cwd,
+    normalize_runtime,
     write_status_path,
 )
 from src.inbox import (
@@ -888,12 +889,13 @@ async def spawn_agent(
     summary directly in the instruction. Be deliberate — the subagent only
     sees what you put here.
 
-    User flow: a naming widget opens in the multiverse monitor showing your
-    instruction and a suggested name. The user can accept, edit the name,
-    or reject. This tool blocks until they respond — there is NO timeout, so
-    the request waits however long the user needs. (You can interrupt the
-    wait with Esc to give up; that cancels the request and no subagent is
-    created.) If rejected, no subagent is created.
+    User flow: a widget opens in the multiverse monitor showing your
+    instruction, a suggested name, and a Claude/Codex runtime selector. The
+    user can accept, edit the name, choose either runtime, or reject. This
+    tool blocks until they respond — there is NO timeout, so the request
+    waits however long the user needs. (You can interrupt the wait with Esc
+    to give up; that cancels the request and no subagent is created.) If
+    rejected, no subagent is created.
 
     Args:
         instruction: The first user message for the new agent. Can be
@@ -908,13 +910,18 @@ async def spawn_agent(
     cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     self_name = os.environ.get("MULTIVERSE_SESSION_NAME")
     caller_sid = os.environ.get("MULTIVERSE_SESSION_ID")
-    caller_runtime = os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
     if not cwd or not self_name or not caller_sid:
         return (
             "Error: this tool requires running inside a multiverse-managed "
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME / "
             "MULTIVERSE_SESSION_ID unset)."
         )
+    try:
+        caller_runtime = normalize_runtime(
+            os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
+        )
+    except ValueError as e:
+        return f"Error: invalid caller runtime: {e}"
 
     if not instruction or not instruction.strip():
         return "Error: instruction cannot be empty."
@@ -942,6 +949,7 @@ async def spawn_agent(
             instruction=instruction,
             default_name=default_name,
             caller_tmux_session=caller_tmux,
+            caller_runtime=caller_runtime,
         )
     except OSError as e:
         return f"Error: failed to write spawn request: {e}"
@@ -1005,19 +1013,26 @@ async def spawn_agent(
         chosen = (res.get("name") or "").strip()
         if not chosen:
             return "Error: resolution contained an empty name — no subagent created."
+        try:
+            child_runtime = normalize_runtime(
+                res.get("runtime") or caller_runtime
+            )
+        except ValueError as e:
+            return f"Error: resolution contained an invalid runtime: {e}"
 
         try:
             create_session(
                 cwd=cwd,
                 claude_args=[],
                 name=chosen,
-                runtime=caller_runtime,
+                runtime=child_runtime,
                 # Pass the instruction off-band via a state-dir file rather
                 # than as a CLI arg. This avoids: shell-escape bloat for
                 # apostrophe-heavy / long instructions, the multi-stage
                 # tmux→sh→multiverse-session re-parse, and any ARG_MAX
                 # surprises. multiverse-session reads the file and hands
-                # the content to claude as a positional argv entry.
+                # the content to the selected runtime as a positional argv
+                # entry.
                 initial_prompt=instruction,
             )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:

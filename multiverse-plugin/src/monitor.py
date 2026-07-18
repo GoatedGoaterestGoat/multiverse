@@ -230,16 +230,19 @@ class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
         self.dismiss(None)
 
 
-class SpawnRequestScreen(ModalScreen[Optional[str]]):
-    """Naming widget for an agent-initiated spawn request.
+class SpawnRequestScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Approval widget for an agent-initiated spawn request.
 
-    Returns the chosen name on accept, or ``None`` on Esc. The monitor's
-    watcher may also dismiss this externally (if another monitor resolved
-    the request first) — in that case the callback still sees ``None`` and
-    ``write_resolution`` no-ops via O_EXCL.
+    Returns the chosen name and runtime on accept, or ``None`` on Esc. The
+    monitor's watcher may also dismiss this externally (if another monitor
+    resolved the request first) — in that case the callback still sees
+    ``None`` and ``write_resolution`` no-ops via O_EXCL.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "submit", "Create", show=False, priority=True),
+    ]
 
     _PREVIEW_CHARS = 280
 
@@ -252,6 +255,11 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
         if not seeded or seeded in names:
             seeded = pick_random_name(names) or ""
         self.default_name = seeded
+        self.caller_runtime = (
+            RUNTIME_CODEX
+            if request.get("caller_runtime") == RUNTIME_CODEX
+            else RUNTIME_CLAUDE
+        )
 
     def compose(self) -> ComposeResult:
         from_name = self.request.get("from", "?")
@@ -262,14 +270,32 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
 
         yield Vertical(
             Static(
-                f"[bold]'{from_name}'[/] wants to spawn a subagent:",
+                f"[bold]'{from_name}'[/] ({self.caller_runtime}) wants to "
+                "spawn a subagent:",
                 id="spawn-header",
             ),
             Static(f"[dim italic]{preview or '(empty instruction)'}[/]", id="spawn-preview"),
             Static("Name the new agent:", id="spawn-prompt"),
             Input(value=self.default_name, id="spawn-name"),
+            Static("Child runtime:", id="spawn-runtime-prompt"),
+            RadioSet(
+                RadioButton(
+                    "Claude",
+                    value=self.caller_runtime == RUNTIME_CLAUDE,
+                    id="spawn-runtime-claude",
+                ),
+                RadioButton(
+                    "Codex",
+                    value=self.caller_runtime == RUNTIME_CODEX,
+                    id="spawn-runtime-codex",
+                ),
+                id="spawn-runtime",
+            ),
             Static("", id="spawn-error"),
-            Static("Enter to accept · Esc to reject", id="spawn-hint"),
+            Static(
+                "Tab to choose runtime · Enter to accept · Esc to reject",
+                id="spawn-hint",
+            ),
             id="spawn-dialog",
         )
 
@@ -282,7 +308,13 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
             pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        name = event.value.strip()
+        self._try_submit()
+
+    def action_submit(self) -> None:
+        self._try_submit()
+
+    def _try_submit(self) -> None:
+        name = self.query_one("#spawn-name", Input).value.strip()
         err = self.query_one("#spawn-error", Static)
         if not name:
             err.update("[red]Name cannot be empty.[/]")
@@ -292,7 +324,12 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
                 f"[red]'{name}' is already used in this workspace.[/]"
             )
             return
-        self.dismiss(name)
+        runtime = (
+            RUNTIME_CODEX
+            if self.query_one("#spawn-runtime-codex", RadioButton).value
+            else RUNTIME_CLAUDE
+        )
+        self.dismiss((name, runtime))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -2699,6 +2736,10 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #spawn-runtime {
+        height: auto;
+        padding-bottom: 1;
+    }
     #spawn-error {
         color: $error;
         height: auto;
@@ -2965,15 +3006,21 @@ class MonitorApp(App):
         rid = req.get("id") or ""
         self._active_spawn_id = rid
 
-        def on_close(chosen_name: Optional[str]) -> None:
+        def on_close(selection: Optional[tuple[str, str]]) -> None:
             self._active_spawn_id = None
             self._active_spawn_modal = None
-            if chosen_name:
-                won = write_resolution(rid, status="accepted", name=chosen_name)
+            if selection:
+                chosen_name, chosen_runtime = selection
+                won = write_resolution(
+                    rid,
+                    status="accepted",
+                    name=chosen_name,
+                    runtime=chosen_runtime,
+                )
                 if won:
                     self.notify(
                         f"Approved spawn from '{req.get('from', '?')}' "
-                        f"as '{chosen_name}'"
+                        f"as '{chosen_name}' ({chosen_runtime})"
                     )
                 else:
                     # Another monitor beat us to the resolution. Show what
@@ -2981,9 +3028,10 @@ class MonitorApp(App):
                     actual = read_resolution(rid)
                     if actual and actual.get("status") == "accepted":
                         won_name = actual.get("name") or "?"
+                        won_runtime = actual.get("runtime") or RUNTIME_CLAUDE
                         self.notify(
                             f"Another monitor already accepted this "
-                            f"spawn as '{won_name}'",
+                            f"spawn as '{won_name}' ({won_runtime})",
                             severity="warning",
                         )
             else:

@@ -78,6 +78,7 @@ def write_spawn_request(
     instruction: str,
     default_name: str,
     caller_tmux_session: str,
+    caller_runtime: str = "claude",
 ) -> Path:
     """Atomically (tmp+rename) drop a spawn request into the watch dir."""
     SPAWN_REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -90,6 +91,7 @@ def write_spawn_request(
         "instruction": instruction,
         "default_name": default_name,
         "caller_tmux_session": caller_tmux_session,
+        "caller_runtime": caller_runtime,
         "ts": time.time(),
     }
     tmp.write_text(json.dumps(data))
@@ -151,6 +153,7 @@ def write_resolution(
     status: str,
     name: Optional[str] = None,
     reason: Optional[str] = None,
+    runtime: Optional[str] = None,
 ) -> bool:
     """O_EXCL-atomic resolution write. Returns ``False`` if another writer won.
 
@@ -163,6 +166,7 @@ def write_resolution(
         "status": status,
         "name": name,
         "reason": reason,
+        "runtime": runtime,
         "ts": time.time(),
     }
     content = json.dumps(data).encode()

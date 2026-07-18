@@ -32,6 +32,75 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
             results, [("codex-agent", monitor.RUNTIME_CODEX)]
         )
 
+    async def test_spawn_modal_shows_caller_runtime_and_returns_codex(self) -> None:
+        results: list[tuple[str, str] | None] = []
+        request = {
+            "from": "claude-caller",
+            "instruction": "Investigate the failing build.",
+            "default_name": "build-agent",
+            "caller_runtime": monitor.RUNTIME_CLAUDE,
+        }
+        with tempfile.TemporaryDirectory() as cwd, patch.object(
+            monitor, "all_session_names_in_cwd", return_value=set()
+        ):
+            app = App()
+            async with app.run_test() as pilot:
+                screen = monitor.SpawnRequestScreen(cwd, request)
+                app.push_screen(screen, results.append)
+                await pilot.pause()
+
+                header = screen.query_one("#spawn-header")
+                self.assertIn("(claude)", str(header.content))
+                self.assertTrue(
+                    screen.query_one(
+                        "#spawn-runtime-claude", RadioButton
+                    ).value
+                )
+                screen.query_one("#spawn-name", Input).value = "codex-child"
+                screen.query_one(
+                    "#spawn-runtime-codex", RadioButton
+                ).value = True
+                await pilot.press("enter")
+                await pilot.pause()
+
+        self.assertEqual(
+            results, [("codex-child", monitor.RUNTIME_CODEX)]
+        )
+
+    async def test_spawn_modal_resolution_includes_selected_runtime(self) -> None:
+        callbacks = []
+        request = {
+            "id": "request-id",
+            "from": "caller",
+            "instruction": "Do the work.",
+            "default_name": "child",
+            "caller_runtime": monitor.RUNTIME_CLAUDE,
+        }
+        with tempfile.TemporaryDirectory() as cwd, patch.dict(
+            "os.environ", {"MULTIVERSE_ORIG_CWD": cwd}
+        ):
+            app = monitor.MonitorApp([])
+            with (
+                patch.object(
+                    app,
+                    "push_screen",
+                    side_effect=lambda screen, callback: callbacks.append(callback),
+                ),
+                patch.object(app, "notify"),
+                patch.object(
+                    monitor, "write_resolution", return_value=True
+                ) as write_resolution,
+            ):
+                app._show_spawn_modal(request)
+                callbacks[0](("codex-child", monitor.RUNTIME_CODEX))
+
+        write_resolution.assert_called_once_with(
+            "request-id",
+            status="accepted",
+            name="codex-child",
+            runtime=monitor.RUNTIME_CODEX,
+        )
+
     async def test_resume_modal_merges_both_runtimes(self) -> None:
         results: list[tuple[str, str, str | None] | None] = []
         claude_info = {
