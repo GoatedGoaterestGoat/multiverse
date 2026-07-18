@@ -195,7 +195,9 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] `r`: refresh mixed-runtime state.
 - [x] `q`: leave all Claude and Codex sessions running.
 - [x] `w`: expose the mixed-runtime monitor through the existing web share.
-- [ ] `S`: expose Codex sessions through the SecondBrain connector.
+- [x] `S`: start and manage the existing device-level SecondBrain connector for a
+      mixed-runtime workspace.
+- [ ] `S`: complete the Codex query, action, and event parity detailed below.
 - [x] Hide or clearly disable Claude-only compaction actions for Codex rows.
 - [x] Keep `c`, `x`, `v`, and `b` unchanged for Claude rows.
 
@@ -203,24 +205,187 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 The completed SecondBrain implementation from `main` was integrated into the
 `codex-support` branch on 2026-07-18. Codex parity targets that integrated feature
-set.
+set. Protocol entries that are not implemented for Claude are tracked separately
+and are not Codex parity blockers.
 
-- [ ] Include Codex sessions in `get_dashboard`, `list_agents`, and `get_status`.
-- [ ] Include runtime information in SecondBrain session data if the protocol permits.
-- [x] Support SecondBrain `ask_agent` queries targeting Codex agents.
-- [ ] Support SecondBrain `prompt_agent` actions targeting live Codex agents.
-- [ ] Support SecondBrain `prompt_agent` actions that resume dormant Codex agents.
-- [ ] Preserve typed-but-unsent Codex terminal input when injecting a live prompt, or
-      use a safer runtime API if available.
-- [x] Emit `workspace.connected` summaries from mixed Claude/Codex workspaces.
-- [ ] Emit `agent.created` for new Codex agents.
-- [ ] Emit `user.prompt` for Codex user turns.
-- [ ] Emit `agent.response` when Codex finishes a normal turn.
-- [ ] Emit question/answer and permission request/decision events where Codex exposes
-      the necessary lifecycle data.
-- [ ] Render partial Codex transcripts for SecondBrain without depending on the Claude
-      JSONL parser.
-- [ ] Preserve durable event buffering, replay, and workspace ACL behavior.
+### Recommended Implementation Order
+
+1. Complete and test the mixed-runtime read queries.
+2. Add the read-only Codex transcript adapter and durable cursor.
+3. Implement live and resumed Codex delivery for `prompt_agent`.
+4. Define runtime selection and complete both SecondBrain spawn paths.
+5. Emit and verify `user.prompt`, `agent.response`, and Codex spawn events.
+6. Investigate structured Codex questions and permissions, then implement only the
+   event/action pairs for which reliable correlation is available.
+7. Run replay, deduplication, ACL, reconnect, and real-device verification across the
+   completed feature set.
+
+### Shared Connector Foundation
+
+- [x] Use one connector daemon, device enrollment, and pinned server connection for
+      Claude and Codex sessions rather than starting a connector per runtime.
+- [x] Preserve the existing workspace ACL for every query, action, and emitted event.
+- [x] Preserve durable event sequencing, buffering, acknowledgement, replay, and
+      reconnect gap recovery for mixed-runtime events.
+- [x] Preserve `LOCK`/`UNLOCK` behavior while events continue to enter the durable
+      outbox.
+- [x] Preserve action-id deduplication, first-writer-wins decisions, and the existing
+      `ok`, `error`, and `rejected` result semantics.
+- [x] Keep connector state and signal writes atomic when Claude and Codex processes
+      publish concurrently.
+- [ ] Decide whether to add a runtime discriminator to SecondBrain payloads; do not
+      change established query result shapes unless the protocol is extended.
+
+### Read Queries
+
+- [x] Keep `list_workspaces` runtime-neutral and scoped to the connector's granted
+      workspace IDs.
+- [x] Feed `get_dashboard`, `list_agents`, and `get_status` from the shared
+      mixed-runtime session roster.
+- [ ] Make `get_dashboard` return a stable ID, common status, inbox count, updated
+      timestamp, and preview for live, ended, and dormant Codex rows.
+- [ ] Define Codex dashboard values when live token usage is unavailable and ensure
+      the Claude-only auto-build field remains `off`.
+- [ ] Verify `list_agents` returns Codex agents with the existing name, status, inbox,
+      token, and last-updated fields and no unapproved schema changes.
+- [ ] Verify `get_status` has identical lookup, not-found, and cross-workspace behavior
+      for Claude and Codex targets.
+- [x] Support `ask_agent` queries targeting Codex agents through a non-mutating
+      ephemeral fork.
+- [ ] Verify ACL, malformed-request, not-found, timeout, and side-fork failure results
+      for every Codex-capable query.
+- [ ] Treat `get_transcript` as a connector-wide future feature: it is currently not
+      implemented for Claude and does not block initial Codex parity.
+
+### Action: `prompt_agent`
+
+- [ ] Deliver a prompt to a live, idle Codex agent without changing the action schema.
+- [ ] Deliver a prompt to a live Codex agent that is already working or listening.
+- [ ] Wait for a starting Codex TUI to become ready using a bounded,
+      runtime-specific readiness signal.
+- [ ] Resume a dormant or ended Codex agent by its Codex session ID and supply the
+      action text as its resumption prompt.
+- [ ] Preserve typed-but-unsent Codex terminal input during live prompt injection, or
+      use a runtime API that does not modify the user's input buffer.
+- [ ] Refuse unsafe delivery when the Codex agent is waiting for an answer or
+      permission decision, is live on another host, or has no usable tmux/session ID.
+- [ ] Preserve the existing busy, locked, waiting, not-found, delivery-failed, and
+      timeout result semantics.
+- [ ] Add action-id deduplication tests proving a retried prompt is delivered at most
+      once to a Codex session.
+
+### Action: `answer_question`
+
+- [ ] Determine which Codex lifecycle event exposes a structured user question,
+      options, multi-select rules, and a stable correlation ID.
+- [ ] Normalize Codex questions to the existing question and answer payload schema
+      without relying on Claude `AskUserQuestion` hook fields.
+- [ ] Deliver single-select, multi-select, and custom-text answers through a
+      Codex-specific API or validated TUI interaction.
+- [ ] Correlate an answer with the pending question and reject stale, missing,
+      malformed, or already-answered requests.
+- [ ] Preserve foreign-host and non-waiting-state safeguards.
+- [ ] If Codex cannot expose or answer structured questions reliably, document the
+      capability as unsupported instead of emitting misleading events.
+
+### Action: `answer_spawn_request`
+
+- [x] Reuse the filesystem-backed spawn request and first-writer-wins resolution
+      protocol for requests originating from either runtime.
+- [ ] Define the approved child's runtime for a SecondBrain decision: inherit the
+      caller runtime unless the protocol gains an explicit runtime field.
+- [ ] Persist that runtime in the accepted resolution so a Codex caller does not
+      accidentally spawn a Claude child.
+- [ ] Verify accept, rename, reject, duplicate-decision, caller-liveness, and workspace
+      mismatch behavior for Codex-originated requests.
+- [ ] Verify the resulting `user.spawn_decision` and `agent.created` events preserve
+      the established payload shapes.
+
+### Action: `spawn_agent`
+
+- [ ] Define runtime selection for a SecondBrain-initiated direct spawn, which has no
+      local approval widget; require an explicit protocol value or a documented
+      default.
+- [ ] Start a Codex child with the requested name and optional instruction as its
+      first prompt.
+- [ ] Preserve workspace ACL, name uniqueness, cross-host liveness, and action-id
+      deduplication.
+- [ ] Return the same duplicate-name, bad-request, forbidden, and start-failure result
+      semantics as the Claude path.
+- [ ] Emit `agent.created` only after the Codex session is successfully materialized.
+
+### Other Protocol Actions
+
+- [ ] Implement connector-wide `answer_permission_prompt` before treating Codex
+      permission decisions as remotely actionable; the action is not yet implemented
+      for Claude either.
+- [ ] Implement connector-wide `message_agent` only if durable agent-to-agent inbox
+      delivery is intentionally exposed through SecondBrain; it is not implemented
+      by the current connector.
+- [x] Keep reserved `kill_agent`, `compact_session`, and `resume_agent` actions out of
+      initial Codex parity. In particular, do not add Multiverse compaction for Codex.
+
+### Outbound Events
+
+- [x] Emit first-connect `workspace.connected` summaries from mixed Claude/Codex
+      workspaces using runtime-aware side questions.
+- [x] Queue `agent.created` from the shared successful-creation choke point for both
+      runtimes.
+- [ ] Add Codex-specific coverage for the `agent.created` payload and ensure failed
+      or duplicate creations emit nothing.
+- [ ] Emit `user.prompt` for real Codex user turns while filtering Multiverse-injected
+      wrappers, local commands, and other synthetic input.
+- [ ] Include the same overview-since-last and partial `full` transcript fields in a
+      Codex `user.prompt` event.
+- [ ] Emit `agent.response` once after a meaningful Codex turn completes normally and
+      becomes idle; suppress empty, interrupted, and waiting responses.
+- [x] Queue `agent.spawn_request` and `user.spawn_decision` at their shared filesystem
+      publication points regardless of caller runtime.
+- [ ] Verify both spawn event payloads and their ordering for a Codex caller.
+- [ ] Emit paired `agent.question` and `user.answered` events only when a stable Codex
+      question ID and structured answer can be correlated.
+- [ ] Emit paired `agent.permission_request` and `user.permission_decision` events
+      only when Codex exposes a stable tool/request ID and reliable allow/deny result.
+- [ ] Keep waiting question and permission events separate from normal
+      `agent.response` completion events.
+- [x] Leave protocol-only `workspace.disconnected` and `user.status_changed` outside
+      Codex parity until the shared connector has baseline producers for them.
+- [x] Do not emit agent-to-agent inbox traffic as SecondBrain user conversation
+      events.
+
+### Codex Transcript Source
+
+- [ ] Add a runtime-specific transcript adapter for Codex rollout history rather than
+      reading Claude `full_jsonls/` or invoking the Claude compaction parser.
+- [ ] Define a durable Codex cursor using the session/thread ID plus a stable rollout
+      item or event position.
+- [ ] Preserve the existing peek/commit rule: advance the cursor only after the
+      corresponding SecondBrain event is durably queued.
+- [ ] Render Codex user text, assistant text, and relevant tool calls into the same
+      role-labelled `full` format expected by SecondBrain.
+- [ ] Filter system scaffolding, synthetic resume prompts, inbox wrappers, and
+      ephemeral side-question turns from user-facing transcript text.
+- [ ] Handle resume, branch/revert behavior, partial final turns, and Codex built-in
+      compaction without transcript gaps or duplicate event context.
+- [ ] Keep transcript collection read-only with respect to the Codex session and do
+      not create a second history mirror solely for SecondBrain.
+
+### SecondBrain Verification
+
+- [ ] Test all implemented queries against live, ended, and dormant Codex targets and
+      a mixed-runtime workspace.
+- [ ] Test live injection, starting readiness, dormant resume, user attachment,
+      typed-input preservation, and duplicate action delivery for `prompt_agent`.
+- [ ] Test direct and approval-based Codex spawns, runtime inheritance/selection,
+      rename, rejection, interruption, and duplicate decisions.
+- [ ] Test event ordering and exactly-once publication for prompt/response,
+      question/answer, permission request/decision, and spawn request/decision pairs.
+- [ ] Test connector restart, server reconnect, acknowledgement replay, sequence-gap
+      recovery, `LOCK`/`UNLOCK`, and ACL rejection with mixed-runtime events pending.
+- [ ] Test transcript cursor recovery across resume, partial turns, event queue
+      failure, and Codex built-in compaction.
+- [ ] Perform an end-to-end device test from a SecondBrain client without modifying
+      persistent test agents unintentionally.
 
 ## Explicitly Out of Scope for Initial Codex Support
 
