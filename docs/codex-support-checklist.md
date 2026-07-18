@@ -78,8 +78,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Preserve the current cross-host liveness safeguards.
 - [x] Prevent two wrappers from claiming the same Codex session and agent name.
 - [x] Preserve sessions when the monitor exits.
-- [ ] Verify attach and detach behavior through tmux.
-- [ ] Verify tmux mouse/scroll behavior in Codex sessions.
+- [x] Verify attach and detach behavior through tmux.
+- [x] Verify tmux mouse/scroll behavior in Codex sessions.
 
 ## Session Discovery and Dashboard
 
@@ -129,7 +129,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Preserve the existing atomic inbox file format.
 - [x] Preserve cross-workspace routing and reply instructions.
 - [x] Deliver queued messages into the Codex agent's context exactly once.
-- [ ] Ensure delivered messages persist in the Codex conversation history.
+- [x] Ensure delivered messages persist in the Codex conversation history.
 - [x] Define Codex inbox delivery as explicit pull via `check_inbox`; passive
       lifecycle-hook delivery is not required.
 - [x] Support `push_notification=True` for dormant Codex agents.
@@ -248,24 +248,30 @@ feature set present when the branches are integrated.
 
 ## Verification
 
+Real-terminal checks for attach/detach, mouse/scroll, monitor restart,
+cross-terminal resume, and MCP-result history persistence were confirmed by the
+user on macOS on 2026-07-18. Automated tests use isolated state roots and fake
+runtime/tmux processes so they do not create or modify persistent agents.
+
 - [x] Unit-test legacy session metadata defaulting to Claude.
 - [x] Unit-test mixed-runtime session discovery and name collision handling.
 - [x] Unit-test Codex status mapping and crash correction.
 - [x] Unit-test Codex inbox delivery and atomic claims.
 - [x] Unit-test Codex ephemeral-session isolation and process cleanup.
-- [ ] End-to-end test Codex plugin loading inside a wrapped session.
-- [ ] End-to-end test all six MCP tools from a Codex session.
+- [x] End-to-end test Codex plugin loading inside a wrapped session.
+- [x] End-to-end test all six MCP tools from a Codex session.
 - [x] Test the communication matrix: Claude-to-Claude, Claude-to-Codex,
       Codex-to-Claude, and Codex-to-Codex.
 - [x] Test passive and push delivery for live, dormant, attached, and listening agents.
 - [x] Test mixed-runtime ask-all.
-- [ ] Test Codex spawn approval, rejection, cancellation, and orphan cleanup.
-- [ ] Test monitor restart while Codex sessions remain live.
-- [ ] Test Codex resume from a different terminal.
+- [x] Test Codex spawn approval, rejection, cancellation, and orphan cleanup.
+- [x] Test monitor restart while Codex sessions remain live.
+- [x] Test Codex resume from a different terminal.
 - [ ] Test web-share attach to a Codex session.
 - [ ] Test supported SecondBrain queries, events, and actions with a Codex target.
-- [ ] Run regression tests for the existing Claude wrapper and plugin.
-- [ ] Verify on macOS and Linux where practical.
+- [x] Run regression tests for the existing Claude wrapper and plugin.
+- [x] Verify on macOS.
+- [ ] Verify on Linux where practical.
 
 ## Documentation and Distribution
 

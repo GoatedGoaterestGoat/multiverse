@@ -15,9 +15,9 @@ watch one place. Resolutions are ``O_EXCL``-atomic so two monitors racing
 on the same request can't double-resolve — first writer wins, losers peek
 at the resolved file to learn the actual outcome.
 
-Stale requests (older than their declared timeout) are ignored by readers;
-the tool cleans up both files on return. If the tool crashes before
-cleanup, stale files persist but are skipped by ``list_pending_requests``.
+Requests have no timeout. The tool cleans up both files on return; if the
+caller is hard-killed before its ``finally`` runs, ``list_pending_requests``
+deletes the orphan once the caller's tmux session is gone.
 """
 
 from __future__ import annotations
@@ -109,8 +109,8 @@ def list_pending_requests(cwd: str) -> list[dict]:
     pending until the user resolves them. Skips:
       - resolution files (``*.resolved.json``) and temp files (``*.tmp``)
       - requests from other cwds
-      - requests whose caller is no longer alive (orphans — the waiting tool
-        was hard-killed without cleaning up; see ``_caller_alive``)
+      - requests whose caller is no longer alive (orphans are deleted because
+        the waiting tool was hard-killed without cleaning up)
       - requests that already have a resolution
     """
     if not SPAWN_REQUESTS_DIR.is_dir():
@@ -130,6 +130,15 @@ def list_pending_requests(cwd: str) -> list[dict]:
         if data.get("cwd") != cwd:
             continue
         if not _caller_alive(data.get("caller_tmux_session", "")):
+            orphan_paths = (
+                path,
+                path.with_name(f"{path.stem}.resolved.json"),
+            )
+            for orphan_path in orphan_paths:
+                try:
+                    orphan_path.unlink()
+                except OSError:
+                    pass
             continue
         if resolution_path(data.get("id", "")).is_file():
             continue

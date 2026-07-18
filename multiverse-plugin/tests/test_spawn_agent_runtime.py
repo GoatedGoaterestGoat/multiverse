@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from src import server, sessions, spawn_requests
 
@@ -45,6 +47,31 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
                 spawn_requests.read_resolution("request-id")["runtime"],
                 sessions.RUNTIME_CODEX,
             )
+
+    def test_dead_caller_request_is_deleted_as_an_orphan(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch.object(
+            spawn_requests, "SPAWN_REQUESTS_DIR", Path(raw)
+        ), patch.object(
+            spawn_requests.sb_notify, "record_spawn_request"
+        ), patch.object(
+            spawn_requests.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1),
+        ):
+            request_path = spawn_requests.write_spawn_request(
+                req_id="orphan-id",
+                from_name="caller",
+                cwd="/workspace",
+                instruction="No caller remains.",
+                default_name="orphan-child",
+                caller_tmux_session="multiverse-dead-caller",
+                caller_runtime=sessions.RUNTIME_CODEX,
+            )
+
+            self.assertEqual(
+                spawn_requests.list_pending_requests("/workspace"), []
+            )
+            self.assertFalse(request_path.exists())
 
 
 class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
@@ -135,6 +162,73 @@ class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             runtime=sessions.RUNTIME_CLAUDE,
             initial_prompt=instruction,
         )
+
+    async def test_rejected_spawn_cleans_up_without_creating_session(
+        self,
+    ) -> None:
+        env = {
+            "MULTIVERSE_SESSION_CWD": "/workspace",
+            "MULTIVERSE_SESSION_NAME": "codex-caller",
+            "MULTIVERSE_SESSION_ID": "caller-id",
+            "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
+        }
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(server, "all_session_names_in_cwd", return_value=set()),
+            patch.object(server, "new_request_id", return_value="request-id"),
+            patch.object(server, "write_spawn_request"),
+            patch.object(
+                server,
+                "read_resolution",
+                return_value={"status": "rejected", "reason": "cancelled"},
+            ),
+            patch.object(server, "cleanup_request") as cleanup,
+            patch.object(server, "create_session") as create,
+            patch.object(server.subprocess, "run"),
+        ):
+            result = await server.spawn_agent(
+                instruction="Do not create this child.",
+                name="rejected-child",
+            )
+
+        self.assertEqual(
+            result,
+            "Spawn request rejected by user (cancelled). "
+            "No subagent was created.",
+        )
+        create.assert_not_called()
+        cleanup.assert_called_once_with("request-id")
+
+    async def test_cancelled_tool_call_cleans_up_pending_request(self) -> None:
+        env = {
+            "MULTIVERSE_SESSION_CWD": "/workspace",
+            "MULTIVERSE_SESSION_NAME": "codex-caller",
+            "MULTIVERSE_SESSION_ID": "caller-id",
+            "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
+        }
+        with (
+            patch.dict(os.environ, env, clear=False),
+            patch.object(server, "all_session_names_in_cwd", return_value=set()),
+            patch.object(server, "new_request_id", return_value="request-id"),
+            patch.object(server, "write_spawn_request"),
+            patch.object(server, "read_resolution", return_value=None),
+            patch.object(
+                server.asyncio,
+                "sleep",
+                new=AsyncMock(side_effect=asyncio.CancelledError),
+            ),
+            patch.object(server, "cleanup_request") as cleanup,
+            patch.object(server, "create_session") as create,
+            patch.object(server.subprocess, "run"),
+        ):
+            with self.assertRaises(asyncio.CancelledError):
+                await server.spawn_agent(
+                    instruction="Cancel while awaiting approval.",
+                    name="cancelled-child",
+                )
+
+        create.assert_not_called()
+        cleanup.assert_called_once_with("request-id")
 
     async def test_spawn_agent_schema_has_no_runtime_argument(self) -> None:
         tools = await server.mcp.list_tools()

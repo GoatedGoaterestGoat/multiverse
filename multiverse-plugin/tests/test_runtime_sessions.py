@@ -260,6 +260,29 @@ class RuntimeLivenessTests(unittest.TestCase):
 
             self.assertEqual(found[0].status, "idle")
 
+    def test_live_codex_session_reloads_after_monitor_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir)
+            (session_dir / "runtime_pid").write_text("4242\n")
+            (session_dir / "runtime_session_id").write_text("codex-thread\n")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=True),
+                patch.object(sessions, "_pid_alive", return_value=True),
+            ):
+                before_restart = sessions.list_sessions()
+                after_restart = sessions.list_sessions()
+
+        self.assertEqual(len(before_restart), 1)
+        self.assertEqual(len(after_restart), 1)
+        self.assertIsNot(before_restart[0], after_restart[0])
+        self.assertEqual(after_restart[0].name, "agent")
+        self.assertEqual(after_restart[0].runtime, sessions.RUNTIME_CODEX)
+        self.assertEqual(after_restart[0].runtime_session_id, "codex-thread")
+        self.assertEqual(after_restart[0].status, "idle")
+
 
 class RuntimeLaunchTests(unittest.TestCase):
     def _create_with_runtime(
