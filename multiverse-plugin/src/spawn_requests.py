@@ -23,7 +23,6 @@ deletes the orphan once the caller's tmux session is gone.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 import uuid
@@ -31,6 +30,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import sb_notify
+from .atomic_files import atomic_create_json, atomic_write_json
 from .inbox import MULTIVERSE_DIR
 
 
@@ -83,7 +83,6 @@ def write_spawn_request(
     """Atomically (tmp+rename) drop a spawn request into the watch dir."""
     SPAWN_REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
     path = request_path(req_id)
-    tmp = path.with_suffix(path.suffix + ".tmp")
     data = {
         "id": req_id,
         "from": from_name,
@@ -94,8 +93,7 @@ def write_spawn_request(
         "caller_runtime": caller_runtime,
         "ts": time.time(),
     }
-    tmp.write_text(json.dumps(data))
-    tmp.rename(path)
+    atomic_write_json(path, data)
     # Firsthand: record an agent.spawn_request for the SecondBrain connector at creation
     # (no-op unless this workspace has connected to SB before). Never breaks the spawn flow.
     sb_notify.record_spawn_request(data)
@@ -178,17 +176,12 @@ def write_resolution(
         "runtime": runtime,
         "ts": time.time(),
     }
-    content = json.dumps(data).encode()
     try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
-    except FileExistsError:
-        return False
+        created = atomic_create_json(path, data)
     except OSError:
         return False
-    try:
-        os.write(fd, content)
-    finally:
-        os.close(fd)
+    if not created:
+        return False
     # Firsthand: record the user's decision for the SecondBrain connector. We won the
     # O_EXCL race (authoritative resolver), and the request file still exists (the spawn
     # tool cleans up only after reading this resolution), so read it for the agent/name

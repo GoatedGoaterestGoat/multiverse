@@ -14,6 +14,12 @@ SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
 [ -z "$SESSION_ID" ] && exit 0
 
 STATE_DIR=$(dirname "$MULTIVERSE_STATUS")
-printf '%s\n' "$SESSION_ID" > "$STATE_DIR/claude_uuid"
+UUID_PATH="$STATE_DIR/claude_uuid"
+TMP="${UUID_PATH}.$$.$RANDOM.tmp"
+if printf '%s\n' "$SESSION_ID" > "$TMP"; then
+  mv -f "$TMP" "$UUID_PATH"
+else
+  rm -f "$TMP" 2>/dev/null || true
+fi
 
 exit 0

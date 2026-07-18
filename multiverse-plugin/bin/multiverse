@@ -105,7 +105,8 @@ if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
    || [ -n "${CLAUDE_LOCAL_DATA_DIR:-}" ] \
    || command -v "$CLAUDE_BIN" >/dev/null 2>&1; then
   mkdir -p "$MULTIVERSE_ROOT"
-  {
+  MULTIVERSE_ENV_TMP="${MULTIVERSE_ENV_FILE}.$$.$RANDOM.tmp"
+  if {
     echo "# Auto-saved by bin/multiverse so multiverse can resume sessions"
     echo "# from a different terminal than the one they were started in."
     echo "# Re-run \`multiverse\` from a claude-configured shell to refresh."
@@ -117,8 +118,12 @@ if [ -n "${CLAUDE_CONFIG_DIR:-}" ] \
       printf 'export PATH=%q:"${PATH-}"\n' \
         "$(dirname "$(command -v "$CLAUDE_BIN")")"
     fi
-  } > "$MULTIVERSE_ENV_FILE.tmp" \
-    && mv "$MULTIVERSE_ENV_FILE.tmp" "$MULTIVERSE_ENV_FILE"
+  } > "$MULTIVERSE_ENV_TMP"; then
+    mv -f "$MULTIVERSE_ENV_TMP" "$MULTIVERSE_ENV_FILE"
+  else
+    rm -f "$MULTIVERSE_ENV_TMP"
+  fi
+  unset MULTIVERSE_ENV_TMP
 fi
 
 # Snapshot/restore the user's Codex install for the same cross-terminal reason

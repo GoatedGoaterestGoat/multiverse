@@ -25,6 +25,16 @@ import re
 import sys
 from pathlib import Path
 
+_PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+if str(_PLUGIN_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_ROOT))
+
+from src.atomic_files import (  # noqa: E402
+    atomic_write_bytes,
+    atomic_write_text,
+    exclusive_file_lock,
+)
+
 
 def _multiverse_dir() -> Path:
     explicit = os.environ.get("MULTIVERSE_ROOT")
@@ -93,6 +103,12 @@ def _last_uuid(path: Path) -> str | None:
 
 
 def _sync(uuid: str, cwd: str) -> None:
+    lock = _full_dir() / f".{uuid}.sync.lock"
+    with exclusive_file_lock(lock):
+        _sync_unlocked(uuid, cwd)
+
+
+def _sync_unlocked(uuid: str, cwd: str) -> None:
     live = _live(uuid, cwd)
     if not live.is_file():
         return
@@ -102,10 +118,10 @@ def _sync(uuid: str, cwd: str) -> None:
 
     if not full.exists():
         # Bootstrap: copy verbatim, set marker = last uuid.
-        full.write_bytes(live.read_bytes())
+        atomic_write_bytes(full, live.read_bytes())
         last = _last_uuid(full)
         if last:
-            _marker(uuid).write_text(last)
+            atomic_write_text(_marker(uuid), last)
         return
 
     # Load full's existing uuids so we can detect (and heal)
@@ -170,7 +186,7 @@ def _sync(uuid: str, cwd: str) -> None:
                 last_appended = u
             dst.write(json.dumps(d) + "\n")
     if last_appended and last_appended != marker:
-        _marker(uuid).write_text(last_appended)
+        atomic_write_text(_marker(uuid), last_appended)
 
 
 def main() -> None:

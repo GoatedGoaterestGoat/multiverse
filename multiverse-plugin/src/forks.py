@@ -26,6 +26,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from .atomic_files import atomic_write_text
 from .paths import multiverse_dir
 
 
@@ -43,7 +44,7 @@ def mark_active(fork_uuid: str, jsonl_path: Path) -> None:
     d = _forks_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
-        (d / fork_uuid).write_text(f"{time.time()}\n{jsonl_path}\n")
+        atomic_write_text(d / fork_uuid, f"{time.time()}\n{jsonl_path}\n")
     except OSError:
         pass
 

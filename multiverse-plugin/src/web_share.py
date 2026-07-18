@@ -66,6 +66,7 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Optional, Protocol
 
+from .atomic_files import atomic_write_json
 from .paths import multiverse_dir
 
 # tmux session name prefix for the dedicated web monitor.
@@ -595,10 +596,7 @@ def _read_record(share_id: str) -> Optional[WebShare]:
 
 def _write_record(rec: WebShare) -> None:
     p = _record_path(rec.share_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(asdict(rec), indent=2))
-    os.replace(tmp, p)  # atomic
+    atomic_write_json(p, asdict(rec), mode=0o600, indent=2)
 
 
 def _free_loopback_port() -> int:

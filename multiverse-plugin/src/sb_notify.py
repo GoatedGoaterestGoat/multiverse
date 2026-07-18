@@ -33,6 +33,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import sb_events
+from .atomic_files import (
+    append_text_locked,
+    atomic_create_json,
+    atomic_write_json,
+)
 from .paths import multiverse_dir
 
 #: Drop pending records older than this if never consumed (device seeded but connector
@@ -139,8 +144,7 @@ def log_hook_outcome(
         line += "\n"
         p = _hook_log_path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line)
+        append_text_locked(p, line)
     except Exception:  # noqa: BLE001
         pass
 
@@ -158,8 +162,6 @@ def _write_record(
     pd = pending_dir()
     pd.mkdir(parents=True, exist_ok=True)
     path = pd / f"{_safe(event_id)}.json"
-    if path.exists():
-        return  # deterministic name per event → idempotent if produced twice
     record = {
         "event_id": event_id,
         "kind": kind,
@@ -169,10 +171,8 @@ def _write_record(
         "payload": payload,
         "ts": _now_iso(),
     }
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(record), encoding="utf-8")
-    os.replace(tmp, path)
-    _prune_old()
+    if atomic_create_json(path, record):
+        _prune_old()
 
 
 def _prune_old() -> None:
@@ -240,9 +240,7 @@ def record_response_signal(cwd: str, agent_name: str) -> None:
             "ts": _now_iso(),
         }
         path = d / f"{uuid.uuid4().hex}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -310,9 +308,7 @@ def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
             "ts": _now_iso(),
         }
         path = d / f"{uuid.uuid4().hex}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -382,9 +378,7 @@ def record_question_signal(
             "ts": _now_iso(),
         }
         path = d / f"{_safe(question_id)}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -431,9 +425,7 @@ def record_answered_signal(
             "ts": _now_iso(),
         }
         path = d / f"{_safe(question_id)}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -493,9 +485,7 @@ def record_pending_tool(
             "ts": _now_iso(),
         }
         path = d / f"{_safe(tool_use_id)}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -623,9 +613,7 @@ def record_permission_request_signal(
             "ts": _now_iso(),
         }
         path = d / f"{_safe(tool_use_id)}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -671,9 +659,7 @@ def record_permission_decision_signal(
             "ts": _now_iso(),
         }
         path = d / f"{_safe(tool_use_id)}.json"
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(rec), encoding="utf-8")
-        os.replace(tmp, path)
+        atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001
         pass
 

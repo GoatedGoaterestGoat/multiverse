@@ -201,8 +201,9 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 ## SecondBrain Integration
 
-SecondBrain is still being developed on `main`; Codex parity should target the
-feature set present when the branches are integrated.
+The completed SecondBrain implementation from `main` was integrated into the
+`codex-support` branch on 2026-07-18. Codex parity targets that integrated feature
+set.
 
 - [ ] Include Codex sessions in `get_dashboard`, `list_agents`, and `get_status`.
 - [ ] Include runtime information in SecondBrain session data if the protocol permits.
@@ -236,7 +237,9 @@ feature set present when the branches are integrated.
 ## Logging, Recovery, and Concurrency
 
 - [x] Reuse `MULTIVERSE_ROOT` as the single absolute state root for both runtimes.
-- [ ] Keep all cross-process writes atomic.
+- [x] Keep runtime and connector cross-process coordination writes atomic, including
+      session status/metadata, runtime IDs, inbox and spawn files, shared logs,
+      full-history mirror synchronization, web-share records, and SecondBrain state.
 - [x] Preserve inbox exactly-once claim behavior under mixed-runtime races.
 - [x] Preserve host-aware liveness checks on shared storage.
 - [x] Recover cleanly when a Codex process exits without a lifecycle callback.
@@ -265,6 +268,9 @@ runtime/tmux processes so they do not create or modify persistent agents.
 - [x] Test passive and push delivery for live, dormant, attached, and listening agents.
 - [x] Test mixed-runtime ask-all.
 - [x] Test Codex spawn approval, rejection, cancellation, and orphan cleanup.
+- [x] Race-test atomic replacement, first-writer-wins claims, spawn request and
+      resolution publication, append-only logs, full-history sync, compaction claims,
+      device-key creation, and the SecondBrain singleton lock.
 - [x] Test monitor restart while Codex sessions remain live.
 - [x] Test Codex resume from a different terminal.
 - [ ] Test web-share attach to a Codex session.

@@ -64,6 +64,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import full_jsonl
+from .atomic_files import atomic_write_json
 from .paths import multiverse_dir
 
 # Make the vendored compaction package importable (same pattern as full_jsonl /
@@ -136,10 +137,7 @@ def _write_marker(
         "updated_at": _now_iso(),
     }
     path = _marker_path(cwd, agent_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(marker), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, marker)
     return marker
 
 

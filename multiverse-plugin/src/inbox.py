@@ -26,6 +26,7 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
+from .atomic_files import atomic_write_json
 from .paths import multiverse_dir
 
 
@@ -43,13 +44,6 @@ def agent_inbox_dir(cwd: str, name: str) -> Path:
 
 def new_message_id() -> str:
     return str(uuid.uuid4())
-
-
-def _atomic_write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data))
-    tmp.rename(path)
 
 
 def write_message_to_inbox(
@@ -77,7 +71,7 @@ def write_message_to_inbox(
     }
     if sender_cwd:
         payload["from_cwd"] = sender_cwd
-    _atomic_write_json(inbox_file, payload)
+    atomic_write_json(inbox_file, payload)
     return inbox_file
 
 

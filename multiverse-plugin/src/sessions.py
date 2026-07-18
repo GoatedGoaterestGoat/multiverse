@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import forks
+from .atomic_files import atomic_write_json
 from .compact_state import list_locked
 from .paths import claude_projects_dir, codex_home, multiverse_dir
 
@@ -501,25 +502,9 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
-def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
-    """Replace a JSON file without exposing a partially-written value."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_name(
-        f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    )
-    try:
-        temp.write_text(json.dumps(value))
-        os.replace(temp, path)
-    finally:
-        try:
-            temp.unlink()
-        except OSError:
-            pass
-
-
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
     """Atomically persist the common Multiverse status shape."""
-    _atomic_write_json(
+    atomic_write_json(
         path,
         {"status": status, "ts": time.time() if ts is None else ts},
     )
@@ -1179,7 +1164,7 @@ def create_session(
             meta["superseded_uuids"] = ancestors
 
     try:
-        _atomic_write_json(d / "meta.json", meta)
+        atomic_write_json(d / "meta.json", meta)
         write_status_path(d / "status.json", "starting", now)
     except Exception:
         for path in claim_paths:

@@ -26,6 +26,7 @@ import os
 import time
 from pathlib import Path
 
+from .atomic_files import atomic_create_json, exclusive_file_lock
 from .paths import multiverse_dir
 
 
@@ -55,41 +56,35 @@ def acquire_lock(claude_uuid: str, monitor_pid: int | None = None) -> bool:
     """
     _compact_dir().mkdir(parents=True, exist_ok=True)
     p = lock_path(claude_uuid)
-    payload = json.dumps({
+    payload = {
         "started_at": time.time(),
         "monitor_pid": monitor_pid or os.getpid(),
-    })
+    }
 
-    for _attempt in range(3):
-        try:
-            fd = os.open(str(p), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            # Maybe a stale lock — check the holder PID.
+    guard = _compact_dir() / ".claims.guard"
+    with exclusive_file_lock(guard):
+        for _attempt in range(3):
             try:
-                existing = json.loads(p.read_text())
-                holder = int(existing.get("monitor_pid", 0))
-            except (OSError, json.JSONDecodeError, ValueError, TypeError):
-                # Unreadable lock; bail rather than guess.
-                return False
-            if _alive(holder):
-                return False
-            # Stale — try to remove and retry.
-            try:
-                p.unlink()
+                created = atomic_create_json(p, payload)
             except OSError:
                 return False
-            continue
-
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(payload)
-        except OSError:
-            try:
-                p.unlink()
-            except OSError:
-                pass
-            return False
-        return True
+            if not created:
+                # Maybe a stale lock — check the holder PID.
+                try:
+                    existing = json.loads(p.read_text())
+                    holder = int(existing.get("monitor_pid", 0))
+                except (OSError, json.JSONDecodeError, ValueError, TypeError):
+                    # Unreadable lock; bail rather than guess.
+                    return False
+                if _alive(holder):
+                    return False
+                # Stale — remove it while still holding the acquisition guard.
+                try:
+                    p.unlink()
+                except OSError:
+                    return False
+                continue
+            return True
 
     return False
 

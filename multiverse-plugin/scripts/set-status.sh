@@ -12,6 +12,11 @@ STATUS="${1:-unknown}"
 TS=$(date +%s)
 
 mkdir -p "$(dirname "$MULTIVERSE_STATUS")"
-printf '{"status":"%s","ts":%d}\n' "$STATUS" "$TS" > "$MULTIVERSE_STATUS"
+TMP="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
+if printf '{"status":"%s","ts":%d}\n' "$STATUS" "$TS" > "$TMP"; then
+  mv -f "$TMP" "$MULTIVERSE_STATUS"
+else
+  rm -f "$TMP" 2>/dev/null || true
+fi
 
 exit 0

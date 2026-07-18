@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .atomic_files import append_text_locked
 from .paths import multiverse_dir
 
 RETENTION_DAYS = 7
@@ -91,8 +92,7 @@ def _append(event: dict[str, Any]) -> None:
         _prune_old(now)
         record = {"ts": now, "host": _host(), **event}
         path = d / f"{_day_str(now)}.jsonl"
-        with path.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+        append_text_locked(path, json.dumps(record) + "\n")
     except OSError:
         pass
 

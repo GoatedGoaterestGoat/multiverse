@@ -37,6 +37,11 @@ import re
 import sys
 from pathlib import Path
 
+from .atomic_files import (
+    atomic_write_bytes,
+    atomic_write_text,
+    exclusive_file_lock,
+)
 from .paths import claude_projects_dir, multiverse_dir
 
 # Make the vendored compaction package importable. The compaction widget
@@ -87,8 +92,7 @@ def read_marker(claude_uuid: str) -> str | None:
 
 def write_marker(claude_uuid: str, uuid: str) -> None:
     p = marker_path(claude_uuid)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(uuid)
+    atomic_write_text(p, uuid)
 
 
 def last_uuid_in(path: Path) -> str | None:
@@ -125,6 +129,12 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
 
     Returns the number of rows appended (0 means up-to-date or no live).
     """
+    lock = _full_dir() / f".{claude_uuid}.sync.lock"
+    with exclusive_file_lock(lock):
+        return _sync_full_unlocked(claude_uuid, cwd)
+
+
+def _sync_full_unlocked(claude_uuid: str, cwd: str) -> int:
     full_dir = _full_dir()
     full_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,7 +146,7 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
 
     if not full.exists():
         # Bootstrap: full is identical to live.
-        full.write_bytes(live.read_bytes())
+        atomic_write_bytes(full, live.read_bytes())
         last = _last_uuid_in(full)
         if last:
             write_marker(claude_uuid, last)

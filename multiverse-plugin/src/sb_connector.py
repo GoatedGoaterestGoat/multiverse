@@ -48,6 +48,7 @@ import signal
 import socket
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,6 +65,11 @@ from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: E402
 from secondbrain import auth  # noqa: E402  (vendored)
 from secondbrain import protocol as p  # noqa: E402  (vendored)
 
+from .atomic_files import (  # noqa: E402
+    atomic_create_bytes,
+    atomic_write_json,
+    exclusive_file_lock,
+)
 from .paths import multiverse_dir  # noqa: E402
 
 log = logging.getLogger("sb_connector")
@@ -250,6 +256,41 @@ def lock_path() -> Path:
     return sb_dir() / "connector.lock"
 
 
+_LOCK_TOKEN = uuid.uuid4().hex
+
+
+def _lock_owner_path(token: str = _LOCK_TOKEN) -> Path:
+    return sb_dir() / f".connector-lock-{token}.json"
+
+
+def _lock_guard_path() -> Path:
+    return sb_dir() / ".connector-lock.guard"
+
+
+def _claimed_owner_path() -> Path | None:
+    path = lock_path()
+    try:
+        raw = os.readlink(path)
+    except OSError:
+        return None
+    target = Path(raw)
+    return target if target.is_absolute() else path.parent / target
+
+
+def _prune_orphan_lock_owners(active: Path) -> None:
+    try:
+        candidates = list(sb_dir().glob(".connector-lock-*.json"))
+    except OSError:
+        return
+    for candidate in candidates:
+        if candidate == active:
+            continue
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
+
+
 def log_path() -> Path:
     return sb_dir() / "daemon.log"
 
@@ -261,15 +302,7 @@ DEFAULT_BASE_URL = "wss://secondbrain.silicon23.me"
 
 
 def _atomic_write_json(path: Path, data: dict, *, mode: int | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    if mode is not None:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2)
-    else:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    atomic_write_json(path, data, mode=mode or 0o666, indent=2)
 
 
 def _read_json(path: Path) -> dict | None:
@@ -489,9 +522,11 @@ def lock_holder() -> dict | None:
     data = _read_json(lock_path())
     if not data:
         return None
-    host = data.get("host")
-    pid = int(data.get("pid", 0))
-    if host == current_host():
+    try:
+        pid = int(data.get("pid", 0))
+    except (TypeError, ValueError):
+        return None
+    if data.get("host") == current_host():
         # Same host: PID probe is authoritative; heartbeat is a secondary "and the
         # process is actually doing work" signal. We use PID here — a live daemon
         # briefly stalled between heartbeat writes shouldn't be reaped.
@@ -507,22 +542,57 @@ def acquire_lock() -> bool:
     another host reads us as live without waiting ``_HEARTBEAT_INTERVAL_S`` for
     the first refresh.
     """
-    holder = lock_holder()
-    if holder is not None and not (
-        holder.get("host") == current_host() and holder.get("pid") == os.getpid()
-    ):
-        return False
     now = _now_iso()
-    _atomic_write_json(
-        lock_path(),
-        {
-            "host": current_host(),
-            "pid": os.getpid(),
-            "started_at": now,
-            "heartbeat": now,
-        },
-    )
-    return True
+    owner_path = _lock_owner_path()
+    payload = {
+        "host": current_host(),
+        "pid": os.getpid(),
+        "token": _LOCK_TOKEN,
+        "started_at": now,
+        "heartbeat": now,
+    }
+    with exclusive_file_lock(_lock_guard_path()):
+        _atomic_write_json(owner_path, payload)
+        if lock_path().is_symlink() or lock_path().exists():
+            existing = _read_json(lock_path()) or {}
+            if existing.get("token") == _LOCK_TOKEN:
+                _prune_orphan_lock_owners(owner_path)
+                return True
+            if lock_holder() is not None:
+                try:
+                    owner_path.unlink()
+                except OSError:
+                    pass
+                return False
+            stale_owner = _claimed_owner_path()
+            try:
+                lock_path().unlink()
+            except OSError:
+                try:
+                    owner_path.unlink()
+                except OSError:
+                    pass
+                return False
+            if (
+                stale_owner is not None
+                and stale_owner.name.startswith(".connector-lock-")
+            ):
+                try:
+                    stale_owner.unlink()
+                except OSError:
+                    pass
+        try:
+            lock_path().symlink_to(owner_path.name)
+            _prune_orphan_lock_owners(owner_path)
+            return True
+        except OSError:
+            pass
+
+    try:
+        owner_path.unlink()
+    except OSError:
+        pass
+    return False
 
 
 def refresh_heartbeat() -> None:
@@ -531,20 +601,26 @@ def refresh_heartbeat() -> None:
     No-op if the lock has been taken over by a different (host, pid) — protects
     against stepping on a legitimate concurrent owner that reaped us as stale.
     """
-    data = _read_json(lock_path()) or {}
-    if data.get("host") != current_host() or int(data.get("pid", 0)) != os.getpid():
-        return
-    data["heartbeat"] = _now_iso()
-    _atomic_write_json(lock_path(), data)
+    with exclusive_file_lock(_lock_guard_path()):
+        data = _read_json(lock_path()) or {}
+        if data.get("token") != _LOCK_TOKEN:
+            return
+        data["heartbeat"] = _now_iso()
+        _atomic_write_json(_lock_owner_path(), data)
 
 
 def release_lock() -> None:
-    data = _read_json(lock_path())
-    if data and data.get("host") == current_host() and data.get("pid") == os.getpid():
-        try:
-            lock_path().unlink()
-        except OSError:
-            pass
+    with exclusive_file_lock(_lock_guard_path()):
+        data = _read_json(lock_path())
+        if data and data.get("token") == _LOCK_TOKEN:
+            try:
+                lock_path().unlink()
+            except OSError:
+                pass
+            try:
+                _lock_owner_path().unlink()
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------------------
@@ -583,11 +659,9 @@ def load_or_create_device_key(path: str | os.PathLike[str]) -> ed25519.Ed25519Pr
     if p_.exists():
         return ed25519.Ed25519PrivateKey.from_private_bytes(p_.read_bytes())
     priv = ed25519.Ed25519PrivateKey.generate()
-    p_.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(p_, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(priv.private_bytes_raw())
-    return priv
+    if atomic_create_bytes(p_, priv.private_bytes_raw(), mode=0o600):
+        return priv
+    return ed25519.Ed25519PrivateKey.from_private_bytes(p_.read_bytes())
 
 
 @dataclass
@@ -616,17 +690,15 @@ class DeviceIdentity:
         return Path(f"{key_path}.json")
 
     def save(self, key_path: str | os.PathLike[str]) -> None:
-        self.sidecar_path(key_path).write_text(
-            json.dumps(
-                {
-                    "device_id": self.device_id,
-                    "pinned_server_fingerprint": self.pinned_server_fingerprint,
-                    "granted_workspaces": self.granted_workspaces,
-                    "device_name": self.device_name,
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        _atomic_write_json(
+            self.sidecar_path(key_path),
+            {
+                "device_id": self.device_id,
+                "pinned_server_fingerprint": self.pinned_server_fingerprint,
+                "granted_workspaces": self.granted_workspaces,
+                "device_name": self.device_name,
+            },
+            mode=0o600,
         )
 
     @classmethod
