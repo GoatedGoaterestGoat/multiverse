@@ -11,23 +11,22 @@ The moving parts:
   Keyed on a **stable identity** ``(resolved cwd, agent_name)`` — NOT the claude_uuid,
   which changes on resume/compaction/fold. Stored one file per agent under
   ``~/.multiverse/secondbrain/transcript_markers/`` and written atomically (tmp+rename).
-  Records ``{claude_uuid, turn_id, row_uuid, updated_at}``: ``turn_id`` is the promptId of
-  the last delivered turn (fast-path lookup); ``row_uuid`` is a concrete JSONL row uuid
-  belonging to that turn (its tip), used to walk the ``parentUuid`` tree when the turn has
-  fallen off the live chain; ``claude_uuid`` is the source session it was observed in.
+  Claude markers record ``{claude_uuid, turn_id, row_uuid, updated_at}``. Codex markers
+  record ``{runtime, thread_id, record_offset, record_hash, turn_id, item_id,
+  updated_at}`` and reconstruct canonical history by replaying rollback records.
 
-* **Transcript source** — the append-only FULL mirror at
-  ``~/.multiverse/full_jsonls/<claude_uuid>.jsonl`` (survives compaction). We
-  ``sync_full`` it, then ``parse_session`` → ``Forest`` (``list[Turn]``, oldest first).
-  The agent's *current* claude_uuid is resolved fresh each call via ``sessions``.
+* **Transcript source** — Claude uses the append-only FULL mirror at
+  ``~/.multiverse/full_jsonls/<claude_uuid>.jsonl`` (survives compaction). Codex uses
+  its native rollout JSONL directly through :mod:`.codex_transcript`; no second mirror
+  is written. The agent's current runtime session is resolved fresh each call.
 
 Semantics:
 
 * ``initialize_marker`` sets the marker to the **last turn that exists right now** — so
   the first partial transcript covers "from now on", not the entire history. Called when
   a workspace first connects to SecondBrain. Idempotent: a second call is a no-op.
-* A partial transcript is the turns **strictly after** the marked ``turn_id`` up to the
-  latest turn. Delivering advances the marker to the new latest turn.
+* A partial transcript is the content after the runtime-specific marker up to the latest
+  history point. Claude advances by turn; Codex can advance within a partial turn.
 * **Peek + commit split** (``peek_partial_transcript`` / ``commit_marker``) lets the
   connector advance the marker only AFTER the event is durably queued: ``peek`` returns
   the text plus an opaque ``cursor`` capturing exactly the point it measured up to, and
@@ -41,6 +40,10 @@ marker's ``row_uuid`` through the (still-present, append-only) abandoned rows un
 reach a row that IS on the live chain; the turn that owns that row is the effective marker
 (the divergence point), and we deliver only the turns after it. Its persistence re-anchors
 the marker back onto the live chain on the next commit.
+
+Codex rollback records leave abandoned turns in the append-only rollout. The Codex adapter
+replays the log at both the marker and current points, finds their longest canonical
+turn/item prefix, and delivers the current suffix from that divergence.
 
 Cross-uuid boundaries (a fold mints a new claude_uuid whose fresh full jsonl contains
 neither the old ``turn_id`` nor the old ``row_uuid``): the walk finds no on-chain ancestor,
@@ -57,7 +60,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import sys
 from datetime import UTC, datetime
@@ -112,8 +114,8 @@ def _marker_path(cwd: str, agent_name: str) -> Path:
 def read_marker(cwd: str, agent_name: str) -> dict | None:
     """The stored delivery marker for an agent, or ``None`` if never initialized.
 
-    Shape: ``{"cwd", "agent_name", "claude_uuid", "turn_id", "row_uuid", "updated_at"}``.
-    ``turn_id``/``row_uuid`` are ``None`` for an agent whose history was empty at init time.
+    Claude and Codex use runtime-specific cursor fields while sharing the stable
+    ``(cwd, agent_name)`` marker identity.
     """
     try:
         return json.loads(_marker_path(cwd, agent_name).read_text(encoding="utf-8"))
@@ -141,27 +143,37 @@ def _write_marker(
     return marker
 
 
+def _write_codex_marker(cwd: str, agent_name: str, cursor: dict) -> dict:
+    marker = {
+        "cwd": _resolve_cwd(cwd),
+        "agent_name": agent_name,
+        "runtime": "codex",
+        "thread_id": cursor.get("thread_id"),
+        "record_offset": cursor.get("record_offset"),
+        "record_hash": cursor.get("record_hash"),
+        "turn_id": cursor.get("turn_id"),
+        "item_id": cursor.get("item_id"),
+        "updated_at": _now_iso(),
+    }
+    path = _marker_path(cwd, agent_name)
+    atomic_write_json(path, marker)
+    return marker
+
+
 def _now_iso() -> str:
     # UTC, no microseconds — matches the connector's ``_now_iso`` style.
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 # ---------------------------------------------------------------------------
-# Source resolution: agent name -> current claude_uuid -> parsed FULL forest
+# Source resolution: agent name -> current runtime session -> parsed history
 # ---------------------------------------------------------------------------
 
-def _resolve_claude_uuid(cwd: str, agent_name: str) -> str | None:
-    """Current claude session uuid backing ``agent_name`` in ``cwd``, or ``None``.
 
-    Lazy-imports :mod:`.sessions` to avoid an import cycle (sessions pulls in the
-    monitor/forks/subprocess surface).
-    """
+def _resolve_agent_row(cwd: str, agent_name: str):  # noqa: ANN202
     from .sessions import find_agent_by_name  # lazy: heavy deps, avoid cycle
 
-    row = find_agent_by_name(cwd, agent_name)
-    if row is None:
-        return None
-    return row.claude_uuid
+    return find_agent_by_name(cwd, agent_name)
 
 
 def _load_forest(claude_uuid: str, cwd: str):
@@ -409,19 +421,36 @@ def _render_forest(turns, ts_map: dict[str, str]) -> str:
 # ---------------------------------------------------------------------------
 
 def initialize_marker(cwd: str, agent_name: str) -> bool:
-    """Set the delivery marker to the agent's **last existing turn**, once.
+    """Set the delivery marker to the agent's **latest history point**, once.
 
     Idempotent: if a marker already exists this is a no-op and returns ``False``.
     Returns ``True`` when a new marker was written. Call this when a workspace first
     connects to SecondBrain — so the first partial transcript covers "from now on"
     rather than dumping the whole backlog.
 
-    An agent that can't be resolved (unknown name, no live/dormant session, no uuid)
-    also returns ``False`` — the connector can retry once the agent exists.
+    An agent that can't be resolved (unknown name, no live/dormant session, no native
+    session ID) also returns ``False`` — the connector can retry once the agent exists.
     """
     if read_marker(cwd, agent_name) is not None:
         return False
-    claude_uuid = _resolve_claude_uuid(cwd, agent_name)
+    row = _resolve_agent_row(cwd, agent_name)
+    if row is None:
+        return False
+    if row.runtime == "codex":
+        from . import codex_transcript
+        from .sessions import CODEX_HOME
+
+        thread_id = row.session_id
+        if not thread_id and row.session is not None:
+            thread_id = row.session.runtime_session_id
+        if not thread_id:
+            return False
+        cursor = codex_transcript.initialize_cursor(CODEX_HOME, thread_id)
+        if cursor is None:
+            return False
+        _write_codex_marker(cwd, agent_name, cursor)
+        return True
+    claude_uuid = row.claude_uuid
     if not claude_uuid:
         return False
     forest = _load_forest(claude_uuid, cwd)
@@ -446,11 +475,25 @@ def peek_partial_transcript(cwd: str, agent_name: str) -> tuple[str, dict] | Non
     whole forest — but the connector is expected to :func:`initialize_marker` on first
     connect so this only happens for a genuinely new agent.
     """
-    claude_uuid = _resolve_claude_uuid(cwd, agent_name)
+    row = _resolve_agent_row(cwd, agent_name)
+    if row is None:
+        return None
+    marker = read_marker(cwd, agent_name)
+    if row.runtime == "codex":
+        from . import codex_transcript
+        from .sessions import CODEX_HOME
+
+        thread_id = row.session_id
+        if not thread_id and row.session is not None:
+            thread_id = row.session.runtime_session_id
+        if not thread_id:
+            return None
+        return codex_transcript.peek_partial_transcript(CODEX_HOME, thread_id, marker)
+
+    claude_uuid = row.claude_uuid
     if not claude_uuid:
         return None
 
-    marker = read_marker(cwd, agent_name)
     forest = _load_forest(claude_uuid, cwd)
     parent_of, ts_of = _full_row_maps(claude_uuid)
 
@@ -513,6 +556,9 @@ def commit_marker(cwd: str, agent_name: str, cursor: dict) -> None:
     peek and commit re-delivers (overlapping, deduped by SB) rather than dropping turns.
     """
     if not isinstance(cursor, dict):
+        return
+    if cursor.get("runtime") == "codex":
+        _write_codex_marker(cwd, agent_name, cursor)
         return
     _write_marker(
         cwd,

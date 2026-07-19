@@ -355,19 +355,20 @@ and are not Codex parity blockers.
 
 ### Codex Transcript Source
 
-- [ ] Add a runtime-specific transcript adapter for Codex rollout history rather than
+- [x] Add a runtime-specific transcript adapter for Codex rollout history rather than
       reading Claude `full_jsonls/` or invoking the Claude compaction parser.
-- [ ] Define a durable Codex cursor using the session/thread ID plus a stable rollout
-      item or event position.
-- [ ] Preserve the existing peek/commit rule: advance the cursor only after the
+- [x] Define a durable Codex cursor using the thread ID, complete-record byte offset
+      and hash, plus the latest canonical turn and item IDs as recovery anchors.
+- [x] Preserve the existing peek/commit rule: advance the cursor only after the
       corresponding SecondBrain event is durably queued.
-- [ ] Render Codex user text, assistant text, and relevant tool calls into the same
+- [x] Render Codex user text, assistant text, and relevant tool calls into the same
       role-labelled `full` format expected by SecondBrain.
-- [ ] Filter system scaffolding, synthetic resume prompts, inbox wrappers, and
-      ephemeral side-question turns from user-facing transcript text.
-- [ ] Handle resume, branch/revert behavior, partial final turns, and Codex built-in
-      compaction without transcript gaps or duplicate event context.
-- [ ] Keep transcript collection read-only with respect to the Codex session and do
+- [x] Filter developer/system scaffolding, reasoning, tool results, compaction
+      replacement history, Multiverse inbox wake/resume wrappers, and ephemeral
+      side-question turns from user-facing transcript text.
+- [x] Handle resume, fork/rollback behavior, partial final turns, stale byte cursors,
+      and Codex built-in compaction without transcript gaps or duplicate event context.
+- [x] Keep transcript collection read-only with respect to the Codex session and do
       not create a second history mirror solely for SecondBrain.
 
 ### SecondBrain Verification
@@ -382,8 +383,8 @@ and are not Codex parity blockers.
       question/answer, permission request/decision, and spawn request/decision pairs.
 - [ ] Test connector restart, server reconnect, acknowledgement replay, sequence-gap
       recovery, `LOCK`/`UNLOCK`, and ACL rejection with mixed-runtime events pending.
-- [ ] Test transcript cursor recovery across resume, partial turns, event queue
-      failure, and Codex built-in compaction.
+- [x] Test transcript cursor recovery across resume, partial turns, event queue
+      failure, rollback/fork, stale marker data, and Codex built-in compaction.
 - [ ] Perform an end-to-end device test from a SecondBrain client without modifying
       persistent test agents unintentionally.
 
