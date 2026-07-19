@@ -1128,8 +1128,8 @@ class SBConnector:
             the pre-existing backlog.
           - Run Multiverse's ``ask_all`` fork against every named agent with a
             fixed question ("Please give a concise summary of what you have
-            achieved so far in this workspace.") — up to 60s per agent,
-            5-parallel. Failed asks land as bracketed placeholder strings.
+            achieved so far in this workspace.") — with the configured long retry
+            timeout, 5-parallel. Failed asks land as bracketed placeholder strings.
           - Emit event with payload ``{first_connect: True, workspace_summary: {…}}``
             (or ``workspace_summary: {}`` for an empty workspace). Stable
             ``event_id=wsconn-first:<workspace_id>`` — a mid-flow crash + restart

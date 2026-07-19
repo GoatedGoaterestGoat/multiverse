@@ -331,6 +331,9 @@ and are not Codex parity blockers.
 
 - [x] Emit first-connect `workspace.connected` summaries from mixed Claude/Codex
       workspaces using runtime-aware side questions.
+- [x] Verify first-connect marker-before-ask ordering, the unchanged runtime-neutral
+      payload, per-agent failure placeholders, empty workspaces, seeded-state
+      persistence, and reconnect suppression with Codex agents present.
 - [x] Queue `agent.created` from the shared successful-creation choke point for both
       runtimes.
 - [x] Add Codex-specific coverage for the `agent.created` payload and ensure failed
