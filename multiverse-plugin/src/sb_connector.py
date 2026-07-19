@@ -889,16 +889,26 @@ class OutboundBuffer:
 
 class ActionDedup:
     """Idempotency guard for inbound actions (§8.2): ``action_id -> cached result``.
-    A duplicate action is NOT re-executed — the cached result is returned."""
+    A duplicate action is NOT re-executed — the cached result is returned. In-flight
+    claims close the window before a background action has produced its result."""
 
     def __init__(self, max_entries: int = 10_000) -> None:
         self._seen: dict[str, p.ActionResult] = {}
+        self._in_flight: set[str] = set()
         self._max = max_entries
 
     def cached(self, action_id: str) -> p.ActionResult | None:
         return self._seen.get(action_id)
 
+    def claim(self, action_id: str) -> bool:
+        """Reserve a new action ID; return ``False`` if seen or already executing."""
+        if action_id in self._seen or action_id in self._in_flight:
+            return False
+        self._in_flight.add(action_id)
+        return True
+
     def remember(self, result: p.ActionResult) -> None:
+        self._in_flight.discard(result.action_id)
         self._seen[result.action_id] = result
         if len(self._seen) > self._max:
             self._seen.pop(next(iter(self._seen)))
@@ -1701,6 +1711,9 @@ class SBConnector:
         if cached is not None:
             await self._send(ws, cached)  # retry: return cached result, do NOT re-run
             return
+        if not self.dedup.claim(action.action_id):
+            # The original background action will send the result for this action_id.
+            return
         if action.kind == p.ActionKind.PROMPT_AGENT:
             # Delivery can involve tmux send-keys or spawning a resumed session — neither
             # is instantaneous. Run in a background task so the receiver stays responsive
@@ -1740,7 +1753,7 @@ class SBConnector:
           idle/working/waiting/listening → tmux send-keys with save/clear/restore
                                             (ignores attached-check — per user directive)
           dormant/ended                  → create_session(initial_prompt=text) — auto-submits
-                                            as the first user turn via bin/multiverse-session
+                                            as the first user turn via the runtime wrapper
           starting                       → wait bounded for ready, then send-keys
           compacting (locked)            → refuse with a specific message; SB retries later
 
@@ -1838,6 +1851,10 @@ class SBConnector:
         if target is None:
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
 
+        native_session_id = target.session_id
+        if not native_session_id and target.session is not None:
+            native_session_id = target.session.runtime_session_id
+
         # Compacting → locked → refuse with the user's phrasing.
         if target.claude_uuid and is_locked(target.claude_uuid):
             return (
@@ -1851,11 +1868,12 @@ class SBConnector:
 
         if is_dormant:
             # Resume with the SB prompt as the first user turn — no send-keys needed;
-            # bin/multiverse-session picks up initial_prompt as claude's positional arg.
-            if not target.claude_uuid:
+            # the selected runtime wrapper picks up initial_prompt as a positional arg.
+            if not native_session_id:
                 return (
                     "not_found", "",
-                    f"'{agent_name}' has no tracked claude UUID yet — can't resume",
+                    f"'{agent_name}' has no tracked {target.runtime} session ID yet — "
+                    "can't resume",
                 )
             try:
                 self._auto_resume_with_prompt(target, cwd_abs, text)
@@ -1902,11 +1920,13 @@ class SBConnector:
 
         # ``starting`` (or generally: tmux exists but Claude UI not yet drawn) — bounded wait.
         if target.status == "starting":
-            ok, err = sb_actions.wait_for_ready(tmux_name)
+            ok, err = sb_actions.wait_for_ready(tmux_name, runtime=target.runtime)
             if not ok:
                 return ("deliver_failed", "", f"target didn't become ready: {err}")
 
-        ok, saved, err = sb_actions.send_prompt_via_tmux(tmux_name, text)
+        ok, saved, err = sb_actions.send_prompt_via_tmux(
+            tmux_name, text, runtime=target.runtime
+        )
         if not ok:
             return ("deliver_failed", "", err)
         if saved:
@@ -1921,11 +1941,20 @@ class SBConnector:
     def _auto_resume_with_prompt(self, target, cwd: str, prompt: str) -> None:
         """Headless resume of a dormant/ended target with an initial user prompt. Mirrors
         the message_agent auto_resume flow, but hands ``initial_prompt`` to create_session
-        so the SB prompt becomes claude's first user turn (via MULTIVERSE_INITIAL_PROMPT_FILE
-        picked up by bin/multiverse-session)."""
+        so the SB prompt becomes the runtime's first user turn."""
         from .sessions import (
-            create_session, foreign_host_still_reported_live, kill_session,
+            RUNTIME_CODEX,
+            create_session,
+            foreign_host_still_reported_live,
+            kill_session,
         )
+        native_session_id = target.session_id
+        if not native_session_id and target.session is not None:
+            native_session_id = target.session.runtime_session_id
+        if not native_session_id:
+            raise RuntimeError(
+                f"'{target.name}' has no tracked {target.runtime} session ID"
+            )
         if target.session is not None and target.status == "ended":
             if foreign_host_still_reported_live(target.session):
                 raise RuntimeError(
@@ -1934,12 +1963,18 @@ class SBConnector:
                     "as a new session here"
                 )
             kill_session(target.session)
+        runtime_args = (
+            ["resume", native_session_id]
+            if target.runtime == RUNTIME_CODEX
+            else ["--resume", native_session_id]
+        )
         create_session(
             cwd=cwd,
-            claude_args=["--resume", target.claude_uuid],
-            resumed_from=target.claude_uuid,
+            claude_args=runtime_args,
+            resumed_from=native_session_id,
             name=target.name,
             initial_prompt=prompt,
+            runtime=target.runtime,
         )
 
     async def _handle_answer_question_action(self, ws, action: p.Action) -> None:  # noqa: ANN001

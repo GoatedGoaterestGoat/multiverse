@@ -9,13 +9,12 @@ Delivery strategies by target status:
 
 - **idle / working / waiting / listening** → :func:`send_prompt_via_tmux`. We ALWAYS
   send-keys (even when a user is attached — unlike ``message_agent``'s push_notification
-  which falls back), and we preserve any text the user has typed into Claude's input box
-  but not yet submitted: save-clear-deliver-restore. Multi-line prompts use ``\\`` + Enter
-  between lines (Claude's user-facing newline convention).
+  which falls back), and preserve typed-but-unsent input with
+  save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between lines;
+  Codex uses Ctrl+J.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
-  ``bin/multiverse-session`` hands to claude as its positional prompt argument, and
-  claude auto-submits it as the first user turn.
+  the runtime wrapper hands to Claude or Codex as a positional prompt argument.
 - **starting** → :func:`wait_for_ready` first (bounded), then send-keys.
 
 All tmux calls are subprocess with tight timeouts so a hung tmux client can't wedge the
@@ -25,15 +24,15 @@ handler. Every helper returns a plain error string on failure; the caller maps t
 
 from __future__ import annotations
 
+import re
 import subprocess
 import time
 
 #: How many extra backspaces to send after clearing, defensive against any off-by-one in
-#: our input-box parse. Extra backspaces past the start of the input box are no-ops in
-#: Claude's TUI, so this is safe.
+#: our input-box parse. Extra backspaces past the start of either input box are no-ops.
 _CLEAR_MARGIN = 3
 
-#: Bounded wait for a `starting` session to reach Claude's ready state before we send-keys.
+#: Bounded wait for a `starting` session to expose its composer before we send-keys.
 DEFAULT_READY_TIMEOUT_S = 15.0
 
 #: How long to wait for tmux capture-pane / send-keys to return. tmux is normally fast;
@@ -66,12 +65,16 @@ def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
     return True, (r.stdout if capture else "")
 
 
-def capture_pane(tmux_name: str) -> tuple[bool, str]:
+def capture_pane(
+    tmux_name: str, *, join_wrapped: bool = False
+) -> tuple[bool, str]:
     """Read the visible content of the target's tmux pane. ``ok, text_or_error``."""
-    return _run_tmux(["capture-pane", "-p", "-t", tmux_name], capture=True)
+    args = ["capture-pane", "-p"]
+    if join_wrapped:
+        args.append("-J")
+    args += ["-t", tmux_name]
+    return _run_tmux(args, capture=True)
 
-
-import re
 
 # Claude Code's input box is drawn with box-drawing chars. The input line looks like
 # ``│ > <typed text> │`` (padded with spaces to the box width), preceded within a few
@@ -85,8 +88,18 @@ import re
 _INPUT_LINE_RE = re.compile(r"^│\s*>\s*(.*?)\s*│\s*$")
 _TOP_BORDER_LOOKBACK = 6  # lines to scan above for ╭...╮
 
+# Codex's composer has no box border. Its first line begins with ``›`` and its status
+# footer follows below it. Continuation lines are indented by two spaces.
+_CODEX_INPUT_LINE_RE = re.compile(r"^›(?:\s?(.*))?$")
+_CODEX_STATUS_RE = re.compile(
+    r"\s·\s(?:Ready|Working|Waiting|Starting|Idle)(?:\s·\s|\s*$)", re.IGNORECASE
+)
+_CODEX_OPAQUE_DRAFT_RE = re.compile(
+    r"\[(?:Pasted Content \d+ chars|Image[^\]]*)\]", re.IGNORECASE
+)
 
-def parse_input_box_text(pane: str) -> str:
+
+def _parse_claude_input_box_text(pane: str) -> str:
     """Best-effort extract of any typed-but-unsent text in Claude's input box.
 
     Requires the FULL Claude-input-box shape: a line matching ``│ > <text> │`` (leading
@@ -114,18 +127,89 @@ def parse_input_box_text(pane: str) -> str:
     return ""
 
 
+def _codex_composer(pane: str) -> tuple[bool, str]:
+    """Return ``(visible, draft)`` for the last Codex composer in ``pane``.
+
+    The caller captures with ``-J`` so terminal soft wraps are joined. Newlines left in
+    the composer region are therefore logical draft newlines and can be restored with
+    Ctrl+J.
+    """
+    lines = pane.splitlines()
+    start = -1
+    first = ""
+    for index in range(len(lines) - 1, -1, -1):
+        match = _CODEX_INPUT_LINE_RE.match(lines[index].rstrip())
+        if match:
+            start = index
+            first = match.group(1) or ""
+            break
+    if start < 0:
+        return False, ""
+
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if _CODEX_STATUS_RE.search(lines[index]):
+            end = index
+            break
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+
+    parts = [first.rstrip()]
+    for line in lines[start + 1 : end]:
+        if line and not line.startswith("  "):
+            # A transcript quote can also begin with ›. Real composer continuation
+            # rows retain Codex's two-cell alignment; fail closed on any other shape.
+            return False, ""
+        # Codex reserves two leading cells for continuation alignment.
+        parts.append(line[2:] if line.startswith("  ") else line)
+    return True, "\n".join(parts).rstrip()
+
+
+def parse_input_box_text(pane: str, *, runtime: str = "claude") -> str:
+    """Extract typed-but-unsent text from a Claude or Codex composer."""
+    if runtime == "codex":
+        return _codex_composer(pane)[1]
+    return _parse_claude_input_box_text(pane)
+
+
 def _bspaces(n: int) -> list[str]:
     return ["BSpace"] * max(0, int(n))
 
 
-def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
+def _type_prompt(
+    tmux_name: str,
+    text: str,
+    *,
+    runtime: str,
+    submit: bool,
+) -> tuple[bool, str]:
+    """Type multiline text with the runtime's composer newline convention."""
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if line:
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", line])
+            if not ok:
+                return False, err
+        if index < len(lines) - 1:
+            newline_keys = ["C-j"] if runtime == "codex" else ["\\", "Enter"]
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, *newline_keys])
+            if not ok:
+                return False, err
+    if submit:
+        return _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
+    return True, ""
+
+
+def send_prompt_via_tmux(
+    tmux_name: str, prompt: str, *, runtime: str = "claude"
+) -> tuple[bool, str, str]:
     """Deliver ``prompt`` to a live target as a user-typed message, preserving any
     typed-but-unsent text in the input box.
 
     Flow (always all six steps — a save of empty text is a no-op restore):
       1. capture pane -> parse input box text ``saved``
       2. backspace-clear ``len(saved) + _CLEAR_MARGIN`` chars from the input
-      3. type ``prompt`` (multi-line via ``\\`` + Enter between lines)
+      3. type ``prompt`` using the runtime's multiline convention
       4. Enter to submit
       5. type ``saved`` back with ``send-keys -l`` (no Enter — user's mid-typing is
          restored to the input box, still unsent)
@@ -133,10 +217,22 @@ def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
     Returns ``(ok, saved_text, error)`` — the saved text lets the caller construct the
     success message ("Prompt delivered to X, saved and restored the text..." when non-empty).
     """
-    ok, pane = capture_pane(tmux_name)
+    ok, pane = capture_pane(tmux_name, join_wrapped=runtime == "codex")
     if not ok:
         return False, "", pane  # `pane` holds the error message
-    saved = parse_input_box_text(pane)
+    if runtime == "codex":
+        composer_visible, saved = _codex_composer(pane)
+        if not composer_visible:
+            return False, "", "Codex input composer is not visible"
+        if _CODEX_OPAQUE_DRAFT_RE.search(saved):
+            return (
+                False,
+                saved,
+                "Codex input contains pasted content or an image that cannot be "
+                "safely restored",
+            )
+    else:
+        saved = parse_input_box_text(pane, runtime=runtime)
 
     # Step 2: clear whatever's in the input box.
     if saved:
@@ -147,26 +243,13 @@ def send_prompt_via_tmux(tmux_name: str, prompt: str) -> tuple[bool, str, str]:
             return False, saved, err
 
     # Step 3+4: type the prompt with proper multi-line handling, then submit.
-    lines = prompt.split("\n")
-    for i, line in enumerate(lines):
-        if line:
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", line])
-            if not ok:
-                return False, saved, err
-        # Between lines: `\` then Enter (Claude's newline convention). After the last line:
-        # bare Enter to SUBMIT.
-        if i < len(lines) - 1:
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "\\", "Enter"])
-            if not ok:
-                return False, saved, err
-        else:
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
-            if not ok:
-                return False, saved, err
+    ok, err = _type_prompt(tmux_name, prompt, runtime=runtime, submit=True)
+    if not ok:
+        return False, saved, err
 
     # Step 5: type saved text back into the (now-empty) input box, no Enter.
     if saved:
-        ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", saved])
+        ok, err = _type_prompt(tmux_name, saved, runtime=runtime, submit=False)
         if not ok:
             # Prompt already delivered; just report the restore failure.
             return False, saved, f"prompt delivered but restore failed: {err}"
@@ -458,21 +541,26 @@ def _log_cursor(log, tmux_name: str, tag: str) -> None:
 
 
 def wait_for_ready(
-    tmux_name: str, timeout_s: float = DEFAULT_READY_TIMEOUT_S
+    tmux_name: str,
+    timeout_s: float = DEFAULT_READY_TIMEOUT_S,
+    *,
+    runtime: str = "claude",
 ) -> tuple[bool, str]:
-    """Poll capture-pane until Claude's input box (``>``) is visible, up to ``timeout_s``.
+    """Poll until the runtime's input composer is visible, up to ``timeout_s``.
 
-    Used for ``starting`` sessions — the tmux pane exists but claude hasn't drawn its UI
-    yet. Returns ``(ok, error)`` where ``ok=True`` means we saw the input line at least
-    once. On timeout, ``ok=False`` and the caller reports ``deliver_failed``.
+    Used for ``starting`` sessions whose TUI has not drawn yet. On timeout, the caller
+    reports ``deliver_failed``.
     """
     deadline = time.monotonic() + timeout_s
     interval = 0.25
     last_err = "timed out waiting for input box"
     while time.monotonic() < deadline:
-        ok, pane = capture_pane(tmux_name)
+        ok, pane = capture_pane(tmux_name, join_wrapped=runtime == "codex")
         if not ok:
             last_err = pane
+        elif runtime == "codex":
+            if _codex_composer(pane)[0] or _CODEX_STATUS_RE.search(pane):
+                return True, ""
         else:
             # Reuse the same heuristic — if we can find the `>` line (empty or not),
             # Claude's ready to accept input.

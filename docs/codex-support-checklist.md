@@ -259,20 +259,22 @@ and are not Codex parity blockers.
 
 ### Action: `prompt_agent`
 
-- [ ] Deliver a prompt to a live, idle Codex agent without changing the action schema.
-- [ ] Deliver a prompt to a live Codex agent that is already working or listening.
-- [ ] Wait for a starting Codex TUI to become ready using a bounded,
+- [x] Deliver a prompt to a live, idle Codex agent without changing the action schema.
+- [x] Deliver a prompt to a live Codex agent that is already working or listening.
+- [x] Wait for a starting Codex TUI to become ready using a bounded,
       runtime-specific readiness signal.
-- [ ] Resume a dormant or ended Codex agent by its Codex session ID and supply the
+- [x] Resume a dormant or ended Codex agent by its Codex session ID and supply the
       action text as its resumption prompt.
-- [ ] Preserve typed-but-unsent Codex terminal input during live prompt injection, or
-      use a runtime API that does not modify the user's input buffer.
-- [ ] Refuse unsafe delivery when the Codex agent is waiting for an answer or
+- [x] Preserve typed-but-unsent Codex terminal input during live prompt injection;
+      fail closed when an opaque paste or image placeholder cannot be reconstructed.
+- [x] Refuse unsafe delivery when the Codex agent is waiting for an answer or
       permission decision, is live on another host, or has no usable tmux/session ID.
-- [ ] Preserve the existing busy, locked, waiting, not-found, delivery-failed, and
-      timeout result semantics.
-- [ ] Add action-id deduplication tests proving a retried prompt is delivered at most
-      once to a Codex session.
+- [x] Preserve the existing waiting, not-found, delivery-failed, and timeout result
+      semantics without adding runtime to the action result.
+- [ ] Verify connector-wide busy/`LOCK` behavior and Claude-only compaction locking
+      during the later mixed-runtime replay exercise.
+- [x] Add action-id deduplication tests proving concurrent and later retries deliver
+      at most once to a Codex session.
 
 ### Action: `answer_question`
 
@@ -375,8 +377,11 @@ and are not Codex parity blockers.
 
 - [ ] Test all implemented queries against live, ended, and dormant Codex targets and
       a mixed-runtime workspace.
-- [ ] Test live injection, starting readiness, dormant resume, user attachment,
-      typed-input preservation, and duplicate action delivery for `prompt_agent`.
+- [x] Add deterministic coverage for live injection routing, starting readiness,
+      dormant/ended resume, typed-input preservation, unsafe-state refusal, and
+      duplicate action delivery for `prompt_agent`.
+- [ ] Perform an attached-pane device test of Codex `prompt_agent`, including a
+      typed-but-unsent draft and multiline SecondBrain prompt.
 - [ ] Test direct and approval-based Codex spawns, runtime inheritance/selection,
       rename, rejection, interruption, and duplicate decisions.
 - [ ] Test event ordering and exactly-once publication for prompt/response,
