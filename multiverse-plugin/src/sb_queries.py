@@ -23,6 +23,7 @@ from .auto_build import is_enabled as build_enabled
 from .full_jsonl import live_stats_cached, structural_tokens_cached
 from .inbox import pending_inbox_count
 from .sessions import (
+    RUNTIME_CLAUDE,
     current_host,
     list_named_agents_in_cwd,
     tmux_session_exists,
@@ -55,10 +56,13 @@ def _corrected_status(row) -> str:  # noqa: ANN001 - DashboardRow
     return row.status
 
 
-def _tokens(row) -> int | None:  # noqa: ANN001 - DashboardRow
+def _tokens(row) -> int | str | None:  # noqa: ANN001 - DashboardRow
     """The dashboard's Tokens cell: LIVE jsonl tokens + structural overhead — what the
-    session would actually cost to resume right now (reflects any past compaction).
-    Both halves are mtime-cached, so repeated queries are cheap. None if no transcript yet."""
+    Claude session would actually cost to resume right now (reflects any past
+    compaction). Codex does not expose an equivalent count, so it uses the monitor's
+    neutral ``"-"`` placeholder. None means a Claude transcript is not available yet."""
+    if row.runtime != RUNTIME_CLAUDE:
+        return "-"
     uuid = row.claude_uuid
     if not uuid:
         return None
@@ -80,13 +84,22 @@ def _dashboard_row(row) -> dict:  # noqa: ANN001 - DashboardRow
     """One session row in the full dashboard shape SB's ``get_dashboard`` expects
     (DESIGN §4d): a 1:1 lift of the monitor's columns."""
     uuid = row.claude_uuid
+    native_id = row.session_id or uuid
     return {
-        "id": row.session.id if row.session is not None else (uuid[:8] if uuid else ""),
+        "id": (
+            row.session.id
+            if row.session is not None
+            else (native_id[:8] if native_id else "")
+        ),
         "name": row.name,
         "status": _corrected_status(row),
         "tokens": _tokens(row),
         "inbox": pending_inbox_count(row.cwd, row.name),
-        "build": "on" if (uuid and build_enabled(uuid)) else "off",
+        "build": (
+            "on"
+            if (row.runtime == RUNTIME_CLAUDE and uuid and build_enabled(uuid))
+            else "off"
+        ),
         "updated": _iso(row.status_ts),
         "preview": row.preview,
     }

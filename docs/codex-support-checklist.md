@@ -233,8 +233,8 @@ and are not Codex parity blockers.
       `ok`, `error`, and `rejected` result semantics.
 - [x] Keep connector state and signal writes atomic when Claude and Codex processes
       publish concurrently.
-- [ ] Decide whether to add a runtime discriminator to SecondBrain payloads; do not
-      change established query result shapes unless the protocol is extended.
+- [x] Keep runtime out of SecondBrain payloads and preserve the established query
+      result shapes.
 
 ### Read Queries
 
@@ -242,18 +242,18 @@ and are not Codex parity blockers.
       workspace IDs.
 - [x] Feed `get_dashboard`, `list_agents`, and `get_status` from the shared
       mixed-runtime session roster.
-- [ ] Make `get_dashboard` return a stable ID, common status, inbox count, updated
+- [x] Make `get_dashboard` return a stable ID, common status, inbox count, updated
       timestamp, and preview for live, ended, and dormant Codex rows.
-- [ ] Define Codex dashboard values when live token usage is unavailable and ensure
-      the Claude-only auto-build field remains `off`.
-- [ ] Verify `list_agents` returns Codex agents with the existing name, status, inbox,
+- [x] Return `"-"` for unavailable Codex token usage and keep the Claude-only
+      auto-build field `off`.
+- [x] Verify `list_agents` returns Codex agents with the existing name, status, inbox,
       token, and last-updated fields and no unapproved schema changes.
-- [ ] Verify `get_status` has identical lookup, not-found, and cross-workspace behavior
+- [x] Verify `get_status` has identical lookup, not-found, and cross-workspace behavior
       for Claude and Codex targets.
 - [x] Support `ask_agent` queries targeting Codex agents through a non-mutating
       ephemeral fork.
-- [ ] Verify ACL, malformed-request, not-found, timeout, and side-fork failure results
-      for every Codex-capable query.
+- [ ] Verify timeout and side-fork failure results for `ask_agent`; ACL,
+      malformed-request, and not-found query behavior is covered for Codex rows.
 - [ ] Treat `get_transcript` as a connector-wide future feature: it is currently not
       implemented for Claude and does not block initial Codex parity.
 
