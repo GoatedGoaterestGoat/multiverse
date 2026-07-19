@@ -29,6 +29,10 @@ _INBOX_RESUME_RE = re.compile(
     r"workspace\. Call the multiverse check_inbox tool to read and clear them, then "
     r"respond or act as appropriate\.\s*$"
 )
+_SYNTHETIC_USER_PREFIXES = (
+    "<task-notification>",
+    "<local-command-caveat>",
+)
 
 
 @dataclass
@@ -48,6 +52,7 @@ class TranscriptTurn:
     timestamp: str | None
     items: list[TranscriptItem] = field(default_factory=list)
     status: str = "in_progress"
+    saw_synthetic_user: bool = False
 
     @property
     def key(self) -> str:
@@ -56,6 +61,14 @@ class TranscriptTurn:
         if self.items:
             return f"pending:{self.items[0].key}"
         return f"pending:{self.start_key}"
+
+    @property
+    def has_user_input(self) -> bool:
+        return any(item.kind == "user" for item in self.items)
+
+    @property
+    def synthetic_only(self) -> bool:
+        return self.saw_synthetic_user and not self.has_user_input
 
 
 @dataclass(frozen=True)
@@ -84,6 +97,7 @@ class _HistoryBuilder:
         self.active: TranscriptTurn | None = None
         self.pending_users: list[TranscriptItem] = []
         self.pending_timestamp: str | None = None
+        self.pending_synthetic_user = False
 
     def view(self) -> list[TranscriptTurn]:
         turns = list(self.turns)
@@ -94,6 +108,7 @@ class _HistoryBuilder:
                     start_key=self.pending_users[0].key,
                     timestamp=self.pending_timestamp,
                     items=list(self.pending_users),
+                    saw_synthetic_user=self.pending_synthetic_user,
                 )
             )
         return turns
@@ -123,9 +138,11 @@ class _HistoryBuilder:
                 start_key=record_key,
                 timestamp=timestamp or self.pending_timestamp,
                 items=list(self.pending_users),
+                saw_synthetic_user=self.pending_synthetic_user,
             )
             self.pending_users.clear()
             self.pending_timestamp = None
+            self.pending_synthetic_user = False
             self.turns.append(turn)
             self.active = turn
             return
@@ -152,16 +169,23 @@ class _HistoryBuilder:
             self.active = None
             self.pending_users.clear()
             self.pending_timestamp = None
+            self.pending_synthetic_user = False
             return
 
         if typ == "event_msg" and payload_type == "user_message":
-            text = payload.get("message")
-            if not isinstance(text, str):
-                text = ""
-            text = _clean_user_text(text)
+            raw_text = payload.get("message")
+            if not isinstance(raw_text, str):
+                raw_text = ""
+            synthetic = is_synthetic_user_text(raw_text)
+            text = clean_user_text(raw_text)
             images = payload.get("images") or payload.get("local_images") or []
             if not text.strip() and isinstance(images, list) and images:
                 text = f"<{len(images)} image(s)>"
+            if synthetic:
+                if self.active is not None:
+                    self.active.saw_synthetic_user = True
+                else:
+                    self.pending_synthetic_user = True
             if not text.strip():
                 return
             item = TranscriptItem(key=f"user:{record_key}", kind="user", text=text)
@@ -229,11 +253,19 @@ def _message_text(content: Any) -> str:
     return "\n".join(chunks)
 
 
-def _clean_user_text(text: str) -> str:
-    """Remove Multiverse-only wake context without hiding real user prompts."""
+def clean_user_text(text: str) -> str:
+    """Remove synthetic runtime input without hiding a wrapped real prompt."""
+    stripped = text.lstrip()
+    if stripped.startswith(_SYNTHETIC_USER_PREFIXES):
+        return ""
     if text.strip() == _WAKE_PROMPT:
         return ""
     return _INBOX_RESUME_RE.sub("", text).rstrip()
+
+
+def is_synthetic_user_text(text: str) -> bool:
+    """Whether ``text`` contains no user-authored content after filtering."""
+    return bool(text.strip()) and not clean_user_text(text).strip()
 
 
 def _item_key(kind: str, payload: dict, record_key: str) -> str:
@@ -346,6 +378,23 @@ def load_snapshot(codex_home: Path, thread_id: str) -> RolloutSnapshot | None:
     return snapshot
 
 
+def turn_state(codex_home: Path, thread_id: str, turn_id: str) -> dict | None:
+    """Return delivery-relevant state for one stable Codex turn ID."""
+    if not turn_id:
+        return None
+    snapshot = load_snapshot(codex_home, thread_id)
+    if snapshot is None:
+        return None
+    for turn in reversed(snapshot.turns):
+        if turn.turn_id == turn_id:
+            return {
+                "status": turn.status,
+                "has_user_input": turn.has_user_input,
+                "synthetic_only": turn.synthetic_only,
+            }
+    return None
+
+
 def initialize_cursor(codex_home: Path, thread_id: str) -> dict | None:
     snapshot = load_snapshot(codex_home, thread_id)
     if snapshot is None:
@@ -359,6 +408,62 @@ def peek_partial_transcript(
     marker: dict | None,
 ) -> tuple[str, dict] | None:
     """Return the canonical transcript suffix and an exact snapshot cursor."""
+    positioned = _positioned_snapshot(codex_home, thread_id, marker)
+    if positioned is None:
+        return None
+    current, start_turn, start_item = positioned
+    text = _render_suffix(current.turns, start_turn, start_item)
+    return text, _cursor(current)
+
+
+def peek_partial_transcript_through_user(
+    codex_home: Path,
+    thread_id: str,
+    marker: dict | None,
+    turn_id: str,
+) -> tuple[str, dict] | None:
+    """Return the suffix only through ``turn_id``'s last real user item.
+
+    A fast turn may finish before the connector consumes its UserPromptSubmit signal.
+    Bounding this peek keeps the prompt event from advancing over the answer and
+    suppressing the later agent.response event. The semantic item cursor is deliberate:
+    a byte cursor at the current end of file would incorrectly mark that answer read.
+    """
+    positioned = _positioned_snapshot(codex_home, thread_id, marker)
+    if positioned is None:
+        return None
+    current, start_turn, start_item = positioned
+    for turn_index, turn in enumerate(current.turns):
+        if turn.turn_id != turn_id:
+            continue
+        user_indexes = [
+            index for index, item in enumerate(turn.items) if item.kind == "user"
+        ]
+        if not user_indexes:
+            return None
+        end_item = user_indexes[-1]
+        text = _render_suffix(
+            current.turns,
+            start_turn,
+            start_item,
+            end_turn=turn_index,
+            end_item=end_item,
+        )
+        cursor = {
+            "runtime": "codex",
+            "thread_id": current.thread_id,
+            "record_offset": None,
+            "record_hash": None,
+            "turn_id": turn.turn_id,
+            "item_id": turn.items[end_item].key,
+        }
+        return text, cursor
+    return None
+
+
+def _positioned_snapshot(
+    codex_home: Path, thread_id: str, marker: dict | None
+) -> tuple[RolloutSnapshot, int, int] | None:
     current_path = find_rollout_path(codex_home, thread_id)
     if current_path is None:
         return None
@@ -408,8 +513,7 @@ def peek_partial_transcript(
         start_turn, start_item = _suffix_position(marker_identity, current.turns)
     else:
         start_turn, start_item = _fallback_marker_position(marker, current.turns)
-    text = _render_suffix(current.turns, start_turn, start_item)
-    return text, _cursor(current)
+    return current, start_turn, start_item
 
 
 def _suffix_position(
@@ -518,13 +622,22 @@ def _short_args(value: Any) -> str:
 
 
 def _render_suffix(
-    turns: list[TranscriptTurn], start_turn: int, start_item: int
+    turns: list[TranscriptTurn],
+    start_turn: int,
+    start_item: int,
+    *,
+    end_turn: int | None = None,
+    end_item: int | None = None,
 ) -> str:
     blocks: list[str] = []
-    for turn_index in range(start_turn, len(turns)):
+    stop_turn = len(turns) - 1 if end_turn is None else min(end_turn, len(turns) - 1)
+    for turn_index in range(start_turn, stop_turn + 1):
         turn = turns[turn_index]
+        if turn.synthetic_only:
+            continue
         first_item = start_item if turn_index == start_turn else 0
-        items = turn.items[first_item:]
+        last_item = end_item + 1 if turn_index == end_turn and end_item is not None else None
+        items = turn.items[first_item:last_item]
         if not items:
             continue
         timestamp = _fmt_ts(turn.timestamp)

@@ -338,12 +338,20 @@ and are not Codex parity blockers.
       runtimes.
 - [x] Add Codex-specific coverage for the `agent.created` payload and ensure failed
       or duplicate creations emit nothing.
-- [ ] Emit `user.prompt` for real Codex user turns while filtering Multiverse-injected
+- [x] Emit `user.prompt` for real Codex user turns while filtering Multiverse-injected
       wrappers, local commands, and other synthetic input.
-- [ ] Include the same overview-since-last and partial `full` transcript fields in a
+- [x] Key Codex prompt signals by stable `turn_id`, defer them until the matching
+      rollout user row is materialized, and suppress duplicate hook invocations.
+- [x] Bound a delayed prompt event's cursor at its user item so a fast completed turn
+      still emits prompt-before-response without consuming the answer early.
+- [x] Include the same overview-since-last and partial `full` transcript fields in a
       Codex `user.prompt` event.
-- [ ] Emit `agent.response` once after a meaningful Codex turn completes normally and
+- [x] Emit `agent.response` once after a meaningful Codex turn completes normally and
       becomes idle; suppress empty, interrupted, and waiting responses.
+- [x] Filter pure inbox wake turns from both prompt events and rendered response text,
+      while preserving a real initial prompt that carries a trailing inbox reminder.
+- [x] Verify Codex `user.prompt` and `agent.response` retain the existing runtime-neutral
+      SecondBrain payloads and marker-after-durable-buffer ordering.
 - [x] Queue `agent.spawn_request` and `user.spawn_decision` at their shared filesystem
       publication points regardless of caller runtime.
 - [x] Verify both spawn event payloads and their ordering for a Codex caller.

@@ -20,6 +20,7 @@ STATUS_BY_EVENT = {
     "PostToolUse": "working",
     "Stop": "idle",
 }
+_SCRIPT = "codex-session-hook"
 
 
 def _write_status(status_path: Path, status: str) -> None:
@@ -110,6 +111,69 @@ def _set_native_name(session_id: str, name: str) -> None:
         time.sleep(0.4 * (attempt + 1))
 
 
+def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
+    """Record cheap turn signals; the connector performs transcript expansion."""
+    cwd = os.environ.get("MULTIVERSE_SESSION_CWD", "")
+    agent = os.environ.get("MULTIVERSE_SESSION_NAME", "")
+    plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT", "")
+    if not cwd or not agent or not plugin_root:
+        return
+    if plugin_root not in sys.path:
+        sys.path.insert(0, plugin_root)
+    try:
+        from src import codex_transcript, sb_notify
+    except Exception:  # noqa: BLE001 - hooks must never block a Codex turn
+        return
+
+    raw_turn_id = event.get("turn_id")
+    turn_id = raw_turn_id if isinstance(raw_turn_id, str) and raw_turn_id else None
+    try:
+        if event_name == "UserPromptSubmit":
+            raw_text = event.get("prompt")
+            if not isinstance(raw_text, str) or not raw_text:
+                sb_notify.log_hook_outcome(
+                    _SCRIPT, "empty-prompt", cwd=cwd, agent=agent
+                )
+                return
+            text = codex_transcript.clean_user_text(raw_text)
+            if not text.strip():
+                sb_notify.log_hook_outcome(
+                    _SCRIPT, "filter-synthetic-prompt", cwd=cwd, agent=agent
+                )
+                return
+            sb_notify.record_user_prompt_signal(
+                cwd, agent, text, turn_id=turn_id
+            )
+            sb_notify.log_hook_outcome(
+                _SCRIPT,
+                "recorded-user-prompt",
+                cwd=cwd,
+                agent=agent,
+                detail=f"turn_id={turn_id or '<unset>'} text_len={len(text)}",
+            )
+            return
+
+        if event_name == "Stop":
+            message = event.get("last_assistant_message")
+            if not isinstance(message, str) or not message.strip():
+                sb_notify.log_hook_outcome(
+                    _SCRIPT, "empty-response", cwd=cwd, agent=agent
+                )
+                return
+            sb_notify.record_response_signal(cwd, agent, turn_id=turn_id)
+            sb_notify.log_hook_outcome(
+                _SCRIPT,
+                "recorded-response",
+                cwd=cwd,
+                agent=agent,
+                detail=f"turn_id={turn_id or '<unset>'}",
+            )
+    except Exception as exc:  # noqa: BLE001 - hooks must never block a Codex turn
+        sb_notify.log_hook_outcome(
+            _SCRIPT, "exception", cwd=cwd, agent=agent, detail=str(exc)[:200]
+        )
+
+
 def _run_hook() -> None:
     try:
         event = json.load(sys.stdin)
@@ -136,6 +200,9 @@ def _run_hook() -> None:
     status = STATUS_BY_EVENT.get(event_name)
     if status:
         _write_status(status_path, status)
+
+    if event_name in ("UserPromptSubmit", "Stop"):
+        _emit_secondbrain_signal(event, event_name)
 
     if event_name != "SessionStart":
         return

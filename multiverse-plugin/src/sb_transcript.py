@@ -549,6 +549,48 @@ def peek_partial_transcript(cwd: str, agent_name: str) -> tuple[str, dict] | Non
     return text, cursor
 
 
+def peek_partial_transcript_through_codex_user(
+    cwd: str, agent_name: str, turn_id: str
+) -> tuple[str, dict] | None:
+    """Codex partial transcript bounded at one turn's submitted user item."""
+    row = _resolve_agent_row(cwd, agent_name)
+    if row is None or row.runtime != "codex":
+        return None
+    from . import codex_transcript
+    from .sessions import CODEX_HOME
+
+    thread_id = row.session_id
+    if not thread_id and row.session is not None:
+        thread_id = row.session.runtime_session_id
+    if not thread_id:
+        return None
+    marker = read_marker(cwd, agent_name)
+    return codex_transcript.peek_partial_transcript_through_user(
+        CODEX_HOME, thread_id, marker, turn_id
+    )
+
+
+def codex_turn_state(cwd: str, agent_name: str, turn_id: str) -> dict | None:
+    """Read one managed Codex turn's rollout state without moving its marker.
+
+    Codex hooks can run before the corresponding rollout row is visible to the
+    connector. ``None`` therefore means "not materialized yet" as well as an
+    unresolvable agent; callers should defer the signal rather than guess.
+    """
+    row = _resolve_agent_row(cwd, agent_name)
+    if row is None or row.runtime != "codex":
+        return None
+    from . import codex_transcript
+    from .sessions import CODEX_HOME
+
+    thread_id = row.session_id
+    if not thread_id and row.session is not None:
+        thread_id = row.session.runtime_session_id
+    if not thread_id:
+        return None
+    return codex_transcript.turn_state(CODEX_HOME, thread_id, turn_id)
+
+
 def commit_marker(cwd: str, agent_name: str, cursor: dict) -> None:
     """Advance the delivery marker to ``cursor`` (from :func:`peek_partial_transcript`).
 

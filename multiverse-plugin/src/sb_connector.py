@@ -1416,9 +1416,49 @@ class SBConnector:
         the same turns."""
         from . import sb_events, sb_notify, sb_transcript
 
+        pending_prompt_turns = {
+            (sig.get("cwd", ""), sig.get("agent", ""), sig.get("turn_id"))
+            for sig in sb_notify.list_user_prompt_signals()
+            if sig.get("turn_id")
+        }
         for sig in sb_notify.list_response_signals():
             cwd = sig.get("cwd", "")
             agent = sig.get("agent", "")
+            turn_id = sig.get("turn_id")
+            if isinstance(turn_id, str) and turn_id:
+                if (cwd, agent, turn_id) in pending_prompt_turns:
+                    log.debug(
+                        "agent.response: %s turn %s still has a prompt signal; "
+                        "deferring to preserve event order",
+                        agent,
+                        turn_id,
+                    )
+                    continue
+                turn_state = sb_transcript.codex_turn_state(cwd, agent, turn_id)
+                if turn_state is None:
+                    log.debug(
+                        "agent.response: %s turn %s not materialized; deferring",
+                        agent,
+                        turn_id,
+                    )
+                    continue
+                status = turn_state.get("status")
+                if status == "aborted":
+                    log.info(
+                        "agent.response: %s turn %s aborted; dropping signal",
+                        agent,
+                        turn_id,
+                    )
+                    sb_notify.delete_response_signal(sig)
+                    continue
+                if status != "completed":
+                    log.debug(
+                        "agent.response: %s turn %s is %s; deferring",
+                        agent,
+                        turn_id,
+                        status or "unknown",
+                    )
+                    continue
             peeked = sb_transcript.peek_partial_transcript(cwd, agent)
             if peeked is None:  # agent unresolvable (gone?) — drop the signal
                 log.debug("agent.response: %s unresolvable, dropping signal", agent)
@@ -1492,16 +1532,44 @@ class SBConnector:
         drop the signal. Order = make_event → commit → delete for at-least-once (SB
         dedups by ``event_id``).
 
-        Note: the UserPromptSubmit hook fires AFTER the JSONL row for the new prompt is
-        written, so the peeked transcript already ends with this new prompt — deliberate
-        redundancy with the ``text`` field per the SB contract."""
+        Claude's hook fires after its JSONL row is written. Codex can invoke the hook
+        before its rollout row is visible, so turn-keyed Codex signals are deferred until
+        the matching turn contains real user input. The eventual transcript therefore
+        still ends with the new prompt — deliberate redundancy with the ``text`` field
+        per the SB contract."""
         from . import sb_events, sb_notify, sb_transcript
 
         for sig in sb_notify.list_user_prompt_signals():
             cwd = sig.get("cwd", "")
             agent = sig.get("agent", "")
             text = sig.get("text", "")
-            peeked = sb_transcript.peek_partial_transcript(cwd, agent)
+            turn_id = sig.get("turn_id")
+            if isinstance(turn_id, str) and turn_id:
+                turn_state = sb_transcript.codex_turn_state(cwd, agent, turn_id)
+                if turn_state is None or (
+                    not turn_state.get("has_user_input")
+                    and not turn_state.get("synthetic_only")
+                ):
+                    log.debug(
+                        "user.prompt: %s turn %s not materialized; deferring",
+                        agent,
+                        turn_id,
+                    )
+                    continue
+                if turn_state.get("synthetic_only"):
+                    log.info(
+                        "user.prompt: %s turn %s synthetic; dropping signal",
+                        agent,
+                        turn_id,
+                    )
+                    sb_notify.delete_user_prompt_signal(sig)
+                    continue
+            if isinstance(turn_id, str) and turn_id:
+                peeked = sb_transcript.peek_partial_transcript_through_codex_user(
+                    cwd, agent, turn_id
+                )
+            else:
+                peeked = sb_transcript.peek_partial_transcript(cwd, agent)
             transcript = ""
             cursor: dict | None = None
             if peeked is not None:

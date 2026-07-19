@@ -492,7 +492,7 @@ class CodexRolloutTranscriptTests(unittest.TestCase):
         self.assertNotIn("check your inbox", peeked[0])
         self.assertNotIn("pending inbox", peeked[0])
         self.assertIn("Real initial task", peeked[0])
-        self.assertIn("Inbox handled", peeked[0])
+        self.assertNotIn("Inbox handled", peeked[0])
 
     def test_scaffolding_reasoning_and_tool_results_are_not_rendered(self) -> None:
         timestamp = "2026-07-19T00:01:00Z"

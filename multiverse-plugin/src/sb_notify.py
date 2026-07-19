@@ -25,6 +25,7 @@ swallowed: recording an SB event must never break the core spawn flow.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -209,7 +210,18 @@ def response_signals_dir() -> Path:
     return _sb_dir() / "response_signals"
 
 
-def record_response_signal(cwd: str, agent_name: str) -> None:
+def _turn_signal_path(
+    directory: Path, cwd: str, agent_name: str, turn_id: str | None
+) -> Path:
+    if not turn_id:
+        return directory / f"{uuid.uuid4().hex}.json"
+    identity = f"{_resolve(cwd)}\x00{agent_name}\x00{turn_id}"
+    return directory / f"{hashlib.sha256(identity.encode()).hexdigest()}.json"
+
+
+def record_response_signal(
+    cwd: str, agent_name: str, *, turn_id: str | None = None
+) -> None:
     """Record a fast turn-end signal for the connector to expand into an ``agent.response``
     event (the agent finished a turn normally → idle). Called from the Stop hook — it must
     stay CHEAP (no transcript parsing here; the connector does that). Gated on the workspace
@@ -239,8 +251,13 @@ def record_response_signal(cwd: str, agent_name: str) -> None:
             "agent": agent_name,
             "ts": _now_iso(),
         }
-        path = d / f"{uuid.uuid4().hex}.json"
-        atomic_write_json(path, rec)
+        if turn_id:
+            rec["turn_id"] = turn_id
+        path = _turn_signal_path(d, cwd, agent_name, turn_id)
+        if turn_id:
+            atomic_create_json(path, rec)
+        else:
+            atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
@@ -275,7 +292,13 @@ def user_prompt_signals_dir() -> Path:
     return _sb_dir() / "user_prompt_signals"
 
 
-def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
+def record_user_prompt_signal(
+    cwd: str,
+    agent_name: str,
+    text: str,
+    *,
+    turn_id: str | None = None,
+) -> None:
     """Record a fast turn-start signal (from the UserPromptSubmit hook) — CHEAP, no
     transcript parsing on the agent's critical path. Gated on the workspace being seeded.
 
@@ -307,8 +330,13 @@ def record_user_prompt_signal(cwd: str, agent_name: str, text: str) -> None:
             "text": text,
             "ts": _now_iso(),
         }
-        path = d / f"{uuid.uuid4().hex}.json"
-        atomic_write_json(path, rec)
+        if turn_id:
+            rec["turn_id"] = turn_id
+        path = _turn_signal_path(d, cwd, agent_name, turn_id)
+        if turn_id:
+            atomic_create_json(path, rec)
+        else:
+            atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
         pass
 
