@@ -40,6 +40,12 @@ fi
 export MULTIVERSE_CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
 export MULTIVERSE_CODEX_PLUGIN_ROOT="${MULTIVERSE_CODEX_PLUGIN_ROOT:-$(cd "$PLUGIN_ROOT/../plugins/multiverse-codex" 2>/dev/null && pwd || true)}"
 
+# SecondBrain's direct spawn_agent action intentionally keeps its established
+# {name, instruction?} wire payload, so runtime selection is a local wrapper policy.
+# Preserve the legacy Claude default; set this to "codex" in bin/multiverse.local
+# when this device should create Codex agents for direct SecondBrain spawns.
+export MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME="${MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME:-claude}"
+
 # Colon-separated extra plugin dirs loaded into interactive sessions
 # (in addition to the multiverse plugin itself). Exported for the same reason.
 export MULTIVERSE_EXTRA_PLUGIN_DIRS="${MULTIVERSE_EXTRA_PLUGIN_DIRS:-}"

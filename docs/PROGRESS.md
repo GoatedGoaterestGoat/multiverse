@@ -218,6 +218,15 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 
 **Orphan request handling:** requests remain pending until resolved. If the caller is hard-killed before its `finally` cleanup runs, `list_pending_requests` filters the orphan once the caller's tmux session no longer exists.
 
+**SecondBrain spawning:** approving an agent-originated spawn through SecondBrain writes
+the caller's runtime into the same resolution file, so a Codex request creates a Codex
+child without changing the SecondBrain action schema. SecondBrain's direct
+`spawn_agent` action has no caller and retains its `{name, instruction?}` payload; its
+runtime is therefore a local device policy selected by
+`MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME` (`claude` by default). Put an override such as
+`export MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME=codex` in `bin/multiverse.local`, then
+reload the device-level SecondBrain connector for the new value to take effect.
+
 **Context assembly note:** the subagent has zero memory of the caller's conversation. If it needs context, the caller must put it in the `instruction`. This is a hard boundary — principled, not a limitation — and it means spawned subagents start from a clean prompt cache rather than a forked one.
 
 **Auto-detach while attached to tmux** (`_SpawnAttachGuard` in `monitor.py`): Textual's `App.suspend()` pauses the event loop during a tmux attach, so the normal 1s tick can't detect incoming spawn requests while the user is watching an agent work. The fix is a background thread started alongside each `tmux attach-session` — it polls `spawn_requests/` every second and runs `tmux detach-client -s <session>` when one arrives, force-booting the user back to the monitor. When `_attach_to` sees `guard.forced_detach = True`, it sets `_pending_reattach = <tmux-session>`; the next `_tick_spawn_requests` call with an empty queue + no open modal automatically reattaches the user. The reattach re-enters `_attach_to` with a fresh guard, so consecutive spawn bursts keep cycling detach → modal → reattach without duplicating state. `tmux_session_exists` guards against reattaching to a session the user killed from the dashboard meanwhile.

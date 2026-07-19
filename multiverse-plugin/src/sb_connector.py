@@ -2153,8 +2153,10 @@ class SBConnector:
 
         Payload: ``{request_id, decision: "approve"|"decline", name?: str}``. ``name``
         is only meaningful when approving; omitted/empty = keep the requester's
-        default_name. Errors: ``not_found`` / ``forbidden`` / ``already_decided`` /
-        ``bad_request`` / ``deliver_failed``.
+        default_name. An approval inherits the request's local ``caller_runtime`` and
+        persists it in the resolution; runtime remains outside the SecondBrain payload.
+        Errors: ``not_found`` / ``forbidden`` / ``already_decided`` / ``bad_request`` /
+        ``deliver_failed``.
         """
         payload = action.payload or {}
         request_id = str(payload.get("request_id") or "").strip()
@@ -2305,8 +2307,19 @@ class SBConnector:
 
         # Do the write. O_EXCL — if we race and lose, treat as already_decided too.
         if decision == "approve":
+            from . import sessions
+
+            try:
+                child_runtime = sessions.normalize_runtime(
+                    req.get("caller_runtime") or sessions.RUNTIME_CLAUDE
+                )
+            except ValueError as exc:
+                return ("err", "", "deliver_failed",
+                        f"spawn request '{request_id}' has an invalid caller runtime: {exc}")
             final_name = name if name else default_name
-            wrote = sr.write_resolution(request_id, "accepted", final_name)
+            wrote = sr.write_resolution(
+                request_id, "accepted", final_name, runtime=child_runtime
+            )
         else:  # decline
             final_name = ""
             wrote = sr.write_resolution(request_id, "rejected", None)
@@ -2339,7 +2352,11 @@ class SBConnector:
 
         Payload: ``{name, instruction?}``. ``name`` REQUIRED, unique in the workspace.
         ``instruction`` OPTIONAL — if provided, delivered as the new agent's first
-        user turn via bin/multiverse-session's positional-prompt path.
+        user turn via the selected runtime wrapper's positional-prompt path.
+
+        Because the established payload has no runtime field and there is no local
+        approval widget, runtime is a device-local policy selected by
+        ``MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME`` (default: ``claude``).
 
         Result on ok: ``{status, spawned_name}``. Errors: ``duplicate_name`` /
         ``bad_request`` / ``forbidden`` / ``deliver_failed``.
@@ -2430,8 +2447,22 @@ class SBConnector:
                     f"an agent named '{name}' already exists in this workspace")
 
         try:
+            runtime = sessions.normalize_runtime(
+                os.environ.get(
+                    "MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME",
+                    sessions.RUNTIME_CLAUDE,
+                )
+            )
+        except ValueError as exc:
+            return (
+                "err", "", "", "deliver_failed",
+                "invalid MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME: " + str(exc),
+            )
+
+        try:
             sessions.create_session(
                 cwd=cwd_abs, claude_args=[], name=name,
+                runtime=runtime,
                 initial_prompt=(instruction or None),
             )
         except Exception as exc:  # noqa: BLE001 - surface whatever create_session raised

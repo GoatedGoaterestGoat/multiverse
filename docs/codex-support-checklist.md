@@ -294,27 +294,27 @@ and are not Codex parity blockers.
 
 - [x] Reuse the filesystem-backed spawn request and first-writer-wins resolution
       protocol for requests originating from either runtime.
-- [ ] Define the approved child's runtime for a SecondBrain decision: inherit the
+- [x] Define the approved child's runtime for a SecondBrain decision: inherit the
       caller runtime unless the protocol gains an explicit runtime field.
-- [ ] Persist that runtime in the accepted resolution so a Codex caller does not
+- [x] Persist that runtime in the accepted resolution so a Codex caller does not
       accidentally spawn a Claude child.
-- [ ] Verify accept, rename, reject, duplicate-decision, caller-liveness, and workspace
+- [x] Verify accept, rename, reject, duplicate-decision, caller-liveness, and workspace
       mismatch behavior for Codex-originated requests.
-- [ ] Verify the resulting `user.spawn_decision` and `agent.created` events preserve
+- [x] Verify the resulting `user.spawn_decision` and `agent.created` events preserve
       the established payload shapes.
 
 ### Action: `spawn_agent`
 
-- [ ] Define runtime selection for a SecondBrain-initiated direct spawn, which has no
-      local approval widget; require an explicit protocol value or a documented
-      default.
-- [ ] Start a Codex child with the requested name and optional instruction as its
+- [x] Define runtime selection for a SecondBrain-initiated direct spawn, which has no
+      local approval widget: use local `MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME`, defaulting
+      to `claude`, without adding runtime to the SecondBrain payload.
+- [x] Start a Codex child with the requested name and optional instruction as its
       first prompt.
-- [ ] Preserve workspace ACL, name uniqueness, cross-host liveness, and action-id
+- [x] Preserve workspace ACL, name uniqueness, cross-host liveness, and action-id
       deduplication.
-- [ ] Return the same duplicate-name, bad-request, forbidden, and start-failure result
+- [x] Return the same duplicate-name, bad-request, forbidden, and start-failure result
       semantics as the Claude path.
-- [ ] Emit `agent.created` only after the Codex session is successfully materialized.
+- [x] Emit `agent.created` only after the Codex session is successfully materialized.
 
 ### Other Protocol Actions
 
@@ -333,7 +333,7 @@ and are not Codex parity blockers.
       workspaces using runtime-aware side questions.
 - [x] Queue `agent.created` from the shared successful-creation choke point for both
       runtimes.
-- [ ] Add Codex-specific coverage for the `agent.created` payload and ensure failed
+- [x] Add Codex-specific coverage for the `agent.created` payload and ensure failed
       or duplicate creations emit nothing.
 - [ ] Emit `user.prompt` for real Codex user turns while filtering Multiverse-injected
       wrappers, local commands, and other synthetic input.
@@ -343,7 +343,7 @@ and are not Codex parity blockers.
       becomes idle; suppress empty, interrupted, and waiting responses.
 - [x] Queue `agent.spawn_request` and `user.spawn_decision` at their shared filesystem
       publication points regardless of caller runtime.
-- [ ] Verify both spawn event payloads and their ordering for a Codex caller.
+- [x] Verify both spawn event payloads and their ordering for a Codex caller.
 - [ ] Emit paired `agent.question` and `user.answered` events only when a stable Codex
       question ID and structured answer can be correlated.
 - [ ] Emit paired `agent.permission_request` and `user.permission_decision` events
@@ -382,7 +382,7 @@ and are not Codex parity blockers.
       duplicate action delivery for `prompt_agent`.
 - [ ] Perform an attached-pane device test of Codex `prompt_agent`, including a
       typed-but-unsent draft and multiline SecondBrain prompt.
-- [ ] Test direct and approval-based Codex spawns, runtime inheritance/selection,
+- [x] Test direct and approval-based Codex spawns, runtime inheritance/selection,
       rename, rejection, interruption, and duplicate decisions.
 - [ ] Test event ordering and exactly-once publication for prompt/response,
       question/answer, permission request/decision, and spawn request/decision pairs.
