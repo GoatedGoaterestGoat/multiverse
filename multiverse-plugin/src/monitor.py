@@ -905,7 +905,7 @@ class SecondBrainScreen(ModalScreen[None]):
         Binding("enter", "primary", "Enroll/Connect (this workspace)"),
         Binding("e", "reenroll", "Re-enroll"),
         Binding("d", "disconnect", "Disconnect (this workspace)"),
-        Binding("shift+d", "stop_device", "Stop device daemon"),
+        Binding("D", "stop_device", "Stop device daemon"),
         Binding("u", "unenroll", "Un-enroll this workspace"),
         Binding("r", "reload", "Reload daemon"),
     ]
@@ -1014,7 +1014,7 @@ class SecondBrainScreen(ModalScreen[None]):
         elif this_exposed:
             hint = (
                 "[b]d[/] disconnect this workspace · [b]u[/] un-enroll this workspace · "
-                "[b]e[/] re-enroll · [b]Shift+D[/] stop entire daemon · "
+                "[b]e[/] re-enroll · [b]D[/] (shift+d) stop entire daemon · "
                 "[b]r[/] reload · [b]Esc[/] close (daemon keeps running)"
             )
         elif this_granted:
