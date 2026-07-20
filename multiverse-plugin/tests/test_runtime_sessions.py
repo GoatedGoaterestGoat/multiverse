@@ -372,6 +372,8 @@ class RuntimeLaunchTests(unittest.TestCase):
             meta["claude_args"], ["--permission-mode", "auto"]
         )
         self.assertIn("multiverse-session --permission-mode auto", tmux_cmd[-1])
+        self.assertNotIn("--sandbox", tmux_cmd[-1])
+        self.assertNotIn("danger-full-access", tmux_cmd[-1])
 
     def test_duplicate_codex_name_and_native_thread_claims_are_rejected(self) -> None:
         temp = tempfile.TemporaryDirectory()
@@ -655,8 +657,11 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             args = capture.read_text().splitlines()
             self.assertIn("--dangerously-bypass-hook-trust", args)
+            sandbox_index = args.index("--sandbox")
+            self.assertEqual(args[sandbox_index + 1], "danger-full-access")
             resume_index = args.index("resume")
             self.assertGreater(resume_index, args.index("-c"))
+            self.assertLess(sandbox_index, resume_index)
             self.assertEqual(
                 args[resume_index : resume_index + 2],
                 ["resume", "codex-thread"],

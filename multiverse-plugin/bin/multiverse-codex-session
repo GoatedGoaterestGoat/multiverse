@@ -28,6 +28,7 @@ MCP_COMMAND=$(printf '%s' "$MCP_SCRIPT" | jq -Rs .)
 RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
 export MULTIVERSE_RUNTIME_PID_PATH="$RUNTIME_PID_PATH"
 CODEX_CONFIG_ARGS=(
+  --sandbox danger-full-access
   --dangerously-bypass-hook-trust
   -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
