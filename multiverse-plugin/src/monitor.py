@@ -932,7 +932,18 @@ class SecondBrainScreen(ModalScreen[None]):
                 Static("[dim]Device name:[/]"),
                 Input(value=(sb_control.get_device_name() or _socket.gethostname()), id="sb-name"),
                 Static("[dim]Workspaces to expose (comma-separated abs paths):[/]"),
-                Input(value=self.cwd, id="sb-workspaces"),
+                # Prefill with the union of what's already granted + the current cwd.
+                # Otherwise a re-enroll from a not-yet-granted workspace would send
+                # want=[current_cwd] only — SB might respond by REPLACING the grants
+                # with just that one, silently dropping previously-granted workspaces
+                # like droid_pipeline. Users can still edit to remove any they don't
+                # want; but the default is additive, not destructive.
+                Input(
+                    value=", ".join(sorted(set(
+                        list(st.get("granted_workspaces") or []) + [self.cwd]
+                    ))),
+                    id="sb-workspaces",
+                ),
                 Static("[dim]— Cloudflare Access service token (wss:// only; blank = keep/none) —[/]"),
                 # Deliberately NOT prefilling client_id from storage: our validation
                 # is both-or-neither, so a prefilled id + empty secret would force

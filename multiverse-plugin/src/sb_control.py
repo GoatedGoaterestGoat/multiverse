@@ -229,11 +229,17 @@ def enroll(
     cf_client_id: str | None = None,
     cf_client_secret: str | None = None,
 ) -> dict:
-    """Run the one-time ``/enroll`` handshake and persist the device identity.
+    """Run the ``/enroll`` handshake and persist the device identity.
 
     Blocking (bounded) — call from a worker thread. Saves the endpoint URL and any CF
     creds first so the enroll dial itself can pass the edge gate. Returns
     ``{device_id, granted_workspaces}``.
+
+    If the daemon is already running when this is called (RE-enrollment to add a new
+    workspace grant from an already-enrolled device), it's reloaded here — otherwise
+    the running daemon holds the OLD identity/grants in memory and never first-connects
+    the newly-added workspace. Callers don't have to remember; a single ``enroll()``
+    both persists the new identity AND makes the daemon see it.
     """
     if cf_client_id and cf_client_secret:
         C.save_cf_creds(cf_client_id, cf_client_secret)
@@ -253,6 +259,15 @@ def enroll(
         )
     except Exception as exc:  # normalize to a widget-friendly error
         raise SBControlError(str(exc)) from exc
+
+    # Post-enroll: if a daemon is running, it's holding the pre-enroll identity in
+    # memory (SBConnector.__init__ captured it at start time). Reload so it picks up
+    # the freshly-written sidecar — otherwise a newly-granted workspace never gets
+    # its first-connect fired. If no daemon is running, this is a no-op; the caller
+    # will call start() next as normal.
+    if is_running():
+        reload()
+
     return {
         "device_id": identity.device_id,
         "granted_workspaces": identity.granted_workspaces,
