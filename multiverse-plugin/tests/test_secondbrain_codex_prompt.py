@@ -39,6 +39,16 @@ class CodexPromptTmuxTests(unittest.TestCase):
         self.assertEqual(
             sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX), ""
         )
+        styled_draft = (
+            "\x1b[1m›\x1b[0m Real draft\n\n"
+            f"{CODEX_FOOTER}\n"
+        )
+        self.assertEqual(
+            sb_actions.parse_input_box_text(
+                styled_draft, runtime=sessions.RUNTIME_CODEX
+            ),
+            "Real draft",
+        )
         self.assertFalse(sb_actions._codex_composer(pane)[0])
 
     def test_codex_delivery_saves_submits_and_restores_draft(self) -> None:
@@ -54,6 +64,7 @@ class CodexPromptTmuxTests(unittest.TestCase):
         with (
             patch.object(sb_actions, "capture_pane", return_value=(True, pane)) as cap,
             patch.object(sb_actions, "_run_tmux", side_effect=fake_tmux),
+            patch.object(sb_actions.time, "sleep") as sleep,
         ):
             result = sb_actions.send_prompt_via_tmux(
                 "multiverse-target",
@@ -62,7 +73,10 @@ class CodexPromptTmuxTests(unittest.TestCase):
             )
 
         self.assertEqual(result, (True, draft, ""))
-        cap.assert_called_once_with("multiverse-target", join_wrapped=True)
+        cap.assert_called_once_with(
+            "multiverse-target", join_wrapped=True, include_styles=True
+        )
+        sleep.assert_called_once_with(sb_actions._CODEX_SUBMIT_DELAY_S)
         self.assertEqual(
             calls,
             [
@@ -80,6 +94,40 @@ class CodexPromptTmuxTests(unittest.TestCase):
                 ["send-keys", "-t", "multiverse-target", "C-j"],
                 ["send-keys", "-t", "multiverse-target", "-l", "Draft second"],
             ],
+        )
+
+    def test_codex_delivery_does_not_restore_dim_ghost_suggestion(self) -> None:
+        pane = (
+            "\x1b[1m›\x1b[0m \x1b[2mImplement changes in @filename\x1b[0m\n\n"
+            f"{CODEX_FOOTER}\n"
+        )
+        calls: list[list[str]] = []
+
+        def fake_tmux(args, *, capture=False):
+            self.assertFalse(capture)
+            calls.append(args)
+            return True, ""
+
+        with (
+            patch.object(sb_actions, "capture_pane", return_value=(True, pane)),
+            patch.object(sb_actions, "_run_tmux", side_effect=fake_tmux),
+            patch.object(sb_actions.time, "sleep") as sleep,
+        ):
+            result = sb_actions.send_prompt_via_tmux(
+                "multiverse-target", "Remote prompt", runtime=sessions.RUNTIME_CODEX
+            )
+
+        self.assertEqual(result, (True, "", ""))
+        self.assertEqual(
+            calls,
+            [
+                ["send-keys", "-t", "multiverse-target", "-l", "Remote prompt"],
+                ["send-keys", "-t", "multiverse-target", "Enter"],
+            ],
+        )
+        sleep.assert_called_once_with(sb_actions._CODEX_SUBMIT_DELAY_S)
+        self.assertEqual(
+            sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX), ""
         )
 
     def test_codex_delivery_requires_visible_composer(self) -> None:
@@ -133,7 +181,9 @@ class CodexPromptTmuxTests(unittest.TestCase):
             )
 
         self.assertEqual(result, (True, "draft", ""))
-        cap.assert_called_once_with("multiverse-target", join_wrapped=False)
+        cap.assert_called_once_with(
+            "multiverse-target", join_wrapped=False, include_styles=False
+        )
         self.assertIn(
             ["send-keys", "-t", "multiverse-target", "\\", "Enter"], calls
         )

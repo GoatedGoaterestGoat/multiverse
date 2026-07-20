@@ -40,6 +40,10 @@ DEFAULT_READY_TIMEOUT_S = 15.0
 #: bail than block the connector's receiver loop.
 _TMUX_CMD_TIMEOUT_S = 3.0
 
+#: Codex groups very rapid terminal input into a paste burst. Let the final literal
+#: text settle before Enter so the key submits instead of joining the paste as a newline.
+_CODEX_SUBMIT_DELAY_S = 0.15
+
 
 def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
     """Run a tmux command. Returns ``(ok, stdout_or_error_message)``.
@@ -66,10 +70,15 @@ def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
 
 
 def capture_pane(
-    tmux_name: str, *, join_wrapped: bool = False
+    tmux_name: str,
+    *,
+    join_wrapped: bool = False,
+    include_styles: bool = False,
 ) -> tuple[bool, str]:
     """Read the visible content of the target's tmux pane. ``ok, text_or_error``."""
     args = ["capture-pane", "-p"]
+    if include_styles:
+        args.append("-e")
     if join_wrapped:
         args.append("-J")
     args += ["-t", tmux_name]
@@ -97,6 +106,7 @@ _CODEX_STATUS_RE = re.compile(
 _CODEX_OPAQUE_DRAFT_RE = re.compile(
     r"\[(?:Pasted Content \d+ chars|Image[^\]]*)\]", re.IGNORECASE
 )
+_ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
 
 
 def _parse_claude_input_box_text(pane: str) -> str:
@@ -134,7 +144,7 @@ def _codex_composer(pane: str) -> tuple[bool, str]:
     the composer region are therefore logical draft newlines and can be restored with
     Ctrl+J.
     """
-    lines = pane.splitlines()
+    lines = _ANSI_SGR_RE.sub("", pane).splitlines()
     start = -1
     first = ""
     for index in range(len(lines) - 1, -1, -1):
@@ -165,10 +175,52 @@ def _codex_composer(pane: str) -> tuple[bool, str]:
     return True, "\n".join(parts).rstrip()
 
 
+def _codex_composer_is_ghost(pane: str) -> bool:
+    """Whether the visible composer text is Codex's dim placeholder, not a draft.
+
+    ``capture-pane -e`` preserves SGR styles. Codex renders the prompt marker normally
+    and its rotating suggestion with the dim attribute. Plain capture text makes the
+    two indistinguishable, which previously caused Multiverse to restore the suggestion
+    as literal user input after delivering a prompt.
+    """
+    for line in reversed(pane.splitlines()):
+        if not _CODEX_INPUT_LINE_RE.match(_ANSI_SGR_RE.sub("", line).rstrip()):
+            continue
+        dim = False
+        saw_prompt = False
+        offset = 0
+        for match in _ANSI_SGR_RE.finditer(line):
+            segment = line[offset : match.start()]
+            for char in segment:
+                if not saw_prompt:
+                    saw_prompt = char == "›"
+                elif not char.isspace():
+                    return dim
+            raw_codes = match.group(1)
+            codes = [int(code) for code in raw_codes.split(";") if code]
+            if not codes:
+                codes = [0]
+            for code in codes:
+                if code == 0:
+                    dim = False
+                elif code == 2:
+                    dim = True
+                elif code == 22:
+                    dim = False
+            offset = match.end()
+        for char in line[offset:]:
+            if not saw_prompt:
+                saw_prompt = char == "›"
+            elif not char.isspace():
+                return dim
+        return False
+    return False
+
+
 def parse_input_box_text(pane: str, *, runtime: str = "claude") -> str:
     """Extract typed-but-unsent text from a Claude or Codex composer."""
     if runtime == "codex":
-        return _codex_composer(pane)[1]
+        return "" if _codex_composer_is_ghost(pane) else _codex_composer(pane)[1]
     return _parse_claude_input_box_text(pane)
 
 
@@ -196,6 +248,8 @@ def _type_prompt(
             if not ok:
                 return False, err
     if submit:
+        if runtime == "codex":
+            time.sleep(_CODEX_SUBMIT_DELAY_S)
         return _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
     return True, ""
 
@@ -217,13 +271,19 @@ def send_prompt_via_tmux(
     Returns ``(ok, saved_text, error)`` — the saved text lets the caller construct the
     success message ("Prompt delivered to X, saved and restored the text..." when non-empty).
     """
-    ok, pane = capture_pane(tmux_name, join_wrapped=runtime == "codex")
+    ok, pane = capture_pane(
+        tmux_name,
+        join_wrapped=runtime == "codex",
+        include_styles=runtime == "codex",
+    )
     if not ok:
         return False, "", pane  # `pane` holds the error message
     if runtime == "codex":
         composer_visible, saved = _codex_composer(pane)
         if not composer_visible:
             return False, "", "Codex input composer is not visible"
+        if _codex_composer_is_ghost(pane):
+            saved = ""
         if _CODEX_OPAQUE_DRAFT_RE.search(saved):
             return (
                 False,
