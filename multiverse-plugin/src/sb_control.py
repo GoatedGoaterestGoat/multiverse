@@ -345,8 +345,18 @@ def expose_workspace(cwd: str) -> dict:
 
 
 def unexpose_workspace(cwd: str) -> dict:
-    """Remove ``cwd`` from the exposed set. Daemon keeps running for other exposed
-    workspaces; stops entirely if this was the last one."""
+    """Remove ``cwd`` from the exposed set.
+
+    Never stops the daemon — even if this leaves ``exposed`` empty, the daemon
+    stays running (idle). Rationale: the user's mental model is that ``d``
+    disconnects THIS workspace only; the daemon is a device-level detail. Auto-
+    stopping on last-unexpose was surprising when other workspaces were still
+    granted-but-not-observed (they might want to re-expose one immediately
+    without needing to re-start the daemon).
+
+    To fully stop the daemon, use ``stop()`` (Shift+D in the widget). Reloads on
+    unexpose so the in-memory ``SBConnector._exposed`` reflects the change.
+    """
     if not C.is_enrolled():
         return status()
     cwd_abs = str(Path(cwd).expanduser().resolve())
@@ -358,10 +368,7 @@ def unexpose_workspace(cwd: str) -> dict:
     st["exposed"] = sorted(exposed)
     C.save_conn_state(st)
     if is_running():
-        if exposed:
-            reload()
-        else:
-            stop()
+        reload()  # daemon picks up new exposed set; stays running even if empty
     return status()
 
 
@@ -370,37 +377,28 @@ def unenroll_workspace(cwd: str) -> dict:
     the exposed set. SB's server-side grant is left untouched — a subsequent
     re-enroll can re-add it without a fresh pairing code if SB still trusts it,
     but from the client's perspective this workspace is now un-enrolled.
+
+    Never stops the daemon (same rationale as :func:`unexpose_workspace`). Use
+    :func:`stop` for device-level shutdown.
     """
     if not C.is_enrolled():
         return status()
     cwd_abs = str(Path(cwd).expanduser().resolve())
     ident = C.load_identity()
-    if cwd_abs not in ident.granted_workspaces:
-        # Also purge from exposed defensively.
-        st = C.load_conn_state()
-        exposed = set(st.get("exposed", []))
-        if cwd_abs in exposed:
-            exposed.discard(cwd_abs)
-            st["exposed"] = sorted(exposed)
-            C.save_conn_state(st)
-            if is_running():
-                if exposed:
-                    reload()
-                else:
-                    stop()
-        return status()
-    ident.granted_workspaces = [w for w in ident.granted_workspaces if w != cwd_abs]
-    ident.save(C.device_key_path())
+    changed = False
+    if cwd_abs in ident.granted_workspaces:
+        ident.granted_workspaces = [w for w in ident.granted_workspaces if w != cwd_abs]
+        ident.save(C.device_key_path())
+        changed = True
     st = C.load_conn_state()
     exposed = set(st.get("exposed", []))
-    exposed.discard(cwd_abs)
-    st["exposed"] = sorted(exposed)
-    C.save_conn_state(st)
-    if is_running():
-        if exposed:
-            reload()
-        else:
-            stop()
+    if cwd_abs in exposed:
+        exposed.discard(cwd_abs)
+        st["exposed"] = sorted(exposed)
+        C.save_conn_state(st)
+        changed = True
+    if changed and is_running():
+        reload()
     return status()
 
 
