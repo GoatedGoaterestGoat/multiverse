@@ -902,9 +902,11 @@ class SecondBrainScreen(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close", "Close"),
-        Binding("enter", "primary", "Enroll/Connect"),
+        Binding("enter", "primary", "Enroll/Connect (this workspace)"),
         Binding("e", "reenroll", "Re-enroll"),
-        Binding("d", "disconnect", "Disconnect"),
+        Binding("d", "disconnect", "Disconnect (this workspace)"),
+        Binding("shift+d", "stop_device", "Stop device daemon"),
+        Binding("u", "unenroll", "Un-enroll this workspace"),
         Binding("r", "reload", "Reload daemon"),
     ]
 
@@ -977,11 +979,18 @@ class SecondBrainScreen(ModalScreen[None]):
             lines[0] += f"  [dim]({st['detail']})[/]"
         if st.get("enrolled"):
             granted = st.get("granted_workspaces", [])
-            here = "[green]✓ this workspace exposed[/]" if self.cwd in granted else (
-                "[yellow]this workspace not yet granted[/]")
+            exposed = st.get("exposed_workspaces", [])
+            # This workspace's state — the primary thing the user needs to see.
+            if self.cwd in exposed:
+                here = "[green]✓ granted + observed[/]"
+            elif self.cwd in granted:
+                here = "[yellow]granted but not observed[/] — press [b]Enter[/] to observe"
+            else:
+                here = "[red]not enrolled[/] — press [b]e[/] with pairing code + fingerprint"
+            lines.append(f"This workspace: {here}")
             lines.append(
                 f"Device: [bold]{st.get('device_id', '?')}[/] · "
-                f"{len(granted)} workspace(s) granted · {here}"
+                f"{len(granted)} granted · {len(exposed)} observed"
             )
             lines.append(
                 f"CF token: {'[green]stored[/]' if st.get('has_cf_creds') else '[dim]none[/]'}"
@@ -996,12 +1005,28 @@ class SecondBrainScreen(ModalScreen[None]):
         self.query_one("#sb-status", Static).update("\n".join(lines))
 
         running = st.get("running")
-        if running:
-            hint = "[b]d[/] disconnect · [b]e[/] re-enroll · [b]r[/] reload · [b]Esc[/] close (daemon keeps running)"
-        elif st.get("enrolled"):
-            hint = "[b]Enter[/] connect · [b]e[/] re-enroll · [b]Esc[/] close"
+        granted = st.get("granted_workspaces", [])
+        exposed = st.get("exposed_workspaces", [])
+        this_exposed = self.cwd in exposed
+        this_granted = self.cwd in granted
+        if not st.get("enrolled"):
+            hint = "[b]Enter[/] enroll & observe this workspace · [b]Esc[/] cancel"
+        elif this_exposed:
+            hint = (
+                "[b]d[/] disconnect this workspace · [b]u[/] un-enroll this workspace · "
+                "[b]e[/] re-enroll · [b]Shift+D[/] stop entire daemon · "
+                "[b]r[/] reload · [b]Esc[/] close (daemon keeps running)"
+            )
+        elif this_granted:
+            hint = (
+                "[b]Enter[/] observe this workspace · [b]u[/] un-enroll · "
+                "[b]e[/] re-enroll · [b]r[/] reload · [b]Esc[/] close"
+            )
         else:
-            hint = "[b]Enter[/] enroll & connect · [b]Esc[/] cancel"
+            hint = "[b]e[/] enroll this workspace · [b]Esc[/] close"
+        # If daemon isn't running for something, tighten the note
+        if not running and this_exposed:
+            hint = "[b]Enter[/] start daemon · " + hint
         self.query_one("#sb-hint", Static).update(hint)
 
     # ---- field helpers -------------------------------------------------------------
@@ -1024,12 +1049,19 @@ class SecondBrainScreen(ModalScreen[None]):
         if self._busy:
             return
         st = sb_control.status()
-        if st.get("running"):
-            self.notify("Already connected — press d to disconnect.")
+        exposed = st.get("exposed_workspaces", [])
+        granted = st.get("granted_workspaces", [])
+        if not st.get("enrolled"):
+            self._start_worker("enroll")
             return
-        if st.get("enrolled"):
-            self._start_worker("connect")
+        if self.cwd in exposed:
+            self.notify("This workspace is already observed — press d to disconnect it.")
+            return
+        if self.cwd in granted:
+            # Granted but not exposed → expose (per-workspace connect)
+            self._start_worker("expose")
         else:
+            # Not granted → needs enroll to add this workspace
             self._start_worker("enroll")
 
     def action_reenroll(self) -> None:
@@ -1037,8 +1069,20 @@ class SecondBrainScreen(ModalScreen[None]):
             self._start_worker("enroll")
 
     def action_disconnect(self) -> None:
+        """Per-workspace: unexpose the current cwd. Daemon keeps running for other
+        exposed workspaces; stops entirely only if this was the last one."""
         if not self._busy:
-            self._start_worker("disconnect")
+            self._start_worker("unexpose")
+
+    def action_stop_device(self) -> None:
+        """Device-level: stop the whole daemon regardless of exposed set."""
+        if not self._busy:
+            self._start_worker("stop_device")
+
+    def action_unenroll(self) -> None:
+        """Remove the current cwd from the sidecar's granted_workspaces + exposed set."""
+        if not self._busy:
+            self._start_worker("unenroll")
 
     def action_reload(self) -> None:
         if not self._busy:
@@ -1046,7 +1090,8 @@ class SecondBrainScreen(ModalScreen[None]):
 
     def _start_worker(self, op: str) -> None:
         url = self._val("url")
-        if op in ("connect", "enroll") and not url:
+        # URL only required for ops that dial out (enroll dial; start reads config)
+        if op in ("enroll",) and not url:
             self._set_error("Endpoint URL is required.")
             return
         cid, csecret, cf_err = self._cf_from_fields()
@@ -1054,10 +1099,6 @@ class SecondBrainScreen(ModalScreen[None]):
             self._set_error(cf_err)
             return
         code = fingerprint = ""
-        # Always grab the name field: for enroll it goes to SB + gets persisted; for
-        # connect we persist locally so subsequent widget openings prefill correctly
-        # (legacy sidecars pre-device_name-persistence carry an empty name and would
-        # otherwise fall back to the container hostname every time).
         name = self._val("name") or ""
         workspaces: list[str] = []
         if op == "enroll":
@@ -1080,24 +1121,29 @@ class SecondBrainScreen(ModalScreen[None]):
             if cid and csecret:
                 sb_control.save_cf_creds(cid, csecret)
             if op == "enroll":
+                # Additive on the client — sidecar merges with prior grants.
+                # After enroll, expose the CURRENT workspace so it starts being
+                # observed (without touching other workspaces' exposure state).
                 sb_control.enroll(
                     base_url=url, code=code, fingerprint=fingerprint,
                     name=name, want=workspaces,
                 )
-                sb_control.start(url)
-            elif op == "connect":
-                # Persist any device name the user typed before starting the daemon.
-                # save_device_name is a no-op if unchanged or unenrolled.
+                sb_control.expose_workspace(self.cwd)
+            elif op == "expose":
                 if name:
                     sb_control.save_device_name(name)
-                sb_control.start(url)
+                sb_control.expose_workspace(self.cwd)
+            elif op == "unexpose":
+                sb_control.unexpose_workspace(self.cwd)
+            elif op == "unenroll":
+                sb_control.unenroll_workspace(self.cwd)
+            elif op == "stop_device":
+                sb_control.stop()
             elif op == "reload":
                 if name:
                     sb_control.save_device_name(name)
                 sb_control.reload()
-            elif op == "disconnect":
-                sb_control.stop()
-        except Exception as exc:  # surface enroll/connect failures to the panel
+        except Exception as exc:  # surface failures to the panel
             err = str(exc)
         self.app.call_from_thread(self._after, err)
 

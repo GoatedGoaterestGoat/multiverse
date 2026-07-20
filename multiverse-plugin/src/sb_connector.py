@@ -426,10 +426,28 @@ def outbox_path() -> Path:
 
 
 def load_conn_state() -> dict:
+    """Read the durable connector state.
+
+    ``exposed`` is the set of workspaces the user has currently opted-in for SB
+    observation (a subset of the sidecar's ``granted_workspaces``). Introduced
+    2026-07-20 for per-workspace connect/disconnect independence. Backward compat:
+    if the field is missing (state written by pre-refactor code), fall back to the
+    full granted list from the sidecar, preserving pre-refactor "everything
+    granted is observed" behavior on first read after upgrade. Callers persist
+    the field explicitly on any change via :func:`save_conn_state`.
+    """
     data = _read_json(state_path()) or {}
+    exposed_raw = data.get("exposed")
+    if exposed_raw is None:
+        # Legacy state.json → default to full granted list.
+        try:
+            exposed_raw = list(load_identity().granted_workspaces)
+        except (FileNotFoundError, OSError, KeyError):
+            exposed_raw = []
     return {
         "seq_hw": int(data.get("seq_hw", 0)),
         "seeded": list(data.get("seeded", [])),
+        "exposed": list(exposed_raw),
     }
 
 
@@ -439,6 +457,7 @@ def save_conn_state(state: dict) -> None:
         {
             "seq_hw": int(state.get("seq_hw", 0)),
             "seeded": sorted(set(state.get("seeded", []))),
+            "exposed": sorted(set(state.get("exposed", []))),
         },
     )
 
@@ -957,7 +976,21 @@ class SBConnector:
         self._locked = False  # between lock and unlock (§9)
         self._stop = asyncio.Event()
         self._seeded: set[str] = set(self._state["seeded"])
+        # ``_exposed`` is the user's per-workspace opt-in — the subset of granted
+        # workspaces we're actively observing right now. Emission is gated on this
+        # so `d` in the widget can unexpose a single workspace without affecting
+        # others. See ``load_conn_state`` for backward-compat defaulting.
+        self._exposed: set[str] = {
+            f"{identity.device_id}:{cwd}"
+            for cwd in self._state["exposed"]
+            if cwd in identity.granted_workspaces
+        }
         self._marker_inited: set[str] = set()  # workspaces whose transcript markers are set
+        # Serializes _emit_workspace_connected against concurrent invocation. Before
+        # this, three rapid reconnects would fan out 3× ask_all runs in parallel
+        # (17×3=51 forks in the user's droid_pipeline case) and interleave payloads
+        # on the SB-cache write path.
+        self._emit_lock = asyncio.Lock()
         self._ws = None  # the live connection while connected (for a graceful close)
         # ``ask_agent`` (long-running, up to 90s each) runs as background tasks so slow
         # asks don't block the receiver from other frames. Concurrency cap agreed with
@@ -1115,68 +1148,73 @@ class SBConnector:
     # ---- one real event: workspace.connected (liveness proof) ---------------------
 
     async def _emit_workspace_connected(self, from_seq: int) -> None:  # noqa: ARG002
-        """Enqueue ``workspace.connected`` for every FIRST-EVER granted workspace
-        (SB, 2026-07-16: reconnect events are net-negative and now silently dropped
-        on the SB side; only first-ever carries decision-relevant signal).
+        """Enqueue ``workspace.connected`` for every FIRST-EVER exposed workspace.
 
-        **First-ever connect** (this ``(device, workspace)`` pair not yet in
+        Semantics (SB 2026-07-16 + per-workspace refactor 2026-07-20):
+          - "Exposed" = user has opted-in for this workspace to be observed by SB
+            (see ``self._exposed``). Subset of granted; managed via the widget.
+          - Only workspaces that are BOTH exposed AND not yet in ``_seeded`` need
+            a first-connect run here. Everything else fast-paths.
+          - SB drops non-first-connect events silently, so reconnect emission is
+            gone entirely (see 2026-07-16 retirement).
+
+        **First-ever exposed** (this ``(device, workspace)`` pair not yet in
         ``_seeded``):
           - Initialize transcript delivery markers for every named agent in the
-            workspace to their latest jsonl entry, BEFORE any events fire — so
-            subsequent transcript-bearing events (agent.response / user.prompt /
-            agent.question / agent.permission_request) cover "from now on," not
-            the pre-existing backlog.
-          - Run Multiverse's ``ask_all`` fork against every named agent with a
-            fixed question ("Please give a concise summary of what you have
-            achieved so far in this workspace.") — with the configured long retry
-            timeout, 5-parallel. Failed asks land as bracketed placeholder strings.
-          - Emit event with payload ``{first_connect: True, workspace_summary: {…}}``
-            (or ``workspace_summary: {}`` for an empty workspace). Stable
-            ``event_id=wsconn-first:<workspace_id>`` — a mid-flow crash + restart
-            is idempotent under SB's dedup.
-          - Add to ``_seeded`` + persist — enables durable event queueing for
-            this workspace on future disconnects.
+            workspace to its latest jsonl entry, BEFORE any events fire — so
+            subsequent transcript-bearing events cover "from now on," not the
+            pre-existing backlog.
+          - Run ``ask_all`` against every named agent with the fixed
+            workspace-summary question — with the configured long retry timeout,
+            5-parallel. Failed asks land as bracketed placeholder strings.
+          - Emit event with payload ``{first_connect: True, workspace_summary: {…}}``.
+            Stable ``event_id=wsconn-first:<workspace_id>`` — a mid-flow crash +
+            restart is idempotent under SB's dedup.
+          - Add to ``_seeded`` + persist.
 
-        **Subsequent (re)connect** (already seeded):
-          - Emit NOTHING. No marker init, no ask_all. Sub-microsecond.
+        **Already seeded (all exposed workspaces)**: emit NOTHING. Sub-µs.
 
-        ``from_seq`` is kept in the signature for the caller's ergonomics (matches
-        the surrounding ``_handshake`` return type) but is no longer used — the
-        pre-2026-07-16 rewind-and-re-emit logic that used it existed only to make
-        reconnect ``workspace.connected`` precede downtime backlog on the wire,
-        and there's no reconnect emission any more.
+        Concurrency: guarded by ``self._emit_lock``. Before the guard, three rapid
+        reconnects fanned out three concurrent ask_all runs (17×3=51 forks in
+        droid_pipeline's case) and interleaved payloads on SB's cache write. The
+        lock serializes; a second concurrent call finds ``_seeded`` already
+        populated (by the first) and fast-returns.
+
+        ``from_seq`` is kept in the signature for caller ergonomics but no longer
+        used — the pre-2026-07-16 rewind-and-re-emit logic that used it existed
+        only to make reconnect ``workspace.connected`` precede downtime backlog.
         """
         from . import sb_events
 
-        # Fast path: nothing new to bootstrap. Every workspace already seeded means
-        # this is a plain reconnect — SB drops those events, and we no longer emit
-        # them, so we're done.
-        pending_first = [
-            (cwd, f"{self.identity.device_id}:{cwd}")
-            for cwd in self.identity.granted_workspaces
-            if f"{self.identity.device_id}:{cwd}" not in self._seeded
-        ]
-        if not pending_first:
-            return
+        async with self._emit_lock:
+            # Pending set = workspaces the user has opted into observing (_exposed)
+            # that haven't been first-connected yet. Note that _exposed already
+            # filters against identity.granted_workspaces at init time — a workspace
+            # can't be exposed without being granted.
+            pending_first = [
+                (cwd, f"{self.identity.device_id}:{cwd}")
+                for cwd in self.identity.granted_workspaces
+                if f"{self.identity.device_id}:{cwd}" in self._exposed
+                and f"{self.identity.device_id}:{cwd}" not in self._seeded
+            ]
+            if not pending_first:
+                return
 
-        # First-ever bootstrap: marker init + ask_all (blocking, potentially slow),
-        # then a single workspace.connected event per new workspace.
-        for cwd, workspace_id in pending_first:
-            self._init_markers_for_workspace(cwd)
-            summary = await self._gather_workspace_summary(cwd)
-            self.make_event(
-                workspace_id=workspace_id,
-                workspace_label=_workspace_label(cwd),
-                kind=p.EventKind.WORKSPACE_CONNECTED,
-                payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
-                event_id=f"wsconn-first:{workspace_id}",
-            )
-            self._seeded.add(workspace_id)
-            self._marker_inited.add(workspace_id)
+            for cwd, workspace_id in pending_first:
+                self._init_markers_for_workspace(cwd)
+                summary = await self._gather_workspace_summary(cwd)
+                self.make_event(
+                    workspace_id=workspace_id,
+                    workspace_label=_workspace_label(cwd),
+                    kind=p.EventKind.WORKSPACE_CONNECTED,
+                    payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
+                    event_id=f"wsconn-first:{workspace_id}",
+                )
+                self._seeded.add(workspace_id)
+                self._marker_inited.add(workspace_id)
 
-        # Persist the seeded set so a subsequent restart doesn't re-fire first-ever.
-        self._state["seeded"] = sorted(self._seeded)
-        save_conn_state(self._state)
+            self._state["seeded"] = sorted(self._seeded)
+            save_conn_state(self._state)
 
     def _init_markers_for_workspace(self, cwd: str) -> None:
         """Initialize sb_transcript markers to the latest jsonl entry for every named

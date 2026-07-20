@@ -97,14 +97,44 @@ def _seeded() -> set[str]:
     return set(data.get("seeded", []))
 
 
+def _exposed() -> set[str] | None:
+    """The set of ``cwd`` strings the user has opted-in for SB observation, or ``None``
+    if the field is missing (legacy state.json → treat as "all granted are exposed").
+
+    Callers combine with device_id + resolved cwd to compare against workspace_id.
+    """
+    data = _read_json(_state_path()) or {}
+    if "exposed" not in data:
+        return None
+    return {str(x) for x in (data.get("exposed") or [])}
+
+
+def _granted() -> set[str]:
+    """Set of ``cwd`` strings from the identity sidecar's granted_workspaces."""
+    data = _read_json(_sidecar_path()) or {}
+    return {str(x) for x in (data.get("granted_workspaces") or [])}
+
+
 def _recordable_workspace_id(cwd: str) -> str | None:
-    """``workspace_id`` if this device is enrolled AND this workspace has connected to SB
-    before (is seeded); otherwise ``None`` — meaning: do not record."""
+    """``workspace_id`` if this device is enrolled AND this workspace is currently
+    exposed (user-opted-in for SB observation); otherwise ``None`` — meaning: do
+    not record.
+
+    "Exposed" was added 2026-07-20 for per-workspace connect/disconnect. Backward
+    compat: if state.json has no ``exposed`` field yet (fresh state written by
+    pre-refactor code), fall back to the sidecar's ``granted_workspaces`` — every
+    granted workspace is implicitly exposed, matching pre-refactor behavior.
+    """
     device_id = _device_id()
     if not device_id:
         return None
-    workspace_id = f"{device_id}:{_resolve(cwd)}"
-    return workspace_id if workspace_id in _seeded() else None
+    cwd_r = _resolve(cwd)
+    exposed = _exposed()
+    if exposed is None:
+        exposed = _granted()  # legacy default
+    if cwd_r not in exposed:
+        return None
+    return f"{device_id}:{cwd_r}"
 
 
 def _hook_log_path() -> Path:
@@ -234,7 +264,7 @@ def record_response_signal(
             # THIS function's name (the record_*_signal we're in) as the script tag —
             # currentframe() is our own frame; the caller's frame is one up but that's
             # not what we want to display.
-            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-exposed"
             import inspect
             frm = inspect.currentframe()
             fn = frm.f_code.co_name if frm else "record_*"
@@ -312,7 +342,7 @@ def record_user_prompt_signal(
             # THIS function's name (the record_*_signal we're in) as the script tag —
             # currentframe() is our own frame; the caller's frame is one up but that's
             # not what we want to display.
-            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-seeded"
+            reason = "no-device-identity" if not _device_id() else "gate-drop-workspace-not-exposed"
             import inspect
             frm = inspect.currentframe()
             fn = frm.f_code.co_name if frm else "record_*"

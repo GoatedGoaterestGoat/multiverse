@@ -110,6 +110,7 @@ def status() -> dict:
         "running": running,
         "device_id": identity.device_id,
         "granted_workspaces": identity.granted_workspaces,
+        "exposed_workspaces": sorted(_load_state_exposed()),
         "base_url": C.load_config()["base_url"],
         "has_cf_creds": C.load_cf_creds() is not None,
         "ts": st.get("ts", ""),
@@ -235,16 +236,31 @@ def enroll(
     creds first so the enroll dial itself can pass the edge gate. Returns
     ``{device_id, granted_workspaces}``.
 
-    If the daemon is already running when this is called (RE-enrollment to add a new
-    workspace grant from an already-enrolled device), it's reloaded here — otherwise
-    the running daemon holds the OLD identity/grants in memory and never first-connects
-    the newly-added workspace. Callers don't have to remember; a single ``enroll()``
-    both persists the new identity AND makes the daemon see it.
+    **Additive grants** (2026-07-20): the sidecar's ``granted_workspaces`` is
+    UNIONed with SB's enroll_ok response rather than overwritten. Fixes a real bug
+    where re-enrolling from workspace B (with ``want=[B]``) would silently drop
+    the previously-granted A. Now: SB responds with what it granted this call;
+    we merge with whatever we already had. To REMOVE a workspace from grants,
+    call ``unenroll_workspace`` — enroll is strictly additive.
+
+    If the daemon is already running, it's reloaded here so it picks up the merged
+    grants + any new exposed entries. If no daemon is running, this is a no-op; the
+    caller will call start() next as normal.
     """
     if cf_client_id and cf_client_secret:
         C.save_cf_creds(cf_client_id, cf_client_secret)
     C.save_config(base_url)
     want_abs = [str(Path(w).expanduser().resolve()) for w in want if w.strip()]
+
+    # Snapshot the pre-enroll grants so we can union afterward. Empty list on
+    # first-ever enroll (no sidecar yet).
+    prior_grants: list[str] = []
+    if C.is_enrolled():
+        try:
+            prior_grants = list(C.load_identity().granted_workspaces)
+        except Exception:  # noqa: BLE001
+            prior_grants = []
+
     try:
         identity = asyncio.run(
             C.enroll(
@@ -260,11 +276,16 @@ def enroll(
     except Exception as exc:  # normalize to a widget-friendly error
         raise SBControlError(str(exc)) from exc
 
+    # Additive merge: sidecar becomes union(prior grants, SB's response). C.enroll
+    # already wrote the sidecar with just the SB response — rewrite additively.
+    merged = sorted(set(prior_grants) | set(identity.granted_workspaces))
+    if merged != list(identity.granted_workspaces):
+        identity.granted_workspaces = merged
+        identity.save(C.device_key_path())
+
     # Post-enroll: if a daemon is running, it's holding the pre-enroll identity in
-    # memory (SBConnector.__init__ captured it at start time). Reload so it picks up
-    # the freshly-written sidecar — otherwise a newly-granted workspace never gets
-    # its first-connect fired. If no daemon is running, this is a no-op; the caller
-    # will call start() next as normal.
+    # memory (SBConnector.__init__ captured it at start time). Reload so it picks
+    # up the merged sidecar. If no daemon is running, this is a no-op.
     if is_running():
         reload()
 
@@ -272,6 +293,115 @@ def enroll(
         "device_id": identity.device_id,
         "granted_workspaces": identity.granted_workspaces,
     }
+
+
+# --------------------------------------------------------------------------------------
+# Per-workspace expose / unexpose / un-enroll (2026-07-20 refactor)
+# --------------------------------------------------------------------------------------
+
+
+def _load_state_exposed() -> set[str]:
+    """Current exposed set from state.json (list of resolved cwd strings).
+
+    Legacy state.json without an ``exposed`` field → default to the sidecar's
+    granted_workspaces (matches pre-refactor behavior: everything granted is
+    implicitly observed).
+    """
+    st = C.load_conn_state()
+    return set(st.get("exposed", []))
+
+
+def is_exposed(cwd: str) -> bool:
+    """True if ``cwd`` is currently in the exposed set."""
+    return str(Path(cwd).expanduser().resolve()) in _load_state_exposed()
+
+
+def expose_workspace(cwd: str) -> dict:
+    """Add ``cwd`` to the exposed set so the daemon starts observing it.
+
+    Refuses if the workspace isn't granted — the widget's ``Enter`` path should
+    route to enroll first for that case. Starts the daemon if it isn't running;
+    reloads it if it is, so the SBConnector's in-memory ``_exposed`` reflects the
+    new state.
+    """
+    if not C.is_enrolled():
+        raise SBControlError("not enrolled — enroll this device with SecondBrain first")
+    cwd_abs = str(Path(cwd).expanduser().resolve())
+    if cwd_abs not in C.load_identity().granted_workspaces:
+        raise SBControlError(
+            f"workspace not granted by SecondBrain: {cwd_abs} — enroll first"
+        )
+    st = C.load_conn_state()
+    exposed = set(st.get("exposed", []))
+    if cwd_abs not in exposed:
+        exposed.add(cwd_abs)
+        st["exposed"] = sorted(exposed)
+        C.save_conn_state(st)
+    if is_running():
+        reload()
+    else:
+        start()
+    return status()
+
+
+def unexpose_workspace(cwd: str) -> dict:
+    """Remove ``cwd`` from the exposed set. Daemon keeps running for other exposed
+    workspaces; stops entirely if this was the last one."""
+    if not C.is_enrolled():
+        return status()
+    cwd_abs = str(Path(cwd).expanduser().resolve())
+    st = C.load_conn_state()
+    exposed = set(st.get("exposed", []))
+    if cwd_abs not in exposed:
+        return status()
+    exposed.discard(cwd_abs)
+    st["exposed"] = sorted(exposed)
+    C.save_conn_state(st)
+    if is_running():
+        if exposed:
+            reload()
+        else:
+            stop()
+    return status()
+
+
+def unenroll_workspace(cwd: str) -> dict:
+    """Remove ``cwd`` from the sidecar's granted_workspaces (client-side) and from
+    the exposed set. SB's server-side grant is left untouched — a subsequent
+    re-enroll can re-add it without a fresh pairing code if SB still trusts it,
+    but from the client's perspective this workspace is now un-enrolled.
+    """
+    if not C.is_enrolled():
+        return status()
+    cwd_abs = str(Path(cwd).expanduser().resolve())
+    ident = C.load_identity()
+    if cwd_abs not in ident.granted_workspaces:
+        # Also purge from exposed defensively.
+        st = C.load_conn_state()
+        exposed = set(st.get("exposed", []))
+        if cwd_abs in exposed:
+            exposed.discard(cwd_abs)
+            st["exposed"] = sorted(exposed)
+            C.save_conn_state(st)
+            if is_running():
+                if exposed:
+                    reload()
+                else:
+                    stop()
+        return status()
+    ident.granted_workspaces = [w for w in ident.granted_workspaces if w != cwd_abs]
+    ident.save(C.device_key_path())
+    st = C.load_conn_state()
+    exposed = set(st.get("exposed", []))
+    exposed.discard(cwd_abs)
+    st["exposed"] = sorted(exposed)
+    C.save_conn_state(st)
+    if is_running():
+        if exposed:
+            reload()
+        else:
+            stop()
+    return status()
 
 
 def get_base_url() -> str:
