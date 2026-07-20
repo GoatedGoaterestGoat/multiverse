@@ -1051,11 +1051,18 @@ class SecondBrainScreen(ModalScreen[None]):
         st = sb_control.status()
         exposed = st.get("exposed_workspaces", [])
         granted = st.get("granted_workspaces", [])
+        running = st.get("running")
         if not st.get("enrolled"):
             self._start_worker("enroll")
             return
         if self.cwd in exposed:
-            self.notify("This workspace is already observed — press d to disconnect it.")
+            if running:
+                self.notify("This workspace is already observed — press d to disconnect it.")
+                return
+            # Exposed but daemon died — start it back up. This is the common case after
+            # a daemon crash / container restart / etc: state.json still lists us as
+            # exposed, but no live daemon is emitting events for us.
+            self._start_worker("expose")
             return
         if self.cwd in granted:
             # Granted but not exposed → expose (per-workspace connect)

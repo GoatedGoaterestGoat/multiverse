@@ -345,17 +345,24 @@ def expose_workspace(cwd: str) -> dict:
 
 
 def unexpose_workspace(cwd: str) -> dict:
-    """Remove ``cwd`` from the exposed set.
+    """Remove ``cwd`` from the exposed set. Purely a state.json update — no daemon
+    restart.
 
-    Never stops the daemon — even if this leaves ``exposed`` empty, the daemon
-    stays running (idle). Rationale: the user's mental model is that ``d``
-    disconnects THIS workspace only; the daemon is a device-level detail. Auto-
-    stopping on last-unexpose was surprising when other workspaces were still
-    granted-but-not-observed (they might want to re-expose one immediately
-    without needing to re-start the daemon).
+    Signal recording (``sb_notify._recordable_workspace_id``) reads state.json
+    FRESH on every hook fire, so the un-expose takes effect immediately for the
+    observation gate. The daemon's in-memory ``_exposed`` is only used at
+    reconnect time (to decide which workspaces need first-connect), so a stale
+    in-memory value is harmless — worst case a workspace we've un-exposed
+    would still be considered for first-connect on the next reconnect, but if
+    it's already in ``_seeded`` it's skipped anyway.
 
-    To fully stop the daemon, use ``stop()`` (Shift+D in the widget). Reloads on
-    unexpose so the in-memory ``SBConnector._exposed`` reflects the change.
+    Previous versions called ``reload()`` here (stop+start). That turned out to
+    race in the container: ``stop()``'s 6s wait sometimes returned while the
+    old daemon's finally block was still executing, then ``start()`` saw
+    ``is_running()`` still True (stale lock file) and returned without
+    actually spawning a new daemon — daemon appeared dead a few seconds later.
+    Avoiding reload entirely sidesteps this and matches the user's mental model:
+    'd' disconnects THIS workspace, nothing else.
     """
     if not C.is_enrolled():
         return status()
@@ -367,8 +374,6 @@ def unexpose_workspace(cwd: str) -> dict:
     exposed.discard(cwd_abs)
     st["exposed"] = sorted(exposed)
     C.save_conn_state(st)
-    if is_running():
-        reload()  # daemon picks up new exposed set; stays running even if empty
     return status()
 
 
@@ -378,27 +383,24 @@ def unenroll_workspace(cwd: str) -> dict:
     re-enroll can re-add it without a fresh pairing code if SB still trusts it,
     but from the client's perspective this workspace is now un-enrolled.
 
-    Never stops the daemon (same rationale as :func:`unexpose_workspace`). Use
-    :func:`stop` for device-level shutdown.
+    No daemon restart (same rationale as :func:`unexpose_workspace`). Signal
+    recording gates on state.json (read fresh); the daemon's in-memory grants
+    are stale but only matter at reconnect. Use :func:`stop` for device-level
+    shutdown; :func:`reload` for an explicit daemon refresh.
     """
     if not C.is_enrolled():
         return status()
     cwd_abs = str(Path(cwd).expanduser().resolve())
     ident = C.load_identity()
-    changed = False
     if cwd_abs in ident.granted_workspaces:
         ident.granted_workspaces = [w for w in ident.granted_workspaces if w != cwd_abs]
         ident.save(C.device_key_path())
-        changed = True
     st = C.load_conn_state()
     exposed = set(st.get("exposed", []))
     if cwd_abs in exposed:
         exposed.discard(cwd_abs)
         st["exposed"] = sorted(exposed)
         C.save_conn_state(st)
-        changed = True
-    if changed and is_running():
-        reload()
     return status()
 
 
