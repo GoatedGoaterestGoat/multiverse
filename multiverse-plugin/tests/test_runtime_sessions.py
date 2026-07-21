@@ -576,17 +576,31 @@ class CodexHookTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             temp_dir = Path(raw)
             capture = temp_dir / "requests.jsonl"
+            proof = temp_dir / "stdin-open"
             fake_codex = temp_dir / "codex"
             fake_codex.write_text(
-                "#!/usr/bin/env bash\n"
-                "cat > \"$CAPTURE_PATH\"\n"
-                "printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
+                "#!/usr/bin/env python3\n"
+                "import json, os, select, sys\n"
+                "requests = []\n"
+                "requests.append(json.loads(sys.stdin.readline()))\n"
+                "print(json.dumps({'id': 1, 'result': {}}), flush=True)\n"
+                "requests.append(json.loads(sys.stdin.readline()))\n"
+                "requests.append(json.loads(sys.stdin.readline()))\n"
+                "with open(os.environ['CAPTURE_PATH'], 'w') as handle:\n"
+                "    for request in requests:\n"
+                "        handle.write(json.dumps(request) + '\\n')\n"
+                "readable, _, _ = select.select([sys.stdin], [], [], 0.1)\n"
+                "if readable and sys.stdin.read(1) == '':\n"
+                "    raise SystemExit(2)\n"
+                "open(os.environ['PROOF_PATH'], 'w').close()\n"
+                "print(json.dumps({'id': 2, 'result': {}}), flush=True)\n"
             )
             fake_codex.chmod(0o755)
             env = {
                 **os.environ,
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "CAPTURE_PATH": str(capture),
+                "PROOF_PATH": str(proof),
             }
 
             proc = subprocess.run(
@@ -604,7 +618,12 @@ class CodexHookTests(unittest.TestCase):
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertTrue(proof.exists(), "rename request was sent after stdin closed")
             requests = [json.loads(line) for line in capture.read_text().splitlines()]
+            initialize = next(item for item in requests if item.get("id") == 1)
+            self.assertTrue(
+                initialize["params"]["capabilities"]["experimentalApi"]
+            )
             rename = next(item for item in requests if item.get("id") == 2)
             self.assertEqual(rename["method"], "thread/name/set")
             self.assertEqual(
