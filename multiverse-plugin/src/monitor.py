@@ -11,8 +11,9 @@ The dashboard also surfaces dormant, named Claude and Codex sessions that are
 not currently wrapped by a Multiverse session. These can be resumed directly
 with Enter.
 
-Attach = ``tmux attach-session`` run while the Textual app is suspended.
-Detach with normal ``Ctrl-b d`` and you land back in the monitor.
+Attach = ``tmux attach-session`` run through a local terminal-probe relay while
+the Textual app is suspended. Detach with normal ``Ctrl-b d`` and you land back
+in the monitor.
 """
 
 from __future__ import annotations
@@ -91,6 +92,7 @@ from .spawn_requests import (
     request_path,
     write_resolution,
 )
+from .tmux_attach import attach_tmux_session
 from . import web_share
 from . import sb_control
 
@@ -3287,7 +3289,7 @@ class MonitorApp(App):
         guard.start()
         try:
             with self.suspend():
-                subprocess.run(["tmux", "attach-session", "-t", tmux_session])
+                attach_tmux_session(tmux_session)
         finally:
             guard.stop()
 

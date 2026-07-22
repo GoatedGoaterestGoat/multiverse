@@ -124,6 +124,11 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 
 **Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
 
+The monitor attaches through a local PTY relay that answers tmux's DA1, DA2, and
+XTVERSION capability probes before they reach the outer terminal. This prevents
+delayed xterm.js replies such as `0;276;0c` from being mistaken for keyboard input
+and inserted into an agent's prompt after an attach or reconnect.
+
 **Auto permission mode by default.** Every session `create_session` spawns — new (`n`), resumed (`R` / `Enter` on a dormant/ended row, including right after compaction, which claude treats as a new session since it's a freshly-written live JSONL), auto-resumed via a push-notification `message_agent` call, or spawned via `spawn_agent` — starts with `--permission-mode auto` unless the caller already passed an explicit `--permission-mode` (e.g. via `multiverse --permission-mode plan`), which is left untouched.
 
 **Dashboard columns**: `ID · Name · Inbox · Build · Status · Tokens · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages — press `i` to peek at them without consuming them. The Build column shows `on` (green) / `off` for the per-session auto tree-build toggle — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
@@ -304,7 +309,7 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 │  - Lists multiverse sessions + dormant claude sessions │
 │  - Spawns via tmux new-session -d -s multiverse-<id>   │
 │    -e MULTIVERSE_SESSION_NAME=<name> -e ...            │
-│  - Attaches via App.suspend() + tmux attach-session    │
+│  - Attaches via App.suspend() + a probe-safe PTY relay │
 │  - `a` key → ask_agents fan-out to all named sessions  │
 │  - `c` key → Compact widget (CompactScreen) drives     │
 │    CompactRunner: lock, kill, sync, build trees,       │
