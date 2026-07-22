@@ -239,7 +239,10 @@ def _type_prompt(
     lines = text.split("\n")
     for index, line in enumerate(lines):
         if line:
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", line])
+            # ``--`` stops tmux from parsing subsequent args as flags. Without it, a
+            # line starting with ``-`` (e.g. a bullet list "- item") makes tmux emit
+            # "command send-keys: invalid flag -" and abort the whole prompt delivery.
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", "--", line])
             if not ok:
                 return False, err
         if index < len(lines) - 1:
@@ -563,7 +566,9 @@ def answer_askuserquestion_via_tmux(
             if not val:
                 continue
             time.sleep(_KEY_DELAY_S)
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", val])
+            # ``--`` stops tmux from parsing subsequent args as flags — needed if the
+            # user's typed answer starts with a dash (e.g. "-1" or "--flag").
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", "--", val])
             if not ok:
                 return False, err
             _log_cursor(log, tmux_name, f"after batch{bi}[text]")
