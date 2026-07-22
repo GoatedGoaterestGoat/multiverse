@@ -223,6 +223,11 @@ def _write_session_status(status: str) -> None:
 # UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
 # the message remains durable until that tool atomically claims it.
 _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
+# Codex groups back-to-back terminal input into a paste burst. If Enter follows
+# literal text immediately, it can join that burst and become a composer newline
+# instead of submitting the prompt. Keep this aligned with sb_actions' Codex
+# prompt delivery delay.
+_CODEX_WAKE_SUBMIT_DELAY_S = 0.15
 
 
 def _client_attached(tmux_name: str) -> bool:
@@ -244,12 +249,13 @@ def _client_attached(tmux_name: str) -> bool:
         return False
 
 
-def _wake_via_tmux(tmux_name: str) -> bool:
+def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     """Type the wake prompt + Enter into a session's tmux pane.
 
     Two send-keys calls: ``-l`` (literal) for the text so no character is
-    interpreted as a tmux key name, then a separate ``Enter`` to submit.
-    Returns False on any tmux error.
+    interpreted as a tmux key name, then a separate ``Enter`` to submit. Codex
+    gets a short settling delay between them so Enter is not folded into the
+    paste burst as a newline. Returns False on any tmux error.
     """
     try:
         subprocess.run(
@@ -259,6 +265,8 @@ def _wake_via_tmux(tmux_name: str) -> bool:
             timeout=3,
             check=True,
         )
+        if runtime == RUNTIME_CODEX:
+            time.sleep(_CODEX_WAKE_SUBMIT_DELAY_S)
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_name, "Enter"],
             stdout=subprocess.DEVNULL,
@@ -737,7 +745,7 @@ def message_agent(
                 + _queued_next_step(target.runtime)
                 + reply_hint
             )
-        woke = _wake_via_tmux(tmux_name)
+        woke = _wake_via_tmux(tmux_name, runtime=target.runtime)
         log_route("wake_tmux", success=woke)
         if woke:
             if target.runtime == RUNTIME_CODEX:

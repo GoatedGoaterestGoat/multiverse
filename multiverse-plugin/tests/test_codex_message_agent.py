@@ -178,7 +178,10 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 ):
                     result, _, routed = self._message(target, push=True)
 
-                wake.assert_called_once_with(target.session.tmux_name)
+                wake.assert_called_once_with(
+                    target.session.tmux_name,
+                    runtime=sessions.RUNTIME_CODEX,
+                )
                 self.assertEqual(
                     inbox.pending_inbox_count(self.cwd, target.name), 1
                 )
@@ -382,17 +385,23 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
         self.assertEqual(calls, ["kill", "create"])
 
-    def test_tmux_wake_types_literal_prompt_then_enter(self) -> None:
+    def test_codex_tmux_wake_settles_literal_prompt_before_enter(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command, **kwargs):
             calls.append(command)
             return subprocess.CompletedProcess(command, 0)
 
-        with patch.object(server.subprocess, "run", side_effect=fake_run):
-            woke = server._wake_via_tmux("multiverse-target")
+        with (
+            patch.object(server.subprocess, "run", side_effect=fake_run),
+            patch.object(server.time, "sleep") as sleep,
+        ):
+            woke = server._wake_via_tmux(
+                "multiverse-target", runtime=sessions.RUNTIME_CODEX
+            )
 
         self.assertTrue(woke)
+        sleep.assert_called_once_with(server._CODEX_WAKE_SUBMIT_DELAY_S)
         self.assertEqual(
             calls,
             [
@@ -413,6 +422,22 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
                 ],
             ],
         )
+
+    def test_claude_tmux_wake_does_not_add_codex_delay(self) -> None:
+        with (
+            patch.object(
+                server.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ),
+            patch.object(server.time, "sleep") as sleep,
+        ):
+            woke = server._wake_via_tmux(
+                "multiverse-target", runtime=sessions.RUNTIME_CLAUDE
+            )
+
+        self.assertTrue(woke)
+        sleep.assert_not_called()
 
     def test_interagent_logs_record_mixed_runtime_metadata(self) -> None:
         with patch.object(interagent_log, "_append") as append:
