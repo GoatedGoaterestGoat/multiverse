@@ -223,13 +223,18 @@ def _run(live: Path, session_id: str, cwd: str, cache_root: Path,
 
         _log(log, f"turn {turn_idx} ({pid[:8]}) — building...")
         t0 = time.time()
+        # Model for the privileged merge agent. Configurable so a machine
+        # can tune cost/quality by setting MULTIVERSE_TREE_BUILD_MODEL
+        # (typically in bin/multiverse.local). Default is "sonnet" — the
+        # historical hardcode.
+        model = os.environ.get("MULTIVERSE_TREE_BUILD_MODEL") or "sonnet"
         try:
             proc = subprocess.run(
                 [
                     sys.executable, str(builder),
                     str(full), str(turn_idx),
                     "--out", str(out_file),
-                    "--model", "sonnet",
+                    "--model", model,
                 ],
                 env=env,
                 capture_output=True, text=True,
