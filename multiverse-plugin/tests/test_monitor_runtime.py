@@ -11,6 +11,57 @@ from textual.widgets import DataTable, Input, RadioButton
 from src import monitor
 
 
+class SpawnAttachGuardTests(unittest.TestCase):
+    def test_ignores_request_from_another_attached_session(self) -> None:
+        guard = monitor._SpawnAttachGuard("/workspace", "multiverse-caller")
+
+        class StopAfterOnePoll:
+            def is_set(self) -> bool:
+                return False
+
+            def wait(self, _timeout: float) -> bool:
+                return True
+
+        guard._stop = StopAfterOnePoll()
+        with (
+            patch.object(
+                monitor,
+                "list_pending_requests",
+                return_value=[
+                    {"caller_tmux_session": "multiverse-other"},
+                ],
+            ),
+            patch.object(monitor.subprocess, "run") as run,
+        ):
+            guard._run()
+
+        run.assert_not_called()
+        self.assertFalse(guard.forced_detach)
+
+    def test_detaches_for_request_from_guarded_session(self) -> None:
+        guard = monitor._SpawnAttachGuard("/workspace", "multiverse-caller")
+        with (
+            patch.object(
+                monitor,
+                "list_pending_requests",
+                return_value=[
+                    {"caller_tmux_session": "multiverse-caller"},
+                ],
+            ),
+            patch.object(monitor.subprocess, "run") as run,
+        ):
+            guard._run()
+
+        run.assert_called_once_with(
+            ["tmux", "detach-client", "-s", "multiverse-caller"],
+            stdout=monitor.subprocess.DEVNULL,
+            stderr=monitor.subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        )
+        self.assertTrue(guard.forced_detach)
+
+
 class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
     async def test_new_session_modal_returns_codex_selection(self) -> None:
         results: list[tuple[str, str] | None] = []

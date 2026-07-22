@@ -116,11 +116,16 @@ _COMPACTABLE_STATUSES = {"idle", "ended", "dormant"}
 class _SpawnAttachGuard:
     """Background watcher while the user is attached to a tmux session.
 
-    Polls ``~/.multiverse/spawn_requests/`` every second for cwd-matching
-    pending requests. When one appears, runs ``tmux detach-client -s
-    <session>`` to force the user back into the monitor so they can see
-    the naming modal (Textual's event loop is suspended during attach, so
-    the normal tick can't fire).
+    Polls ``~/.multiverse/spawn_requests/`` every second for pending requests
+    created by the exact tmux session being guarded. When one appears, runs
+    ``tmux detach-client -s <session>`` to force the user back into the
+    monitor so they can see the naming modal (Textual's event loop is
+    suspended during attach, so the normal tick can't fire).
+
+    Filtering by ``caller_tmux_session`` is important when several monitors
+    are attached in one workspace. A request from one agent must not detach
+    unrelated clients, especially abandoned terminals whose output queues
+    can block the shared tmux server during detach.
 
     ``forced_detach`` is set to True when we issue the detach so the
     caller can schedule a reattach once the queue has fully drained.
@@ -147,7 +152,11 @@ class _SpawnAttachGuard:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                pending = list_pending_requests(self.cwd)
+                pending = [
+                    request
+                    for request in list_pending_requests(self.cwd)
+                    if request.get("caller_tmux_session") == self.tmux_session
+                ]
             except Exception:
                 pending = []
             if pending:
@@ -157,6 +166,7 @@ class _SpawnAttachGuard:
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
                         timeout=3,
+                        check=True,
                     )
                     self.forced_detach = True
                 except (OSError, subprocess.SubprocessError):
