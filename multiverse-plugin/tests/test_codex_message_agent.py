@@ -395,6 +395,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
         with (
             patch.object(server.subprocess, "run", side_effect=fake_run),
             patch.object(server.time, "sleep") as sleep,
+            patch.object(server, "_codex_wake_prompt_ready", return_value=True),
         ):
             woke = server._wake_via_tmux(
                 "multiverse-target", runtime=sessions.RUNTIME_CODEX
@@ -422,6 +423,59 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
                 ],
             ],
         )
+
+    def test_codex_tmux_wake_does_not_submit_contaminated_composer(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            patch.object(server.subprocess, "run", side_effect=fake_run),
+            patch.object(server.time, "sleep"),
+            patch.object(server, "_codex_wake_prompt_ready", return_value=False),
+        ):
+            woke = server._wake_via_tmux(
+                "multiverse-target", runtime=sessions.RUNTIME_CODEX
+            )
+
+        self.assertFalse(woke)
+        self.assertEqual(
+            calls,
+            [
+                [
+                    "tmux",
+                    "send-keys",
+                    "-t",
+                    "multiverse-target",
+                    "-l",
+                    server._WAKE_PROMPT,
+                ]
+            ],
+        )
+
+    def test_codex_wake_prompt_validation_rejects_xterm_response_leak(self) -> None:
+        pane = (
+            "transcript\n"
+            f"› {server._WAKE_PROMPT}0;276;0c>|xterm.js(6.1.0-beta.288)\n"
+            "  gpt-5.4 · Ready · 100% left\n"
+        )
+        with patch.object(server, "capture_pane", return_value=(True, pane)):
+            ready = server._codex_wake_prompt_ready("multiverse-target")
+
+        self.assertFalse(ready)
+
+    def test_codex_wake_prompt_validation_accepts_exact_prompt(self) -> None:
+        pane = (
+            "transcript\n"
+            f"› {server._WAKE_PROMPT}\n"
+            "  gpt-5.4 · Ready · 100% left\n"
+        )
+        with patch.object(server, "capture_pane", return_value=(True, pane)):
+            ready = server._codex_wake_prompt_ready("multiverse-target")
+
+        self.assertTrue(ready)
 
     def test_claude_tmux_wake_does_not_add_codex_delay(self) -> None:
         with (

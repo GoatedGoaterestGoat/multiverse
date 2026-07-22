@@ -65,6 +65,7 @@ from src.spawn_requests import (
     read_resolution,
     write_spawn_request,
 )
+from src.sb_actions import capture_pane, parse_input_box_text
 
 mcp = FastMCP("multiverse")
 
@@ -230,6 +231,24 @@ _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arriv
 _CODEX_WAKE_SUBMIT_DELAY_S = 0.15
 
 
+def _codex_wake_prompt_ready(tmux_name: str) -> bool:
+    """Whether Codex's visible composer contains exactly the wake prompt.
+
+    Browser terminals can occasionally leak delayed terminal-identification replies
+    into application input. Fail closed rather than pressing Enter on a composer that
+    contains one of those replies, a pre-existing draft, or any other unexpected text.
+    The inter-agent message itself remains queued in the durable inbox.
+    """
+    ok, pane = capture_pane(
+        tmux_name,
+        join_wrapped=True,
+        include_styles=True,
+    )
+    if not ok:
+        return False
+    return parse_input_box_text(pane, runtime=RUNTIME_CODEX) == _WAKE_PROMPT
+
+
 def _client_attached(tmux_name: str) -> bool:
     """True if a user is attached to this session's tmux pane.
 
@@ -255,7 +274,9 @@ def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     Two send-keys calls: ``-l`` (literal) for the text so no character is
     interpreted as a tmux key name, then a separate ``Enter`` to submit. Codex
     gets a short settling delay between them so Enter is not folded into the
-    paste burst as a newline. Returns False on any tmux error.
+    paste burst as a newline. Its composer is then captured and must contain
+    exactly the intended prompt before Enter is sent. Returns False on any tmux
+    error or unexpected Codex composer content.
     """
     try:
         subprocess.run(
@@ -267,6 +288,8 @@ def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
         )
         if runtime == RUNTIME_CODEX:
             time.sleep(_CODEX_WAKE_SUBMIT_DELAY_S)
+            if not _codex_wake_prompt_ready(tmux_name):
+                return False
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_name, "Enter"],
             stdout=subprocess.DEVNULL,
