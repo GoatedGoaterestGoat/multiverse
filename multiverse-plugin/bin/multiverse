@@ -96,6 +96,14 @@ export MULTIVERSE_TREE_BUILD_MODEL="${MULTIVERSE_TREE_BUILD_MODEL:-sonnet}"
 # the session's own default model (unchanged behaviour when unset).
 export MULTIVERSE_ASK_MODEL="${MULTIVERSE_ASK_MODEL:-}"
 
+# Extra env var NAMES (space-separated) to forward into every tmux-spawned
+# session, on top of the fixed base set in sessions.py's create_session.
+# Lets a machine propagate environment-specific auth/config vars (e.g. a
+# packaged claude's persistent-token auth) by setting this in
+# bin/multiverse.local — without hardcoding those names in tracked code.
+# Empty default => forward only the base set (unchanged behaviour).
+export MULTIVERSE_FORWARD_ENV="${MULTIVERSE_FORWARD_ENV:-}"
+
 # Snapshot/restore the user's Claude install env so multiverse works
 # from any terminal — including ones that haven't sourced activate.sh
 # or run an `alexcc`-style alias to set CLAUDE_CONFIG_DIR. Without this,

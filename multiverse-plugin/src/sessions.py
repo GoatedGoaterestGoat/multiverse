@@ -1232,14 +1232,23 @@ def create_session(
     # making cross-terminal resume produce a fresh JSONL instead of
     # picking up the existing one. PATH carries the bin dir of the
     # caller's `claude` so the inner shell finds the same binary.
-    for env_key in ("CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
-                    "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
-                    "MULTIVERSE_CODEX_BIN",
-                    # Rate-limit retry tuning — see bin/multiverse for
-                    # defaults + rationale. Propagated so interactive
-                    # claude sessions inside tmux honor them, not just
-                    # subprocess-inherited workers.
-                    "CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_UNATTENDED_RETRY"):
+    # Base set always forwarded into the tmux-spawned session, plus any
+    # extra keys named in MULTIVERSE_FORWARD_ENV (space-separated). The
+    # extra-keys hook lets a machine forward environment-specific auth /
+    # config vars (e.g. a packaged claude's persistent-token auth) by
+    # setting MULTIVERSE_FORWARD_ENV in bin/multiverse.local — without
+    # hardcoding those names in tracked code.
+    base_env_keys = (
+        "CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
+        "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
+        "MULTIVERSE_CODEX_BIN",
+        # Rate-limit retry tuning — see bin/multiverse for defaults +
+        # rationale. Propagated so interactive claude sessions inside tmux
+        # honor them, not just subprocess-inherited workers.
+        "CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_UNATTENDED_RETRY",
+    )
+    extra_env_keys = tuple(os.environ.get("MULTIVERSE_FORWARD_ENV", "").split())
+    for env_key in base_env_keys + extra_env_keys:
         val = os.environ.get(env_key)
         if val:
             cmd += ["-e", f"{env_key}={val}"]
