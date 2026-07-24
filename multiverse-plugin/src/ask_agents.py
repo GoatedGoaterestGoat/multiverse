@@ -487,10 +487,11 @@ def _ask_one_claude(
         cmd += ["--plugin-dir", plugin_root]
     # Ask forks resume the full origin session, so a large session can
     # overflow the default (200k) context window and fail with "Prompt is
-    # too long". MULTIVERSE_ASK_MODEL (set in bin/multiverse.local) pins a
-    # model — e.g. a 1M-context id — so the fork fits. Unset => no --model,
-    # i.e. the session's own default model (unchanged behaviour).
-    ask_model = os.environ.get("MULTIVERSE_ASK_MODEL")
+    # too long". MULTIVERSE_CLAUDE_ASK_MODEL (set in bin/multiverse.local)
+    # pins a model — e.g. a 1M-context id — so the fork fits. Unset => no
+    # --model, i.e. the session's own default model (unchanged behaviour).
+    # Claude-only: codex ask-forks (_ask_one_codex) never consult it.
+    ask_model = os.environ.get("MULTIVERSE_CLAUDE_ASK_MODEL")
     if ask_model:
         cmd += ["--model", ask_model]
     cmd += [

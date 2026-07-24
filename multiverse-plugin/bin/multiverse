@@ -88,13 +88,14 @@ export MULTIVERSE_ROOT="${MULTIVERSE_ROOT:-$HOME/.multiverse}"
 # editing tracked files. Default matches the historical hardcode.
 export MULTIVERSE_TREE_BUILD_MODEL="${MULTIVERSE_TREE_BUILD_MODEL:-sonnet}"
 
-# Model the ask_agent side-fork uses (claude -p --resume --fork-session).
-# The fork resumes the full origin session, so a large session can overflow
-# the default (200k) context window and fail with "Prompt is too long".
-# Set a model with a big enough window (e.g. a 1M-context id) in
+# Model for the ask_agent side-fork (claude -p --resume --fork-session);
+# CLAUDE-only — codex ask-forks use the codex app-server's own model. The
+# fork resumes the full origin session, so a large session can overflow the
+# default (200k) context window and fail with "Prompt is too long". Set a
+# model with a big enough window (e.g. a 1M-context id) in
 # bin/multiverse.local to fix that. Empty default => no --model flag, i.e.
 # the session's own default model (unchanged behaviour when unset).
-export MULTIVERSE_ASK_MODEL="${MULTIVERSE_ASK_MODEL:-}"
+export MULTIVERSE_CLAUDE_ASK_MODEL="${MULTIVERSE_CLAUDE_ASK_MODEL:-}"
 
 # Model for interactive multiverse-started CLAUDE sessions (new + resumed);
 # codex sessions are unaffected (create_session gates this on the claude
