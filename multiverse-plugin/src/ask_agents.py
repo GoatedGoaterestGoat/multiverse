@@ -485,6 +485,14 @@ def _ask_one_claude(
     cmd = [os.environ.get("MULTIVERSE_CLAUDE_BIN") or "claude"]
     if plugin_root:
         cmd += ["--plugin-dir", plugin_root]
+    # Ask forks resume the full origin session, so a large session can
+    # overflow the default (200k) context window and fail with "Prompt is
+    # too long". MULTIVERSE_ASK_MODEL (set in bin/multiverse.local) pins a
+    # model — e.g. a 1M-context id — so the fork fits. Unset => no --model,
+    # i.e. the session's own default model (unchanged behaviour).
+    ask_model = os.environ.get("MULTIVERSE_ASK_MODEL")
+    if ask_model:
+        cmd += ["--model", ask_model]
     cmd += [
         "--resume",
         target.native_session_id,
@@ -520,7 +528,11 @@ def _ask_one_claude(
             env=_env_without_session_vars(),
         )
         if r.returncode != 0:
-            err = (r.stderr.strip() or f"claude exited {r.returncode}")[:400]
+            # On failure the CLI often prints the real reason to stdout
+            # (e.g. "Prompt is too long") with empty stderr — fall back to
+            # stdout so the caller sees the cause, not a bare "claude
+            # exited N".
+            err = (r.stderr.strip() or r.stdout.strip() or f"claude exited {r.returncode}")[:400]
         else:
             response = r.stdout.strip() or None
             if not response:
