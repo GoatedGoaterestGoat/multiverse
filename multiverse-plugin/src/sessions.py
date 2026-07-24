@@ -1132,6 +1132,20 @@ def create_session(
     ):
         claude_args = [*claude_args, "--permission-mode", "auto"]
 
+    # Pin the model for multiverse-started CLAUDE sessions (this whole block
+    # is gated on RUNTIME_CLAUDE — codex sessions are unaffected). Keeps all
+    # claude sessions on a consistent model regardless of the user's
+    # settings.json /model default (which /model may set to a bare alias).
+    # Configurable via MULTIVERSE_CLAUDE_MODEL (bin/multiverse defaults it to
+    # opus[1m]); set a full id in bin/multiverse.local for a packaged claude
+    # that rejects bare aliases. Skipped if the caller already passed --model.
+    if runtime == RUNTIME_CLAUDE and not any(
+        a == "--model" for a in claude_args
+    ):
+        claude_model = os.environ.get("MULTIVERSE_CLAUDE_MODEL")
+        if claude_model:
+            claude_args = [*claude_args, "--model", claude_model]
+
     now = time.time()
     meta: dict[str, Any] = {
         "cwd": cwd_abs,

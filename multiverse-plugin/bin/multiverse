@@ -96,6 +96,15 @@ export MULTIVERSE_TREE_BUILD_MODEL="${MULTIVERSE_TREE_BUILD_MODEL:-sonnet}"
 # the session's own default model (unchanged behaviour when unset).
 export MULTIVERSE_ASK_MODEL="${MULTIVERSE_ASK_MODEL:-}"
 
+# Model for interactive multiverse-started CLAUDE sessions (new + resumed);
+# codex sessions are unaffected (create_session gates this on the claude
+# runtime). create_session injects `--model $MULTIVERSE_CLAUDE_MODEL` unless
+# the caller already passed --model, so all claude sessions use a consistent
+# model regardless of the user's settings.json /model default. Defaults to the
+# opus[1m] alias; set a full id (e.g. claude-opus-4-8[1m]) in
+# bin/multiverse.local for a packaged claude that rejects bare aliases.
+export MULTIVERSE_CLAUDE_MODEL="${MULTIVERSE_CLAUDE_MODEL:-opus[1m]}"
+
 # Extra env var NAMES (space-separated) to forward into every tmux-spawned
 # session, on top of the fixed base set in sessions.py's create_session.
 # Lets a machine propagate environment-specific auth/config vars (e.g. a
