@@ -11,7 +11,7 @@ Delivery strategies by target status:
   send-keys (even when a user is attached — unlike ``message_agent``'s push_notification
   which falls back), and preserve typed-but-unsent input with
   save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between lines;
-  Codex uses Ctrl+J.
+  Codex uses an explicit bracketed paste.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
   the runtime wrapper hands to Claude or Codex as a positional prompt argument.
@@ -24,9 +24,11 @@ handler. Every helper returns a plain error string on failure; the caller maps t
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import time
+import uuid
 
 #: How many extra backspaces to send after clearing, defensive against any off-by-one in
 #: our input-box parse. Extra backspaces past the start of either input box are no-ops.
@@ -40,12 +42,13 @@ DEFAULT_READY_TIMEOUT_S = 15.0
 #: bail than block the connector's receiver loop.
 _TMUX_CMD_TIMEOUT_S = 3.0
 
-#: Codex groups very rapid terminal input into a paste burst. Let the final literal
-#: text settle before Enter so the key submits instead of joining the paste as a newline.
-_CODEX_SUBMIT_DELAY_S = 0.15
 
-
-def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
+def _run_tmux(
+    args: list[str],
+    *,
+    capture: bool = False,
+    input_text: str | None = None,
+) -> tuple[bool, str]:
     """Run a tmux command. Returns ``(ok, stdout_or_error_message)``.
 
     ``capture=True`` returns stdout on success; otherwise returns an empty string. Failure
@@ -56,7 +59,9 @@ def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
             ["tmux"] + args,
             capture_output=True,
             text=True,
+            input=input_text,
             timeout=_TMUX_CMD_TIMEOUT_S,
+            check=False,
         )
     except subprocess.TimeoutExpired:
         return False, f"tmux {args[0]} timed out"
@@ -67,6 +72,44 @@ def _run_tmux(args: list[str], *, capture: bool = False) -> tuple[bool, str]:
     if r.returncode != 0:
         return False, (r.stderr or f"tmux exit {r.returncode}").strip()
     return True, (r.stdout if capture else "")
+
+
+def paste_text_via_tmux(tmux_name: str, text: str) -> tuple[bool, str]:
+    """Paste text through tmux's explicit bracketed-paste path.
+
+    Codex infers a paste when many literal key events arrive quickly. Enter is
+    intentionally treated as a newline for a short window after such a burst, which
+    makes ``send-keys -l <text>`` followed by Enter timing-dependent. An explicit paste
+    reaches Codex's paste handler instead, which clears that suppression state.
+
+    The text is provided on stdin so prompt length is not constrained by the operating
+    system's command-line argument limit. ``-d`` removes the private tmux buffer after a
+    successful paste; failures get a best-effort cleanup.
+    """
+    buffer_name = f"multiverse-input-{os.getpid()}-{uuid.uuid4().hex}"
+    ok, err = _run_tmux(
+        ["load-buffer", "-b", buffer_name, "-"],
+        input_text=text,
+    )
+    if not ok:
+        return False, err
+
+    ok, err = _run_tmux(
+        [
+            "paste-buffer",
+            "-p",
+            "-r",
+            "-d",
+            "-b",
+            buffer_name,
+            "-t",
+            tmux_name,
+        ]
+    )
+    if not ok:
+        _run_tmux(["delete-buffer", "-b", buffer_name])
+        return False, err
+    return True, ""
 
 
 def capture_pane(
@@ -236,6 +279,14 @@ def _type_prompt(
     submit: bool,
 ) -> tuple[bool, str]:
     """Type multiline text with the runtime's composer newline convention."""
+    if runtime == "codex":
+        ok, err = paste_text_via_tmux(tmux_name, text)
+        if not ok:
+            return False, err
+        if submit:
+            return _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
+        return True, ""
+
     lines = text.split("\n")
     for index, line in enumerate(lines):
         if line:
@@ -246,13 +297,10 @@ def _type_prompt(
             if not ok:
                 return False, err
         if index < len(lines) - 1:
-            newline_keys = ["C-j"] if runtime == "codex" else ["\\", "Enter"]
-            ok, err = _run_tmux(["send-keys", "-t", tmux_name, *newline_keys])
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, "\\", "Enter"])
             if not ok:
                 return False, err
     if submit:
-        if runtime == "codex":
-            time.sleep(_CODEX_SUBMIT_DELAY_S)
         return _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
     return True, ""
 

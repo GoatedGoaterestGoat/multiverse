@@ -65,7 +65,7 @@ from src.spawn_requests import (
     read_resolution,
     write_spawn_request,
 )
-from src.sb_actions import capture_pane, parse_input_box_text
+from src.sb_actions import capture_pane, parse_input_box_text, paste_text_via_tmux
 
 mcp = FastMCP("multiverse")
 
@@ -224,11 +224,8 @@ def _write_session_status(status: str) -> None:
 # UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
 # the message remains durable until that tool atomically claims it.
 _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
-# Codex groups back-to-back terminal input into a paste burst. If Enter follows
-# literal text immediately, it can join that burst and become a composer newline
-# instead of submitting the prompt. Keep this aligned with sb_actions' Codex
-# prompt delivery delay.
-_CODEX_WAKE_SUBMIT_DELAY_S = 0.15
+_CODEX_WAKE_COMPOSER_TIMEOUT_S = 1.0
+_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S = 0.025
 
 
 def _codex_wake_prompt_ready(tmux_name: str) -> bool:
@@ -247,6 +244,18 @@ def _codex_wake_prompt_ready(tmux_name: str) -> bool:
     if not ok:
         return False
     return parse_input_box_text(pane, runtime=RUNTIME_CODEX) == _WAKE_PROMPT
+
+
+def _wait_for_codex_wake_prompt(tmux_name: str) -> bool:
+    """Wait briefly for Codex to render and expose the pasted wake prompt."""
+    deadline = time.monotonic() + _CODEX_WAKE_COMPOSER_TIMEOUT_S
+    while True:
+        if _codex_wake_prompt_ready(tmux_name):
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
 
 
 def _client_attached(tmux_name: str) -> bool:
@@ -271,25 +280,25 @@ def _client_attached(tmux_name: str) -> bool:
 def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     """Type the wake prompt + Enter into a session's tmux pane.
 
-    Two send-keys calls: ``-l`` (literal) for the text so no character is
-    interpreted as a tmux key name, then a separate ``Enter`` to submit. Codex
-    gets a short settling delay between them so Enter is not folded into the
-    paste burst as a newline. Its composer is then captured and must contain
-    exactly the intended prompt before Enter is sent. Returns False on any tmux
-    error or unexpected Codex composer content.
+    Claude uses literal ``send-keys`` for the text. Codex uses tmux's explicit
+    bracketed-paste path so its inferred paste-burst heuristic cannot reinterpret Enter
+    as a newline. Its composer is then captured and must contain exactly the intended
+    prompt before Enter is sent. Returns False on any tmux error or unexpected Codex
+    composer content.
     """
     try:
-        subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_name, "-l", _WAKE_PROMPT],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=3,
-            check=True,
-        )
         if runtime == RUNTIME_CODEX:
-            time.sleep(_CODEX_WAKE_SUBMIT_DELAY_S)
-            if not _codex_wake_prompt_ready(tmux_name):
+            ok, _ = paste_text_via_tmux(tmux_name, _WAKE_PROMPT)
+            if not ok or not _wait_for_codex_wake_prompt(tmux_name):
                 return False
+        else:
+            subprocess.run(
+                ["tmux", "send-keys", "-t", tmux_name, "-l", _WAKE_PROMPT],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=True,
+            )
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_name, "Enter"],
             stdout=subprocess.DEVNULL,
