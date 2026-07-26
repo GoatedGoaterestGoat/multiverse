@@ -101,6 +101,18 @@ class CodexPromptTmuxTests(unittest.TestCase):
         )
         self.assertFalse(sb_actions._codex_composer(pane)[0])
 
+    def test_codex_composer_parser_recognizes_thinking_footer(self) -> None:
+        pane = (
+            "• Earlier output\n"
+            "› Draft while active\n\n"
+            "  gpt-5.6 · Multiverse · main · Thinking · Context 90% left\n"
+        )
+
+        self.assertEqual(
+            sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX),
+            "Draft while active",
+        )
+
     def test_codex_delivery_saves_submits_and_restores_draft(self) -> None:
         draft = "Draft first\nDraft second"
         pane = f"› Draft first\n  Draft second\n\n{CODEX_FOOTER}\n"

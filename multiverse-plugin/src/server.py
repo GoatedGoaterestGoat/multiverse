@@ -65,7 +65,12 @@ from src.spawn_requests import (
     read_resolution,
     write_spawn_request,
 )
-from src.sb_actions import capture_pane, parse_input_box_text, paste_text_via_tmux
+from src.sb_actions import (
+    capture_pane,
+    codex_composer_first_line_text,
+    parse_input_box_text,
+    paste_text_via_tmux,
+)
 
 mcp = FastMCP("multiverse")
 
@@ -224,17 +229,20 @@ def _write_session_status(status: str) -> None:
 # UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
 # the message remains durable until that tool atomically claims it.
 _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
-_CODEX_WAKE_COMPOSER_TIMEOUT_S = 1.0
+_CODEX_WAKE_COMPOSER_TIMEOUT_S = 3.0
 _CODEX_WAKE_COMPOSER_POLL_INTERVAL_S = 0.025
+_CODEX_WAKE_SUBMIT_ACK_TIMEOUT_S = 0.5
+_CODEX_WAKE_SUBMIT_ATTEMPTS = 3
 
 
-def _codex_wake_prompt_ready(tmux_name: str) -> bool:
+def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
     """Whether Codex's visible composer contains exactly the wake prompt.
 
     Browser terminals can occasionally leak delayed terminal-identification replies
-    into application input. Fail closed rather than pressing Enter on a composer that
+    into application input. Fail closed rather than submitting a composer that
     contains one of those replies, a pre-existing draft, or any other unexpected text.
-    The inter-agent message itself remains queued in the durable inbox.
+    ``None`` means the pane could not be captured; the caller must not treat a transient
+    capture failure as either validation or submission acknowledgement.
     """
     ok, pane = capture_pane(
         tmux_name,
@@ -242,8 +250,12 @@ def _codex_wake_prompt_ready(tmux_name: str) -> bool:
         include_styles=True,
     )
     if not ok:
-        return False
-    return parse_input_box_text(pane, runtime=RUNTIME_CODEX) == _WAKE_PROMPT
+        return None
+    return codex_composer_first_line_text(pane) == _WAKE_PROMPT
+
+
+def _codex_wake_prompt_ready(tmux_name: str) -> bool:
+    return _codex_wake_prompt_state(tmux_name) is True
 
 
 def _wait_for_codex_wake_prompt(tmux_name: str) -> bool:
@@ -256,6 +268,38 @@ def _wait_for_codex_wake_prompt(tmux_name: str) -> bool:
         if remaining <= 0:
             return False
         time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
+
+
+def _wait_for_codex_wake_prompt_to_clear(tmux_name: str) -> bool:
+    """Whether Codex acknowledged submission by clearing the wake composer."""
+    deadline = time.monotonic() + _CODEX_WAKE_SUBMIT_ACK_TIMEOUT_S
+    while True:
+        if _codex_wake_prompt_state(tmux_name) is False:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
+
+
+def _submit_codex_wake_prompt(tmux_name: str) -> bool:
+    """Submit or queue a validated Codex wake prompt, with acknowledgement.
+
+    Codex assigns Tab the desired cross-state behavior: it submits while idle and
+    queues while a turn is running. tmux accepting a key does not prove that the TUI
+    handled it, so retry only while the exact validated prompt remains in the composer.
+    """
+    for _ in range(_CODEX_WAKE_SUBMIT_ATTEMPTS):
+        subprocess.run(
+            ["tmux", "send-keys", "-t", tmux_name, "Tab"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=True,
+        )
+        if _wait_for_codex_wake_prompt_to_clear(tmux_name):
+            return True
+    return False
 
 
 def _client_attached(tmux_name: str) -> bool:
@@ -278,19 +322,20 @@ def _client_attached(tmux_name: str) -> bool:
 
 
 def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
-    """Type the wake prompt + Enter into a session's tmux pane.
+    """Type and submit the wake prompt in a session's tmux pane.
 
     Claude uses literal ``send-keys`` for the text. Codex uses tmux's explicit
-    bracketed-paste path so its inferred paste-burst heuristic cannot reinterpret Enter
-    as a newline. Its composer is then captured and must contain exactly the intended
-    prompt before Enter is sent. Returns False on any tmux error or unexpected Codex
-    composer content.
+    bracketed-paste path, validates the composer, then uses Tab to submit while idle or
+    queue while working. Codex submission is acknowledged by the prompt leaving the
+    composer and retried if necessary. Returns False on any tmux error or unexpected
+    Codex composer content.
     """
     try:
         if runtime == RUNTIME_CODEX:
             ok, _ = paste_text_via_tmux(tmux_name, _WAKE_PROMPT)
             if not ok or not _wait_for_codex_wake_prompt(tmux_name):
                 return False
+            return _submit_codex_wake_prompt(tmux_name)
         else:
             subprocess.run(
                 ["tmux", "send-keys", "-t", tmux_name, "-l", _WAKE_PROMPT],

@@ -385,21 +385,17 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
         self.assertEqual(calls, ["kill", "create"])
 
-    def test_codex_tmux_wake_uses_bracketed_paste_before_enter(self) -> None:
-        calls: list[list[str]] = []
-
-        def fake_run(command, **kwargs):
-            calls.append(command)
-            return subprocess.CompletedProcess(command, 0)
-
+    def test_codex_tmux_wake_uses_bracketed_paste_then_acknowledged_tab(self) -> None:
         with (
-            patch.object(server.subprocess, "run", side_effect=fake_run),
             patch.object(
                 server, "paste_text_via_tmux", return_value=(True, "")
             ) as paste,
             patch.object(
                 server, "_wait_for_codex_wake_prompt", return_value=True
             ) as wait,
+            patch.object(
+                server, "_submit_codex_wake_prompt", return_value=True
+            ) as submit,
         ):
             woke = server._wake_via_tmux(
                 "multiverse-target", runtime=sessions.RUNTIME_CODEX
@@ -408,18 +404,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
         self.assertTrue(woke)
         paste.assert_called_once_with("multiverse-target", server._WAKE_PROMPT)
         wait.assert_called_once_with("multiverse-target")
-        self.assertEqual(
-            calls,
-            [
-                [
-                    "tmux",
-                    "send-keys",
-                    "-t",
-                    "multiverse-target",
-                    "Enter",
-                ],
-            ],
-        )
+        submit.assert_called_once_with("multiverse-target")
 
     def test_codex_tmux_wake_does_not_submit_contaminated_composer(self) -> None:
         calls: list[list[str]] = []
@@ -436,6 +421,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
             patch.object(
                 server, "_wait_for_codex_wake_prompt", return_value=False
             ),
+            patch.object(server, "_submit_codex_wake_prompt") as submit,
         ):
             woke = server._wake_via_tmux(
                 "multiverse-target", runtime=sessions.RUNTIME_CODEX
@@ -443,7 +429,51 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
         self.assertFalse(woke)
         paste.assert_called_once_with("multiverse-target", server._WAKE_PROMPT)
+        submit.assert_not_called()
         self.assertEqual(calls, [])
+
+    def test_codex_tmux_wake_retries_tab_until_composer_clears(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess(command, 0)
+
+        with (
+            patch.object(server.subprocess, "run", side_effect=fake_run),
+            patch.object(
+                server,
+                "_wait_for_codex_wake_prompt_to_clear",
+                side_effect=[False, True],
+            ) as cleared,
+        ):
+            submitted = server._submit_codex_wake_prompt("multiverse-target")
+
+        self.assertTrue(submitted)
+        self.assertEqual(cleared.call_count, 2)
+        self.assertEqual(
+            calls,
+            [
+                ["tmux", "send-keys", "-t", "multiverse-target", "Tab"],
+                ["tmux", "send-keys", "-t", "multiverse-target", "Tab"],
+            ],
+        )
+
+    def test_codex_tmux_wake_fails_if_tab_never_clears_composer(self) -> None:
+        with (
+            patch.object(
+                server.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as run,
+            patch.object(
+                server, "_wait_for_codex_wake_prompt_to_clear", return_value=False
+            ),
+        ):
+            submitted = server._submit_codex_wake_prompt("multiverse-target")
+
+        self.assertFalse(submitted)
+        self.assertEqual(run.call_count, server._CODEX_WAKE_SUBMIT_ATTEMPTS)
 
     def test_codex_wake_prompt_validation_rejects_xterm_response_leak(self) -> None:
         pane = (
@@ -461,6 +491,17 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
             "transcript\n"
             f"› {server._WAKE_PROMPT}\n"
             "  gpt-5.4 · Ready · 100% left\n"
+        )
+        with patch.object(server, "capture_pane", return_value=(True, pane)):
+            ready = server._codex_wake_prompt_ready("multiverse-target")
+
+        self.assertTrue(ready)
+
+    def test_codex_wake_prompt_validation_does_not_depend_on_footer_state(self) -> None:
+        pane = (
+            "transcript\n"
+            f"› {server._WAKE_PROMPT}\n"
+            "  gpt-5.6 · Thinking · 100% left\n"
         )
         with patch.object(server, "capture_pane", return_value=(True, pane)):
             ready = server._codex_wake_prompt_ready("multiverse-target")

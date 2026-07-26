@@ -144,12 +144,26 @@ _TOP_BORDER_LOOKBACK = 6  # lines to scan above for ╭...╮
 # footer follows below it. Continuation lines are indented by two spaces.
 _CODEX_INPUT_LINE_RE = re.compile(r"^›(?:\s?(.*))?$")
 _CODEX_STATUS_RE = re.compile(
-    r"\s·\s(?:Ready|Working|Waiting|Starting|Idle)(?:\s·\s|\s*$)", re.IGNORECASE
+    r"\s·\s(?:Ready|Working|Thinking|Waiting|Starting|Idle)(?:\s·\s|\s*$)",
+    re.IGNORECASE,
 )
 _CODEX_OPAQUE_DRAFT_RE = re.compile(
     r"\[(?:Pasted Content \d+ chars|Image[^\]]*)\]", re.IGNORECASE
 )
 _ANSI_SGR_RE = re.compile(r"\x1b\[([0-9;]*)m")
+
+
+def codex_composer_first_line_text(pane: str) -> str | None:
+    """Return the first line of the last visible Codex composer.
+
+    This intentionally does not depend on recognizing the status footer. Codex adds
+    run-state labels over time, while the composer marker itself remains stable.
+    """
+    for line in reversed(_ANSI_SGR_RE.sub("", pane).splitlines()):
+        match = _CODEX_INPUT_LINE_RE.match(line.rstrip())
+        if match:
+            return match.group(1) or ""
+    return None
 
 
 def _parse_claude_input_box_text(pane: str) -> str:
