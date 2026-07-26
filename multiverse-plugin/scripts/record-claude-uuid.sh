@@ -7,6 +7,15 @@
 # sessions against live multiverse sessions.
 
 [ -z "${MULTIVERSE_STATUS:-}" ] && exit 0
+# Never let a tree-build merge subprocess claim the session pointer. The
+# constructor spawns `claude --resume <uuid> -p <instruction>` per merge
+# step; that subprocess gets its OWN fresh claude session_id (custom-title
+# "priv_compaction") and inherits this plugin, so SessionStart fires here
+# with the PARENT session's MULTIVERSE_STATUS. Writing that id would
+# repoint claude_uuid at the throwaway summarizer session — making the
+# dashboard read the wrong live/full JSONL for the real agent. Same env
+# flag spawn-tree-builder.py already uses as its recursion guard.
+[ -n "${MULTIVERSE_TREE_BUILDER_ACTIVE:-}" ] && exit 0
 command -v jq &>/dev/null || exit 0
 
 INPUT=$(cat)

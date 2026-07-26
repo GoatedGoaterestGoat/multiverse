@@ -190,6 +190,17 @@ def _sync_unlocked(uuid: str, cwd: str) -> None:
 
 
 def main() -> None:
+    # Never mirror a tree-build merge subprocess. The constructor spawns
+    # `claude --resume <uuid> -p <instruction>` for each merge step; that
+    # subprocess gets its OWN fresh claude session_id (custom-title
+    # "priv_compaction") and inherits this plugin, so its hooks fire with
+    # the PARENT session's MULTIVERSE_* env. Without this guard we create a
+    # junk full_jsonls/<priv_compaction_uuid>.jsonl holding just the merge
+    # prompt — which surfaces on the dashboard as the agent's full history
+    # collapsing to a single turn. Same env flag spawn-tree-builder.py
+    # already uses as its recursion guard.
+    if os.environ.get("MULTIVERSE_TREE_BUILDER_ACTIVE"):
+        return
     hook = _read_input()
     sid = hook.get("session_id")
     cwd = hook.get("cwd") or os.getcwd()
