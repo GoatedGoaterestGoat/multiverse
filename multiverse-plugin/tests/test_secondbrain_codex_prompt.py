@@ -247,6 +247,25 @@ class CodexPromptTmuxTests(unittest.TestCase):
             sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX), ""
         )
 
+    def test_focused_codex_capture_treats_dim_placeholder_as_empty(self) -> None:
+        pane = (
+            "\x1b[1m›\x1b[0m \x1b[2mImplement changes in @filename\x1b[0m\n\n"
+            f"{CODEX_FOOTER}\n"
+        )
+        with (
+            patch.object(
+                sb_actions,
+                "codex_composer_has_focus",
+                return_value=(True, ""),
+            ),
+            patch.object(sb_actions, "capture_pane", return_value=(True, pane)),
+        ):
+            result = sb_actions.capture_focused_codex_composer_draft(
+                "multiverse-target"
+            )
+
+        self.assertEqual(result, (True, "", ""))
+
     def test_codex_delivery_requires_visible_composer(self) -> None:
         with (
             patch.object(

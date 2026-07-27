@@ -120,12 +120,12 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 target = self._target(
                     name=f"receiver-{index}", runtime=target_runtime
                 )
-                # Keep every runtime pair on a non-delivering path so this stays a
-                # pure persistence/metadata test. Codex is gated on attachment;
-                # Claude is gated on its composer being on screen.
+                # Keep every runtime pair on a failed-delivery path so this stays a
+                # pure persistence/metadata test.
                 with (
-                    patch.object(server, "_client_attached", return_value=True),
-                    patch.object(server, "_wake_via_tmux") as wake,
+                    patch.object(
+                        server, "_wake_via_tmux", return_value=False
+                    ) as wake,
                     patch.object(
                         server,
                         "send_prompt_via_tmux",
@@ -140,7 +140,6 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                         target, caller_runtime=caller_runtime
                     )
 
-                wake.assert_not_called()
                 pending = inbox.list_pending_messages(self.cwd, target.name)
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(pending[0]["from"], "sender")
@@ -155,14 +154,20 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                     sent.call_args.kwargs["recipient_runtime"], target_runtime
                 )
                 if target_runtime == sessions.RUNTIME_CODEX:
+                    wake.assert_called_once_with(
+                        target.session.tmux_name,
+                        runtime=sessions.RUNTIME_CODEX,
+                    )
                     self.assertEqual(
                         routed.call_args.kwargs["route"],
-                        "passive_fallback_client_attached",
+                        "wake_tmux",
                     )
+                    self.assertFalse(routed.call_args.kwargs["success"])
                     self.assertIn(
                         "remain queued until Codex calls check_inbox", result
                     )
                 else:
+                    wake.assert_not_called()
                     self.assertEqual(
                         routed.call_args.kwargs["route"],
                         "passive_fallback_no_composer",
@@ -176,9 +181,8 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             runtime=sessions.RUNTIME_CODEX, cwd=other_cwd
         )
 
-        # Attached, so delivery stays queued and this test stays focused on
-        # the cross-workspace reply metadata rather than wake routing.
-        with patch.object(server, "_client_attached", return_value=True):
+        # Failed wake keeps this test focused on cross-workspace reply metadata.
+        with patch.object(server, "_wake_via_tmux", return_value=False):
             result, _, _ = self._message(
                 target,
                 caller_runtime=sessions.RUNTIME_CLAUDE,
@@ -193,14 +197,13 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         self.assertIn(f'working_directory="{self.cwd}"', rendered)
         self.assertIn("remain queued until Codex calls check_inbox", result)
 
-    def test_live_unattached_codex_is_pinged_for_idle_and_working(self) -> None:
+    def test_live_codex_is_pinged_for_idle_and_working(self) -> None:
         for status in ("idle", "working"):
             with self.subTest(status=status):
                 target = self._target(name=f"target-{status}", status=status)
-                with (
-                    patch.object(server, "_client_attached", return_value=False),
-                    patch.object(server, "_wake_via_tmux", return_value=True) as wake,
-                ):
+                with patch.object(
+                    server, "_wake_via_tmux", return_value=True
+                ) as wake:
                     result, _, routed = self._message(target)
 
                 wake.assert_called_once_with(
@@ -218,31 +221,26 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                     sessions.RUNTIME_CODEX,
                 )
 
-    def test_attached_codex_is_left_queued_without_terminal_input(self) -> None:
+    def test_codex_delivery_is_not_attachment_gated(self) -> None:
         target = self._target()
-        with (
-            patch.object(server, "_client_attached", return_value=True),
-            patch.object(server, "_wake_via_tmux") as wake,
-        ):
+        with patch.object(
+            server, "_wake_via_tmux", return_value=True
+        ) as wake:
             result, _, routed = self._message(target)
 
-        wake.assert_not_called()
-        self.assertIn("a user is attached", result)
-        self.assertIn("remain queued until Codex calls check_inbox", result)
-        self.assertEqual(
-            routed.call_args.kwargs["route"],
-            "passive_fallback_client_attached",
+        wake.assert_called_once_with(
+            target.session.tmux_name,
+            runtime=sessions.RUNTIME_CODEX,
         )
+        self.assertIn("pinged to call check_inbox now", result)
+        self.assertEqual(routed.call_args.kwargs["route"], "wake_tmux")
+        self.assertTrue(routed.call_args.kwargs["success"])
 
     def test_listening_codex_relies_on_monitor_without_terminal_input(self) -> None:
         target = self._target(status="listening")
-        with (
-            patch.object(server, "_client_attached") as attached,
-            patch.object(server, "_wake_via_tmux") as wake,
-        ):
+        with patch.object(server, "_wake_via_tmux") as wake:
             result, _, routed = self._message(target)
 
-        attached.assert_not_called()
         wake.assert_not_called()
         self.assertIn("already listening", result)
         self.assertIn("detect it within a second", result)
@@ -254,13 +252,9 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         for status in ("starting", "waiting"):
             with self.subTest(status=status):
                 target = self._target(name=f"target-{status}", status=status)
-                with (
-                    patch.object(server, "_client_attached") as attached,
-                    patch.object(server, "_wake_via_tmux") as wake,
-                ):
+                with patch.object(server, "_wake_via_tmux") as wake:
                     result, _, routed = self._message(target)
 
-                attached.assert_not_called()
                 wake.assert_not_called()
                 self.assertIn("no terminal ping was sent", result)
                 self.assertIn(
@@ -273,10 +267,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
 
     def test_failed_terminal_ping_keeps_codex_message_queued(self) -> None:
         target = self._target()
-        with (
-            patch.object(server, "_client_attached", return_value=False),
-            patch.object(server, "_wake_via_tmux", return_value=False),
-        ):
+        with patch.object(server, "_wake_via_tmux", return_value=False):
             result, _, routed = self._message(target)
 
         self.assertIn("terminal ping failed", result)
@@ -285,16 +276,9 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         self.assertFalse(routed.call_args.kwargs["success"])
         self.assertEqual(inbox.pending_inbox_count(self.cwd, target.name), 1)
 
-    def test_claude_delivers_to_attached_target(self) -> None:
-        """Claude delivery is gated on the composer, not on attachment.
-
-        Replaces an earlier test that asserted an attached user forced passive
-        delivery: we now type into the composer regardless, preserving the user's
-        draft, so an attached user no longer delays their agent's messages.
-        """
+    def test_claude_delivery_is_composer_gated(self) -> None:
         target = self._target(runtime=sessions.RUNTIME_CLAUDE)
         with (
-            patch.object(server, "_client_attached", return_value=True) as attached,
             patch.object(server, "_wake_via_tmux") as wake,
             patch.object(
                 server, "send_prompt_via_tmux", return_value=(True, "", "")
@@ -304,7 +288,6 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 target, caller_runtime=sessions.RUNTIME_CLAUDE
             )
 
-        attached.assert_not_called()
         wake.assert_not_called()
         send.assert_called_once()
         self.assertTrue(send.call_args.kwargs["require_composer"])

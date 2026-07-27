@@ -161,9 +161,8 @@ Several MCP tools are available to any agent running under the wrapper. They def
 | dormant / ended | Recipient is **auto-resumed** (started for you) and processes the message on startup — no user needed. |
 | idle / working — **Claude**, composer on screen | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately — *whether or not a user is attached*. Any typed-but-unsent draft is saved, cleared, and restored around the send, so an attached user loses nothing. |
 | idle / working — **Claude**, composer not on screen | Remains queued. No composer means a permission prompt or question modal is up, and keystrokes would answer the modal instead of typing a prompt. |
-| idle / working — **Codex**, no user attached, composer focused | Recipient is **pinged via its terminal** (bracketed paste + Tab) to check its inbox immediately. Any typed-but-unsent draft is saved, cleared, and restored around the send. |
+| idle / working — **Codex**, composer focused | Recipient is **pinged via its terminal** (bracketed paste + Tab) to check its inbox immediately, whether or not a user is attached. Any typed-but-unsent draft is saved, cleared, and restored around the send. |
 | idle / working — **Codex**, composer not focused | Remains queued. No keystrokes are sent to a picker, approval dialog, or other active terminal surface. |
-| idle / working — **Codex**, user attached | Remains queued — we don't disrupt the attached user's pane. |
 | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
 | starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
 | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
@@ -437,8 +436,7 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 2. **Wake routing** (always attempted — there is no queue-only mode):
    - dormant/ended → `_auto_resume` spawns detached tmux with either `claude --resume <uuid>` or `codex resume <id>`; the runtime wrapper supplies the startup inbox prompt.
    - idle/working + **Claude** → gated on the composer, not on attachment. `send_prompt_via_tmux(..., require_composer=True)` captures the pane (`-J -e`), and `claude_input_box()` reports `(visible, draft)`. If the composer is on screen we deliver even to an attached user, preserving any draft: backspace-clear it → literal `send-keys` the wake prompt + Enter (its prompt hook injects the message) → type the draft back, unsent. If the composer is *not* on screen (permission prompt / question modal), nothing is typed and the message remains queued (`passive_fallback_no_composer`).
-   - idle/working + **Codex** + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` requires tmux's cursor to be inside the visible composer. It snapshots the exact draft, clears and verifies it, bracket-pastes and verifies the wake prompt, uses Tab (submit while idle, queue while working), confirms the prompt cleared, then restores and verifies the original draft. Any failed check leaves the message queued; an unavailable composer receives no keystrokes.
-   - idle/working + **Codex** + client attached → no ping (would clobber the user's input); the message remains queued.
+   - idle/working + **Codex** → attachment does not affect routing. `_wake_via_tmux` requires tmux's cursor to be inside the visible composer, snapshots the exact draft, clears and verifies it, bracket-pastes and verifies the wake prompt, uses Tab (submit while idle, queue while working), confirms the prompt cleared, then restores and verifies the original draft. Any failed check leaves the message queued; an unavailable composer receives no keystrokes.
    - listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
    - starting → no ping while the runtime TUI is starting; the message remains queued.
    - waiting (blocked on a permission/input prompt) → no ping; it would land on the prompt as random keys, so we don't try. Remains queued.

@@ -233,16 +233,12 @@ class MessageAgentClaudeRoutingTests(unittest.TestCase):
 
     def test_attached_user_no_longer_blocks_delivery(self) -> None:
         """The whole point of the change: attachment is not a reason to hold."""
-        with (
-            patch.object(server, "_client_attached", return_value=True) as attached,
-            patch.object(
-                server, "send_prompt_via_tmux", return_value=(True, "", "")
-            ) as send,
-        ):
+        with patch.object(
+            server, "send_prompt_via_tmux", return_value=(True, "", "")
+        ) as send:
             result = self._message(self._target("idle"))
 
         send.assert_called_once()
-        attached.assert_not_called()
         self.assertIn("pinged its terminal", result)
         self.assertEqual(
             self.routed.call_args.kwargs["route"], "wake_tmux"
@@ -284,22 +280,22 @@ class MessageAgentClaudeRoutingTests(unittest.TestCase):
         self.assertEqual(self.routed.call_args.kwargs["route"], "wake_tmux")
         self.assertFalse(self.routed.call_args.kwargs["success"])
 
-    def test_codex_target_keeps_the_attachment_gate(self) -> None:
-        """Codex delivery is explicitly out of scope for this change."""
+    def test_codex_target_uses_the_same_attachment_independent_policy(self) -> None:
         target = self._target("idle")
         target.runtime = sessions.RUNTIME_CODEX
         target.session.runtime = sessions.RUNTIME_CODEX
         with (
-            patch.object(server, "_client_attached", return_value=True) as attached,
             patch.object(server, "send_prompt_via_tmux") as send,
-            patch.object(server, "_wake_via_tmux") as wake,
+            patch.object(server, "_wake_via_tmux", return_value=True) as wake,
         ):
             result = self._message(target)
 
-        attached.assert_called_once()
         send.assert_not_called()
-        wake.assert_not_called()
-        self.assertIn("a user is attached", result)
+        wake.assert_called_once_with(
+            target.session.tmux_name,
+            runtime=sessions.RUNTIME_CODEX,
+        )
+        self.assertIn("pinged to call check_inbox now", result)
 
 
 if __name__ == "__main__":

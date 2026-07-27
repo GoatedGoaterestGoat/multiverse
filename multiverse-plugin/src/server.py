@@ -360,25 +360,6 @@ def _wake_codex_via_tmux(tmux_name: str) -> bool:
     return _restore_codex_composer_text(tmux_name, saved)
 
 
-def _client_attached(tmux_name: str) -> bool:
-    """True if a user is attached to this session's tmux pane.
-
-    We never send-keys into an attached pane (it would clobber whatever the
-    user is typing), so a push notification falls back to normal inbox
-    delivery when this returns True.
-    """
-    try:
-        r = subprocess.run(
-            ["tmux", "list-clients", "-t", tmux_name],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        return r.returncode == 0 and bool(r.stdout.strip())
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
 def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     """Type and submit the wake prompt in a session's tmux pane.
 
@@ -635,10 +616,11 @@ def message_agent(
       - idle or working (Claude), with its input box NOT on screen → it's
         sitting on a permission prompt or a question modal, so nothing is
         typed and delivery stays queued.
-      - idle or working (Codex), with NO user attached to its terminal →
-        it's pinged via its terminal to check its inbox immediately.
-      - idle or working (Codex), but a user IS attached to its terminal →
-        falls back to queued delivery without disrupting the attached user.
+      - idle or working (Codex), with its input box focused → it's pinged
+        via its terminal whether or not a user is attached. Anything the
+        user had typed but not sent is saved and restored around the ping.
+      - idle or working (Codex), with its input box NOT focused → nothing
+        is typed and delivery stays queued.
       - listening (parked in ``monitor_inbox``) → it's already watching its
         inbox and picks the message up within a second; no wake needed.
       - starting → remains queued; no terminal input is sent while the
@@ -871,21 +853,6 @@ def message_agent(
 
     if status in ("idle", "working"):
         tmux_name = target.session.tmux_name
-        if _client_attached(tmux_name):
-            log_route("passive_fallback_client_attached")
-            if target.runtime == RUNTIME_CLAUDE:
-                return (
-                    f"Message queued for '{target_name}' — a user is attached to "
-                    "its terminal, so it falls back to passive delivery (delivered "
-                    "on the recipient's next turn) rather than a terminal ping."
-                    + reply_hint
-                )
-            return (
-                f"Message queued for '{target_name}' — a user is attached to "
-                "its terminal, so no terminal ping was sent. "
-                + _queued_next_step(target.runtime)
-                + reply_hint
-            )
         woke = _wake_via_tmux(tmux_name, runtime=target.runtime)
         log_route("wake_tmux", success=woke)
         if woke:

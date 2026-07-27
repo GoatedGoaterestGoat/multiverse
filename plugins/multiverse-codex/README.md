@@ -34,8 +34,9 @@ terminal is prompted to call `check_inbox` only when its input composer is
 focused. A typed-but-unsent draft is saved, cleared, and restored around that
 prompt. If another terminal surface is active, no keys are sent and the message
 stays queued. A dormant or ended Codex agent is resumed with the inbox prompt as
-its first user turn. Starting, approval-waiting, and user-attached sessions are
-also left queued.
+its first user turn. Starting and approval-waiting sessions remain queued.
+Attached sessions are delivered to whenever the normal composer is focused;
+attachment by itself does not prevent delivery.
 
 The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
 Claude-to-Codex messages. Cross-workspace messages retain the sender workspace

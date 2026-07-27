@@ -134,7 +134,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
       lifecycle-hook delivery is not required.
 - [x] Auto-resume dormant Codex agents for always-active message delivery.
 - [x] Support push delivery to live, unattached Codex agents.
-- [x] Avoid clobbering input when a user is attached to the Codex terminal.
+- [x] Deliver to attached Codex terminals without losing typed-but-unsent input.
 - [x] Require the Codex composer to be visible and focused before terminal
       delivery; leave messages queued when a picker, modal, or other surface is
       active.
