@@ -29,10 +29,10 @@ do not consume or inject them.
   without consuming it. The Multiverse dashboard reports `listening` during
   the wait. When it returns, call `check_inbox()` to read the message.
 
-An urgent `message_agent(..., push_notification=True)` wakes an unattended
-live Codex terminal with a prompt to call `check_inbox`. A dormant or ended
-Codex agent is resumed with that prompt as its first user turn. Starting,
-approval-waiting, and user-attached sessions are left queued.
+Every `message_agent(...)` call uses active delivery. An unattended live Codex
+terminal is prompted to call `check_inbox`; a dormant or ended Codex agent is
+resumed with that prompt as its first user turn. Starting, approval-waiting,
+and user-attached sessions are left queued.
 
 The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
 Claude-to-Codex messages. Cross-workspace messages retain the sender workspace

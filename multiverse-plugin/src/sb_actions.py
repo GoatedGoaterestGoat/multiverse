@@ -8,10 +8,10 @@ focused on the decision flow.
 Delivery strategies by target status:
 
 - **idle / working / waiting / listening** → :func:`send_prompt_via_tmux`. We ALWAYS
-  send-keys (even when a user is attached — unlike ``message_agent``'s push_notification
-  which falls back), and preserve typed-but-unsent input with
-  save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between lines;
-  Codex uses an explicit bracketed paste.
+  send-keys (even when a user is attached — unlike ``message_agent``, which leaves
+  delivery queued for an attached user), and preserve typed-but-unsent input with
+  save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between
+  lines; Codex uses an explicit bracketed paste.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
   the runtime wrapper hands to Claude or Codex as a positional prompt argument.

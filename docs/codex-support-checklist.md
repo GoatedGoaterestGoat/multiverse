@@ -132,7 +132,7 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Ensure delivered messages persist in the Codex conversation history.
 - [x] Define Codex inbox delivery as explicit pull via `check_inbox`; passive
       lifecycle-hook delivery is not required.
-- [x] Support `push_notification=True` for dormant Codex agents.
+- [x] Auto-resume dormant Codex agents for always-active message delivery.
 - [x] Support push delivery to live, unattached Codex agents.
 - [x] Avoid clobbering input when a user is attached to the Codex terminal.
 - [x] Treat an agent in `monitor_inbox` as already listening.

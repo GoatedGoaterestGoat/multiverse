@@ -5,13 +5,12 @@ reconstruct the sequence of events from memory or SSH into a remote to
 read raw JSONLs. Three event kinds, matching the three places delivery
 can silently go wrong:
 
-  message_sent       — message_agent was called (with or without
-                       push_notification). Logged once per call,
-                       regardless of what happens next.
-  notification_routed — the push_notification routing OUTCOME: which
-                       path was taken (auto-resume, tmux wake, fallback
-                       to passive, already-listening) and whether it
-                       succeeded. Logged only when push_notification=True.
+  message_sent       — message_agent was called. Logged once per call,
+                       regardless of what happens next. Its legacy
+                       push_notification field is always true.
+  notification_routed — the active-delivery routing OUTCOME: which path
+                       was taken (auto-resume, tmux wake, queued fallback,
+                       already-listening) and whether it succeeded.
   inbox_delivered    — messages were actually claimed and handed to an
                        agent's context — via a hook (SessionStart /
                        UserPromptSubmit / Stop) or the check_inbox tool.
@@ -136,7 +135,7 @@ def log_notification_routed(
     sender_runtime: Optional[str] = None,
     recipient_runtime: Optional[str] = None,
 ) -> None:
-    """The push_notification routing outcome for one message_agent call.
+    """The active-delivery routing outcome for one message_agent call.
 
     ``route`` records the selected auto-resume, tmux wake, already-listening,
     or passive-fallback path. ``success`` is only meaningful for routes that

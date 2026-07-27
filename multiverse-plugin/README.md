@@ -433,7 +433,7 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 1. `message_agent(target, message, working_directory=…)` writes `~/.multiverse/inbox/<target-cwd>/<target>/<id>.json` (atomic tmp+rename), where `<target-cwd>` is `working_directory` if given (cross-workspace) else the sender's own cwd. For a cross-workspace send it also stamps `from_cwd` (the sender's workspace) so the recipient can reply. The inbox write always happens before any auto-resume, so Claude's SessionStart hook and Codex's wrapper-side resume prompt both observe it.
 2. **Wake routing** (always attempted — there is no queue-only mode):
    - dormant/ended → `_auto_resume` spawns detached tmux with either `claude --resume <uuid>` or `codex resume <id>`; the runtime wrapper supplies the startup inbox prompt.
-   - idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter`. Claude's prompt hook injects the message; Codex is explicitly told to call `check_inbox`.
+   - idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` submits a check-inbox wake prompt. Claude uses literal `send-keys` + Enter so its prompt hook injects the message. Codex uses bracketed paste + Tab (submit while idle, queue while working), validates the exact composer text, and confirms it cleared before reporting success.
    - idle/working + client attached → no ping (would clobber the user's input); the message remains queued.
    - listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
    - starting → no ping while the runtime TUI is starting; the message remains queued.
