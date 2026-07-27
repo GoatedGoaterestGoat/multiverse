@@ -244,6 +244,7 @@ def _read_codex_session_metadata(path: Path) -> dict:
     session_id: Optional[str] = None
     cwd: Optional[str] = None
     preview: Optional[str] = None
+    ancestor_ids: list[str] = []
     try:
         with path.open() as fh:
             for line in fh:
@@ -254,12 +255,25 @@ def _read_codex_session_metadata(path: Path) -> dict:
                 typ = raw.get("type")
                 payload = raw.get("payload") or {}
                 if typ == "session_meta" and isinstance(payload, dict):
-                    value = payload.get("id")
-                    if isinstance(value, str):
-                        session_id = value
-                    value = payload.get("cwd")
-                    if isinstance(value, str):
-                        cwd = value
+                    # A resumed rollout can embed the ancestor's session_meta after
+                    # its own. The first metadata row identifies this rollout; later
+                    # rows are transcript history and must not replace its ID/cwd.
+                    if session_id is None:
+                        value = payload.get("id")
+                        if isinstance(value, str):
+                            session_id = value
+                    else:
+                        value = payload.get("id")
+                        if (
+                            isinstance(value, str)
+                            and value != session_id
+                            and value not in ancestor_ids
+                        ):
+                            ancestor_ids.append(value)
+                    if cwd is None:
+                        value = payload.get("cwd")
+                        if isinstance(value, str):
+                            cwd = value
                 elif (
                     preview is None
                     and typ == "event_msg"
@@ -280,6 +294,7 @@ def _read_codex_session_metadata(path: Path) -> dict:
         "id": session_id,
         "cwd": cwd,
         "preview": preview or "(no user message)",
+        "ancestor_ids": ancestor_ids,
     }
     _CODEX_METADATA_CACHE[str(path)] = (mtime, result)
     return result
@@ -326,6 +341,7 @@ def list_codex_sessions_in(
                 "mtime": st.st_mtime,
                 "size": st.st_size,
                 "name": names.get(session_id),
+                "ancestor_ids": list(meta.get("ancestor_ids") or ()),
             }
             previous = by_id.get(session_id)
             if previous is None or found["mtime"] > previous["mtime"]:
@@ -670,10 +686,10 @@ def build_dashboard_rows(
 
     ``sessions`` is expected to already be filtered to ``cwd``.
 
-    Deduplicates: a claude JSONL is considered "wrapped" (and skipped from
-    the dormant list) if any multiverse session has it as ``claude_uuid`` or
-    ``resumed_from``, or if it's listed in ``hide_uuids`` (used for in-flight
-    ask-all fork JSONLs).
+    Deduplicates: a native session is considered "wrapped" (and skipped from
+    the dormant list) if any multiverse session has it as its current runtime
+    ID or ``resumed_from``, or, for Claude, if it's listed in ``hide_uuids``
+    (used for in-flight ask-all fork JSONLs).
     """
     # Reap stale ask-fork registry entries (and any orphaned fork JSONLs)
     # before we read the registry below.
@@ -692,8 +708,11 @@ def build_dashboard_rows(
         u = s.effective_claude_uuid
         if u:
             wrapped_uuids.add(u)
-        if s.runtime == RUNTIME_CODEX and s.runtime_session_id:
-            wrapped_codex_ids.add(s.runtime_session_id)
+        if s.runtime == RUNTIME_CODEX:
+            if s.runtime_session_id:
+                wrapped_codex_ids.add(s.runtime_session_id)
+            if s.resumed_from:
+                wrapped_codex_ids.add(s.resumed_from)
 
     # Map each superseded claude UUID to its fold timestamp. Used to render
     # those JSONLs as `Name (folded HH:MM)` ghost rows instead of plain
@@ -725,6 +744,16 @@ def build_dashboard_rows(
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
     codex_sessions = list_codex_sessions_in(cwd, include_unnamed=True)
     codex_by_id = {info["id"]: info for info in codex_sessions}
+    pending_codex_ids = list(wrapped_codex_ids)
+    while pending_codex_ids:
+        info = codex_by_id.get(pending_codex_ids.pop())
+        if not info:
+            continue
+        for ancestor_id in info.get("ancestor_ids") or ():
+            if ancestor_id in wrapped_codex_ids:
+                continue
+            wrapped_codex_ids.add(ancestor_id)
+            pending_codex_ids.append(ancestor_id)
 
     if project_dir.is_dir():
         for path in project_dir.glob("*.jsonl"):
@@ -752,6 +781,17 @@ def build_dashboard_rows(
             info = codex_by_id.get(s.runtime_session_id)
             if info:
                 preview = info.get("preview") or ""
+            preview_ancestors: list[str] = []
+            if s.resumed_from and s.resumed_from != s.runtime_session_id:
+                preview_ancestors.append(s.resumed_from)
+            if info:
+                preview_ancestors.extend(info.get("ancestor_ids") or ())
+            for ancestor_id in preview_ancestors:
+                if preview and preview != "(no user message)":
+                    break
+                ancestor = codex_by_id.get(ancestor_id)
+                if ancestor:
+                    preview = ancestor.get("preview") or preview
         rows.append(
             DashboardRow(
                 name=s.name,
@@ -868,6 +908,12 @@ def wrapped_runtime_session_ids(sessions: list[Session]) -> set[tuple[str, str]]
         session_id = session.runtime_session_id
         if session_id:
             out.add((session.runtime, session_id))
+        if (
+            session.runtime == RUNTIME_CODEX
+            and session.resumed_from
+            and session.resumed_from != session_id
+        ):
+            out.add((session.runtime, session.resumed_from))
     return out
 
 

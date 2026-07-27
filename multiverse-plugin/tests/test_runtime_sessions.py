@@ -110,6 +110,50 @@ class RuntimeMetadataTests(unittest.TestCase):
             {item["id"] for item in all_found}, {"named-id", "unnamed-id"}
         )
 
+    def test_resumed_codex_rollout_keeps_its_first_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            rollout = Path(raw) / "rollout.jsonl"
+            rollout.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "current-thread",
+                                    "cwd": "/workspace",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "ancestor-thread",
+                                    "cwd": "/workspace",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "user_message",
+                                    "message": "Original prompt",
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            metadata = sessions._read_codex_session_metadata(rollout)
+
+        self.assertEqual(metadata["id"], "current-thread")
+        self.assertEqual(metadata["preview"], "Original prompt")
+        self.assertEqual(metadata["ancestor_ids"], ["ancestor-thread"])
+
     def test_dashboard_deduplicates_wrapped_codex_thread(self) -> None:
         wrapped = sessions.Session(
             id="mv-id",
@@ -142,6 +186,48 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(rows[0].runtime, sessions.RUNTIME_CODEX)
         self.assertEqual(rows[0].session_id, "codex-thread")
         self.assertEqual(rows[0].preview, "hello")
+
+    def test_dashboard_deduplicates_resumed_codex_ancestor_and_uses_preview(
+        self,
+    ) -> None:
+        wrapped = sessions.Session(
+            id="mv-id",
+            cwd="/workspace",
+            created_at=1,
+            status="idle",
+            status_ts=2,
+            name="codex-agent",
+            runtime=sessions.RUNTIME_CODEX,
+            codex_session_id="current-thread",
+            resumed_from="current-thread",
+        )
+        native = [
+            {
+                "id": "current-thread",
+                "name": "codex-agent",
+                "preview": "(no user message)",
+                "mtime": 4,
+                "ancestor_ids": ["ancestor-thread"],
+            },
+            {
+                "id": "ancestor-thread",
+                "name": "codex-agent",
+                "preview": "Original prompt",
+                "mtime": 3,
+            },
+        ]
+        with (
+            patch.object(sessions.forks, "gc"),
+            patch.object(sessions.forks, "active_uuids", return_value=set()),
+            patch.object(sessions, "list_codex_sessions_in", return_value=native),
+            patch.object(sessions, "list_locked", return_value=set()),
+            patch.object(sessions, "CLAUDE_PROJECTS_DIR", Path("/missing")),
+        ):
+            rows = sessions.build_dashboard_rows([wrapped], "/workspace")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "current-thread")
+        self.assertEqual(rows[0].preview, "Original prompt")
 
     def test_all_session_names_share_one_runtime_namespace(self) -> None:
         with (
