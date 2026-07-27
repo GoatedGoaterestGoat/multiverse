@@ -145,7 +145,7 @@ Several MCP tools are available to any agent running under the wrapper. They def
 
 **`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster.
 
-**`message_agent(target_name, message, push_notification=False, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
+**`message_agent(target_name, message, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
 - Claude recipients get hook-injected reminders; Codex recipients call `check_inbox`
 - Recipient has full tool access (Read, Bash, Grep, etc.) and can take their time
@@ -154,20 +154,21 @@ Several MCP tools are available to any agent running under the wrapper. They def
 - To reply, the recipient simply calls `message_agent` back at the original sender (no separate respond tool)
 - **Cross-workspace**: pass `working_directory=<abs path>` to message an agent in another workspace (like `ask_agent`). The delivered message carries the sender's workspace, and the recipient is told to reply with `working_directory=<sender's workspace>` — so replies route back correctly.
 
-**`push_notification`** controls *when* the message reaches the recipient:
+**Delivery is always active** — the message is queued in the recipient's inbox, then the recipient is woken so it gets picked up without waiting for the user. What the wake looks like depends on the recipient's state:
 
-| `push_notification` | Recipient state | What happens |
-|:--------------------|:----------------|:-------------|
-| `False` (default) | any | Queue only. Claude consumes it through its next inbox hook; Codex consumes it with `check_inbox`. A dormant recipient stays dormant until the user resumes it. |
-| `True` | dormant / ended | Recipient is **auto-resumed** (started for you) and processes the message on startup — no user needed. |
-| `True` | idle / working, **no user attached** | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately. |
-| `True` | idle / working, **user attached** | Remains queued — we don't disrupt the attached user's pane. |
-| `True` | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
-| `True` | starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
-| `True` | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
-| `True` | compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
+| Recipient state | What happens |
+|:----------------|:-------------|
+| dormant / ended | Recipient is **auto-resumed** (started for you) and processes the message on startup — no user needed. |
+| idle / working, **no user attached** | Recipient is **pinged via its terminal** (tmux `send-keys`) to check its inbox immediately. |
+| idle / working, **user attached** | Remains queued — we don't disrupt the attached user's pane. |
+| listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
+| starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
+| waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
+| compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
 
-The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, fell back to passive, etc.). Use `push_notification=True` for time-sensitive work or when you're blocked on the recipient acting; leave it `False` when it's fine to wait for the recipient (or the user) to get to it.
+The states that can't be woken still receive the message through their normal delivery path (Claude's inbox hooks; Codex's `check_inbox`). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
+
+> The old `push_notification` argument is retired — delivery is always active now. Passing it (either spelling) is silently ignored.
 
 **`ask_agent(target_name, question, timeout_seconds=60)`** — send a quick ephemeral question. Use this for facts the target already knows.
 
@@ -378,7 +379,7 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 | Tool | Purpose |
 |:-----|:--------|
 | `list_agents(max_agents)` | Discover other agents in the workspace |
-| `message_agent(target_name, message, push_notification, working_directory)` | Send a durable message (inbox-delivered); `push_notification=True` actively wakes the recipient; `working_directory` targets another workspace |
+| `message_agent(target_name, message, working_directory)` | Send a durable message (inbox-delivered); always actively wakes the recipient; `working_directory` targets another workspace |
 | `check_inbox()` | Read + clear pending inbox messages on demand |
 | `monitor_inbox(timeout_seconds)` | Block until the next inbox message arrives (async, interruptible; shows as `listening`) |
 | `ask_agent(target_name, question, timeout_seconds)` | Ephemeral side-question (forked subprocess) |
@@ -429,17 +430,16 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 
 ### What happens during a `message_agent` call
 
-1. `message_agent(target, message, push_notification=…, working_directory=…)` writes `~/.multiverse/inbox/<target-cwd>/<target>/<id>.json` (atomic tmp+rename), where `<target-cwd>` is `working_directory` if given (cross-workspace) else the sender's own cwd. For a cross-workspace send it also stamps `from_cwd` (the sender's workspace) so the recipient can reply. The inbox write always happens before any auto-resume, so Claude's SessionStart hook and Codex's wrapper-side resume prompt both observe it.
-2. **Routing by `push_notification`:**
-   - `False` → nothing else happens. Claude waits for its next inbox hook; Codex waits for `check_inbox` or a later wrapper resume prompt.
-   - `True` + dormant/ended → `_auto_resume` spawns detached tmux with either `claude --resume <uuid>` or `codex resume <id>`; the runtime wrapper supplies the startup inbox prompt.
-   - `True` + idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter`. Claude's prompt hook injects the message; Codex is explicitly told to call `check_inbox`.
-   - `True` + idle/working + client attached → no ping (would clobber the user's input); the message remains queued.
-   - `True` + listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
-   - `True` + starting → no ping while the runtime TUI is starting; the message remains queued.
-   - `True` + waiting (blocked on a permission/input prompt) → passive delivery; a terminal ping would land on the prompt as random keys, not go through, so we don't try.
-   - `True` + compacting (`is_locked(uuid)` — checked before any state-based branching) → passive delivery; the pane is killed for the duration.
-3. Tool returns a result describing which path was taken (woke dormant / pinged live / fell back to passive because attached-user / waiting / compacting / etc.).
+1. `message_agent(target, message, working_directory=…)` writes `~/.multiverse/inbox/<target-cwd>/<target>/<id>.json` (atomic tmp+rename), where `<target-cwd>` is `working_directory` if given (cross-workspace) else the sender's own cwd. For a cross-workspace send it also stamps `from_cwd` (the sender's workspace) so the recipient can reply. The inbox write always happens before any auto-resume, so Claude's SessionStart hook and Codex's wrapper-side resume prompt both observe it.
+2. **Wake routing** (always attempted — there is no queue-only mode):
+   - dormant/ended → `_auto_resume` spawns detached tmux with either `claude --resume <uuid>` or `codex resume <id>`; the runtime wrapper supplies the startup inbox prompt.
+   - idle/working + no client attached (`tmux list-clients` empty) → `_wake_via_tmux` types `send-keys -l "<wake prompt>"` + `Enter`. Claude's prompt hook injects the message; Codex is explicitly told to call `check_inbox`.
+   - idle/working + client attached → no ping (would clobber the user's input); the message remains queued.
+   - listening → no action; the recipient's `monitor_inbox` poll picks it up within ~1s.
+   - starting → no ping while the runtime TUI is starting; the message remains queued.
+   - waiting (blocked on a permission/input prompt) → no ping; it would land on the prompt as random keys, so we don't try. Remains queued.
+   - compacting (`is_locked(uuid)` — checked before any state-based branching) → no wake; the pane is killed for the duration. Remains queued.
+3. Tool returns a result describing which path was taken (woke dormant / pinged live / left queued because attached-user / waiting / compacting / etc.).
 4. For a Claude recipient, the next firing hook (`SessionStart` if just resumed, `Stop` after the current turn, or `UserPromptSubmit` on the next input or a push ping) runs `deliver-inbox.py`, which:
    - Reads all pending messages in the recipient's inbox
    - Formats them as one `<system-reminder>` block

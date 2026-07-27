@@ -547,8 +547,6 @@ def list_agents(
 def message_agent(
     target_name: str,
     message: str,
-    push_notification: bool = False,
-    push_notifications: bool = False,
     working_directory: str = "",
 ) -> str:
     """Send a durable message to another named agent.
@@ -571,16 +569,8 @@ def message_agent(
     workspace) — there is no separate "respond" tool. For a quick fact you
     don't want to persist in the target's session, use ``ask_agent``.
 
-    DELIVERY TIMING is controlled by ``push_notification``:
-
-    ``push_notification=False`` (default) — queue only. Claude receives the
-    message through its next inbox hook. Codex receives it only when it calls
-    ``check_inbox``; a user-initiated resume prompts dormant Codex sessions to
-    do so. A dormant recipient stays dormant and the dashboard shows its
-    pending-inbox badge. Use this for non-urgent messages.
-
-    ``push_notification=True`` — active delivery: wake the recipient now,
-    no user needed. Behavior depends on the recipient's state:
+    DELIVERY is always active: the recipient is woken now, no user needed.
+    Behavior depends on the recipient's state:
       - dormant/ended → the agent is auto-resumed (started for you) and
         processes the message on startup.
       - idle or working, with NO user attached to its terminal → it's
@@ -599,22 +589,17 @@ def message_agent(
         the user can't interact with it during compaction), so it is NOT
         woken; the message queues and is delivered once compaction finishes
         and the session resumes.
-    Use this for time-sensitive messages or when you're blocked waiting on
-    the recipient to act.
 
-    The tool result tells you exactly what happened (woke a dormant agent,
-    pinged a live one, fell back to passive delivery, etc.).
+    In every case the message is queued in the recipient's inbox first, so
+    the states that can't be woken still receive it through their normal
+    delivery path. The tool result tells you exactly what happened (woke a
+    dormant agent, pinged a live one, fell back to queued delivery, etc.).
 
     Args:
         target_name: Name of the agent to message. Use ``list_agents`` to
             see who's available.
         message: The message text. Can be multi-line, can include
             instructions, code, anything.
-        push_notification: If True, actively wake the recipient to deliver
-            now (see above). If False (default), leave it in the inbox for
-            its runtime-specific pull or hook delivery path.
-        push_notifications: Accepted alias for ``push_notification`` (either
-            spelling works; they're OR'd together).
         working_directory: Optional absolute path to another workspace. When
             omitted, the target is looked up in your own workspace. When
             provided, the target (and any auto-resume / inbox delivery)
@@ -669,8 +654,6 @@ def message_agent(
         message=message,
         sender_cwd="" if in_own_workspace else self_cwd_abs,
     )
-    # Accept either spelling — models frequently pluralize "notification".
-    push = bool(push_notification) or bool(push_notifications)
     caller_runtime = os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
     if caller_runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
         caller_runtime = RUNTIME_CLAUDE
@@ -679,7 +662,9 @@ def message_agent(
         sender=self_name,
         recipient=target_name,
         cwd=cwd,
-        push_notification=push,
+        # Retired as a caller-facing argument — delivery is always active
+        # now. Kept in the event schema so historical logs stay comparable.
+        push_notification=True,
         message_id=inbox_file.stem,
         message=message,
         sender_runtime=caller_runtime,
@@ -706,10 +691,10 @@ def message_agent(
 
     # A compacting agent is LOCKED: its tmux pane is killed for the duration
     # of the compaction and even the user can't attach/interact. Never wake
-    # it (no auto-resume, no terminal ping) — queue the message for passive
-    # delivery regardless of push, to be picked up when compaction finishes
-    # and the session resumes. Checked against the compaction lock directly
-    # (authoritative) rather than the status string.
+    # it (no auto-resume, no terminal ping) — leave the message queued, to
+    # be picked up when compaction finishes and the session resumes. Checked
+    # against the compaction lock directly (authoritative) rather than the
+    # status string.
     if target.claude_uuid and is_locked(target.claude_uuid):
         log_route("passive_fallback_compacting")
         return (
@@ -718,26 +703,7 @@ def message_agent(
             "finishes and the session resumes." + reply_hint
         )
 
-    if not push:
-        if is_dormant:
-            if target.runtime == RUNTIME_CLAUDE:
-                return (
-                    f"Message queued for '{target_name}' (dormant — it will be "
-                    "delivered when the user next resumes that session)."
-                    + reply_hint
-                )
-            return (
-                f"Message queued for '{target_name}' (dormant). "
-                + _queued_next_step(target.runtime, dormant=True)
-                + reply_hint
-            )
-        return (
-            f"Message queued for '{target_name}'. "
-            + _queued_next_step(target.runtime)
-            + reply_hint
-        )
-
-    # push enabled — actively wake the recipient.
+    # Actively wake the recipient.
     if is_dormant:
         try:
             _auto_resume(target, cwd)

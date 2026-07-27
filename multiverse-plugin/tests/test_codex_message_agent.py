@@ -86,7 +86,6 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         target: sessions.DashboardRow,
         *,
         caller_runtime: str = sessions.RUNTIME_CODEX,
-        push: bool = False,
         working_directory: str = "",
     ):
         with (
@@ -103,12 +102,11 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             result = server.message_agent(
                 target.name,
                 "Please inspect the failing test.",
-                push_notification=push,
                 working_directory=working_directory,
             )
         return result, sent, routed
 
-    def test_queue_only_communication_matrix_persists_messages(self) -> None:
+    def test_communication_matrix_persists_messages(self) -> None:
         matrix = [
             (sessions.RUNTIME_CLAUDE, sessions.RUNTIME_CLAUDE),
             (sessions.RUNTIME_CODEX, sessions.RUNTIME_CODEX),
@@ -122,10 +120,17 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 target = self._target(
                     name=f"receiver-{index}", runtime=target_runtime
                 )
-                result, sent, routed = self._message(
-                    target, caller_runtime=caller_runtime
-                )
+                # Attached target: the one live state that stays queued, so
+                # this stays a pure persistence/metadata test with no wake.
+                with (
+                    patch.object(server, "_client_attached", return_value=True),
+                    patch.object(server, "_wake_via_tmux") as wake,
+                ):
+                    result, sent, routed = self._message(
+                        target, caller_runtime=caller_runtime
+                    )
 
+                wake.assert_not_called()
                 pending = inbox.list_pending_messages(self.cwd, target.name)
                 self.assertEqual(len(pending), 1)
                 self.assertEqual(pending[0]["from"], "sender")
@@ -139,7 +144,10 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 self.assertEqual(
                     sent.call_args.kwargs["recipient_runtime"], target_runtime
                 )
-                routed.assert_not_called()
+                self.assertEqual(
+                    routed.call_args.kwargs["route"],
+                    "passive_fallback_client_attached",
+                )
                 if target_runtime == sessions.RUNTIME_CODEX:
                     self.assertIn(
                         "remain queued until Codex calls check_inbox", result
@@ -154,11 +162,14 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             runtime=sessions.RUNTIME_CODEX, cwd=other_cwd
         )
 
-        result, _, _ = self._message(
-            target,
-            caller_runtime=sessions.RUNTIME_CLAUDE,
-            working_directory=other_cwd,
-        )
+        # Attached, so delivery stays queued and this test stays focused on
+        # the cross-workspace reply metadata rather than wake routing.
+        with patch.object(server, "_client_attached", return_value=True):
+            result, _, _ = self._message(
+                target,
+                caller_runtime=sessions.RUNTIME_CLAUDE,
+                working_directory=other_cwd,
+            )
 
         pending = inbox.list_pending_messages(other_cwd, target.name)
         self.assertEqual(len(pending), 1)
@@ -176,7 +187,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                     patch.object(server, "_client_attached", return_value=False),
                     patch.object(server, "_wake_via_tmux", return_value=True) as wake,
                 ):
-                    result, _, routed = self._message(target, push=True)
+                    result, _, routed = self._message(target)
 
                 wake.assert_called_once_with(
                     target.session.tmux_name,
@@ -199,7 +210,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             patch.object(server, "_client_attached", return_value=True),
             patch.object(server, "_wake_via_tmux") as wake,
         ):
-            result, _, routed = self._message(target, push=True)
+            result, _, routed = self._message(target)
 
         wake.assert_not_called()
         self.assertIn("a user is attached", result)
@@ -215,7 +226,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             patch.object(server, "_client_attached") as attached,
             patch.object(server, "_wake_via_tmux") as wake,
         ):
-            result, _, routed = self._message(target, push=True)
+            result, _, routed = self._message(target)
 
         attached.assert_not_called()
         wake.assert_not_called()
@@ -233,7 +244,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                     patch.object(server, "_client_attached") as attached,
                     patch.object(server, "_wake_via_tmux") as wake,
                 ):
-                    result, _, routed = self._message(target, push=True)
+                    result, _, routed = self._message(target)
 
                 attached.assert_not_called()
                 wake.assert_not_called()
@@ -252,7 +263,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             patch.object(server, "_client_attached", return_value=False),
             patch.object(server, "_wake_via_tmux", return_value=False),
         ):
-            result, _, routed = self._message(target, push=True)
+            result, _, routed = self._message(target)
 
         self.assertIn("terminal ping failed", result)
         self.assertIn("remain queued until Codex calls check_inbox", result)
@@ -267,7 +278,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             patch.object(server, "_wake_via_tmux") as wake,
         ):
             result, _, _ = self._message(
-                target, caller_runtime=sessions.RUNTIME_CLAUDE, push=True
+                target, caller_runtime=sessions.RUNTIME_CLAUDE
             )
 
         wake.assert_not_called()
@@ -278,22 +289,26 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         )
         self.assertNotIn("Codex", result)
 
-    def test_claude_dormant_queue_result_keeps_existing_wording(self) -> None:
+    def test_claude_dormant_is_resumed_with_claude_wording(self) -> None:
         target = self._target(
             runtime=sessions.RUNTIME_CLAUDE,
             status="dormant",
             wrapped=False,
         )
 
-        result, _, _ = self._message(
-            target, caller_runtime=sessions.RUNTIME_CLAUDE
-        )
+        with patch.object(server, "_auto_resume") as resume:
+            result, _, routed = self._message(
+                target, caller_runtime=sessions.RUNTIME_CLAUDE
+            )
 
+        resume.assert_called_once()
+        self.assertEqual(routed.call_args.kwargs["route"], "auto_resume")
+        self.assertTrue(routed.call_args.kwargs["success"])
         self.assertIn(
-            "dormant — it will be delivered when the user next resumes that "
-            "session",
+            "Woke 'receiver' (it was dormant) and delivered your message",
             result,
         )
+        # Claude wording must not borrow the Codex check_inbox phrasing.
         self.assertNotIn("check_inbox", result.split(" If you're expecting")[0])
 
     def test_dormant_codex_is_resumed_after_inbox_write(self) -> None:
@@ -307,7 +322,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         with patch.object(
             server, "_auto_resume", side_effect=assert_inbox_precedes_resume
         ) as resume:
-            result, _, routed = self._message(target, push=True)
+            result, _, routed = self._message(target)
 
         resume.assert_called_once_with(target, self.cwd)
         self.assertIn("prompted Codex to call check_inbox on startup", result)
@@ -319,7 +334,7 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         with patch.object(
             server, "_auto_resume", side_effect=RuntimeError("spawn failed")
         ):
-            result, _, routed = self._message(target, push=True)
+            result, _, routed = self._message(target)
 
         self.assertIn("auto-resume failed (spawn failed)", result)
         self.assertIn("Codex wrapper will then prompt it", result)
@@ -565,9 +580,12 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
 
 class CodexMessageAgentMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_plugin_server_queues_message_for_discovered_codex_thread(
+    async def test_plugin_server_ignores_retired_push_notification_arg(
         self,
     ) -> None:
+        """A caller passing the retired ``push_notification`` argument must
+        not error, and must not suppress the (now unconditional) wake — the
+        MCP layer drops unknown kwargs, so the flag is silently ignored."""
         repo_root = Path(__file__).resolve().parents[2]
         wrapper_root = repo_root / "multiverse-plugin"
         mcp_server = (
@@ -629,8 +647,9 @@ class CodexMessageAgentMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             self.assertFalse(response.isError)
+            # Retired arg ignored → the dormant thread is woken anyway.
             self.assertIn(
-                "Codex wrapper will then prompt it to call check_inbox",
+                "prompted Codex to call check_inbox on startup",
                 response.content[0].text,
             )
             target_inbox = (

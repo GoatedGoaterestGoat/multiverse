@@ -151,7 +151,6 @@ async def run_wrapped_client() -> None:
                     {
                         "target_name": "codex-target",
                         "message": "Wrapped MCP delivery",
-                        "push_notification": False,
                     },
                 )
             )
@@ -371,7 +370,11 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
             self.assertIn("codex-target", results["list_agents"])
             self.assertIn("already have pending", results["monitor_inbox"])
             self.assertIn("Wrapped inbox delivery", results["check_inbox"])
-            self.assertIn("queued", results["message_agent"])
+            # Delivery is always active now: the dormant target is woken.
+            self.assertIn(
+                "prompted Codex to call check_inbox on startup",
+                results["message_agent"],
+            )
             self.assertEqual(results["ask_agent"], "Wrapped Codex answer")
             self.assertEqual(
                 results["spawn_agent"],
