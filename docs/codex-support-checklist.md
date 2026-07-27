@@ -135,6 +135,11 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Auto-resume dormant Codex agents for always-active message delivery.
 - [x] Support push delivery to live, unattached Codex agents.
 - [x] Avoid clobbering input when a user is attached to the Codex terminal.
+- [x] Require the Codex composer to be visible and focused before terminal
+      delivery; leave messages queued when a picker, modal, or other surface is
+      active.
+- [x] Save, clear, and restore a detached Codex session's typed-but-unsent draft
+      around terminal delivery, verifying each transition before continuing.
 - [x] Treat an agent in `monitor_inbox` as already listening.
 - [x] Report the actual delivery route in the tool result.
 - [x] Preserve inter-agent send, route, and delivery logs.

@@ -67,9 +67,12 @@ from src.spawn_requests import (
 )
 from src.sb_actions import (
     capture_pane,
+    capture_focused_codex_composer_draft,
+    clear_composer_text_via_tmux,
     codex_composer_first_line_text,
     parse_input_box_text,
     paste_text_via_tmux,
+    send_prompt_via_tmux,
 )
 
 mcp = FastMCP("multiverse")
@@ -229,10 +232,10 @@ def _write_session_status(status: str) -> None:
 # UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
 # the message remains durable until that tool atomically claims it.
 _WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
-_CODEX_WAKE_COMPOSER_TIMEOUT_S = 3.0
 _CODEX_WAKE_COMPOSER_POLL_INTERVAL_S = 0.025
 _CODEX_WAKE_SUBMIT_ACK_TIMEOUT_S = 0.5
 _CODEX_WAKE_SUBMIT_ATTEMPTS = 3
+_CODEX_WAKE_DRAFT_TIMEOUT_S = 3.0
 
 
 def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
@@ -256,18 +259,6 @@ def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
 
 def _codex_wake_prompt_ready(tmux_name: str) -> bool:
     return _codex_wake_prompt_state(tmux_name) is True
-
-
-def _wait_for_codex_wake_prompt(tmux_name: str) -> bool:
-    """Wait briefly for Codex to render and expose the pasted wake prompt."""
-    deadline = time.monotonic() + _CODEX_WAKE_COMPOSER_TIMEOUT_S
-    while True:
-        if _codex_wake_prompt_ready(tmux_name):
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
 
 
 def _wait_for_codex_wake_prompt_to_clear(tmux_name: str) -> bool:
@@ -302,6 +293,73 @@ def _submit_codex_wake_prompt(tmux_name: str) -> bool:
     return False
 
 
+def _wait_for_codex_composer_text(tmux_name: str, expected: str) -> bool:
+    """Wait for a focused Codex composer to contain exactly ``expected``."""
+    deadline = time.monotonic() + _CODEX_WAKE_DRAFT_TIMEOUT_S
+    while True:
+        ok, draft, _ = capture_focused_codex_composer_draft(tmux_name)
+        if ok and draft == expected:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
+
+
+def _replace_codex_composer_text(
+    tmux_name: str,
+    current: str,
+    replacement: str,
+) -> bool:
+    """Atomically-as-possible replace a known focused Codex draft."""
+    ok, actual, _ = capture_focused_codex_composer_draft(tmux_name)
+    if not ok or actual != current:
+        return False
+    if current:
+        ok, _ = clear_composer_text_via_tmux(tmux_name, current)
+        if not ok or not _wait_for_codex_composer_text(tmux_name, ""):
+            return False
+    if replacement:
+        ok, _ = paste_text_via_tmux(tmux_name, replacement)
+        if not ok or not _wait_for_codex_composer_text(tmux_name, replacement):
+            return False
+    return True
+
+
+def _restore_codex_composer_text(tmux_name: str, saved: str) -> bool:
+    """Best-effort rollback/restore after a Codex wake attempt."""
+    deadline = time.monotonic() + _CODEX_WAKE_DRAFT_TIMEOUT_S
+    while True:
+        ok, current, _ = capture_focused_codex_composer_draft(tmux_name)
+        if ok:
+            if current == saved:
+                return True
+            if _replace_codex_composer_text(tmux_name, current, saved):
+                return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(_CODEX_WAKE_COMPOSER_POLL_INTERVAL_S, remaining))
+
+
+def _wake_codex_via_tmux(tmux_name: str) -> bool:
+    """Wake Codex without losing a detached session's partial draft."""
+    ok, saved, _ = capture_focused_codex_composer_draft(tmux_name)
+    if not ok:
+        return False
+
+    if saved and not _replace_codex_composer_text(tmux_name, saved, ""):
+        _restore_codex_composer_text(tmux_name, saved)
+        return False
+    if not _replace_codex_composer_text(tmux_name, "", _WAKE_PROMPT):
+        _restore_codex_composer_text(tmux_name, saved)
+        return False
+    if not _submit_codex_wake_prompt(tmux_name):
+        _restore_codex_composer_text(tmux_name, saved)
+        return False
+    return _restore_codex_composer_text(tmux_name, saved)
+
+
 def _client_attached(tmux_name: str) -> bool:
     """True if a user is attached to this session's tmux pane.
 
@@ -325,17 +383,14 @@ def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     """Type and submit the wake prompt in a session's tmux pane.
 
     Claude uses literal ``send-keys`` for the text. Codex uses tmux's explicit
-    bracketed-paste path, validates the composer, then uses Tab to submit while idle or
-    queue while working. Codex submission is acknowledged by the prompt leaving the
-    composer and retried if necessary. Returns False on any tmux error or unexpected
-    Codex composer content.
+    bracketed-paste path, requires the composer to be focused, saves and clears any
+    partial draft, then uses Tab to submit while idle or queue while working. Codex
+    submission and draft restoration are both verified. Returns False on any tmux
+    error, unavailable composer, or unexpected Codex composer content.
     """
     try:
         if runtime == RUNTIME_CODEX:
-            ok, _ = paste_text_via_tmux(tmux_name, _WAKE_PROMPT)
-            if not ok or not _wait_for_codex_wake_prompt(tmux_name):
-                return False
-            return _submit_codex_wake_prompt(tmux_name)
+            return _wake_codex_via_tmux(tmux_name)
         else:
             subprocess.run(
                 ["tmux", "send-keys", "-t", tmux_name, "-l", _WAKE_PROMPT],
@@ -573,10 +628,17 @@ def message_agent(
     Behavior depends on the recipient's state:
       - dormant/ended → the agent is auto-resumed (started for you) and
         processes the message on startup.
-      - idle or working, with NO user attached to its terminal → it's
-        pinged via its terminal to check its inbox immediately.
-      - idle or working, but a user IS attached to its terminal → falls
-        back to queued delivery without disrupting the attached user.
+      - idle or working (Claude), with its input box on screen → it's
+        pinged via its terminal to check its inbox immediately, whether or
+        not a user is attached. Anything the user had typed but not sent is
+        saved and restored around the ping.
+      - idle or working (Claude), with its input box NOT on screen → it's
+        sitting on a permission prompt or a question modal, so nothing is
+        typed and delivery stays queued.
+      - idle or working (Codex), with NO user attached to its terminal →
+        it's pinged via its terminal to check its inbox immediately.
+      - idle or working (Codex), but a user IS attached to its terminal →
+        falls back to queued delivery without disrupting the attached user.
       - listening (parked in ``monitor_inbox``) → it's already watching its
         inbox and picks the message up within a second; no wake needed.
       - starting → remains queued; no terminal input is sent while the
@@ -769,6 +831,42 @@ def message_agent(
             "ping was sent. "
             + _queued_next_step(target.runtime)
             + reply_hint
+        )
+
+    if status in ("idle", "working") and target.runtime == RUNTIME_CLAUDE:
+        # Claude delivery is composer-gated rather than attachment-gated. Whether a
+        # user is attached is irrelevant — what matters is whether the composer is on
+        # screen to receive keystrokes:
+        #   composer visible  → deliver, preserving any typed-but-unsent draft
+        #                       (save → clear → send+submit → restore).
+        #   composer missing  → a permission prompt / AskUserQuestion modal is up (or
+        #                       the pane is scrolled away). Keystrokes would answer the
+        #                       modal, so leave the message queued.
+        tmux_name = target.session.tmux_name
+        ok, saved, err = send_prompt_via_tmux(
+            tmux_name, _WAKE_PROMPT, runtime=RUNTIME_CLAUDE, require_composer=True
+        )
+        if not ok and "composer is not visible" in err:
+            log_route("passive_fallback_no_composer")
+            return (
+                f"Message queued for '{target_name}' — its input box isn't on screen "
+                "(it's on a permission prompt or a question modal), so no keystrokes "
+                "were sent. The message will be delivered on the recipient's next "
+                "turn." + reply_hint
+            )
+        log_route("wake_tmux", success=ok)
+        if not ok:
+            return (
+                f"Message queued for '{target_name}', but the terminal ping failed "
+                f"({err}) — it will be delivered on the recipient's next turn."
+                + reply_hint
+            )
+        preserved = (
+            " Its typed-but-unsent input was saved and restored." if saved else ""
+        )
+        return (
+            f"Delivered to '{target_name}' and pinged its terminal to check its "
+            f"inbox now (it was {status})." + preserved + reply_hint
         )
 
     if status in ("idle", "working"):

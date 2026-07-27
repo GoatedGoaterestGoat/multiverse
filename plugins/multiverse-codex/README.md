@@ -30,9 +30,12 @@ do not consume or inject them.
   the wait. When it returns, call `check_inbox()` to read the message.
 
 Every `message_agent(...)` call uses active delivery. An unattended live Codex
-terminal is prompted to call `check_inbox`; a dormant or ended Codex agent is
-resumed with that prompt as its first user turn. Starting, approval-waiting,
-and user-attached sessions are left queued.
+terminal is prompted to call `check_inbox` only when its input composer is
+focused. A typed-but-unsent draft is saved, cleared, and restored around that
+prompt. If another terminal surface is active, no keys are sent and the message
+stays queued. A dormant or ended Codex agent is resumed with the inbox prompt as
+its first user turn. Starting, approval-waiting, and user-attached sessions are
+also left queued.
 
 The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
 Claude-to-Codex messages. Cross-workspace messages retain the sender workspace

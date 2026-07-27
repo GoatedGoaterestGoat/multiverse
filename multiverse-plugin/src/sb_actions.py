@@ -8,10 +8,12 @@ focused on the decision flow.
 Delivery strategies by target status:
 
 - **idle / working / waiting / listening** → :func:`send_prompt_via_tmux`. We ALWAYS
-  send-keys (even when a user is attached — unlike ``message_agent``, which leaves
-  delivery queued for an attached user), and preserve typed-but-unsent input with
+  send-keys (even when a user is attached), and preserve typed-but-unsent input with
   save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between
-  lines; Codex uses an explicit bracketed paste.
+  lines; Codex uses an explicit bracketed paste. ``message_agent`` calls the same
+  helper with ``require_composer=True`` so it can fall back to queued delivery when a
+  modal has replaced the composer; the connector leaves it False and delivers to
+  ``waiting`` targets regardless.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
   the runtime wrapper hands to Claude or Codex as a positional prompt argument.
@@ -128,23 +130,96 @@ def capture_pane(
     return _run_tmux(args, capture=True)
 
 
-# Claude Code's input box is drawn with box-drawing chars. The input line looks like
-# ``│ > <typed text> │`` (padded with spaces to the box width), preceded within a few
-# lines by a top border ``╭───...───╮``.
+# Claude Code's composer is a region bracketed by two horizontal rule lines (U+2500),
+# with the prompt marker on the first line inside it:
 #
-# We had a live E2E failure with a looser heuristic that matched ANY ``>`` after
-# stripping box chars — that misfires on inter-agent message quote blocks (``> ...``
-# prefix), tool logs, system reminders, and anywhere else a ``>`` character appears in
-# rendered pane content. This stricter version requires BOTH the specific input-line
-# shape AND a nearby top-border line, which the false-positive scenarios don't satisfy.
-_INPUT_LINE_RE = re.compile(r"^│\s*>\s*(.*?)\s*│\s*$")
-_TOP_BORDER_LOOKBACK = 6  # lines to scan above for ╭...╮
+#     ──────────────────────────────────────────────── agent-name ──
+#     ❯\xa0typed text
+#     ──────────────────────────────────────────────────────────────
+#     ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent
+#
+# Verified by capturing live Claude Code panes (empty box renders as a bare ``❯\xa0``).
+#
+# NOTE: an earlier shape here — ``│ > <text> │`` plus a ``╭───╮`` top border — does not
+# match any Claude Code version we run, so Claude draft save/restore silently no-opped:
+# the parse always returned "" (read as "empty box"), so nothing was ever preserved.
+#
+# The marker is ``❯`` U+276F, NOT ASCII ``>``, and it is padded with U+00A0. Bracketing
+# the marker between two rules is what keeps this off scrollback: ``❯`` also prefixes
+# *sent* history lines and can appear inside quoted inter-agent messages, but those
+# aren't rule-bracketed.
+_CLAUDE_MARKER = "❯"
+_RULE_CHAR = "─"
+_RULE_MIN_LEN = 8
+# Deliberately loose: the top rule carries the agent name (``──── agent-comm-tools ──``),
+# which for a 16-char name already drops the rule-char ratio to 0.81. The marker-line
+# requirement is what actually rejects non-composer regions.
+_RULE_MIN_RATIO = 0.6
+# Claude renders its tab-to-accept autocomplete suggestion with SGR 2 (dim). Under a
+# plain capture that is indistinguishable from typed text, so dim spans are deleted
+# before parsing — otherwise a ghost suggestion gets "saved" and then restored into the
+# box as literal user input.
+_GHOST_DIM_RE = re.compile(r"\x1b\[2m.*?\x1b\[0m", re.DOTALL)
+
+
+def _is_rule_line(line: str) -> bool:
+    """Whether ``line`` is one of the composer's horizontal rules."""
+    s = line.strip()
+    if len(s) < _RULE_MIN_LEN:
+        return False
+    return s.count(_RULE_CHAR) >= _RULE_MIN_RATIO * len(s)
+
+
+def claude_input_box(pane: str) -> tuple[bool, str]:
+    """Return ``(visible, draft)`` for the Claude composer in ``pane``.
+
+    ``visible`` distinguishes the two cases a bare draft string cannot:
+
+    * ``(True, "")``   — composer is on screen and empty. Safe to send-keys.
+    * ``(True, text)`` — composer is on screen holding typed-but-unsent text.
+    * ``(False, "")``  — no composer: a permission prompt or AskUserQuestion modal is
+      up, the session is still booting, or the pane is scrolled away. Sending keys
+      here would answer the modal instead of typing a prompt, so callers must not.
+
+    Pass a pane captured with ``-J`` (join wrapped) so soft wraps are already joined and
+    any newline inside the composer region is a real draft newline; and with ``-e`` so
+    dim autocomplete ghost text can be told apart from a genuine draft.
+    """
+    text = pane
+    if "\x1b" in text:
+        text = _GHOST_DIM_RE.sub("", text)
+        text = _ANSI_SGR_RE.sub("", text)
+    lines = text.splitlines()
+
+    bottom = next(
+        (i for i in range(len(lines) - 1, -1, -1) if _is_rule_line(lines[i])), None
+    )
+    if bottom is None:
+        return False, ""
+    top = next((i for i in range(bottom - 1, -1, -1) if _is_rule_line(lines[i])), None)
+    if top is None:
+        return False, ""
+
+    region = lines[top + 1 : bottom]
+    if not region:
+        return False, ""
+    first = region[0].lstrip()
+    if not first.startswith(_CLAUDE_MARKER):
+        return False, ""
+
+    # U+00A0 padding after the marker is ordinary whitespace to str.strip().
+    parts = [first[len(_CLAUDE_MARKER) :].strip()]
+    parts.extend(line.strip() for line in region[1:])
+    return True, "\n".join(parts).strip()
 
 # Codex's composer has no box border. Its first line begins with ``›`` and its status
 # footer follows below it. Continuation lines are indented by two spaces.
 _CODEX_INPUT_LINE_RE = re.compile(r"^›(?:\s?(.*))?$")
 _CODEX_STATUS_RE = re.compile(
-    r"\s·\s(?:Ready|Working|Thinking|Waiting|Starting|Idle)(?:\s·\s|\s*$)",
+    r"(?:"
+    r"\s·\s(?:Ready|Working|Thinking|Waiting|Starting|Idle)(?:\s·\s|\s*$)"
+    r"|^\s+tab to queue message\b.*\bcontext left\s*$"
+    r")",
     re.IGNORECASE,
 )
 _CODEX_OPAQUE_DRAFT_RE = re.compile(
@@ -166,32 +241,93 @@ def codex_composer_first_line_text(pane: str) -> str | None:
     return None
 
 
-def _parse_claude_input_box_text(pane: str) -> str:
-    """Best-effort extract of any typed-but-unsent text in Claude's input box.
+def codex_composer_has_focus(tmux_name: str) -> tuple[bool, str]:
+    """Whether tmux's visible cursor is inside the last Codex composer.
 
-    Requires the FULL Claude-input-box shape: a line matching ``│ > <text> │`` (leading
-    box border, ``>`` prompt, trailing box border) AND a top-border line ``╭...╮`` within
-    :data:`_TOP_BORDER_LOOKBACK` lines above. A ``>`` in an inter-agent message quote
-    block, a system reminder, or a tool's output no longer matches — those lack the
-    left-border pattern and/or the accompanying top border.
-
-    Failure mode is still safe: a mismatch returns ``""`` (no save, no restore), which
-    just means we don't preserve typed text on that call — a mild regression, not
-    corruption of the pane.
+    A composer can remain rendered behind a modal, picker, or other active surface.
+    Visibility alone is therefore not enough to make terminal injection safe.
     """
-    lines = pane.splitlines()
-    for i in range(len(lines) - 1, -1, -1):
-        line = lines[i].rstrip()
-        m = _INPUT_LINE_RE.match(line)
-        if not m:
-            continue
-        # Confirm a Claude top-border line sits within a few lines above.
-        for j in range(max(0, i - _TOP_BORDER_LOOKBACK), i):
-            top = lines[j]
-            if "╭" in top and "╮" in top:
-                return m.group(1)
-        # Matched an input-shaped line but no accompanying top border → skip.
-    return ""
+    ok, pane = capture_pane(tmux_name)
+    if not ok:
+        return False, pane
+    ok, cursor = _run_tmux(
+        [
+            "display-message",
+            "-p",
+            "-t",
+            tmux_name,
+            "#{cursor_y} #{cursor_flag}",
+        ],
+        capture=True,
+    )
+    if not ok:
+        return False, cursor
+    try:
+        cursor_y_raw, cursor_flag = str(cursor).split()
+        cursor_y = int(cursor_y_raw)
+    except (ValueError, TypeError):
+        return False, "could not read the tmux cursor position"
+    if cursor_flag != "1":
+        return False, "Codex input cursor is not visible"
+
+    lines = _ANSI_SGR_RE.sub("", pane).splitlines()
+    if not 0 <= cursor_y < len(lines):
+        return False, "Codex input cursor is outside the visible pane"
+
+    composer_y = -1
+    for index in range(min(cursor_y, len(lines) - 1), -1, -1):
+        if _CODEX_INPUT_LINE_RE.match(lines[index].rstrip()):
+            composer_y = index
+            break
+    if composer_y < 0:
+        return False, "Codex input composer is not focused"
+    for line in lines[composer_y + 1 : cursor_y + 1]:
+        if _CODEX_STATUS_RE.search(line):
+            return False, "Codex input composer is not focused"
+    if cursor_y > composer_y:
+        cursor_line = lines[cursor_y]
+        if cursor_line and not cursor_line.startswith("  "):
+            return False, "Codex input composer is not focused"
+    return True, ""
+
+
+def capture_focused_codex_composer_draft(
+    tmux_name: str,
+) -> tuple[bool, str, str]:
+    """Return ``(ok, draft, error)`` for an active Codex input composer."""
+    focused, error = codex_composer_has_focus(tmux_name)
+    if not focused:
+        return False, "", error
+    ok, pane = capture_pane(
+        tmux_name,
+        join_wrapped=True,
+        include_styles=True,
+    )
+    if not ok:
+        return False, "", pane
+    composer_visible, draft = _codex_composer(pane)
+    if not composer_visible:
+        return False, "", "Codex input composer is not visible"
+    if _codex_composer_is_ghost(pane):
+        draft = ""
+    if _CODEX_OPAQUE_DRAFT_RE.search(draft):
+        return (
+            False,
+            draft,
+            "Codex input contains pasted content or an image that cannot be safely restored",
+        )
+    return True, draft, ""
+
+
+def _parse_claude_input_box_text(pane: str) -> str:
+    """Typed-but-unsent text in Claude's composer, or ``""``.
+
+    Draft-only view of :func:`claude_input_box`. It cannot distinguish "composer
+    visible and empty" from "no composer at all" — both are ``""`` — so callers that
+    need to branch on that (e.g. deliver vs. fall back to queued delivery) should use
+    :func:`claude_input_box` directly.
+    """
+    return claude_input_box(pane)[1]
 
 
 def _codex_composer(pane: str) -> tuple[bool, str]:
@@ -285,6 +421,17 @@ def _bspaces(n: int) -> list[str]:
     return ["BSpace"] * max(0, int(n))
 
 
+def clear_composer_text_via_tmux(
+    tmux_name: str, text: str
+) -> tuple[bool, str]:
+    """Backspace-clear a known composer draft."""
+    if not text:
+        return True, ""
+    return _run_tmux(
+        ["send-keys", "-t", tmux_name] + _bspaces(len(text) + _CLEAR_MARGIN)
+    )
+
+
 def _type_prompt(
     tmux_name: str,
     text: str,
@@ -320,7 +467,11 @@ def _type_prompt(
 
 
 def send_prompt_via_tmux(
-    tmux_name: str, prompt: str, *, runtime: str = "claude"
+    tmux_name: str,
+    prompt: str,
+    *,
+    runtime: str = "claude",
+    require_composer: bool = False,
 ) -> tuple[bool, str, str]:
     """Deliver ``prompt`` to a live target as a user-typed message, preserving any
     typed-but-unsent text in the input box.
@@ -333,14 +484,20 @@ def send_prompt_via_tmux(
       5. type ``saved`` back with ``send-keys -l`` (no Enter — user's mid-typing is
          restored to the input box, still unsent)
 
+    ``require_composer`` makes step 1 fail when Claude's composer isn't on screen,
+    which means a permission prompt or AskUserQuestion modal has replaced it and our
+    keystrokes would answer the modal instead of typing a prompt. Callers that can
+    fall back to queued delivery (``message_agent``) pass True; the SecondBrain
+    connector leaves it False, which preserves its existing behaviour of delivering to
+    ``waiting`` targets. Codex always requires its composer.
+
     Returns ``(ok, saved_text, error)`` — the saved text lets the caller construct the
     success message ("Prompt delivered to X, saved and restored the text..." when non-empty).
     """
-    ok, pane = capture_pane(
-        tmux_name,
-        join_wrapped=runtime == "codex",
-        include_styles=runtime == "codex",
-    )
+    # Both runtimes need -J (soft wraps joined, so a newline in the composer region is
+    # a real draft newline) and -e (SGR preserved, so dim ghost/placeholder text can be
+    # told apart from a genuine draft and not "restored" as literal input).
+    ok, pane = capture_pane(tmux_name, join_wrapped=True, include_styles=True)
     if not ok:
         return False, "", pane  # `pane` holds the error message
     if runtime == "codex":
@@ -357,13 +514,13 @@ def send_prompt_via_tmux(
                 "safely restored",
             )
     else:
-        saved = parse_input_box_text(pane, runtime=runtime)
+        composer_visible, saved = claude_input_box(pane)
+        if require_composer and not composer_visible:
+            return False, "", "Claude input composer is not visible"
 
     # Step 2: clear whatever's in the input box.
     if saved:
-        ok, err = _run_tmux(
-            ["send-keys", "-t", tmux_name] + _bspaces(len(saved) + _CLEAR_MARGIN)
-        )
+        ok, err = clear_composer_text_via_tmux(tmux_name, saved)
         if not ok:
             return False, saved, err
 

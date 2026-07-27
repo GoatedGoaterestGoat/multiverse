@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -120,11 +120,21 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 target = self._target(
                     name=f"receiver-{index}", runtime=target_runtime
                 )
-                # Attached target: the one live state that stays queued, so
-                # this stays a pure persistence/metadata test with no wake.
+                # Keep every runtime pair on a non-delivering path so this stays a
+                # pure persistence/metadata test. Codex is gated on attachment;
+                # Claude is gated on its composer being on screen.
                 with (
                     patch.object(server, "_client_attached", return_value=True),
                     patch.object(server, "_wake_via_tmux") as wake,
+                    patch.object(
+                        server,
+                        "send_prompt_via_tmux",
+                        return_value=(
+                            False,
+                            "",
+                            "Claude input composer is not visible",
+                        ),
+                    ),
                 ):
                     result, sent, routed = self._message(
                         target, caller_runtime=caller_runtime
@@ -144,15 +154,19 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                 self.assertEqual(
                     sent.call_args.kwargs["recipient_runtime"], target_runtime
                 )
-                self.assertEqual(
-                    routed.call_args.kwargs["route"],
-                    "passive_fallback_client_attached",
-                )
                 if target_runtime == sessions.RUNTIME_CODEX:
+                    self.assertEqual(
+                        routed.call_args.kwargs["route"],
+                        "passive_fallback_client_attached",
+                    )
                     self.assertIn(
                         "remain queued until Codex calls check_inbox", result
                     )
                 else:
+                    self.assertEqual(
+                        routed.call_args.kwargs["route"],
+                        "passive_fallback_no_composer",
+                    )
                     self.assertIn("recipient's next turn", result)
 
     def test_cross_workspace_message_records_reply_workspace(self) -> None:
@@ -271,22 +285,31 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         self.assertFalse(routed.call_args.kwargs["success"])
         self.assertEqual(inbox.pending_inbox_count(self.cwd, target.name), 1)
 
-    def test_claude_attached_result_keeps_existing_passive_wording(self) -> None:
+    def test_claude_delivers_to_attached_target(self) -> None:
+        """Claude delivery is gated on the composer, not on attachment.
+
+        Replaces an earlier test that asserted an attached user forced passive
+        delivery: we now type into the composer regardless, preserving the user's
+        draft, so an attached user no longer delays their agent's messages.
+        """
         target = self._target(runtime=sessions.RUNTIME_CLAUDE)
         with (
-            patch.object(server, "_client_attached", return_value=True),
+            patch.object(server, "_client_attached", return_value=True) as attached,
             patch.object(server, "_wake_via_tmux") as wake,
+            patch.object(
+                server, "send_prompt_via_tmux", return_value=(True, "", "")
+            ) as send,
         ):
-            result, _, _ = self._message(
+            result, _, routed = self._message(
                 target, caller_runtime=sessions.RUNTIME_CLAUDE
             )
 
+        attached.assert_not_called()
         wake.assert_not_called()
-        self.assertIn(
-            "falls back to passive delivery (delivered on the recipient's "
-            "next turn) rather than a terminal ping",
-            result,
-        )
+        send.assert_called_once()
+        self.assertTrue(send.call_args.kwargs["require_composer"])
+        self.assertEqual(routed.call_args.kwargs["route"], "wake_tmux")
+        self.assertIn("pinged its terminal", result)
         self.assertNotIn("Codex", result)
 
     def test_claude_dormant_is_resumed_with_claude_wording(self) -> None:
@@ -400,42 +423,76 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
         self.assertEqual(calls, ["kill", "create"])
 
-    def test_codex_tmux_wake_uses_bracketed_paste_then_acknowledged_tab(self) -> None:
+    def test_codex_tmux_wake_uses_empty_focused_composer(self) -> None:
         with (
             patch.object(
-                server, "paste_text_via_tmux", return_value=(True, "")
-            ) as paste,
+                server,
+                "capture_focused_codex_composer_draft",
+                return_value=(True, "", ""),
+            ) as capture,
             patch.object(
-                server, "_wait_for_codex_wake_prompt", return_value=True
-            ) as wait,
+                server, "_replace_codex_composer_text", return_value=True
+            ) as replace,
             patch.object(
                 server, "_submit_codex_wake_prompt", return_value=True
             ) as submit,
+            patch.object(
+                server, "_restore_codex_composer_text", return_value=True
+            ) as restore,
         ):
             woke = server._wake_via_tmux(
                 "multiverse-target", runtime=sessions.RUNTIME_CODEX
             )
 
         self.assertTrue(woke)
-        paste.assert_called_once_with("multiverse-target", server._WAKE_PROMPT)
-        wait.assert_called_once_with("multiverse-target")
+        capture.assert_called_once_with("multiverse-target")
+        replace.assert_called_once_with(
+            "multiverse-target", "", server._WAKE_PROMPT
+        )
         submit.assert_called_once_with("multiverse-target")
+        restore.assert_called_once_with("multiverse-target", "")
 
-    def test_codex_tmux_wake_does_not_submit_contaminated_composer(self) -> None:
-        calls: list[list[str]] = []
-
-        def fake_run(command, **kwargs):
-            calls.append(command)
-            return subprocess.CompletedProcess(command, 0)
-
+    def test_codex_tmux_wake_saves_clears_and_restores_partial_draft(self) -> None:
+        draft = "partially typed\nprompt"
         with (
-            patch.object(server.subprocess, "run", side_effect=fake_run),
             patch.object(
-                server, "paste_text_via_tmux", return_value=(True, "")
-            ) as paste,
-            patch.object(
-                server, "_wait_for_codex_wake_prompt", return_value=False
+                server,
+                "capture_focused_codex_composer_draft",
+                return_value=(True, draft, ""),
             ),
+            patch.object(
+                server, "_replace_codex_composer_text", return_value=True
+            ) as replace,
+            patch.object(
+                server, "_submit_codex_wake_prompt", return_value=True
+            ) as submit,
+            patch.object(
+                server, "_restore_codex_composer_text", return_value=True
+            ) as restore,
+        ):
+            woke = server._wake_via_tmux(
+                "multiverse-target", runtime=sessions.RUNTIME_CODEX
+            )
+
+        self.assertTrue(woke)
+        self.assertEqual(
+            replace.call_args_list,
+            [
+                call("multiverse-target", draft, ""),
+                call("multiverse-target", "", server._WAKE_PROMPT),
+            ],
+        )
+        submit.assert_called_once_with("multiverse-target")
+        restore.assert_called_once_with("multiverse-target", draft)
+
+    def test_codex_tmux_wake_requires_focused_composer(self) -> None:
+        with (
+            patch.object(
+                server,
+                "capture_focused_codex_composer_draft",
+                return_value=(False, "", "Codex input composer is not focused"),
+            ),
+            patch.object(server, "_replace_codex_composer_text") as replace,
             patch.object(server, "_submit_codex_wake_prompt") as submit,
         ):
             woke = server._wake_via_tmux(
@@ -443,9 +500,34 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
             )
 
         self.assertFalse(woke)
-        paste.assert_called_once_with("multiverse-target", server._WAKE_PROMPT)
+        replace.assert_not_called()
         submit.assert_not_called()
-        self.assertEqual(calls, [])
+
+    def test_codex_tmux_wake_rolls_back_when_notification_insert_fails(self) -> None:
+        draft = "saved draft"
+        with (
+            patch.object(
+                server,
+                "capture_focused_codex_composer_draft",
+                return_value=(True, draft, ""),
+            ),
+            patch.object(
+                server,
+                "_replace_codex_composer_text",
+                side_effect=[True, False],
+            ),
+            patch.object(server, "_submit_codex_wake_prompt") as submit,
+            patch.object(
+                server, "_restore_codex_composer_text", return_value=True
+            ) as restore,
+        ):
+            woke = server._wake_via_tmux(
+                "multiverse-target", runtime=sessions.RUNTIME_CODEX
+            )
+
+        self.assertFalse(woke)
+        submit.assert_not_called()
+        restore.assert_called_once_with("multiverse-target", draft)
 
     def test_codex_tmux_wake_retries_tab_until_composer_clears(self) -> None:
         calls: list[list[str]] = []

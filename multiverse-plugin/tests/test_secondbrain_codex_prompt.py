@@ -17,6 +17,45 @@ CODEX_FOOTER = (
 
 
 class CodexPromptTmuxTests(unittest.TestCase):
+    def test_codex_composer_focus_requires_cursor_inside_composer(self) -> None:
+        pane = f"• Output\n› Partial draft\n\n{CODEX_FOOTER}\n"
+        with (
+            patch.object(sb_actions, "capture_pane", return_value=(True, pane)),
+            patch.object(
+                sb_actions,
+                "_run_tmux",
+                return_value=(True, "1 1\n"),
+            ),
+        ):
+            focused, error = sb_actions.codex_composer_has_focus(
+                "multiverse-target"
+            )
+
+        self.assertTrue(focused)
+        self.assertEqual(error, "")
+
+    def test_codex_composer_focus_rejects_active_modal(self) -> None:
+        pane = (
+            "› Partial draft\n\n"
+            f"{CODEX_FOOTER}\n\n"
+            "Allow this command?\n"
+            "  Yes\n"
+        )
+        with (
+            patch.object(sb_actions, "capture_pane", return_value=(True, pane)),
+            patch.object(
+                sb_actions,
+                "_run_tmux",
+                return_value=(True, "5 1\n"),
+            ),
+        ):
+            focused, error = sb_actions.codex_composer_has_focus(
+                "multiverse-target"
+            )
+
+        self.assertFalse(focused)
+        self.assertIn("not focused", error)
+
     def test_bracketed_paste_loads_text_on_stdin_and_deletes_buffer(self) -> None:
         calls: list[tuple[list[str], str | None]] = []
 
@@ -111,6 +150,19 @@ class CodexPromptTmuxTests(unittest.TestCase):
         self.assertEqual(
             sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX),
             "Draft while active",
+        )
+
+    def test_codex_composer_parser_recognizes_queue_hint_footer(self) -> None:
+        pane = (
+            "• Working (4s • esc to interrupt)\n\n"
+            "› Draft while active\n"
+            "  Second line\n\n"
+            "  tab to queue message                       98% context left\n"
+        )
+
+        self.assertEqual(
+            sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX),
+            "Draft while active\nSecond line",
         )
 
     def test_codex_delivery_saves_submits_and_restores_draft(self) -> None:
@@ -229,7 +281,11 @@ class CodexPromptTmuxTests(unittest.TestCase):
         run.assert_not_called()
 
     def test_claude_delivery_keeps_existing_multiline_sequence(self) -> None:
-        pane = "╭────────╮\n│ > draft │\n╰────────╯\n"
+        # Real Claude composer geometry: a rule-bracketed ``❯`` + U+00A0 marker line.
+        # (The former ``│ > draft │`` fixture matched no Claude Code version we run,
+        # so this assertion used to pass against a parser that always returned "".)
+        rule = "─" * 40
+        pane = f"{rule}\n❯\xa0draft\n{rule}\n  ⏵⏵ auto mode on\n"
         calls: list[list[str]] = []
 
         def fake_tmux(args, *, capture=False):
@@ -247,7 +303,7 @@ class CodexPromptTmuxTests(unittest.TestCase):
 
         self.assertEqual(result, (True, "draft", ""))
         cap.assert_called_once_with(
-            "multiverse-target", join_wrapped=False, include_styles=False
+            "multiverse-target", join_wrapped=True, include_styles=True
         )
         self.assertIn(
             ["send-keys", "-t", "multiverse-target", "\\", "Enter"], calls
