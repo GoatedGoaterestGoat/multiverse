@@ -451,10 +451,44 @@ class Session:
         Prefers the value captured by the SessionStart hook; falls back to
         ``resumed_from`` (valid for resumed sessions, which keep their UUID
         without ``--fork-session``).
+
+        ``claude_uuid`` is written by the record-claude-uuid.sh SessionStart
+        hook, which records whatever session_id it is handed by ANY claude
+        process that starts with this session's MULTIVERSE_STATUS in env.
+        A short-lived helper process — one launched with
+        ``--no-session-persistence``, or whose transcript is unlinked on exit
+        — therefore leaves the pointer aimed at a UUID that has no JSONL on
+        disk. The session then reads as 0 tokens / empty preview while its
+        real transcript shows up as a SEPARATE dormant row, i.e. the same
+        agent appears twice.
+
+        So: a recorded UUID that names no JSONL is not trusted. We fall back
+        to ``resumed_from`` when that one does resolve. This self-heals the
+        display without needing to know which helper clobbered the pointer,
+        and is inert whenever the recorded UUID is real (the common case) —
+        a brand-new non-resumed session still returns its own UUID even
+        before its JSONL exists, because there is nothing to fall back to.
         """
         if self.runtime != RUNTIME_CLAUDE:
             return None
-        return self.claude_uuid or self.resumed_from
+        recorded = self.claude_uuid
+        if (
+            recorded
+            and self.resumed_from
+            and recorded != self.resumed_from
+            and not self._live_jsonl_exists(recorded)
+            and self._live_jsonl_exists(self.resumed_from)
+        ):
+            return self.resumed_from
+        return recorded or self.resumed_from
+
+    def _live_jsonl_exists(self, uuid: str) -> bool:
+        try:
+            return (
+                CLAUDE_PROJECTS_DIR / _encode_cwd(self.cwd) / f"{uuid}.jsonl"
+            ).is_file()
+        except OSError:
+            return False
 
     @property
     def runtime_session_id(self) -> Optional[str]:
