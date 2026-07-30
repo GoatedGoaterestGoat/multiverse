@@ -126,7 +126,8 @@ def _read_session_metadata(path: Path) -> dict:
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        return {"title": None, "cwd": None, "preview": "", "bg_fork": False}
+        return {"title": None, "cwd": None, "preview": "", "bg_fork": False,
+                "n_rows": 0}
 
     cached = _METADATA_CACHE.get(str(path))
     if cached and cached[0] == mtime:
@@ -136,12 +137,14 @@ def _read_session_metadata(path: Path) -> dict:
     cwd: Optional[str] = None
     preview: Optional[str] = None
     last_kind: Optional[str] = None
+    n_rows = 0
     try:
         with open(path, "r") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
+                n_rows += 1
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError:
@@ -175,6 +178,9 @@ def _read_session_metadata(path: Path) -> dict:
         "cwd": cwd,
         "preview": preview or "(no user message)",
         "bg_fork": last_kind == "bg",
+        # Row count, used to tell an ahead fork from a redundant one without a
+        # second pass. Free here since we already walked every line.
+        "n_rows": n_rows,
     }
     _METADATA_CACHE[str(path)] = (mtime, result)
     return result
@@ -887,12 +893,14 @@ def build_dashboard_rows(
     # a title collision with a real (non-fork) transcript, not on being a fork.
     # Uses only mtime-cached metadata, so this second pass costs no extra I/O.
     nonfork_titles: set[str] = set()
+    nonfork_rows: dict[str, int] = {}
     if project_dir.is_dir():
         for path in project_dir.glob("*.jsonl"):
             m = _read_session_metadata(path)
             t = m.get("title")
             if t and not m.get("bg_fork"):
                 nonfork_titles.add(t)
+                nonfork_rows[t] = max(nonfork_rows.get(t, 0), m.get("n_rows", 0))
 
     if project_dir.is_dir():
         for path in project_dir.glob("*.jsonl"):
@@ -910,8 +918,21 @@ def build_dashboard_rows(
             # equivalent for the ones Claude Code spawns itself. Suppress only
             # while the parent is still around — a fork whose parent is gone is
             # the agent's only transcript and must stay visible.
+            #
+            # And only when the fork adds nothing. A fork routinely runs AHEAD
+            # of the session it forked from (that is the whole point — Claude
+            # Code spawns it to carry the agent forward), and hiding an ahead
+            # fork silently parks the dashboard on a stale branch: observed on
+            # viz-server, whose visible row sat 19 turns and ~59k tokens behind
+            # its hidden fork. So an ahead fork is SHOWN, tagged so it is not
+            # mistaken for a duplicate. Row count is the ahead/behind proxy —
+            # already computed by the cached metadata pass, no extra I/O.
             if meta.get("bg_fork") and title in nonfork_titles:
-                continue
+                if meta.get("n_rows", 0) <= nonfork_rows.get(title, 0):
+                    continue  # redundant: parent has at least as much
+                display_title = f"{title} (bg fork)"
+            else:
+                display_title = title
             recorded_cwd = meta.get("cwd")
             if recorded_cwd and recorded_cwd != cwd:
                 continue
@@ -922,10 +943,12 @@ def build_dashboard_rows(
 
             ghost_ts = ghost_map.get(uuid)
             if ghost_ts is not None:
-                display_name = f"{title} (folded {_format_fold_time(ghost_ts)})"
+                display_name = (
+                    f"{display_title} (folded {_format_fold_time(ghost_ts)})"
+                )
                 status_ts = ghost_ts or st.st_mtime
             else:
-                display_name = title
+                display_name = display_title
                 status_ts = st.st_mtime
 
             rows.append(
