@@ -101,17 +101,32 @@ _METADATA_CACHE: dict[str, tuple[float, dict]] = {}
 
 
 def _read_session_metadata(path: Path) -> dict:
-    """Extract title (last ``custom-title``), cwd (first ``cwd`` field), and
-    a preview (first non-system user message) from a claude JSONL.
+    """Extract title (last ``custom-title``), cwd (first ``cwd`` field), a
+    preview (first non-system user message), and whether the transcript is a
+    Claude-Code-native background fork, from a claude JSONL.
 
-    Returns ``{"title": Optional[str], "cwd": Optional[str], "preview": str}``.
-    Results are cached by mtime, so scanning dormant sessions every second is
-    cheap once warm.
+    Returns ``{"title": Optional[str], "cwd": Optional[str], "preview": str,
+    "bg_fork": bool}``. Results are cached by mtime, so scanning dormant
+    sessions every second is cheap once warm.
+
+    ``bg_fork`` — Claude Code stamps ``sessionKind: "bg"`` on rows it writes
+    while running a session as a background agent (spawned as
+    ``--session-id <new> --fork-session --resume <parent.jsonl>`` under a
+    ``claude bg-pty-host`` supervisor; this happens automatically when e.g. a
+    ``run_in_background`` Bash task completes while the session is detached).
+    Such a fork copies the parent's transcript verbatim — custom-title
+    included — so without this flag it surfaces as a second dormant agent
+    with the same name as its parent.
+
+    We classify on the LAST ``sessionKind``-bearing row rather than "any bg
+    row", so a fork that is later attached interactively (and resumes writing
+    plain rows) stops being treated as one. Rows inherited from the parent
+    carry no ``sessionKind``, so they neither set nor clear the verdict.
     """
     try:
         mtime = path.stat().st_mtime
     except OSError:
-        return {"title": None, "cwd": None, "preview": ""}
+        return {"title": None, "cwd": None, "preview": "", "bg_fork": False}
 
     cached = _METADATA_CACHE.get(str(path))
     if cached and cached[0] == mtime:
@@ -120,6 +135,7 @@ def _read_session_metadata(path: Path) -> dict:
     title: Optional[str] = None
     cwd: Optional[str] = None
     preview: Optional[str] = None
+    last_kind: Optional[str] = None
     try:
         with open(path, "r") as fh:
             for line in fh:
@@ -139,6 +155,9 @@ def _read_session_metadata(path: Path) -> dict:
                     c = raw.get("cwd")
                     if c:
                         cwd = str(c)
+                kind = raw.get("sessionKind")
+                if kind:
+                    last_kind = str(kind)
                 if preview is None and typ == "user":
                     msg = raw.get("message") or {}
                     if msg.get("role") == "user":
@@ -155,9 +174,16 @@ def _read_session_metadata(path: Path) -> dict:
         "title": title,
         "cwd": cwd,
         "preview": preview or "(no user message)",
+        "bg_fork": last_kind == "bg",
     }
     _METADATA_CACHE[str(path)] = (mtime, result)
     return result
+
+
+def is_native_bg_fork(path: Path) -> bool:
+    """True if this claude JSONL is a Claude-Code-native background fork.
+    See ``_read_session_metadata``'s ``bg_fork`` note. mtime-cached."""
+    return bool(_read_session_metadata(path).get("bg_fork"))
 
 
 def read_claude_session_name(path: Path) -> Optional[str]:
@@ -468,6 +494,12 @@ class Session:
         and is inert whenever the recorded UUID is real (the common case) —
         a brand-new non-resumed session still returns its own UUID even
         before its JSONL exists, because there is nothing to fall back to.
+
+        Also distrusted: a UUID naming a Claude-Code-native background fork.
+        Those forks inherit the parent's MULTIVERSE_* env, so their
+        SessionStart fires this session's record-claude-uuid.sh hook and the
+        pointer swings onto the throwaway fork — leaving the row reading the
+        fork's transcript instead of the session the user is attached to.
         """
         if self.runtime != RUNTIME_CLAUDE:
             return None
@@ -476,19 +508,27 @@ class Session:
             recorded
             and self.resumed_from
             and recorded != self.resumed_from
-            and not self._live_jsonl_exists(recorded)
             and self._live_jsonl_exists(self.resumed_from)
+            and not self._is_trustworthy(recorded)
         ):
             return self.resumed_from
         return recorded or self.resumed_from
 
+    def _jsonl_for(self, uuid: str) -> Path:
+        return CLAUDE_PROJECTS_DIR / _encode_cwd(self.cwd) / f"{uuid}.jsonl"
+
     def _live_jsonl_exists(self, uuid: str) -> bool:
         try:
-            return (
-                CLAUDE_PROJECTS_DIR / _encode_cwd(self.cwd) / f"{uuid}.jsonl"
-            ).is_file()
+            return self._jsonl_for(uuid).is_file()
         except OSError:
             return False
+
+    def _is_trustworthy(self, uuid: str) -> bool:
+        """A recorded UUID is trustworthy unless its transcript is absent or
+        is a Claude-Code-native background fork."""
+        if not self._live_jsonl_exists(uuid):
+            return False
+        return not is_native_bg_fork(self._jsonl_for(uuid))
 
     @property
     def runtime_session_id(self) -> Optional[str]:
@@ -848,6 +888,13 @@ def build_dashboard_rows(
             meta = _read_session_metadata(path)
             title = meta.get("title")
             if not title:
+                continue
+            # Claude-Code-native background forks copy their parent's
+            # transcript (custom-title included), so listing them would show
+            # a duplicate of the agent they were forked from. Multiverse
+            # already hides its own ask_agent forks via ~/.multiverse/forks/;
+            # this is the equivalent for the ones Claude Code spawns itself.
+            if meta.get("bg_fork"):
                 continue
             recorded_cwd = meta.get("cwd")
             if recorded_cwd and recorded_cwd != cwd:
