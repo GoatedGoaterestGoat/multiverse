@@ -880,6 +880,20 @@ def build_dashboard_rows(
             )
         )
 
+    # Titles held by a NON-fork transcript. A Claude-Code-native background
+    # fork is only a duplicate while the session it forked from still exists;
+    # if that parent is gone the fork IS the agent, and hiding it would make
+    # the agent vanish from the dashboard entirely. So suppression is keyed on
+    # a title collision with a real (non-fork) transcript, not on being a fork.
+    # Uses only mtime-cached metadata, so this second pass costs no extra I/O.
+    nonfork_titles: set[str] = set()
+    if project_dir.is_dir():
+        for path in project_dir.glob("*.jsonl"):
+            m = _read_session_metadata(path)
+            t = m.get("title")
+            if t and not m.get("bg_fork"):
+                nonfork_titles.add(t)
+
     if project_dir.is_dir():
         for path in project_dir.glob("*.jsonl"):
             uuid = path.stem
@@ -890,11 +904,13 @@ def build_dashboard_rows(
             if not title:
                 continue
             # Claude-Code-native background forks copy their parent's
-            # transcript (custom-title included), so listing them would show
-            # a duplicate of the agent they were forked from. Multiverse
-            # already hides its own ask_agent forks via ~/.multiverse/forks/;
-            # this is the equivalent for the ones Claude Code spawns itself.
-            if meta.get("bg_fork"):
+            # transcript (custom-title included), so listing one alongside its
+            # parent shows the same agent twice. Multiverse already hides its
+            # own ask_agent forks via ~/.multiverse/forks/; this is the
+            # equivalent for the ones Claude Code spawns itself. Suppress only
+            # while the parent is still around — a fork whose parent is gone is
+            # the agent's only transcript and must stay visible.
+            if meta.get("bg_fork") and title in nonfork_titles:
                 continue
             recorded_cwd = meta.get("cwd")
             if recorded_cwd and recorded_cwd != cwd:
