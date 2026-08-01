@@ -1349,7 +1349,14 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             )
         prompt_line += " " + "  ·  ".join(parts) + "[/]"
 
-        yield Vertical(
+        # VerticalScroll, not Vertical: this dialog stacks a multi-line
+        # header, the scheduler radio set, an image toggle, three
+        # labelled params each with a paragraph of help, the budget
+        # input, the per-turn preview and the hint. That comfortably
+        # exceeds a terminal's height, and a plain Vertical simply clips
+        # the overflow with no way to reach it — the budget input and
+        # preview became unreachable on shorter terminals.
+        yield VerticalScroll(
             Static(
                 f"Compact: [bold]{self.display_name}[/]\n"
                 f"[dim]Full (uncompacted): {self.full_tokens:,}t · "
