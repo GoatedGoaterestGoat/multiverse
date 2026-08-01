@@ -2313,7 +2313,16 @@ class CompactScreen(ModalScreen[None]):
 
     def _append_log(self, line: str) -> None:
         try:
-            self.query_one("#compact-log", RichLog).write(line)
+            log = self.query_one("#compact-log", RichLog)
+            # Follow the tail only while the view is already parked at the
+            # bottom. RichLog defaults to auto_scroll=True and its write()
+            # calls scroll_end() UNCONDITIONALLY — not "only if pinned" — so
+            # every streamed line yanked the user back down mid-scroll,
+            # making the build log effectively unscrollable while a build
+            # was running. Passing scroll_end explicitly gives the usual
+            # tail-follow behaviour: keep following at the bottom, hold
+            # position once the user scrolls up.
+            log.write(line, scroll_end=log.is_vertical_scroll_end)
         except Exception:  # noqa: BLE001
             pass
         # Pull per-turn build times out of the worker.log lines as they
