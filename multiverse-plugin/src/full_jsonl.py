@@ -367,6 +367,14 @@ def structural_tokens(claude_uuid: str, cwd: str) -> int:
                     + (usage.get("cache_creation_input_tokens") or 0)
                     + (usage.get("cache_read_input_tokens") or 0)
                 )
+                # Skip synthetic API-error rows (model=<synthetic>, "API Error: 500…")
+                # which carry an all-zero usage block. Treating that as a measurement
+                # would look like a full-total eviction drop to the peak scan below and
+                # freeze usage_total at a stale early snapshot — under-reporting the
+                # dashboard's Tokens column for the rest of the session (per SB's
+                # 2026-08-01 report). Absent measurement, not a zero one.
+                if total == 0:
+                    continue
                 samples.append((usage, uuid, total))
     except OSError:
         return 0
@@ -481,11 +489,19 @@ def last_real_usage_total(claude_uuid: str, cwd: str) -> int:
                 if not (isinstance(usage, dict)
                         and isinstance(usage.get("input_tokens"), int)):
                     continue
-                last_total = (
+                candidate = (
                     usage["input_tokens"]
                     + (usage.get("cache_creation_input_tokens") or 0)
                     + (usage.get("cache_read_input_tokens") or 0)
                 )
+                # Same synthetic-API-error guard as structural_tokens above:
+                # a zero usage total is an absent measurement, not a real "0". If we
+                # accepted it as last_total, a session that hit even one 500 error
+                # would keep reporting 0 tokens forever until it produced another
+                # real assistant response.
+                if candidate == 0:
+                    continue
+                last_total = candidate
     except OSError:
         return 0
     return last_total
