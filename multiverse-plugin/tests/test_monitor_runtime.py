@@ -3,12 +3,38 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from textual.app import App
 from textual.widgets import DataTable, Input, RadioButton
 
 from src import monitor
+
+
+class DashboardRuntimeRenderingTests(unittest.TestCase):
+    def test_codex_build_column_displays_not_applicable(self) -> None:
+        row = monitor.DashboardRow(
+            name="codex-agent",
+            cwd="/workspace",
+            status="idle",
+            status_ts=1,
+            runtime=monitor.RUNTIME_CODEX,
+            session_id="codex-thread",
+        )
+        app = monitor.MonitorApp([])
+        app.entries = [row]
+        table = MagicMock()
+        table.cursor_row = 0
+
+        with (
+            patch.object(app, "query_one", return_value=table),
+            patch.object(monitor, "pending_inbox_count", return_value=0),
+            patch.object(monitor, "auto_build_enabled") as build_enabled,
+        ):
+            app._redraw_table()
+
+        build_enabled.assert_not_called()
+        self.assertEqual(table.add_row.call_args.args[4], "[dim]-[/]")
 
 
 class SpawnAttachGuardTests(unittest.TestCase):

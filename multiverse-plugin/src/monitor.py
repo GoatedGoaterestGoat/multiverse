@@ -3179,7 +3179,9 @@ class MonitorApp(App):
                 id_cell = f"[dim]{session_id[:8]}[/]"
             pending = pending_inbox_count(e.cwd, e.name)
             inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
-            if e.claude_uuid and auto_build_enabled(e.claude_uuid):
+            if e.runtime == RUNTIME_CODEX:
+                build_cell = "[dim]-[/]"
+            elif e.claude_uuid and auto_build_enabled(e.claude_uuid):
                 build_cell = "[bold green]on[/]"
             else:
                 build_cell = "[dim]off[/]"
