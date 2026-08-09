@@ -168,7 +168,7 @@ def main() -> int:
     # permission-mode, agent-name, mode) across the rewrite — the
     # renderer only emits transcript rows. Read from the OUTGOING live
     # before it's replaced. Same logic the monitor-driven path uses.
-    state_rows = _collect_state_rows(live)
+    state_rows = _collect_state_rows(live, full_jsonl_path(uuid))
     if state_rows:
         jsonl_text = splice_state_rows(jsonl_text, state_rows)
         print(f"[state] preserved: "

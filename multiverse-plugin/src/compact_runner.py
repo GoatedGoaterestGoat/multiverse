@@ -698,7 +698,9 @@ class CompactRunner:
         # name, and mode. Read from the OUTGOING live before we replace
         # it.
         live = live_jsonl_path(self.claude_uuid, self.cwd)
-        state_rows = _collect_state_rows(live)
+        state_rows = _collect_state_rows(
+            live, full_jsonl_path(self.claude_uuid)
+        )
         if state_rows:
             jsonl_text = splice_state_rows(jsonl_text, state_rows)
             on_log(
@@ -866,18 +868,17 @@ _PRESERVED_STATE_TYPES = (
 )
 
 
-def _collect_state_rows(path: Path) -> list[dict]:
-    """Return the LAST occurrence of each ``_PRESERVED_STATE_TYPES`` row
-    found in ``path``, in allowlist order.
+def _scan_state_rows(path: Path) -> dict[str, dict]:
+    """Map type -> LAST occurrence of that row in ``path``, for every
+    ``_PRESERVED_STATE_TYPES`` present.
 
-    Last-wins: these rows are rewritten by Claude Code whenever the
-    value changes, so the final occurrence is the live value. Missing
-    types are simply absent from the result.
+    Last-wins: Claude Code rewrites these rows whenever the value
+    changes, so the final occurrence is the current value.
     """
     import json  # local — narrow blast radius
     latest: dict[str, dict] = {}
     if not path.is_file():
-        return []
+        return latest
     try:
         with path.open() as f:
             for line in f:
@@ -892,7 +893,40 @@ def _collect_state_rows(path: Path) -> list[dict]:
                 if t in _PRESERVED_STATE_TYPES:
                     latest[t] = d
     except OSError:
-        return []
+        return latest
+    return latest
+
+
+def _collect_state_rows(
+    live: Path, full: Optional[Path] = None
+) -> list[dict]:
+    """Return the current value of each ``_PRESERVED_STATE_TYPES`` row,
+    in allowlist order, preferring ``live`` and falling back to ``full``
+    for any type ``live`` lacks.
+
+    Why the fallback matters. The mirror appends every new live row to
+    full.jsonl without filtering by type, so full accumulates these
+    state rows too, and — being append-ordered — its last occurrence is
+    current as of the most recent sync. Two cases where that's the only
+    source:
+
+      - A session damaged by a pre-fix compaction. Its state rows were
+        erased from live and Claude Code may not have rewritten them
+        all yet. Pulling the missing ones from full lets the session
+        SELF-HEAL on its next compaction instead of staying broken.
+      - The restore path, where live doesn't exist at all and we're
+        re-materializing it from an orphaned full.
+
+    Live stays authoritative — full only fills gaps. The full copy can
+    be up to one turn stale (the mirror hook runs on UserPromptSubmit /
+    Stop / SessionEnd, so a state change inside the last partial turn
+    may not have been mirrored yet), which is why it never overrides a
+    value live still has.
+    """
+    latest = _scan_state_rows(live)
+    if full is not None:
+        for t, row in _scan_state_rows(full).items():
+            latest.setdefault(t, row)
     return [latest[t] for t in _PRESERVED_STATE_TYPES if t in latest]
 
 
