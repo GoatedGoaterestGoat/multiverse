@@ -692,8 +692,21 @@ class CompactRunner:
             keep_image_turn_ids=keep_image_turn_ids,
         )
 
-        # Atomic replace: temp file in the same directory, then os.replace.
+        # Carry session-state rows across the rewrite. The renderer only
+        # emits transcript rows, so without this every compaction erases
+        # the Remote Control reattach pointer, permission mode, agent
+        # name, and mode. Read from the OUTGOING live before we replace
+        # it.
         live = live_jsonl_path(self.claude_uuid, self.cwd)
+        state_rows = _collect_state_rows(live)
+        if state_rows:
+            jsonl_text = splice_state_rows(jsonl_text, state_rows)
+            on_log(
+                "Preserved session-state row(s): "
+                + ", ".join(r.get("type", "?") for r in state_rows)
+            )
+
+        # Atomic replace: temp file in the same directory, then os.replace.
         live.parent.mkdir(parents=True, exist_ok=True)
         import tempfile  # local import; only used here
         fd, tmp = tempfile.mkstemp(
@@ -824,6 +837,87 @@ class CompactRunner:
             if title:
                 return title
         return None
+
+
+# Row types that carry SESSION STATE rather than transcript content.
+# parse_session only yields turns, so compact_forest_to_session_jsonl
+# rebuilds a live JSONL containing nothing but custom-title / user /
+# assistant rows — every state row is silently erased on each
+# compaction. Consequences: Remote Control's reattach pointer
+# (bridge-session) is lost so `remoteControlAtStartup` can't reconnect
+# on resume, the session's permission mode resets, and its display
+# name drops.
+#
+# These four are safe to carry forward because they're last-wins
+# pointers with no ``uuid`` / ``parentUuid`` — splicing them can't
+# disturb the parent chain the compacted transcript depends on.
+#
+# Deliberately NOT carried: ``last-prompt`` references a ``leafUuid``
+# compaction may have just dropped, and ``file-history-snapshot`` /
+# ``file-history-delta`` / ``attachment`` / ``system`` are anchored to
+# turns that no longer exist. Carrying those manufactures dangling
+# references. Allowlist by design — a new state row type stays
+# unpreserved until we've checked it's chain-independent.
+_PRESERVED_STATE_TYPES = (
+    "bridge-session",
+    "permission-mode",
+    "agent-name",
+    "mode",
+)
+
+
+def _collect_state_rows(path: Path) -> list[dict]:
+    """Return the LAST occurrence of each ``_PRESERVED_STATE_TYPES`` row
+    found in ``path``, in allowlist order.
+
+    Last-wins: these rows are rewritten by Claude Code whenever the
+    value changes, so the final occurrence is the live value. Missing
+    types are simply absent from the result.
+    """
+    import json  # local — narrow blast radius
+    latest: dict[str, dict] = {}
+    if not path.is_file():
+        return []
+    try:
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = d.get("type")
+                if t in _PRESERVED_STATE_TYPES:
+                    latest[t] = d
+    except OSError:
+        return []
+    return [latest[t] for t in _PRESERVED_STATE_TYPES if t in latest]
+
+
+def splice_state_rows(jsonl_text: str, state_rows: list[dict]) -> str:
+    """Insert ``state_rows`` into ``jsonl_text`` right after the leading
+    ``custom-title`` row (or at the very top if there isn't one).
+
+    Placement mirrors where Claude Code writes them in a fresh session —
+    ahead of the transcript — and keeps them clear of the parent chain.
+    """
+    import json  # local — narrow blast radius
+    if not state_rows:
+        return jsonl_text
+    lines = jsonl_text.splitlines()
+    insert_at = 0
+    for i, line in enumerate(lines):
+        try:
+            if json.loads(line).get("type") == "custom-title":
+                insert_at = i + 1
+                break
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    rendered = [json.dumps(r, ensure_ascii=False) for r in state_rows]
+    out = lines[:insert_at] + rendered + lines[insert_at:]
+    return "\n".join(out) + "\n"
 
 
 _ABORTED_STUB_SUMMARY = "<construction aborted; uncollapsed frontier>"
