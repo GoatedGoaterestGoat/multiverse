@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -124,8 +126,37 @@ def main():
         "tree": serialize(turn.root) if turn.root is not None else None,
         "history": trace.merges,
     }
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, default=str)
+    # tmp + atomic replace, not open(out, "w"). Truncating opens two
+    # windows, and the second is the expensive one:
+    #
+    #  1. A torn file if we die mid-dump. Every reader already tolerates
+    #     that (_is_valid_cached_tree and _attach_trees_from_cache both
+    #     catch JSONDecodeError and treat it as no-tree), so the cost is
+    #     a rebuild, not corruption.
+    #  2. The one that actually bites: `open(out, "w")` destroys an
+    #     EXISTING good tree the instant it opens, before the
+    #     replacement is written. Die in between and we've thrown away
+    #     a tree we already had — the same destroy-before-commit shape
+    #     as the inbox drain, and here each rebuild is tens of seconds
+    #     of model calls (hours across a whole session).
+    #
+    # os.replace leaves the old file untouched until the new one is
+    # complete on disk.
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".tree_", suffix=".json", dir=str(out_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
     print(f"Saved tree to {out}", file=sys.stderr)
     return 0
