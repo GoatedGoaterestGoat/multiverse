@@ -558,9 +558,9 @@ def turn_to_rows(
             # block becomes its own row, all sharing no message.id (user
             # rows in claude code's JSONL don't carry an outer message.id
             # — content sits directly on the row's ``message.content``).
-            for block in blocks:
+            for i, block in enumerate(blocks):
                 row_uuid = str(uuidlib.uuid4())
-                rows.append({
+                row: dict = {
                     "parentUuid": prev_uuid,
                     "uuid": row_uuid,
                     "sessionId": session_id,
@@ -569,7 +569,23 @@ def turn_to_rows(
                     "cwd": cwd,
                     "userType": "external",
                     "message": {"role": "user", "content": [block]},
-                })
+                }
+                # Re-attach Claude Code's rich tool output, which lives in
+                # a top-level row field rather than in message.content.
+                # Only structuredPatch renders an Edit's diff in the
+                # transcript; without this the UI shows the tool header
+                # and an empty body. Costs no tokens — row-level fields
+                # never reach the API.
+                src = sources[i] if i < len(sources) else None
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") == "tool_result"
+                    and isinstance(src, Leaf)
+                ):
+                    tur = src.content.get("tool_use_result")
+                    if tur is not None:
+                        row["toolUseResult"] = tur
+                rows.append(row)
                 prev_uuid = row_uuid
 
     return rows, prev_uuid

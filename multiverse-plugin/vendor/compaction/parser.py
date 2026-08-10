@@ -590,13 +590,31 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
                 else:
                     text = str(result_content) if result_content is not None else ""
                 images = top_images + result_images
+                # Claude Code keeps the RICH tool output in a top-level
+                # ``toolUseResult`` row field, not in message.content.
+                # For an Edit that's structuredPatch / originalFile /
+                # old+newString — and structuredPatch is the only thing
+                # that renders the diff in the transcript UI, since the
+                # content block itself is just a short confirmation
+                # string. Carry it on the leaf so a tool_result that
+                # SURVIVES expansion can be re-emitted with its diff
+                # intact; without it the UI shows "Updated <file>" and
+                # then nothing.
+                #
+                # Costs no tokens: row-level fields aren't part of the
+                # API request, so this is UI fidelity only and must not
+                # enter the `tokens` math below.
+                tool_use_result = row.get("toolUseResult")
+                content: dict[str, Any] = {
+                    "tool_use_id": block.get("tool_use_id"),
+                    "text": text,
+                    "is_error": block.get("is_error", False),
+                }
+                if tool_use_result is not None:
+                    content["tool_use_result"] = tool_use_result
                 return Leaf(
                     kind="tool_result",
-                    content={
-                        "tool_use_id": block.get("tool_use_id"),
-                        "text": text,
-                        "is_error": block.get("is_error", False),
-                    },
+                    content=content,
                     tokens=count_tokens(text)
                     + img_tokens
                     + sum(count_image_tokens(b) for b in result_images),
