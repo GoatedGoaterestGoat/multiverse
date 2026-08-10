@@ -3498,6 +3498,40 @@ class MonitorApp(App):
             )
             return
 
+        # Claude's own reaper (`cleanupPeriodDays`, default 30) deletes
+        # dormant live JSONLs, while our state dir and the full.jsonl
+        # mirror both survive it. The row therefore keeps rendering as
+        # normal, but `claude --resume <uuid>` exits 1 with "No
+        # conversation found" — and because claude IS the tmux session's
+        # command, that exit takes the tmux session down with it, so the
+        # resume looks like it silently did nothing at all.
+        #
+        # The session is fully recoverable the whole time: its full.jsonl
+        # is intact and RestoreScreen would list it. Detect the reaped
+        # shape here and point at the path that works instead of spawning
+        # a doomed session.
+        #
+        # Ordering matters: this must run BEFORE the kill_session() below,
+        # which rmtree's the multiverse state dir. Failing after that
+        # point would destroy the row's identity on behalf of a resume
+        # that was never going to succeed.
+        if e.runtime == RUNTIME_CLAUDE:
+            if not live_jsonl_path(session_id, e.cwd).is_file():
+                if full_jsonl_path(session_id).is_file():
+                    self.notify(
+                        f"'{e.name}' has no live transcript — claude's "
+                        f"cleanupPeriodDays reaper likely deleted it. The "
+                        f"full mirror is intact: press x to restore it.",
+                        severity="warning",
+                    )
+                else:
+                    self.notify(
+                        f"'{e.name}' has no live transcript and no full "
+                        f"mirror — nothing to resume.",
+                        severity="error",
+                    )
+                return
+
         # Ended multiverse row: free the name by reaping its meta dir before
         # spawning the replacement (otherwise existing_names_in_cwd blocks it).
         if e.session is not None and e.status == "ended":
