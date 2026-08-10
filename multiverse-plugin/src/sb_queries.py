@@ -134,3 +134,58 @@ def get_status(cwd: str, agent: str) -> dict | None:
 def list_workspaces(granted_workspaces: list[str]) -> list[dict]:
     """The workspaces this device exposes — ``{cwd, label}`` each (device-scoped)."""
     return [{"cwd": w, "label": Path(w).name or w} for w in granted_workspaces]
+
+
+def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
+    """Capture-pane snapshot of an agent's live tmux screen (SB ``peek_agent``).
+
+    Returns a discriminated tuple ``(kind, payload)`` for the caller to translate
+    into a ``QueryResult``:
+
+    * ``("ok", {screen, status})`` — clean-text pane + current agent status.
+    * ``("not_found", {message})`` — no agent by that name in the workspace.
+    * ``("not_running", {message})`` — dormant/ended/no-tmux; there IS no screen.
+    * ``("locked", {message})`` — session is compacting; the pane is torn down.
+    * ``("deliver_failed", {message})`` — tmux subprocess failure (rare).
+
+    Contract with the SB ``toolsmith`` agent (2026-08-09):
+      * Read-only, permission-exempt (Query, not Action).
+      * ``capture-pane -p`` output is CLEAN plain text — we ``rstrip`` each line
+        + strip trailing blank lines to remove tmux's pane-width padding, so SB
+        gets tight rendered content ready to drop in a fenced block.
+      * ``starting`` returns the pane as-is (the startup output IS what it's
+        doing right now — we don't wait for readiness).
+      * ``waiting`` is the highest-value case: the pane shows the exact
+        AskUserQuestion modal / permission prompt live, so SB can read the
+        question text + options directly.
+    """
+    from .compact_state import is_locked  # local import — compact_state pulls textual
+    from .sb_actions import capture_pane   # local import — sb_actions has TUI deps
+    from .sessions import find_agent_by_name
+
+    target = find_agent_by_name(cwd, agent_name)
+    if target is None:
+        return "not_found", {"message": f"no agent named '{agent_name}' in this workspace"}
+
+    status = _corrected_status(target)
+
+    if status in ("dormant", "ended"):
+        return "not_running", {"message": f"'{agent_name}' is {status}"}
+
+    if target.claude_uuid and is_locked(target.claude_uuid):
+        return "locked", {"message": f"'{agent_name}' is compacting; screen unavailable"}
+
+    tmux_name = target.session.tmux_name if target.session else None
+    if not tmux_name or not tmux_session_exists(tmux_name):
+        return "not_running", {"message": f"'{agent_name}' has no live tmux session"}
+
+    ok, out = capture_pane(tmux_name)
+    if not ok:
+        return "deliver_failed", {"message": f"capture-pane failed: {out}"}
+
+    # Strip tmux's pane-width padding: per-line rstrip + drop trailing blank lines.
+    lines = [ln.rstrip() for ln in out.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    screen = "\n".join(lines)
+    return "ok", {"screen": screen, "status": status}

@@ -124,6 +124,15 @@ class EventKind(StrEnum):
     # System-synthesized (not from wire): user's status changed via the TUI (§7).
     # Payload: {"from": <old>, "to": <new>, "guide": <expected-behavior text>}.
     USER_STATUS_CHANGED = "user.status_changed"
+    # Synthetic (SB-side, no wire origin): the user changed SB's permission level
+    # for a (workspace, verb). Payload: {workspace_label, verb, from, to, meaning}.
+    PERMISSION_CHANGED = "permission.changed"
+    # Synthetic (SB-side, no wire origin): the user cleared the wake-up report SB
+    # maintained while they were asleep. Payload: {bytes_cleared, lines_cleared}.
+    WAKE_UP_REPORT_CLEARED = "wake_up_report.cleared"
+    # Synthetic (SB-side, no wire origin): the daily nudge to tidy memory, fired a
+    # few minutes before the data-repo backup. Payload: {scheduled_utc}.
+    MEMORY_REMINDER = "memory.reminder"
 
 
 class ActionKind(StrEnum):
@@ -133,7 +142,6 @@ class ActionKind(StrEnum):
     ANSWER_QUESTION = "answer_question"
     ANSWER_PERMISSION_PROMPT = "answer_permission_prompt"
     ANSWER_SPAWN_REQUEST = "answer_spawn_request"  # approve/decline an agent's spawn request
-    MESSAGE_AGENT = "message_agent"
     SPAWN_AGENT = "spawn_agent"
     # Reserved for later lifecycle verbs (§10.3 "(later)"):
     KILL_AGENT = "kill_agent"
@@ -154,6 +162,7 @@ class QueryKind(StrEnum):
     GET_TRANSCRIPT = "get_transcript"
     GET_DASHBOARD = "get_dashboard"  # full monitor dashboard for one workspace (first agent tool)
     ASK_AGENT = "ask_agent"  # read-only side-question to one agent (answers from its own history)
+    PEEK_AGENT = "peek_agent"  # read-only capture-pane snapshot of an agent's live screen
 
 
 class Authority(StrEnum):

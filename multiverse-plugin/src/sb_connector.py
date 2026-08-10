@@ -2613,6 +2613,21 @@ class SBConnector:
                 # can't stall the receiver on it. The task sends the QueryResult itself.
                 asyncio.create_task(self._handle_ask_query(ws, query))
                 return
+            elif kind == p.QueryKind.PEEK_AGENT:
+                # tmux capture-pane is fast (~10-50ms) — safe to run inline in the
+                # receive loop. sb_queries.peek_agent returns a discriminated tuple we
+                # translate directly to QueryResult ok / error+code.
+                cwd = self._query_cwd(query)
+                agent = params.get("agent")
+                if cwd is None:
+                    return await self._reject_query(ws, query, "forbidden", "unknown/ungranted workspace")
+                if not agent:
+                    return await self._reject_query(ws, query, "bad_request", "workspace_id + agent required")
+                outcome, payload = sb_queries.peek_agent(cwd, agent)
+                if outcome == "ok":
+                    result = payload
+                else:
+                    return await self._reject_query(ws, query, outcome, payload["message"])
             else:  # get_transcript (recall path) — a later phase-2 step
                 return await self._reject_query(
                     ws, query, "not_implemented",
