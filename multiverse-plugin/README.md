@@ -112,12 +112,12 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 |:----|:-------|
 | `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse`. Starts in `--permission-mode auto` by default (see below). |
 | `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Also starts in auto mode. |
-| `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below |
+| `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
 | `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
 | `i` | View the highlighted agent's pending inbox — a read-only peek at queued `message_agent` messages. Does **not** consume them; Claude hooks or Codex's `check_inbox` still own delivery. |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. Refused while the row is `compacting` |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
@@ -240,6 +240,10 @@ A `mirror-jsonl.py` hook wired into `UserPromptSubmit` / `Stop` / `SessionEnd` k
 Surviving thinking blocks are emitted verbatim with their original signatures (which validate server-side via subscription auth, so no `ANTHROPIC_API_KEY` needed). Summary nodes emit as `<compacted-context entries="N">…</compacted-context>` text blocks so the live agent can distinguish summarized regions from native output.
 
 **Compaction is non-destructive on the original.** The full JSONL is never compacted — only appended to. Re-compacting a session always reaches back to the full uncompacted history, regardless of how many prior compactions happened. Aborting a compaction (Esc during the running phase) stops at the next safe checkpoint without leaving live in a half-written state (the rewrite is atomic).
+
+**Detaching from a running compaction (`d`).** Esc aborts; `d` just puts the screen away. The build keeps running, the lock stays held (so the row still reads `compacting` and still refuses attach / resume / kill everywhere), and `Enter` or `c` on that row re-opens the same screen with its log and progress intact. If summarization finishes while you're detached, the scheduler picker is *held* rather than thrown over the dashboard — you get a notification, and the picker appears when you come back. If the whole run finishes while you're away, the verdict arrives as a notification and the screen is retired, so a later `c` starts fresh.
+
+This is one screen moving, not a shared one: a compaction detached in one monitor can only be re-opened from that same monitor, and a lock held by a *live* monitor still blocks every other one. Only a **dead** holder's lock is reclaimable (see `list_locked`), which is what makes a compaction survive quitting the monitor mid-build.
 
 ### With vs without the wrapper
 

@@ -1813,6 +1813,15 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.dismiss(None)
 
 
+def _compact_screen_name(claude_uuid: str) -> str:
+    """Textual installed-screen name for a session's CompactScreen.
+
+    Keyed by claude_uuid so a detached compaction can be found again from
+    the dashboard row. See ``CompactScreen.action_detach``.
+    """
+    return f"compact-{claude_uuid}"
+
+
 class CompactScreen(ModalScreen[None]):
     """Drive a manual compaction for one session.
 
@@ -1828,6 +1837,12 @@ class CompactScreen(ModalScreen[None]):
         checkpoint (won't kill an in-flight build subprocess).
       - In ``done``: dismiss.
 
+    ``d`` detaches instead of aborting: the modal closes back to the
+    dashboard while the compaction keeps running and the lock stays held,
+    so the row still reads ``compacting`` and still refuses attach /
+    resume / kill. Enter or ``c`` on that row re-opens this same screen
+    with its log and progress intact — see ``action_detach``.
+
     The actual *expansion* step (rendering the compacted live JSONL from
     the per-turn budget) is intentionally not yet wired in — first version
     stops once every turn has a tree. The next iteration will plug in
@@ -1835,7 +1850,10 @@ class CompactScreen(ModalScreen[None]):
     rewrite the live JSONL.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("d", "detach", "Detach (keep running)"),
+    ]
 
     # Match the worker.log lines that report a single turn's build time:
     #   "[HH:MM:SS]   turn N done (X.Ys)"
@@ -1866,6 +1884,13 @@ class CompactScreen(ModalScreen[None]):
         # prompts to start summarization.
         self.phase = "input"  # input | summarizing | choosing | expanding | done | failed
         self._runner: Optional[CompactRunner] = None
+        # Detach state (``d``). ``_installed`` tracks whether this screen is
+        # registered with Textual under _compact_screen_name so it survives
+        # being popped; ``_pending_picker`` defers the scheduler picker when
+        # summarization finishes while the user is back on the dashboard.
+        self._detached = False
+        self._installed = False
+        self._pending_picker = False
         # Per-turn build elapsed times collected from worker.log; powers
         # the ETA estimate. Bounded — only the most-recent N are used so
         # ETA tracks current rate, not a stale long-tail.
@@ -2202,7 +2227,8 @@ class CompactScreen(ModalScreen[None]):
         log_widget = self.query_one("#compact-log", RichLog)
         log_widget.clear()
         self.query_one("#compact-hint", Static).update(
-            "[dim]Esc to abort (won't kill in-flight build subprocess)[/]"
+            "[dim]Esc to abort (won't kill in-flight build subprocess)  ·  "
+            "d to detach (keeps running)[/]"
         )
 
         # Ensure forest_sizes is populated even if the initial stats
@@ -2411,26 +2437,17 @@ class CompactScreen(ModalScreen[None]):
             self.query_one("#compact-hint", Static).update(
                 "[dim]Trees built. Choose scheduler + budget…[/]"
             )
-            # Rebuild the richer per-turn stats now that trees are
-            # freshly built — root.tokens for each turn is up-to-date.
-            # Live stats come along so the picker's header keeps the
-            # full / live context visible instead of dropping it when
-            # we transition from the input phase.
-            live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
-            struct_toks = structural_tokens(self.claude_uuid, self.cwd)
-            picker = ChooseSchedulerScreen(
-                claude_uuid=self.claude_uuid,
-                cwd=self.cwd,
-                display_name=self.display_name,
-                forest_stats=self._per_turn_forest_stats(),
-                default_budget=max(1, self.total_tokens // 2),
-                full_tokens=self.total_tokens,
-                full_turns=self.total_turns,
-                live_tokens=live_toks,
-                live_turns=live_turns,
-                structural_tokens=struct_toks,
-            )
-            self.app.push_screen(picker, self._on_config_chosen)
+            if self._detached:
+                # Don't ambush the dashboard with a modal the user isn't
+                # looking at. Hold the picker until they re-attach;
+                # on_screen_resume pushes it then.
+                self._pending_picker = True
+                self.app.notify(
+                    f"'{self.display_name}': trees built — press Enter on "
+                    "its row to choose the budget."
+                )
+                return
+            self._push_picker()
             return
 
         # Terminal state — either summarize failed, or expansion done.
@@ -2443,6 +2460,41 @@ class CompactScreen(ModalScreen[None]):
         self.query_one("#compact-hint", Static).update(
             f"[bold {verdict_color}]{verdict}Esc to close.[/]"
         )
+        if self._detached:
+            # Finished while the user was on the dashboard. Report the
+            # verdict there and drop the registration, so a later `c` on
+            # that row starts a fresh compaction instead of re-opening this
+            # finished one.
+            self.app.notify(
+                f"'{self.display_name}': {verdict.strip()}"
+                + ("" if ok else f" {msg}"),
+                severity="information" if ok else "error",
+            )
+            self._teardown_detached()
+
+    def _push_picker(self) -> None:
+        """Hand off to ChooseSchedulerScreen.
+
+        Rebuilds the richer per-turn stats now that trees are freshly
+        built — root.tokens for each turn is up-to-date. Live stats come
+        along so the picker's header keeps the full / live context visible
+        instead of dropping it on the way out of the input phase.
+        """
+        live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
+        struct_toks = structural_tokens(self.claude_uuid, self.cwd)
+        picker = ChooseSchedulerScreen(
+            claude_uuid=self.claude_uuid,
+            cwd=self.cwd,
+            display_name=self.display_name,
+            forest_stats=self._per_turn_forest_stats(),
+            default_budget=max(1, self.total_tokens // 2),
+            full_tokens=self.total_tokens,
+            full_turns=self.total_turns,
+            live_tokens=live_toks,
+            live_turns=live_turns,
+            structural_tokens=struct_toks,
+        )
+        self.app.push_screen(picker, self._on_config_chosen)
 
     def _on_config_chosen(self, config: Optional[dict]) -> None:
         """Callback from ChooseSchedulerScreen. None → user exited to
@@ -2457,6 +2509,69 @@ class CompactScreen(ModalScreen[None]):
             )
             return
         self._enter_expanding_phase(config)
+
+    # ----- Detach / re-attach ---------------------------------------------
+
+    def action_detach(self) -> None:
+        """Close back to the dashboard WITHOUT stopping the compaction.
+
+        Esc aborts the run; this deliberately does not. The runner thread
+        keeps going, the compaction lock stays held (so every monitor keeps
+        rendering the row as ``compacting`` and keeps refusing attach /
+        resume / kill), and the user gets the dashboard back.
+
+        The screen instance is kept alive with ``install_screen``. That is
+        load-bearing, not incidental: Textual removes a popped screen's
+        widgets, so a plain pop-and-re-push would come back with an empty
+        log and a reset progress bar. An installed screen stays mounted,
+        keeps accepting the runner's writes while off-stack, and re-pushes
+        as the same instance.
+        """
+        if self.phase not in ("summarizing", "choosing", "expanding"):
+            self.notify(
+                "Nothing is running — Esc closes this screen.",
+                severity="warning",
+            )
+            return
+        app = self.app
+        if not self._installed:
+            try:
+                app.install_screen(self, name=_compact_screen_name(self.claude_uuid))
+                self._installed = True
+            except Exception:  # noqa: BLE001
+                self.notify(
+                    "Could not detach — leaving this screen open.",
+                    severity="error",
+                )
+                return
+        app._detached_compactions[self.claude_uuid] = self
+        self._detached = True
+        app.pop_screen()
+        app.notify(
+            f"'{self.display_name}' is still compacting in the background — "
+            "press Enter on its row to come back."
+        )
+
+    def on_screen_resume(self) -> None:
+        """Re-attached (or shown for the first time)."""
+        self._detached = False
+        if self._pending_picker:
+            self._pending_picker = False
+            self._push_picker()
+
+    def _teardown_detached(self) -> None:
+        """Drop the detach registration once the run has finished while the
+        user was away. Safe to uninstall here — a detached screen is by
+        definition off the stack, which is the one case Textual refuses."""
+        app = self.app
+        app._detached_compactions.pop(self.claude_uuid, None)
+        if self._installed:
+            try:
+                app.uninstall_screen(_compact_screen_name(self.claude_uuid))
+            except Exception:  # noqa: BLE001
+                pass
+            self._installed = False
+        app.refresh_sessions()
 
     # ----- Cancel / dismiss -----------------------------------------------
 
@@ -2993,6 +3108,10 @@ class MonitorApp(App):
         self._spawn_queue: list[dict] = []
         self._active_spawn_id: Optional[str] = None
         self._active_spawn_modal: Optional[SpawnRequestScreen] = None
+        # CompactScreens detached with ``d``: still running, off-stack, kept
+        # alive via install_screen. Keyed by claude_uuid so Enter / ``c`` on
+        # the (still ``compacting``) row can re-open the same instance.
+        self._detached_compactions: dict[str, CompactScreen] = {}
         # When the attach sidecar forcibly detaches the user to deal with a
         # spawn request, we remember the tmux session here so we can
         # reattach once the queue fully drains (set by ``_attach_to``;
@@ -3351,8 +3470,12 @@ class MonitorApp(App):
             return
 
         if e.status == "compacting":
+            # Ours, detached with `d`? Re-open it rather than refuse.
+            if e.claude_uuid and self._reattach_compaction(e.claude_uuid):
+                return
             self.notify(
-                "Session is compacting — wait until it finishes",
+                "Session is compacting in another monitor — wait until it "
+                "finishes",
                 severity="warning",
             )
             return
@@ -3576,6 +3699,12 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
+        # A compaction of this row detached with `d` is still running —
+        # re-open it. Checked before the status guard, since such a row is
+        # by definition `compacting` and would be refused below.
+        if self._reattach_compaction(e.claude_uuid):
+            return
+
         if e.status not in _COMPACTABLE_STATUSES:
             self.notify(
                 f"Compaction only allowed for idle/ended/dormant sessions "
@@ -3584,18 +3713,48 @@ class MonitorApp(App):
             )
             return
 
-        def _on_close(_: None) -> None:
-            self.refresh_sessions()
-
+        uuid = e.claude_uuid
         self.push_screen(
             CompactScreen(
-                claude_uuid=e.claude_uuid,
+                claude_uuid=uuid,
                 cwd=e.cwd,
                 display_name=e.name,
                 mv_session=e.session,
             ),
-            _on_close,
+            lambda _=None: self._compact_closed(uuid),
         )
+
+    def _reattach_compaction(self, claude_uuid: str) -> bool:
+        """Re-open the CompactScreen detached for ``claude_uuid``, if any.
+
+        Returns True if one existed and was pushed. The instance was kept
+        alive by ``install_screen`` while off-stack, so its log, progress
+        bar and runner come back exactly as they were.
+        """
+        if claude_uuid not in self._detached_compactions:
+            return False
+        try:
+            self.push_screen(
+                _compact_screen_name(claude_uuid),
+                lambda _=None: self._compact_closed(claude_uuid),
+            )
+        except Exception:  # noqa: BLE001
+            # Registration outlived the installed screen somehow — drop it
+            # rather than wedge the row into permanently refusing.
+            self._detached_compactions.pop(claude_uuid, None)
+            return False
+        return True
+
+    def _compact_closed(self, claude_uuid: str) -> None:
+        """A CompactScreen dismissed for good. Runs after the pop, which is
+        the only point ``uninstall_screen`` accepts (it refuses a screen
+        still on the stack)."""
+        self._detached_compactions.pop(claude_uuid, None)
+        try:
+            self.uninstall_screen(_compact_screen_name(claude_uuid))
+        except Exception:  # noqa: BLE001
+            pass
+        self.refresh_sessions()
 
     def action_restore(self) -> None:
         """Restore a lost session from an orphan full JSONL.
