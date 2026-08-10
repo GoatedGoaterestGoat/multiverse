@@ -46,6 +46,7 @@ import logging
 import os
 import signal
 import socket
+import subprocess
 import sys
 import time
 import uuid
@@ -479,6 +480,46 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _daemon_pid_alive(pid: int) -> bool:
+    """True only if ``pid`` is alive AND is actually our connector daemon.
+
+    Liveness alone is not enough for a pid read back off disk. The lock
+    record persists across crashes and reboots, and once the OS recycles
+    the number a bare probe reports the lock as held forever — which
+    matters most in ``sb_control.stop()``, where that pid is then
+    SIGTERM'd. Killing whatever inherited the number is not recoverable.
+
+    Deliberately identity, not the heartbeat sitting right next to it.
+    They answer different questions: the heartbeat says "is the daemon
+    healthy", identity says "is this pid still mine". A stop button
+    needs the second — a wedged-but-alive daemon that stopped
+    heartbeating is exactly what someone is pressing stop to kill, and
+    gating on health would refuse to kill it. (The heartbeat keeps its
+    own job on the foreign-host path below, where a pid from another
+    machine is meaningless and proof-of-life is all there is.)
+
+    Unverifiable means False. This feeds three callers, and they don't
+    want the same default: ``acquire_lock`` would rather assume held
+    (avoid a second daemon), ``stop`` would rather assume not-ours
+    (avoid signalling a stranger). False is correct because the
+    double-start it risks is independently prevented — acquire_lock
+    claims under an exclusive flock — while a wrong signal has no
+    second line of defence.
+    """
+    if not _pid_alive(pid):
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return "sb_connector" in out
+
+
 #: The daemon refreshes the lock's ``heartbeat`` field every ``_HEARTBEAT_INTERVAL_S``
 #: seconds. A lock whose heartbeat hasn't been touched in ``_HEARTBEAT_STALE_S`` is
 #: considered dead — either the daemon crashed (missed heartbeats), or the entire host
@@ -523,20 +564,26 @@ def _lock_is_fresh(data: dict) -> bool:
 def lock_holder() -> dict | None:
     """The live daemon holding the singleton lock, or None.
 
-    Live-detection combines two signals so a lock from a dead-and-gone remote host
-    doesn't wedge the widget forever:
+    Two signals, each used where it is the RIGHT one — not both everywhere.
+    (An earlier version of this docstring claimed "both signals must agree" and
+    described the heartbeat as belt-and-suspenders on same-host; the code never
+    did that, and it shouldn't.)
 
-    * **Same host**: PID probe (``kill(pid, 0)``) — cheap and authoritative.
-    * **Any host** (foreign or same, belt-and-suspenders): the daemon refreshes a
-      ``heartbeat`` timestamp every ``_HEARTBEAT_INTERVAL_S``. A lock whose
-      heartbeat is older than ``_HEARTBEAT_STALE_S`` is stale even if the recorded
-      PID is alive on another host (or on this host but wedged), and even if the
-      lock has no ``heartbeat`` field at all (legacy schema → treated as stale).
+    * **Same host** — process identity (``_daemon_pid_alive``): alive AND the
+      pid's command line still names our daemon. The pid is meaningful here, and
+      a recycled one would otherwise hold the lock forever and be SIGTERM'd by
+      ``sb_control.stop()``.
 
-    Both signals must agree: on same-host, PID probe is required (a wedged
-    heartbeat writer looks dead-but-not-really). On foreign-host, heartbeat is the
-    only signal we have (a bare PID is meaningless across hosts on a shared
-    ``~/.multiverse``).
+      The heartbeat is deliberately not consulted on this path. It answers "is
+      the daemon healthy", which is the wrong question for a caller deciding
+      whether it may signal a pid: a wedged-but-alive daemon that stopped
+      heartbeating is precisely what someone presses stop to kill, and gating on
+      freshness would make it unkillable.
+
+    * **Foreign host** — heartbeat freshness (``_lock_is_fresh``). A pid from
+      another machine is meaningless on this one, so proof-of-life is all there
+      is. Older than ``_HEARTBEAT_STALE_S``, or no ``heartbeat`` field at all
+      (legacy schema), reads as stale.
     """
     data = _read_json(lock_path())
     if not data:
@@ -546,10 +593,13 @@ def lock_holder() -> dict | None:
     except (TypeError, ValueError):
         return None
     if data.get("host") == current_host():
-        # Same host: PID probe is authoritative; heartbeat is a secondary "and the
-        # process is actually doing work" signal. We use PID here — a live daemon
-        # briefly stalled between heartbeat writes shouldn't be reaped.
-        return data if _pid_alive(pid) else None
+        # Same host: the pid is meaningful, so identity is authoritative —
+        # alive AND still our daemon, since a recycled pid would otherwise
+        # hold the lock forever (and get SIGTERM'd by sb_control.stop()).
+        # Heartbeat is deliberately NOT consulted here: a live daemon
+        # briefly stalled between writes shouldn't be reaped, and a wedged
+        # one must stay killable.
+        return data if _daemon_pid_alive(pid) else None
     # Foreign host: PID is meaningless, heartbeat is the only proof of life.
     return data if _lock_is_fresh(data) else None
 
