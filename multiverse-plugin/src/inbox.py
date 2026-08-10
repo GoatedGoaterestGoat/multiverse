@@ -33,6 +33,12 @@ from .paths import multiverse_dir
 MULTIVERSE_DIR = multiverse_dir()
 INBOX_DIR = MULTIVERSE_DIR / "inbox"
 
+# How long a staged (claimed but uncommitted) message waits before the
+# next claimant assumes its deliverer died and re-adopts it. Delivery
+# itself takes milliseconds; see _readopt_stale_claims for why this is
+# age-based rather than pid-based.
+_STALE_CLAIM_SECONDS = 60.0
+
 
 def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
@@ -124,13 +130,26 @@ def claim_pending_messages(cwd: str, name: str) -> list[dict]:
     other caller even knows that name, so reading + deleting it afterward
     is no longer contested.
 
-    Returns the claimed messages, sorted by ts ascending — each still a
-    plain message dict (no ``__path``, since there's nothing left to do
-    with it once deleted).
+    Claiming STAGES rather than deletes. Each returned dict carries a
+    ``__claim_path`` pointing at its staged file, which survives until
+    the caller confirms delivery via ``commit_claimed_messages``. A
+    process that dies between claiming and delivering therefore loses
+    nothing — the staged file is re-adopted by the next claim (see
+    ``_readopt_stale_claims``).
+
+    That ordering matters: deleting at claim time put an unbounded
+    amount of fallible work (reading hook stdin, logging, rendering,
+    writing the response) between the destroy and the hand-over, and
+    deliver-inbox swallows exceptions with ``sys.exit(0)`` so hooks
+    never crash claude. Any failure in that window destroyed the
+    messages, exited success, and told nobody.
+
+    Returns the claimed messages, sorted by ts ascending.
     """
     d = agent_inbox_dir(cwd, name)
     if not d.is_dir():
         return []
+    _readopt_stale_claims(d)
     claimant = f"{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex[:8]}"
     claimed: list[dict] = []
     for path in d.glob("*.json"):
@@ -144,15 +163,76 @@ def claim_pending_messages(cwd: str, name: str) -> list[dict]:
         try:
             data = json.loads(claim_path.read_text())
         except (OSError, json.JSONDecodeError):
-            data = None
-        try:
-            claim_path.unlink()
-        except OSError:
-            pass
-        if data is not None:
-            claimed.append(data)
+            # Corrupt or unreadable: drop it outright. Staging it would
+            # strand a message no caller can ever deliver or commit, and
+            # _readopt_stale_claims would then re-adopt it every 60s
+            # forever.
+            try:
+                claim_path.unlink()
+            except OSError:
+                pass
+            continue
+        data["__claim_path"] = str(claim_path)
+        claimed.append(data)
     claimed.sort(key=lambda m: m.get("ts", 0))
     return claimed
+
+
+def commit_claimed_messages(messages: list[dict]) -> None:
+    """Delete the staged files for messages whose delivery is confirmed.
+
+    Call this AFTER the hand-over actually happened — the hook's
+    response written to stdout, or the tool's result returned. Before
+    that point the staged files are the only copy.
+
+    Commits exactly what was staged, by path, rather than clearing the
+    inbox directory: a concurrent ``message_agent`` may have written new
+    messages during delivery, and those were never handed to anyone.
+    """
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        raw = m.get("__claim_path")
+        if not raw:
+            continue
+        try:
+            Path(raw).unlink()
+        except OSError:
+            pass
+
+
+def _readopt_stale_claims(d: Path) -> None:
+    """Return abandoned staged files to the unclaimed pool.
+
+    A staged file older than ``_STALE_CLAIM_SECONDS`` belonged to a
+    deliverer that died between claiming and committing. Renaming it
+    back to its original name makes the next claim loop pick it up.
+
+    Staleness is judged by age, deliberately not by whether the
+    claimant's pid is still alive: pid reuse makes that check
+    unreliable (this codebase already hit exactly that in the
+    tree-build tail loop — a recycled pid kept a dead worker looking
+    alive forever, fixed in 5437f39), and here the consequence of
+    getting it wrong would be permanent message loss.
+
+    The threshold is enormous relative to the work it covers — delivery
+    is a few file reads and one write — so a false positive needs a
+    deliverer wedged for a full minute. And a false positive costs a
+    duplicate delivery, which is strictly better than a message
+    delivered never.
+    """
+    now = time.time()
+    for claim_path in d.glob("*.json.claim-*"):
+        try:
+            if now - claim_path.stat().st_mtime < _STALE_CLAIM_SECONDS:
+                continue
+        except OSError:
+            continue
+        original = claim_path.with_name(claim_path.name.split(".claim-")[0])
+        try:
+            claim_path.rename(original)
+        except OSError:
+            pass
 
 
 def pending_inbox_count(cwd: str, name: str) -> int:

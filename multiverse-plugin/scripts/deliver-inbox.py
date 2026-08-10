@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inbox import (  # noqa: E402
     claim_pending_messages,
+    commit_claimed_messages,
     render_messages_as_system_reminder,
 )
 from src.interagent_log import log_inbox_delivered  # noqa: E402
@@ -89,6 +90,14 @@ def main() -> None:
         }
 
     print(json.dumps(out))
+    sys.stdout.flush()
+
+    # Hand-over is complete — only now is it safe to destroy the staged
+    # files. Everything above (reading stdin, logging, rendering) can
+    # throw, and the __main__ handler swallows exceptions with exit 0 so
+    # hooks never crash claude; committing earlier meant any of those
+    # failures silently ate the messages.
+    commit_claimed_messages(messages)
 
 
 if __name__ == "__main__":

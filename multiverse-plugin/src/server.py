@@ -47,6 +47,7 @@ from src.sessions import (
 )
 from src.inbox import (
     claim_pending_messages,
+    commit_claimed_messages,
     pending_inbox_count,
     render_messages_as_tool_result,
     write_message_to_inbox,
@@ -920,8 +921,10 @@ def check_inbox() -> str:
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
         )
 
-    # Claims (reads + atomically deletes) — safe if a duplicate-session
-    # process is also polling this same inbox; see claim_pending_messages.
+    # Claims (reads + STAGES) — safe if a duplicate-session process is
+    # also polling this same inbox; see claim_pending_messages. The
+    # staged files survive until commit_claimed_messages below, so a
+    # throw in between doesn't destroy undelivered messages.
     messages = claim_pending_messages(cwd, name)
     if not messages:
         return "You have no pending inbox messages."
@@ -933,7 +936,13 @@ def check_inbox() -> str:
         messages=messages,
         recipient_runtime=os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE),
     )
-    return render_messages_as_tool_result(messages)
+    rendered = render_messages_as_tool_result(messages)
+
+    # Render succeeded and `rendered` is what the caller receives — the
+    # last point we can observe from here. Committing before this put
+    # log_inbox_delivered and the renderer inside the destroy window.
+    commit_claimed_messages(messages)
+    return rendered
 
 
 @mcp.tool()
