@@ -67,12 +67,42 @@ def _read_input() -> dict:
         return {}
 
 
-def _alive(pid: int) -> bool:
+def _worker_alive(pid: int) -> bool:
+    """True only if ``pid`` is alive AND is actually our tree-builder.
+
+    A bare ``os.kill(pid, 0)`` liveness check isn't enough. The worker
+    unlinks its lockfile in a ``finally``, but SIGKILL / OOM / reboot
+    skips that, leaving the lockfile behind — and the OS eventually
+    recycles the pid. Once any unrelated process inherits it, a
+    pid-only check reports "a worker is already running" forever, so
+    auto tree-build silently never runs again for that session. No
+    error, no log, and the feature the user explicitly opted into with
+    `b` is just permanently off.
+
+    That's the same recycled-pid failure the compact runner's tail loop
+    hit (fixed in 5437f39) — different symptom, identical cause.
+
+    Identity-matching on the command line rather than an age threshold:
+    a legitimate build runs for hours (many turns at tens of seconds
+    each), so any age bound loose enough to avoid killing live builds
+    would be far too loose to clear a stale lock promptly.
+    """
     try:
         os.kill(pid, 0)
-        return True
     except OSError:
         return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        # Can't verify. Assume it IS our worker: a false "stale" here
+        # spawns a second builder alongside a live one, and the two
+        # would race writing the same tree JSONs. A false "alive" only
+        # delays this session's build until the next prompt.
+        return True
+    return "tree-builder-worker" in out
 
 
 def main() -> None:
@@ -105,7 +135,7 @@ def main() -> None:
     if lockfile.exists():
         try:
             pid = int(lockfile.read_text().strip())
-            if _alive(pid):
+            if _worker_alive(pid):
                 return  # a worker is already chewing on this session
         except (ValueError, OSError):
             pass  # stale or unreadable — overwrite below
