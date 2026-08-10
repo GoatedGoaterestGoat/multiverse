@@ -333,14 +333,34 @@ def _read_codex_session_metadata(path: Path) -> dict:
 
 
 def list_codex_sessions_in(
-    cwd: str, *, include_unnamed: bool = False
+    cwd: str,
+    *,
+    include_unnamed: bool = False,
+    include_ancestors: bool = False,
 ) -> list[dict]:
     """Return Codex sessions under ``cwd``, newest first.
 
     Codex stores the stable thread id and cwd in rollout metadata, while
     explicit user-facing names live in ``session_index.jsonl``. Unnamed
-    threads are omitted unless ``include_unnamed`` is true.
+    threads are omitted unless ``include_unnamed`` is true. Resumed rollouts
+    embed their prior thread metadata; named ancestors are omitted by default
+    so one logical conversation does not appear multiple times. Internal
+    callers that need the complete lineage can pass ``include_ancestors``.
     """
+    def visible(items: list[dict]) -> list[dict]:
+        selected = items
+        if not include_ancestors:
+            superseded = {
+                ancestor_id
+                for item in selected
+                if item.get("name")
+                for ancestor_id in item.get("ancestor_ids") or ()
+            }
+            selected = [item for item in selected if item.get("id") not in superseded]
+        if not include_unnamed:
+            selected = [item for item in selected if item.get("name")]
+        return [dict(item) for item in selected]
+
     try:
         cwd_abs = str(Path(cwd).expanduser().resolve())
     except OSError:
@@ -349,10 +369,7 @@ def list_codex_sessions_in(
     now = time.monotonic()
     cached = _CODEX_DISCOVERY_CACHE.get(cwd_abs)
     if cached and now - cached[0] < _CODEX_DISCOVERY_TTL:
-        out = cached[1]
-        if not include_unnamed:
-            out = [item for item in out if item.get("name")]
-        return [dict(item) for item in out]
+        return visible(cached[1])
 
     names = _read_codex_names()
     sessions_dir = CODEX_HOME / "sessions"
@@ -381,9 +398,7 @@ def list_codex_sessions_in(
     out = list(by_id.values())
     out.sort(key=lambda d: d["mtime"], reverse=True)
     _CODEX_DISCOVERY_CACHE[cwd_abs] = (now, out)
-    if not include_unnamed:
-        out = [item for item in out if item.get("name")]
-    return [dict(item) for item in out]
+    return visible(out)
 
 
 def existing_names_in_cwd(cwd: str) -> set[str]:
@@ -822,8 +837,18 @@ def build_dashboard_rows(
                 ghost_map[uid] = 0.0
 
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
-    codex_sessions = list_codex_sessions_in(cwd, include_unnamed=True)
+    codex_sessions = list_codex_sessions_in(
+        cwd,
+        include_unnamed=True,
+        include_ancestors=True,
+    )
     codex_by_id = {info["id"]: info for info in codex_sessions}
+    superseded_codex_ids = {
+        ancestor_id
+        for info in codex_sessions
+        if info.get("name")
+        for ancestor_id in info.get("ancestor_ids") or ()
+    }
     pending_codex_ids = list(wrapped_codex_ids)
     while pending_codex_ids:
         info = codex_by_id.get(pending_codex_ids.pop())
@@ -969,7 +994,11 @@ def build_dashboard_rows(
 
     for info in codex_sessions:
         session_id = info["id"]
-        if session_id in wrapped_codex_ids or not info.get("name"):
+        if (
+            session_id in wrapped_codex_ids
+            or session_id in superseded_codex_ids
+            or not info.get("name")
+        ):
             continue
         rows.append(
             DashboardRow(

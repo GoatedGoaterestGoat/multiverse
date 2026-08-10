@@ -154,6 +154,37 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["preview"], "Original prompt")
         self.assertEqual(metadata["ancestor_ids"], ["ancestor-thread"])
 
+    def test_codex_discovery_hides_named_resume_ancestor(self) -> None:
+        resumed = {
+            "id": "current-thread",
+            "name": "codex-agent",
+            "preview": "Original prompt",
+            "mtime": 2,
+            "ancestor_ids": ["ancestor-thread"],
+        }
+        ancestor = {
+            "id": "ancestor-thread",
+            "name": "codex-agent",
+            "preview": "Original prompt",
+            "mtime": 1,
+            "ancestor_ids": [],
+        }
+        with patch.object(
+            sessions,
+            "_CODEX_DISCOVERY_CACHE",
+            {"/workspace": (time.monotonic(), [resumed, ancestor])},
+        ):
+            visible = sessions.list_codex_sessions_in("/workspace")
+            full_lineage = sessions.list_codex_sessions_in(
+                "/workspace", include_ancestors=True
+            )
+
+        self.assertEqual([item["id"] for item in visible], ["current-thread"])
+        self.assertEqual(
+            [item["id"] for item in full_lineage],
+            ["current-thread", "ancestor-thread"],
+        )
+
     def test_dashboard_deduplicates_wrapped_codex_thread(self) -> None:
         wrapped = sessions.Session(
             id="mv-id",
@@ -228,6 +259,35 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].session_id, "current-thread")
         self.assertEqual(rows[0].preview, "Original prompt")
+
+    def test_dashboard_hides_dormant_codex_resume_ancestor(self) -> None:
+        native = [
+            {
+                "id": "current-thread",
+                "name": "codex-agent",
+                "preview": "Original prompt",
+                "mtime": 2,
+                "ancestor_ids": ["ancestor-thread"],
+            },
+            {
+                "id": "ancestor-thread",
+                "name": "codex-agent",
+                "preview": "Original prompt",
+                "mtime": 1,
+                "ancestor_ids": [],
+            },
+        ]
+        with (
+            patch.object(sessions.forks, "gc"),
+            patch.object(sessions.forks, "active_uuids", return_value=set()),
+            patch.object(sessions, "list_codex_sessions_in", return_value=native),
+            patch.object(sessions, "list_locked", return_value=set()),
+            patch.object(sessions, "CLAUDE_PROJECTS_DIR", Path("/missing")),
+        ):
+            rows = sessions.build_dashboard_rows([], "/workspace")
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0].session_id, "current-thread")
 
     def test_all_session_names_share_one_runtime_namespace(self) -> None:
         with (
