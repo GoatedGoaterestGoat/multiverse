@@ -159,7 +159,16 @@ _RULE_MIN_RATIO = 0.6
 # plain capture that is indistinguishable from typed text, so dim spans are deleted
 # before parsing — otherwise a ghost suggestion gets "saved" and then restored into the
 # box as literal user input.
-_GHOST_DIM_RE = re.compile(r"\x1b\[2m.*?\x1b\[0m", re.DOTALL)
+#
+# Line-bounded ON PURPOSE. Claude frequently opens the dim span on the composer's
+# marker line and emits the closing ``\x1b[0m`` at the START OF THE NEXT LINE (the
+# closing rule). A DOTALL ``\x1b\[2m.*?\x1b\[0m`` swallows the newline with it, welding
+# the marker line onto the rule below (``❯\xa0──────…``). That weld reads as a rule
+# line, leaving an empty region between two rules — so the composer looked ABSENT and
+# every push notification to that agent silently degraded to queued delivery.
+# ``[^\n]*?`` cannot cross a line, and the ``$`` alternative (with MULTILINE) handles a
+# span whose reset lands on a later line by dimming to end-of-line instead.
+_GHOST_DIM_RE = re.compile(r"\x1b\[2m[^\n]*?(?:\x1b\[0m|$)", re.MULTILINE)
 
 
 def _is_rule_line(line: str) -> bool:

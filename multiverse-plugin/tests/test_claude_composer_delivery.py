@@ -37,6 +37,26 @@ def claude_pane(draft: str = "", *, ghost: bool = False, name: str = "agent") ->
     )
 
 
+def claude_pane_ghost_reset_on_next_line(ghost: str = "Pull on the remote") -> str:
+    """Real-world shape captured from a live agent (GOAT).
+
+    Claude opens the dim span on the marker line but emits the closing ``\\x1b[0m`` at
+    the START of the following line (the closing rule). A DOTALL dim-strip eats the
+    newline along with it, welding the marker line onto the rule and making the
+    composer look absent — which silently degraded every push to queued delivery.
+    """
+    return "\n".join(
+        [
+            "  earlier transcript output",
+            "",
+            f"\x1b[38;5;37m{RULE}",
+            f"\x1b[39m❯\xa0\x1b[2m{ghost}",
+            f"\x1b[0m\x1b[38;5;37m{RULE}",
+            "\x1b[39m  ⏵⏵ auto mode on (shift+tab to cycle)",
+        ]
+    )
+
+
 def modal_pane() -> str:
     """A pane with a permission prompt up — the composer is gone."""
     return "\n".join(
@@ -67,6 +87,23 @@ class ClaudeInputBoxDetectionTests(unittest.TestCase):
         )
         self.assertTrue(visible)
         self.assertEqual(draft, "")
+
+    def test_ghost_whose_reset_lands_on_the_next_line(self) -> None:
+        """Regression: the composer must stay visible, and the ghost is not a draft.
+
+        Live bug this reproduces — a DOTALL dim-strip consumed the newline before the
+        reset, welding ``❯`` onto the closing rule. The weld itself scored as a rule
+        line, so the region between the two rules came back empty and the composer
+        read as ABSENT: every push notification to that agent fell back to queued.
+        """
+        pane = claude_pane_ghost_reset_on_next_line("Pull on the remote and restart")
+        self.assertEqual(sb_actions.claude_input_box(pane), (True, ""))
+
+    def test_ghost_reset_next_line_still_delivers(self) -> None:
+        """The end-to-end consequence: this pane must be deliverable, not queued."""
+        pane = claude_pane_ghost_reset_on_next_line()
+        visible, _ = sb_actions.claude_input_box(pane)
+        self.assertTrue(visible, "composer must be visible or delivery degrades")
 
     def test_modal_hides_composer(self) -> None:
         self.assertEqual(sb_actions.claude_input_box(modal_pane()), (False, ""))
