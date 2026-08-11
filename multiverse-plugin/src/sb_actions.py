@@ -39,6 +39,20 @@ _CLEAR_MARGIN = 3
 #: Bounded wait for a `starting` session to expose its composer before we send-keys.
 DEFAULT_READY_TIMEOUT_S = 15.0
 
+#: Quiet gap to leave before the Enter that submits a Claude prompt.
+#:
+#: Claude's input handler infers a paste when a burst of literal input arrives, and
+#: while that inference is pending it swallows every subsequent key into the pasted
+#: text instead of dispatching it — so an Enter sent inside the window is appended as
+#: a newline rather than submitting. Nothing about the burst marks its end, so the
+#: handler only settles after a short idle gap; we simply out-wait it. The delay is
+#: a few hundred ms once per delivery, and it is what makes submission deterministic
+#: rather than dependent on how the runtime happened to chunk our writes.
+#:
+#: Codex avoids this window differently — see :func:`paste_text_via_tmux`, which
+#: reaches its paste handler explicitly and clears the suppression state outright.
+_CLAUDE_SUBMIT_DELAY_S = 0.30
+
 #: How long to wait for tmux capture-pane / send-keys to return. tmux is normally fast;
 #: a hang beyond a few seconds means the tmux server is unhealthy, and it's better to
 #: bail than block the connector's receiver loop.
@@ -471,6 +485,11 @@ def _type_prompt(
             if not ok:
                 return False, err
     if submit:
+        # Claude's composer suppresses Enter-as-submit for a short window after a
+        # burst of literal input — the same paste-inference behavior documented on
+        # the Codex path above, and the reason a long prompt would sometimes land
+        # in the composer with a newline appended instead of being sent.
+        time.sleep(_CLAUDE_SUBMIT_DELAY_S)
         return _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
     return True, ""
 
