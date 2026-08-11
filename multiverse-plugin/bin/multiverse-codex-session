@@ -81,6 +81,7 @@ unset MCP_ENV_NAME
 CODEX_ARGS=("$@")
 READY_WATCHER_PID=""
 NAME_WATCHER_PID=""
+RUNTIME_PID=""
 
 write_status() {
   local status="$1" ts tmp
@@ -105,10 +106,27 @@ cleanup() {
   write_status ended || true
 }
 
+terminate_runtime() {
+  local runtime_signal="$1" exit_code="$2" attempt=0
+  trap - HUP INT TERM
+  if [ -n "$RUNTIME_PID" ] && kill -0 "$RUNTIME_PID" 2>/dev/null; then
+    kill "-$runtime_signal" "$RUNTIME_PID" 2>/dev/null || true
+    while kill -0 "$RUNTIME_PID" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if kill -0 "$RUNTIME_PID" 2>/dev/null; then
+      kill -KILL "$RUNTIME_PID" 2>/dev/null || true
+    fi
+    wait "$RUNTIME_PID" 2>/dev/null || true
+  fi
+  exit "$exit_code"
+}
+
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'terminate_runtime HUP 129' HUP
+trap 'terminate_runtime INT 130' INT
+trap 'terminate_runtime TERM 143' TERM
 
 INITIAL_PROMPT=""
 if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
@@ -217,20 +235,19 @@ READY_WATCHER_PID=$!
 set_native_name_when_codex_starts &
 NAME_WATCHER_PID=$!
 
-# Keep Codex in the pane's foreground process group. The tiny foreground
-# launcher records its own PID and then execs Codex, so the PID remains stable
-# for liveness checks without changing terminal input or job-control behavior.
-/bin/sh -c '
-  pid_path=$1
-  shift
-  tmp="${pid_path}.$$.tmp"
-  if printf "%s\n" "$$" > "$tmp"; then
-    mv -f "$tmp" "$pid_path"
-  else
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-  exec "$@"
-' multiverse-codex-exec "$RUNTIME_PID_PATH" \
-  "$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
+# An explicit stdin redirection prevents non-interactive Bash from replacing a
+# background command's stdin with /dev/null. Codex remains in the pane's
+# foreground process group, while the wrapper can now receive a signal during
+# wait, forward it to Codex, and reap the child before writing `ended`.
+"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
   ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} \
-  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
+  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} <&0 &
+RUNTIME_PID=$!
+RUNTIME_PID_TMP="${RUNTIME_PID_PATH}.$$.$RANDOM.tmp"
+if printf '%s\n' "$RUNTIME_PID" > "$RUNTIME_PID_TMP"; then
+  mv -f "$RUNTIME_PID_TMP" "$RUNTIME_PID_PATH"
+else
+  rm -f "$RUNTIME_PID_TMP" 2>/dev/null || true
+fi
+wait "$RUNTIME_PID" 2>/dev/null || true
+RUNTIME_PID=""

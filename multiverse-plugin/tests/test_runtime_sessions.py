@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -13,6 +14,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from src import sessions
+
+
+def _isolated_process_env() -> dict[str, str]:
+    """Keep subprocess tests from inheriting a live Multiverse identity."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith("MULTIVERSE_")
+    }
 
 
 class RuntimeMetadataTests(unittest.TestCase):
@@ -400,11 +410,67 @@ class RuntimeLivenessTests(unittest.TestCase):
                 patch.object(sessions, "STATE_DIR", state_dir),
                 patch.object(sessions, "current_host", return_value="local-host"),
                 patch.object(sessions, "tmux_session_exists", return_value=True),
-                patch.object(sessions, "_pid_alive", return_value=True),
+                patch.object(
+                    sessions, "_codex_runtime_pid_matches", return_value=True
+                ),
             ):
                 found = sessions.list_sessions()
 
             self.assertEqual(found[0].status, "idle")
+
+    def test_live_codex_pid_prevents_detach_from_marking_ended(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir)
+            (session_dir / "runtime_pid").write_text("4242\n")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=False),
+                patch.object(
+                    sessions, "_codex_runtime_pid_matches", return_value=True
+                ),
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "idle")
+            self.assertEqual(
+                json.loads((session_dir / "status.json").read_text())["status"],
+                "idle",
+            )
+
+    def test_codex_pid_identity_requires_embedded_wrapper_id(self) -> None:
+        wrapped = sessions.Session(
+            id="wrapper-id",
+            cwd="/workspace",
+            created_at=1,
+            runtime=sessions.RUNTIME_CODEX,
+            host="local-host",
+        )
+        with (
+            patch.object(sessions, "current_host", return_value="local-host"),
+            patch.object(sessions, "_pid_alive", return_value=True),
+            patch.object(
+                sessions,
+                "_proc_cmdline",
+                return_value=(
+                    "codex -c mcp_servers.multiverse.env."
+                    'MULTIVERSE_SESSION_ID="wrapper-id"'
+                ),
+            ),
+        ):
+            self.assertTrue(sessions._codex_runtime_pid_matches(wrapped, 4242))
+
+        with (
+            patch.object(sessions, "current_host", return_value="local-host"),
+            patch.object(sessions, "_pid_alive", return_value=True),
+            patch.object(
+                sessions,
+                "_proc_cmdline",
+                return_value="codex resume unrelated-thread",
+            ),
+        ):
+            self.assertFalse(sessions._codex_runtime_pid_matches(wrapped, 4242))
 
     def test_live_codex_session_reloads_after_monitor_restart(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -416,7 +482,9 @@ class RuntimeLivenessTests(unittest.TestCase):
                 patch.object(sessions, "STATE_DIR", state_dir),
                 patch.object(sessions, "current_host", return_value="local-host"),
                 patch.object(sessions, "tmux_session_exists", return_value=True),
-                patch.object(sessions, "_pid_alive", return_value=True),
+                patch.object(
+                    sessions, "_codex_runtime_pid_matches", return_value=True
+                ),
             ):
                 before_restart = sessions.list_sessions()
                 after_restart = sessions.list_sessions()
@@ -472,12 +540,13 @@ class RuntimeLaunchTests(unittest.TestCase):
                 initial_prompt=initial_prompt,
             )
         meta = json.loads((state_dir / "session-id" / "meta.json").read_text())
-        return created, meta, calls[0]
+        return created, meta, calls
 
     def test_codex_launch_uses_codex_runner_and_resume_command(self) -> None:
-        created, meta, tmux_cmd = self._create_with_runtime(
+        created, meta, calls = self._create_with_runtime(
             sessions.RUNTIME_CODEX, ["resume", "native-thread"]
         )
+        tmux_cmd = calls[0]
 
         self.assertEqual(created.runtime, sessions.RUNTIME_CODEX)
         self.assertEqual(meta["runtime"], sessions.RUNTIME_CODEX)
@@ -485,17 +554,35 @@ class RuntimeLaunchTests(unittest.TestCase):
         self.assertNotIn("--permission-mode", meta["codex_args"])
         self.assertIn("MULTIVERSE_RUNTIME=codex", tmux_cmd)
         self.assertIn("MULTIVERSE_RUNTIME_SESSION_ID_PATH=", " ".join(tmux_cmd))
-        self.assertIn("multiverse-codex-session resume native-thread", tmux_cmd[-1])
+        self.assertIn(
+            "multiverse-codex-session resume native-thread", " ".join(tmux_cmd)
+        )
+        persistence_args = [
+            ";",
+            "set-option",
+            "-t",
+            "multiverse-session-id",
+            "destroy-unattached",
+            "off",
+        ]
+        persistence_index = tmux_cmd.index(";")
+        self.assertEqual(
+            tmux_cmd[
+                persistence_index : persistence_index + len(persistence_args)
+            ],
+            persistence_args,
+        )
 
     def test_codex_launch_keeps_name_and_initial_prompt_off_command_line(
         self,
     ) -> None:
         prompt = "First line with apostrophe's.\nSecond line."
-        _, _, tmux_cmd = self._create_with_runtime(
+        _, _, calls = self._create_with_runtime(
             sessions.RUNTIME_CODEX,
             [],
             initial_prompt=prompt,
         )
+        tmux_cmd = calls[0]
 
         self.assertIn("MULTIVERSE_SESSION_NAME=named-agent", tmux_cmd)
         prompt_env = next(
@@ -505,21 +592,24 @@ class RuntimeLaunchTests(unittest.TestCase):
         )
         prompt_path = Path(prompt_env.split("=", 1)[1])
         self.assertEqual(prompt_path.read_text(), prompt)
-        self.assertNotIn(prompt, tmux_cmd[-1])
-        self.assertIn("multiverse-codex-session", tmux_cmd[-1])
+        self.assertNotIn(prompt, " ".join(tmux_cmd))
+        self.assertIn("multiverse-codex-session", " ".join(tmux_cmd))
 
     def test_claude_launch_keeps_existing_permission_and_runner_behavior(self) -> None:
-        created, meta, tmux_cmd = self._create_with_runtime(
+        created, meta, calls = self._create_with_runtime(
             sessions.RUNTIME_CLAUDE, []
         )
+        tmux_cmd = calls[0]
 
         self.assertEqual(created.runtime, sessions.RUNTIME_CLAUDE)
         self.assertEqual(
             meta["claude_args"], ["--permission-mode", "auto"]
         )
-        self.assertIn("multiverse-session --permission-mode auto", tmux_cmd[-1])
-        self.assertNotIn("--sandbox", tmux_cmd[-1])
-        self.assertNotIn("danger-full-access", tmux_cmd[-1])
+        self.assertIn(
+            "multiverse-session --permission-mode auto", " ".join(tmux_cmd)
+        )
+        self.assertNotIn("--sandbox", " ".join(tmux_cmd))
+        self.assertNotIn("danger-full-access", " ".join(tmux_cmd))
 
     def test_duplicate_codex_name_and_native_thread_claims_are_rejected(self) -> None:
         temp = tempfile.TemporaryDirectory()
@@ -641,6 +731,130 @@ class RuntimeLaunchTests(unittest.TestCase):
         self.assertEqual(list(claims_dir.iterdir()), [])
 
 
+class RuntimeKillTests(unittest.TestCase):
+    def _session(self, state_dir: Path, session_id: str) -> sessions.Session:
+        session_dir = state_dir / session_id
+        session_dir.mkdir()
+        (session_dir / "meta.json").write_text(
+            json.dumps(
+                {
+                    "cwd": str(state_dir),
+                    "created_at": 1,
+                    "name": "owned-agent",
+                    "runtime": sessions.RUNTIME_CODEX,
+                    "host": sessions.current_host(),
+                }
+            )
+        )
+        (session_dir / "status.json").write_text(
+            json.dumps({"status": "idle", "ts": 2})
+        )
+        (session_dir / "runtime_session_id").write_text("native-thread\n")
+        return sessions.Session(
+            id=session_id,
+            cwd=str(state_dir),
+            created_at=1,
+            status="idle",
+            name="owned-agent",
+            runtime=sessions.RUNTIME_CODEX,
+            codex_session_id="native-thread",
+            host=sessions.current_host(),
+        )
+
+    def test_kill_terminates_owned_process_group_before_releasing_state(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "sessions"
+            state_dir.mkdir()
+            wrapped = self._session(state_dir, "owned-wrapper")
+            child_pid_path = Path(raw) / "child-pid"
+            runtime_script = Path(raw) / "owned-runtime.py"
+            runtime_script.write_text(
+                "import signal, subprocess, sys, time\n"
+                "child = subprocess.Popen(['sleep', '60'])\n"
+                "open(sys.argv[1], 'w').write(str(child.pid))\n"
+                "def stop(_signal, _frame):\n"
+                "    child.wait(timeout=2)\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGTERM, stop)\n"
+                "while True:\n"
+                "    time.sleep(1)\n"
+            )
+            runtime = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(runtime_script),
+                    str(child_pid_path),
+                    'MULTIVERSE_SESSION_ID="owned-wrapper"',
+                ],
+                start_new_session=True,
+            )
+            try:
+                session_dir = state_dir / wrapped.id
+                deadline = time.monotonic() + 3
+                while not child_pid_path.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(child_pid_path.is_file())
+                child_pid = int(child_pid_path.read_text())
+                (session_dir / "runtime_pid").write_text(f"{runtime.pid}\n")
+
+                with (
+                    patch.object(sessions, "STATE_DIR", state_dir),
+                    patch.object(
+                        sessions, "tmux_session_exists", return_value=False
+                    ),
+                ):
+                    for kind, value in sessions._session_claim_specs(
+                        wrapped.cwd,
+                        wrapped.runtime,
+                        wrapped.name,
+                        wrapped.runtime_session_id,
+                    ):
+                        sessions._acquire_claim(
+                            sessions._claim_path(kind, value), wrapped.id
+                        )
+                    sessions.kill_session(wrapped)
+
+                runtime.wait(timeout=3)
+                deadline = time.monotonic() + 2
+                while sessions._pid_alive(child_pid) and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertFalse(sessions._pid_alive(runtime.pid))
+                self.assertFalse(sessions._pid_alive(child_pid))
+                self.assertFalse(session_dir.exists())
+                claims_dir = state_dir.parent / "session_claims"
+                self.assertEqual(list(claims_dir.iterdir()), [])
+            finally:
+                if runtime.poll() is None:
+                    os.killpg(os.getpgid(runtime.pid), signal.SIGKILL)
+                    runtime.wait()
+
+    def test_kill_does_not_signal_reused_runtime_pid(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw) / "sessions"
+            state_dir.mkdir()
+            wrapped = self._session(state_dir, "stale-wrapper")
+            unrelated = subprocess.Popen(["sleep", "60"], start_new_session=True)
+            try:
+                session_dir = state_dir / wrapped.id
+                (session_dir / "runtime_pid").write_text(f"{unrelated.pid}\n")
+                with (
+                    patch.object(sessions, "STATE_DIR", state_dir),
+                    patch.object(
+                        sessions, "tmux_session_exists", return_value=False
+                    ),
+                ):
+                    sessions.kill_session(wrapped)
+
+                self.assertIsNone(unrelated.poll())
+                self.assertFalse(session_dir.exists())
+            finally:
+                if unrelated.poll() is None:
+                    os.killpg(os.getpgid(unrelated.pid), signal.SIGKILL)
+                    unrelated.wait()
+
+
 class CodexDeletionTests(unittest.TestCase):
     def test_delete_codex_thread_uses_app_server_protocol(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -661,7 +875,7 @@ class CodexDeletionTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "CAPTURE_PATH": str(capture),
             }
@@ -688,7 +902,7 @@ class CodexHookTests(unittest.TestCase):
             status = state / "status.json"
             native_id = state / "runtime_session_id"
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_STATUS": str(status),
                 "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(native_id),
             }
@@ -743,7 +957,7 @@ class CodexHookTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "CAPTURE_PATH": str(capture),
                 "PROOF_PATH": str(proof),
@@ -824,7 +1038,7 @@ class CodexRunnerTests(unittest.TestCase):
             prompt_file = temp_dir / "initial-prompt.txt"
             prompt_file.write_text("Do the spawned work.")
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
@@ -863,14 +1077,17 @@ class CodexRunnerTests(unittest.TestCase):
             temp_dir = Path(raw)
             status = temp_dir / "status.json"
             capture = temp_dir / "args.txt"
+            stdin_capture = temp_dir / "stdin.txt"
             fake_codex = temp_dir / "codex"
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
                 "printf '%s\\n' \"$@\" > \"$CAPTURE_PATH\"\n"
+                "IFS= read -r line\n"
+                "printf '%s\\n' \"$line\" > \"$STDIN_CAPTURE_PATH\"\n"
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
@@ -885,10 +1102,12 @@ class CodexRunnerTests(unittest.TestCase):
                     temp_dir / "runtime_session_id"
                 ),
                 "CAPTURE_PATH": str(capture),
+                "STDIN_CAPTURE_PATH": str(stdin_capture),
             }
 
             proc = subprocess.run(
                 [str(runner), "resume", "codex-thread"],
+                input="typed through wrapper\n",
                 text=True,
                 capture_output=True,
                 env=env,
@@ -922,6 +1141,7 @@ class CodexRunnerTests(unittest.TestCase):
                 + json.dumps(str(temp_dir / "runtime_pid")),
                 args,
             )
+            self.assertEqual(stdin_capture.read_text().strip(), "typed through wrapper")
             self.assertEqual(json.loads(status.read_text())["status"], "ended")
 
     def test_ready_watcher_advances_unchanged_starting_status(self) -> None:
@@ -952,7 +1172,7 @@ class CodexRunnerTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
@@ -1004,7 +1224,7 @@ class CodexRunnerTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "PATH": f"{temp_dir}:{os.environ.get('PATH', '')}",
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
@@ -1047,7 +1267,7 @@ class CodexRunnerTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
@@ -1084,7 +1304,7 @@ class CodexRunnerTests(unittest.TestCase):
             )
             fake_codex.chmod(0o755)
             env = {
-                **os.environ,
+                **_isolated_process_env(),
                 "MULTIVERSE_CODEX_BIN": str(fake_codex),
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
@@ -1113,6 +1333,70 @@ class CodexRunnerTests(unittest.TestCase):
                     proc.wait()
 
             self.assertEqual(proc.returncode, 0, stderr)
+            self.assertEqual(json.loads(status.read_text())["status"], "ended")
+
+    def test_runner_forwards_hup_and_reaps_codex_child(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            runtime_pid = temp_dir / "runtime_pid"
+            ready = temp_dir / "ready"
+            received_hup = temp_dir / "received-hup"
+            status.write_text(json.dumps({"status": "starting", "ts": 1}))
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env python3\n"
+                "import os, signal, time\n"
+                "def stop(_signal, _frame):\n"
+                "    open(os.environ['RECEIVED_HUP'], 'w').close()\n"
+                "    raise SystemExit(0)\n"
+                "signal.signal(signal.SIGHUP, stop)\n"
+                "open(os.environ['READY_PATH'], 'w').close()\n"
+                "while True:\n"
+                "    time.sleep(1)\n"
+            )
+            fake_codex.chmod(0o755)
+            env = {
+                **_isolated_process_env(),
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_PID_PATH": str(runtime_pid),
+                "READY_PATH": str(ready),
+                "RECEIVED_HUP": str(received_hup),
+            }
+            proc = subprocess.Popen(
+                [str(runner)],
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+                start_new_session=True,
+            )
+            child_pid = 0
+            try:
+                deadline = time.monotonic() + 3
+                while (
+                    (not ready.is_file() or not runtime_pid.is_file())
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+                self.assertTrue(ready.is_file())
+                child_pid = int(runtime_pid.read_text())
+                proc.send_signal(signal.SIGHUP)
+                _, stderr = proc.communicate(timeout=4)
+            finally:
+                if proc.poll() is None:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    proc.wait()
+
+            self.assertEqual(proc.returncode, 129, stderr)
+            self.assertTrue(received_hup.is_file())
+            self.assertFalse(sessions._pid_alive(child_pid))
             self.assertEqual(json.loads(status.read_text())["status"], "ended")
 
 

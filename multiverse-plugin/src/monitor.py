@@ -3545,7 +3545,11 @@ class MonitorApp(App):
                     severity="error",
                 )
                 return
-            kill_session(e.session)
+            try:
+                kill_session(e.session)
+            except RuntimeError as exc:
+                self.notify(f"Could not stop runtime: {exc}", severity="error")
+                return
 
         self._spawn_resumed(e.cwd, e.runtime, session_id, e.name)
 
@@ -3700,7 +3704,13 @@ class MonitorApp(App):
             def _on_force_close(confirmed: Optional[bool]) -> None:
                 if not confirmed:
                     return
-                kill_session(session)
+                try:
+                    kill_session(session)
+                except RuntimeError as exc:
+                    self.notify(
+                        f"Could not stop runtime: {exc}", severity="error"
+                    )
+                    return
                 self.notify(
                     f"Force-killed '{display_name}' "
                     f"(was on host {session.host})"
@@ -3716,7 +3726,11 @@ class MonitorApp(App):
                 _on_force_close,
             )
             return
-        kill_session(e.session)
+        try:
+            kill_session(e.session)
+        except RuntimeError as exc:
+            self.notify(f"Could not stop runtime: {exc}", severity="error")
+            return
         self.notify(f"Killed {e.session.id}")
         self.refresh_sessions()
 

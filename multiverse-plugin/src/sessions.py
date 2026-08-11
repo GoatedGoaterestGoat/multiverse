@@ -23,6 +23,7 @@ import re
 import secrets
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import time
@@ -46,6 +47,8 @@ RUNTIME_CLAUDE = "claude"
 RUNTIME_CODEX = "codex"
 RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX)
 _STARTING_LIVENESS_GRACE_SECONDS = 10.0
+_CODEX_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
+_CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _CLAIM_DIR_NAME = "session_claims"
 
 
@@ -633,6 +636,112 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+def _proc_cmdline(pid: int) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def _runtime_pid(s: Session) -> Optional[int]:
+    raw_pid = _read_text_stripped(s.runtime_pid_path)
+    if not raw_pid:
+        return None
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        return None
+    return pid if pid > 0 else None
+
+
+def _codex_runtime_pid_matches(s: Session, pid: int) -> bool:
+    """Return whether ``pid`` is the Codex process owned by ``s``.
+
+    PID files outlive processes, so liveness alone is unsafe: the OS may
+    recycle the number for an unrelated process. Every wrapped Codex command
+    contains an MCP environment override with the unique Multiverse session
+    ID. Require that identity before treating the PID as live or signaling its
+    process group. Foreign-host PID files are never compared to local PIDs.
+    """
+    if s.runtime != RUNTIME_CODEX:
+        return False
+    if s.host and s.host != current_host():
+        return False
+    if not _pid_alive(pid):
+        return False
+    command = _proc_cmdline(pid)
+    if command is None:
+        return False
+    identities = (
+        f'MULTIVERSE_SESSION_ID="{s.id}"',
+        f"MULTIVERSE_SESSION_ID='{s.id}'",
+        f"MULTIVERSE_SESSION_ID={s.id}",
+    )
+    return any(identity in command for identity in identities)
+
+
+def _wait_for_codex_runtime_exit(s: Session, pid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _codex_runtime_pid_matches(s, pid):
+            return True
+        time.sleep(0.05)
+    return not _codex_runtime_pid_matches(s, pid)
+
+
+def _signal_codex_runtime_group(
+    s: Session,
+    pid: int,
+    expected_pgid: int,
+    sig: signal.Signals,
+) -> bool:
+    """Signal an owned Codex process group after rechecking PID identity."""
+    if not _codex_runtime_pid_matches(s, pid):
+        return False
+    try:
+        pgid = os.getpgid(pid)
+    except OSError:
+        return False
+    if pgid != expected_pgid or pgid <= 1 or pgid == os.getpgrp():
+        return False
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        return False
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to signal Codex runtime process group {pgid}: {exc}"
+        ) from exc
+    return True
+
+
+def _terminate_codex_runtime(s: Session, pid: int, pgid: int) -> None:
+    """Stop an owned Codex writer, escalating to SIGKILL if necessary."""
+    if _wait_for_codex_runtime_exit(s, pid, 0.5):
+        return
+    _signal_codex_runtime_group(s, pid, pgid, signal.SIGTERM)
+    if _wait_for_codex_runtime_exit(
+        s, pid, _CODEX_RUNTIME_TERM_TIMEOUT_SECONDS
+    ):
+        return
+    _signal_codex_runtime_group(s, pid, pgid, signal.SIGKILL)
+    if _wait_for_codex_runtime_exit(
+        s, pid, _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS
+    ):
+        return
+    raise RuntimeError(
+        f"Codex runtime PID {pid} is still alive; retained session state"
+    )
+
+
 def _mark_session_ended(s: Session) -> None:
     now = time.time()
     try:
@@ -659,24 +768,30 @@ def _correct_local_liveness(s: Session) -> bool:
         s.status == "starting"
         and time.time() - max(s.created_at, s.status_ts) < _STARTING_LIVENESS_GRACE_SECONDS
     )
-    if not tmux_session_exists(s.tmux_name):
+    tmux_exists = tmux_session_exists(s.tmux_name)
+    runtime_pid = _runtime_pid(s) if s.runtime == RUNTIME_CODEX else None
+    runtime_is_owned = bool(
+        runtime_pid and _codex_runtime_pid_matches(s, runtime_pid)
+    )
+    if not tmux_exists:
         if within_startup_grace:
+            return False
+        # A detach must not turn a live Codex writer into an ended/resumable
+        # row. Keeping the durable status prevents a second writer from being
+        # started against the same native thread; dashboard kill can still
+        # terminate this orphan safely using the recorded identity.
+        if runtime_is_owned:
             return False
         _mark_session_ended(s)
         return True
 
     if s.runtime != RUNTIME_CODEX:
         return False
-    raw_pid = _read_text_stripped(s.runtime_pid_path)
-    if not raw_pid:
+    if runtime_pid is None:
         # Backward compatibility for sessions launched before runtime PID
         # tracking was introduced. Their runner still writes `ended` itself.
         return False
-    try:
-        runtime_pid = int(raw_pid)
-    except ValueError:
-        runtime_pid = -1
-    if runtime_pid > 0 and _pid_alive(runtime_pid):
+    if runtime_is_owned:
         return False
     if within_startup_grace:
         return False
@@ -1466,7 +1581,19 @@ def create_session(
         cmd += ["-e", f"MULTIVERSE_SESSION_NAME={name}"]
     if initial_prompt_file is not None:
         cmd += ["-e", f"MULTIVERSE_INITIAL_PROMPT_FILE={initial_prompt_file}"]
-    cmd.append(inner_cmd)
+    # Queue the persistence option in the same tmux invocation as creation.
+    # Running a second `tmux set-option` command would race a user's global
+    # destroy-unattached=on setting: the brand-new `-d` session has no clients
+    # and could be destroyed before that second process reaches the server.
+    cmd += [
+        inner_cmd,
+        ";",
+        "set-option",
+        "-t",
+        tmux_name,
+        "destroy-unattached",
+        "off",
+    ]
     try:
         subprocess.run(cmd, check=True, capture_output=True, text=True)
     except (OSError, subprocess.CalledProcessError) as e:
@@ -1629,12 +1756,30 @@ def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
 
 
 def kill_session(s: Session) -> None:
-    """Tear down a multiverse session: kill tmux + remove state dir."""
+    """Tear down a wrapper and its owned runtime before releasing state."""
+    runtime_pid: Optional[int] = None
+    runtime_pgid: Optional[int] = None
+    candidate_pid = _runtime_pid(s) if s.runtime == RUNTIME_CODEX else None
+    if candidate_pid and _codex_runtime_pid_matches(s, candidate_pid):
+        try:
+            candidate_pgid = os.getpgid(candidate_pid)
+        except OSError:
+            candidate_pgid = None
+        if (
+            candidate_pgid is not None
+            and candidate_pgid > 1
+            and candidate_pgid != os.getpgrp()
+        ):
+            runtime_pid = candidate_pid
+            runtime_pgid = candidate_pgid
+
     if tmux_session_exists(s.tmux_name):
         subprocess.run(
             ["tmux", "kill-session", "-t", s.tmux_name],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+    if runtime_pid is not None and runtime_pgid is not None:
+        _terminate_codex_runtime(s, runtime_pid, runtime_pgid)
     shutil.rmtree(s.dir, ignore_errors=True)
     _release_session_claims(s)
