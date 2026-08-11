@@ -779,6 +779,82 @@ class CodexHookTests(unittest.TestCase):
 
 
 class CodexRunnerTests(unittest.TestCase):
+    def test_runner_names_spawned_thread_after_session_start(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = (
+            repo_root
+            / "multiverse-plugin"
+            / "bin"
+            / "multiverse-codex-session"
+        )
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            native_id = temp_dir / "runtime_session_id"
+            rename_request = temp_dir / "rename-request.json"
+            received_prompt = temp_dir / "received-prompt.txt"
+            status.write_text(json.dumps({"status": "starting", "ts": 1}))
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text(
+                "#!/usr/bin/env bash\n"
+                "set -euo pipefail\n"
+                "if [ \"${1:-}\" = app-server ]; then\n"
+                "  IFS= read -r initialize\n"
+                "  printf '%s\\n' '{\"id\":1,\"result\":{}}'\n"
+                "  IFS= read -r initialized\n"
+                "  IFS= read -r rename\n"
+                "  printf '%s\\n' \"$rename\" > \"$RENAME_REQUEST\"\n"
+                "  printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
+                "  exit 0\n"
+                "fi\n"
+                "printf '%s\\n' \"${!#}\" > \"$RECEIVED_PROMPT\"\n"
+                "printf '%s\\n' "
+                "'{\"hook_event_name\":\"SessionStart\",'"
+                "'\"session_id\":\"spawned-thread\"}' "
+                "| \"$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/session-hook.py\"\n"
+                "attempt=0\n"
+                "while [ ! -s \"$RENAME_REQUEST\" ] && [ \"$attempt\" -lt 100 ]; do\n"
+                "  attempt=$((attempt + 1))\n"
+                "  sleep 0.02\n"
+                "done\n"
+                "[ -s \"$RENAME_REQUEST\" ]\n"
+            )
+            fake_codex.chmod(0o755)
+            prompt_file = temp_dir / "initial-prompt.txt"
+            prompt_file.write_text("Do the spawned work.")
+            env = {
+                **os.environ,
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_SESSION_NAME": "named-child",
+                "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(native_id),
+                "MULTIVERSE_INITIAL_PROMPT_FILE": str(prompt_file),
+                "RENAME_REQUEST": str(rename_request),
+                "RECEIVED_PROMPT": str(received_prompt),
+            }
+
+            proc = subprocess.run(
+                [str(runner)],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(
+                received_prompt.read_text().strip(), "Do the spawned work."
+            )
+            request = json.loads(rename_request.read_text())
+            self.assertEqual(request["method"], "thread/name/set")
+            self.assertEqual(
+                request["params"],
+                {"threadId": "spawned-thread", "name": "named-child"},
+            )
+
     def test_runner_injects_plugin_config_before_resume_command(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"

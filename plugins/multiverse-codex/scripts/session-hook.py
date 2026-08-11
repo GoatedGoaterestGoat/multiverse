@@ -276,26 +276,6 @@ def _run_hook() -> None:
     if event_name in ("UserPromptSubmit", "Stop"):
         _emit_secondbrain_signal(event, event_name)
 
-    if event_name != "SessionStart":
-        return
-    session_id = event.get("session_id")
-    if not isinstance(session_id, str) or not session_id:
-        return
-
-    name = os.environ.get("MULTIVERSE_SESSION_NAME")
-    if name:
-        try:
-            subprocess.Popen(
-                [sys.executable, __file__, "--set-name", session_id, name],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError:
-            pass
-
-
 if __name__ == "__main__":
     if len(sys.argv) == 4 and sys.argv[1] == "--set-name":
         raise SystemExit(0 if _set_native_name(sys.argv[2], sys.argv[3]) else 1)

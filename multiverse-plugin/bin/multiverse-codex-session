@@ -80,6 +80,7 @@ unset MCP_ENV_NAME
 
 CODEX_ARGS=("$@")
 READY_WATCHER_PID=""
+NAME_WATCHER_PID=""
 
 write_status() {
   local status="$1" ts tmp
@@ -96,6 +97,10 @@ cleanup() {
   if [ -n "$READY_WATCHER_PID" ]; then
     kill "$READY_WATCHER_PID" 2>/dev/null || true
     wait "$READY_WATCHER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$NAME_WATCHER_PID" ]; then
+    kill "$NAME_WATCHER_PID" 2>/dev/null || true
+    wait "$NAME_WATCHER_PID" 2>/dev/null || true
   fi
   write_status ended || true
 }
@@ -185,8 +190,32 @@ mark_idle_when_codex_is_ready() {
   done
 }
 
+# SessionStart must return promptly, so the hook only records Codex's native
+# thread ID. Keep the native rename retry under this long-lived runner instead
+# of leaving an unsupervised child behind when the hook process exits.
+set_native_name_when_codex_starts() {
+  local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
+  local name="${MULTIVERSE_SESSION_NAME:-}"
+  local attempt=0 session_id
+  [ -z "$id_path" ] && return 0
+  [ -z "$name" ] && return 0
+
+  while [ "$attempt" -lt 2400 ]; do
+    attempt=$((attempt + 1))
+    if [ -s "$id_path" ]; then
+      session_id=$(head -n 1 "$id_path" 2>/dev/null || true)
+      if [ -n "$session_id" ]; then
+        exec "$HOOK_SCRIPT" --set-name "$session_id" "$name" >/dev/null 2>&1
+      fi
+    fi
+    sleep 0.25
+  done
+}
+
 mark_idle_when_codex_is_ready &
 READY_WATCHER_PID=$!
+set_native_name_when_codex_starts &
+NAME_WATCHER_PID=$!
 
 # Keep Codex in the pane's foreground process group. The tiny foreground
 # launcher records its own PID and then execs Codex, so the PID remains stable
