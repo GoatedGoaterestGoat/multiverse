@@ -1692,8 +1692,22 @@ def foreign_host_still_reported_live(s: Session) -> bool:
     predating this field, or ``current_host()`` failed at creation time)
     or matches this host — local tmux is authoritative for those, same
     as before this function existed.
+
+    Also returns False when local tmux CAN see the session, even though
+    the recorded host doesn't match. A hostname is not a stable machine
+    identity: macOS reports a different one depending on the network it's
+    attached to (mDNS ``Silicon23.local`` vs DHCP ``MacBookPro.lan`` for
+    the same laptop), so a session created right here can come back
+    looking foreign after nothing more than a network change — and then
+    refuse to be killed or resumed on the very machine running it. A tmux
+    server is per-machine, so its seeing the session settles the question
+    regardless of what string was recorded. This does not weaken the
+    shared-``MULTIVERSE_ROOT`` case the guard exists for: a session
+    spawned on host A never shows up in host B's tmux.
     """
     if not s.host or s.host == current_host():
+        return False
+    if tmux_session_exists(s.tmux_name):
         return False
     fresh = load_session(s.id)
     if fresh is None:
