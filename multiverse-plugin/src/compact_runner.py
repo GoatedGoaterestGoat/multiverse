@@ -121,12 +121,24 @@ class CompactRunner:
         scheduler_name: str = "proportional",
         scheduler_params: Optional[dict] = None,
         image_mode: str = "budget_fit",
+        own_lock: bool = True,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.live_jsonl = live_jsonl
         self.total_budget = total_budget
         self.kill_session_fn = kill_session_fn
+        # Whether THIS runner owns the compacting lock.
+        #
+        # A compaction is not one runner, it is summarize -> user picks a
+        # scheduler + budget -> expand. When each runner took and dropped the
+        # lock itself, the session fell out of `compacting` during the picker
+        # step — harmless while a modal covered the dashboard, but visible the
+        # moment the user detached (`d`): the row went dormant mid-compaction
+        # and Enter on it offered to RESUME the session instead of returning
+        # to the picker. So CompactScreen takes the lock once for the whole
+        # flow and passes own_lock=False here.
+        self.own_lock = own_lock
         # Summarize-only mode: run every step through tree-build, then
         # STOP — do not expand + rewrite live. Useful for pre-warming
         # the tree cache before an eventual compaction. The compacting
@@ -182,18 +194,22 @@ class CompactRunner:
             on_done(False, f"unexpected error: {e}")
 
     def _run(self, on_log, on_progress, on_state, on_done) -> None:
-        on_state(State.LOCKING)
-        if not acquire_lock(self.claude_uuid):
-            on_state(State.FAILED)
-            on_done(False, "Another monitor is already compacting this session.")
-            return
+        if self.own_lock:
+            on_state(State.LOCKING)
+            if not acquire_lock(self.claude_uuid):
+                on_state(State.FAILED)
+                on_done(
+                    False,
+                    "Another monitor is already compacting this session.",
+                )
+                return
 
         # Ensure the per-session cache + log dir exists before any worker
         # tries to open files inside it.
         try:
             self.paths.cache_root.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            release_lock(self.claude_uuid)
+            self._release_lock_if_owned()
             on_state(State.FAILED)
             on_done(False, f"could not create cache dir: {e}")
             return
@@ -357,6 +373,13 @@ class CompactRunner:
                 f"{total_turns} turn(s); wrote {rendered} row(s) to live.",
             )
         finally:
+            self._release_lock_if_owned()
+
+    def _release_lock_if_owned(self) -> None:
+        """Drop the compacting lock only if this runner took it. When the
+        caller owns it (own_lock=False) the lock must outlive this runner —
+        see ``self.own_lock``."""
+        if self.own_lock:
             release_lock(self.claude_uuid)
 
     # ---------------------------------------------------------------- private

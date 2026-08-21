@@ -48,6 +48,7 @@ from textual.widgets import (
 from .ask_agents import AskResult, AskTarget, ask_all
 from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
+from .compact_state import acquire_lock, release_lock
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
@@ -1931,6 +1932,12 @@ class CompactScreen(ModalScreen[None]):
         # summarization finishes while the user is back on the dashboard.
         self._detached = False
         self._installed = False
+        # Whether this screen holds the compacting lock. Taken once when
+        # summarization starts and held for the WHOLE flow — including the
+        # scheduler/budget picker, which is a human-speed pause the session
+        # must stay `compacting` across — then dropped exactly once at
+        # teardown. See _acquire_compact_lock.
+        self._holds_lock = False
         self._pending_picker = False
         # Per-turn build elapsed times collected from worker.log; powers
         # the ETA estimate. Bounded — only the most-recent N are used so
@@ -2279,7 +2286,42 @@ class CompactScreen(ModalScreen[None]):
 
         self._start_summarize_runner()
 
+    def _acquire_compact_lock(self) -> bool:
+        """Take the compacting lock for the whole compaction.
+
+        Previously each CompactRunner took and released it around its own
+        run, so the session stopped being `compacting` between summarize
+        and expand — exactly the window where the picker waits on a human.
+        Invisible while a modal covered the dashboard; wrong as soon as the
+        user detached with `d`, since the row dropped to dormant and Enter
+        on it offered to resume the session rather than reopen the picker.
+        """
+        if self._holds_lock:
+            return True
+        if not acquire_lock(self.claude_uuid):
+            return False
+        self._holds_lock = True
+        return True
+
+    def _release_compact_lock(self) -> None:
+        """Drop the lock, once. Guarded by ``_holds_lock`` so a screen that
+        never acquired it (cancelled at the input phase) can't unlink a lock
+        belonging to another monitor."""
+        if not self._holds_lock:
+            return
+        self._holds_lock = False
+        release_lock(self.claude_uuid)
+
     def _start_summarize_runner(self) -> None:
+        if not self._acquire_compact_lock():
+            self.phase = "failed"
+            self._append_log(
+                "[FAIL] another monitor is already compacting this session."
+            )
+            self.query_one("#compact-hint", Static).update(
+                "[bold red]Already being compacted elsewhere. Esc to close.[/]"
+            )
+            return
         live = live_jsonl_path(self.claude_uuid, self.cwd)
         if self.mv_session is not None:
             kill_fn = self._make_kill_fn(self.mv_session)
@@ -2292,6 +2334,7 @@ class CompactScreen(ModalScreen[None]):
             total_budget=0,
             kill_session_fn=kill_fn,
             summarize_only=True,
+            own_lock=False,  # this screen holds it for the whole flow
         )
         self._run_in_thread()
 
@@ -2338,6 +2381,7 @@ class CompactScreen(ModalScreen[None]):
             scheduler_name=config["scheduler"],
             scheduler_params=params,
             image_mode=image_mode,
+            own_lock=False,  # this screen holds it for the whole flow
         )
         self._run_in_thread()
 
@@ -2604,6 +2648,7 @@ class CompactScreen(ModalScreen[None]):
         """Drop the detach registration once the run has finished while the
         user was away. Safe to uninstall here — a detached screen is by
         definition off the stack, which is the one case Textual refuses."""
+        self._release_compact_lock()
         app = self.app
         app._detached_compactions.pop(self.claude_uuid, None)
         if self._installed:
@@ -2627,6 +2672,7 @@ class CompactScreen(ModalScreen[None]):
                 self._append_log("[user] cancel requested — will abort soon")
                 return
             # Second Esc while still running: force-dismiss.
+        self._release_compact_lock()
         self.dismiss(None)
 
 
