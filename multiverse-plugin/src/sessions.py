@@ -51,6 +51,17 @@ _CODEX_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _CLAIM_DIR_NAME = "session_claims"
 
+# Custom-title stamped on the throwaway transcripts our OWN compaction
+# machinery writes (vendor/compaction/priv_session.py::_metadata_row). The
+# constructor spawns one `claude --resume ... -p <merge instruction>` per
+# merge step; each gets its own claude session id and lands in the project
+# dir looking exactly like a dormant agent. It is never a real session, so
+# it is hidden from the dashboard rather than offered as something to
+# resume. (e033737 already stops those subprocesses from hijacking the
+# session pointer or writing junk mirrors; this hides the transcript they
+# legitimately leave behind.)
+_INTERNAL_TITLES = frozenset({"priv_compaction"})
+
 
 def normalize_runtime(runtime: Optional[str]) -> str:
     """Validate and normalize a persisted or user-selected runtime."""
@@ -1049,6 +1060,8 @@ def build_dashboard_rows(
             meta = _read_session_metadata(path)
             title = meta.get("title")
             if not title:
+                continue
+            if title in _INTERNAL_TITLES:
                 continue
             # Claude-Code-native background forks copy their parent's
             # transcript (custom-title included), so listing one alongside its
