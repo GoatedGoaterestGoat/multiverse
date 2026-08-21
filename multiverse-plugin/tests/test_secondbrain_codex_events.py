@@ -46,8 +46,12 @@ class _Rollout:
         self.append(
             {
                 "timestamp": timestamp,
-                "type": "event_msg",
-                "payload": {"type": "user_message", "message": prompt},
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": prompt}],
+                },
             }
         )
 

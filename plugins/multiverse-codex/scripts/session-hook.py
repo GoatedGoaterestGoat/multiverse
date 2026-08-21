@@ -5,11 +5,8 @@ from __future__ import annotations
 
 import json
 import os
-import queue
-import subprocess
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -65,122 +62,6 @@ def _write_text(path: Path, value: str) -> None:
                 pass
     except OSError:
         pass
-
-
-def _wait_for_response(
-    messages: queue.Queue[str | None], request_id: int, timeout: float
-) -> bool:
-    deadline = time.monotonic() + timeout
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        try:
-            line = messages.get(timeout=remaining)
-        except queue.Empty:
-            return False
-        if line is None:
-            return False
-        try:
-            response = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if response.get("id") == request_id:
-            return "error" not in response and isinstance(response.get("result"), dict)
-
-
-def _native_name_attempt(codex_bin: str, session_id: str, name: str) -> bool:
-    """Set a name once, keeping stdio open until Codex acknowledges it."""
-    proc: subprocess.Popen[str] | None = None
-    reader: threading.Thread | None = None
-    messages: queue.Queue[str | None] = queue.Queue()
-
-    def read_stdout() -> None:
-        assert proc is not None and proc.stdout is not None
-        try:
-            for line in proc.stdout:
-                messages.put(line)
-        finally:
-            messages.put(None)
-
-    def send(payload: dict) -> None:
-        assert proc is not None and proc.stdin is not None
-        proc.stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
-        proc.stdin.flush()
-
-    try:
-        proc = subprocess.Popen(
-            [codex_bin, "app-server", "--listen", "stdio://"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-        if proc.stdin is None or proc.stdout is None:
-            return False
-        reader = threading.Thread(target=read_stdout, daemon=True)
-        reader.start()
-        send(
-            {
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "clientInfo": {"name": "multiverse", "version": "0.1.0"},
-                    "capabilities": {"experimentalApi": True},
-                },
-            }
-        )
-        if not _wait_for_response(messages, 1, 8):
-            return False
-        send({"method": "initialized"})
-        send(
-            {
-                "id": 2,
-                "method": "thread/name/set",
-                "params": {"threadId": session_id, "name": name},
-            }
-        )
-        return _wait_for_response(messages, 2, 8)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    finally:
-        if proc is not None:
-            if proc.stdin is not None:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=1)
-                except (OSError, subprocess.TimeoutExpired):
-                    try:
-                        proc.kill()
-                        proc.wait(timeout=1)
-                    except OSError:
-                        pass
-                    except subprocess.TimeoutExpired:
-                        pass
-            if reader is not None:
-                reader.join(timeout=0.2)
-            if proc.stdout is not None:
-                try:
-                    proc.stdout.close()
-                except OSError:
-                    pass
-
-
-def _set_native_name(session_id: str, name: str) -> bool:
-    """Best-effort native Codex rename through the app-server protocol."""
-    codex_bin = os.environ.get("MULTIVERSE_CODEX_BIN", "codex")
-    for attempt in range(8):
-        if _native_name_attempt(codex_bin, session_id, name):
-            return True
-        if attempt < 7:
-            time.sleep(min(0.4 * (2**attempt), 3.0))
-    return False
 
 
 def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
@@ -277,7 +158,4 @@ def _run_hook() -> None:
         _emit_secondbrain_signal(event, event_name)
 
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--set-name":
-        raise SystemExit(0 if _set_native_name(sys.argv[2], sys.argv[3]) else 1)
-    else:
-        _run_hook()
+    _run_hook()
