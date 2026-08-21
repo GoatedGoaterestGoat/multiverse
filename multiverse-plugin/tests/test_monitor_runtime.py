@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from subprocess import CompletedProcess
 from unittest.mock import MagicMock, patch
 
 from textual.app import App
@@ -66,6 +67,7 @@ class SpawnAttachGuardTests(unittest.TestCase):
 
     def test_detaches_for_request_from_guarded_session(self) -> None:
         guard = monitor._SpawnAttachGuard("/workspace", "multiverse-caller")
+        guard.set_client_pid(4242)
         with (
             patch.object(
                 monitor,
@@ -74,18 +76,60 @@ class SpawnAttachGuardTests(unittest.TestCase):
                     {"caller_tmux_session": "multiverse-caller"},
                 ],
             ),
-            patch.object(monitor.subprocess, "run") as run,
+            patch.object(
+                monitor.subprocess,
+                "run",
+                side_effect=[
+                    CompletedProcess(
+                        args=[],
+                        returncode=0,
+                        stdout=(
+                            "4242\t/dev/pts/9\tmultiverse-caller\n"
+                            "5000\t/dev/pts/10\tmultiverse-other\n"
+                        ),
+                    ),
+                    CompletedProcess(args=[], returncode=0),
+                ],
+            ) as run,
         ):
             guard._run()
 
-        run.assert_called_once_with(
-            ["tmux", "detach-client", "-s", "multiverse-caller"],
+        self.assertEqual(run.call_count, 2)
+        run.assert_any_call(
+            [
+                "tmux",
+                "list-clients",
+                "-F",
+                "#{client_pid}\t#{client_name}\t#{session_name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=True,
+        )
+        run.assert_any_call(
+            ["tmux", "detach-client", "-t", "/dev/pts/9"],
             stdout=monitor.subprocess.DEVNULL,
             stderr=monitor.subprocess.DEVNULL,
             timeout=3,
             check=True,
         )
         self.assertTrue(guard.forced_detach)
+
+    def test_detach_retries_when_attach_client_is_not_registered_yet(self) -> None:
+        guard = monitor._SpawnAttachGuard("/workspace", "multiverse-caller")
+        guard.set_client_pid(4242)
+        listed = CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="5000\t/dev/pts/10\tmultiverse-caller\n",
+        )
+
+        with patch.object(monitor.subprocess, "run", return_value=listed) as run:
+            self.assertFalse(guard._detach_client())
+
+        run.assert_called_once()
+        self.assertFalse(guard.forced_detach)
 
 
 class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):

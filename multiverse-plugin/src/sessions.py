@@ -267,6 +267,10 @@ def _read_codex_names() -> dict[str, str]:
 
 def _read_codex_session_metadata(path: Path) -> dict:
     """Extract stable dashboard fields from a Codex rollout JSONL."""
+    # Imported lazily to preserve this module's lightweight import path while sharing
+    # the exact synthetic-input filtering used by SecondBrain transcript delivery.
+    from .codex_transcript import user_text_from_record
+
     try:
         mtime = path.stat().st_mtime
     except OSError:
@@ -309,14 +313,9 @@ def _read_codex_session_metadata(path: Path) -> dict:
                         value = payload.get("cwd")
                         if isinstance(value, str):
                             cwd = value
-                elif (
-                    preview is None
-                    and typ == "event_msg"
-                    and isinstance(payload, dict)
-                    and payload.get("type") == "user_message"
-                ):
-                    value = payload.get("message")
-                    if isinstance(value, str) and value.strip():
+                elif preview is None:
+                    value = user_text_from_record(raw)
+                    if value.strip():
                         preview = " ".join(value.split())
                         if len(preview) > 80:
                             preview = preview[:79] + "…"
@@ -1497,11 +1496,10 @@ def create_session(
         raise
 
     # When a caller (e.g. spawn_agent) wants the new runtime session to start
-    # with a specific initial prompt, write the prompt to a file and let
-    # its runner injects it as an argv positional at exec time. This
-    # keeps the (potentially long, apostrophe-heavy, multi-line) prompt off
-    # the tmux/shell command line entirely — no shlex round-trip, no
-    # ARG_MAX risk, no /bin/sh re-parsing.
+    # with a specific initial prompt, write the prompt to a file for its runner.
+    # Claude consumes it as an argv positional; fresh Codex sessions submit it
+    # through the live TUI after setting their native thread name. This keeps the
+    # potentially long, multiline prompt off the tmux/shell command line.
     initial_prompt_file: Optional[Path] = None
     if initial_prompt:
         initial_prompt_file = d / "initial_prompt.txt"

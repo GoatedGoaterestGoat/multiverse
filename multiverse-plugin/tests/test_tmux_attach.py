@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import MagicMock, patch
 
 from src import tmux_attach
 
@@ -79,3 +80,38 @@ class TerminalReplyFilterTests(unittest.TestCase):
         self.assertEqual(reply_filter.feed(b"\x1b"), b"")
         self.assertEqual(reply_filter.flush(), b"\x1b")
 
+
+class AttachClientIdentityTests(unittest.TestCase):
+    def test_reports_tmux_client_pid_before_relaying(self) -> None:
+        process = MagicMock(pid=4242)
+        process.wait.return_value = 0
+        events: list[str] = []
+        callback = MagicMock(side_effect=lambda _pid: events.append("client"))
+        terminal = MagicMock()
+        terminal.fileno.return_value = 7
+
+        with (
+            patch.object(tmux_attach.sys, "stdin", terminal),
+            patch.object(tmux_attach.sys, "stdout", terminal),
+            patch.object(tmux_attach.os, "openpty", return_value=(10, 11)),
+            patch.object(tmux_attach.os, "close"),
+            patch.object(tmux_attach, "_copy_window_size"),
+            patch.object(tmux_attach.subprocess, "Popen", return_value=process),
+            patch.object(tmux_attach.termios, "tcgetattr", return_value=None),
+            patch.object(tmux_attach.signal, "getsignal", return_value=None),
+            patch.object(tmux_attach.signal, "signal"),
+            patch.object(
+                tmux_attach,
+                "_relay",
+                side_effect=lambda *_args, **_kwargs: events.append("relay"),
+            ) as relay,
+        ):
+            result = tmux_attach.attach_tmux_session(
+                "multiverse-caller",
+                on_client_started=callback,
+            )
+
+        self.assertEqual(result, 0)
+        callback.assert_called_once_with(4242)
+        self.assertEqual(events, ["client", "relay"])
+        relay.assert_called_once_with(10, stdin_fd=7, stdout_fd=7)

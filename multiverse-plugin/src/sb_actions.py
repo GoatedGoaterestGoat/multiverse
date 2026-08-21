@@ -16,7 +16,7 @@ Delivery strategies by target status:
   ``waiting`` targets regardless.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
-  the runtime wrapper hands to Claude or Codex as a positional prompt argument.
+  the runtime wrapper hands to the resumed CLI as a positional prompt argument.
 - **starting** → :func:`wait_for_ready` first (bounded), then send-keys.
 
 All tmux calls are subprocess with tight timeouts so a hung tmux client can't wedge the
@@ -241,6 +241,7 @@ _CODEX_INPUT_LINE_RE = re.compile(r"^›(?:\s?(.*))?$")
 _CODEX_STATUS_RE = re.compile(
     r"(?:"
     r"\s·\s(?:Ready|Working|Thinking|Waiting|Starting|Idle)(?:\s·\s|\s*$)"
+    r"|^\s+\S.*\s·\sContext\s+\d+%\s+used\b"
     r"|^\s+tab to queue message\b.*\bcontext left\s*$"
     r")",
     re.IGNORECASE,

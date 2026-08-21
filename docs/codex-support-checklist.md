@@ -66,9 +66,9 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 
 - [x] Create a new Codex session in a detached tmux session.
 - [x] Record the Codex session ID in Multiverse state.
-- [x] Apply the Multiverse agent name to a Codex session or maintain an equivalent
-      durable name mapping when Codex cannot store it natively.
-- [x] Deliver an initial prompt to a newly created Codex session.
+- [x] Apply the Multiverse agent name through the fresh session's live `/rename`
+      command so both the active TUI and durable Codex index use it.
+- [x] Deliver an initial prompt to a newly created Codex session after native naming.
 - [x] Resume an existing Codex session by ID.
 - [x] Resume a dormant Codex session under its existing Multiverse name.
 - [x] Auto-resume a dormant Codex session for an urgent inbox message.
@@ -86,7 +86,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Discover resumable Codex sessions for the monitor's workspace.
 - [x] Distinguish active, ended, and dormant Codex sessions.
 - [x] Extract or maintain a stable session name.
-- [x] Extract a first-user-message preview.
+- [x] Extract a first-user-message preview from both legacy `event_msg` and current
+      `response_item` rollout schemas while filtering Codex environment envelopes.
 - [ ] Determine whether a reliable live context/token count is available.
 - [x] Display a neutral placeholder when Codex cannot provide a token count.
 - [x] Add a Runtime column or another unambiguous Claude/Codex indicator.
@@ -181,7 +182,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Show the caller runtime and proposed child runtime in the approval modal.
 - [x] Let the user accept, rename, reject, or cancel the request.
 - [x] Keep concurrent spawn requests FIFO and single-modal.
-- [x] Preserve forced detach and automatic reattach while approval is required.
+- [x] Preserve forced detach and automatic reattach while approval is required,
+      targeting the exact tmux client and retrying attach-registration races.
 - [x] Preserve progress notifications during an indefinite approval wait.
 - [x] Cancel and clean up the request when the tool call is interrupted.
 - [x] Reap orphaned requests when the caller process is gone.

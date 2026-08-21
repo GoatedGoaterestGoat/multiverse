@@ -119,9 +119,9 @@ class _SpawnAttachGuard:
     """Background watcher while the user is attached to a tmux session.
 
     Polls ``~/.multiverse/spawn_requests/`` every second for pending requests
-    created by the exact tmux session being guarded. When one appears, runs
-    ``tmux detach-client -s <session>`` to force the user back into the
-    monitor so they can see the naming modal (Textual's event loop is
+    created by the exact tmux session being guarded. When one appears, finds
+    the tmux client process launched by this monitor and detaches that exact
+    client to return the user to the naming modal (Textual's event loop is
     suspended during attach, so the normal tick can't fire).
 
     Filtering by ``caller_tmux_session`` is important when several monitors
@@ -140,7 +140,12 @@ class _SpawnAttachGuard:
         self.tmux_session = tmux_session
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._client_pid: Optional[int] = None
         self.forced_detach = False
+
+    def set_client_pid(self, pid: int) -> None:
+        """Identify the tmux attach client owned by this monitor."""
+        self._client_pid = pid
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -161,21 +166,50 @@ class _SpawnAttachGuard:
                 ]
             except Exception:
                 pending = []
-            if pending:
-                try:
-                    subprocess.run(
-                        ["tmux", "detach-client", "-s", self.tmux_session],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=3,
-                        check=True,
-                    )
-                    self.forced_detach = True
-                except (OSError, subprocess.SubprocessError):
-                    pass
+            if pending and self._detach_client():
+                self.forced_detach = True
                 return  # one detach is all we need
             if self._stop.wait(self._POLL_INTERVAL):
                 return
+
+    def _detach_client(self) -> bool:
+        """Detach this monitor's client, retrying later on races or tmux errors."""
+        if self._client_pid is None:
+            return False
+        try:
+            listed = subprocess.run(
+                [
+                    "tmux",
+                    "list-clients",
+                    "-F",
+                    "#{client_pid}\t#{client_name}\t#{session_name}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=True,
+            )
+            client_name = None
+            for line in listed.stdout.splitlines():
+                fields = line.split("\t", 2)
+                if len(fields) != 3:
+                    continue
+                pid, name, session = fields
+                if pid == str(self._client_pid) and session == self.tmux_session:
+                    client_name = name
+                    break
+            if client_name is None:
+                return False
+            subprocess.run(
+                ["tmux", "detach-client", "-t", client_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=True,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
 
 
 class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
@@ -3426,7 +3460,10 @@ class MonitorApp(App):
         guard.start()
         try:
             with self.suspend():
-                attach_tmux_session(tmux_session)
+                attach_tmux_session(
+                    tmux_session,
+                    on_client_started=guard.set_client_pid,
+                )
         finally:
             guard.stop()
 

@@ -30,11 +30,17 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.connector.identity = SimpleNamespace(
             device_id="device-id", granted_workspaces=[self.cwd]
         )
-        self.connector._state = {"seq_hw": 0, "seeded": []}
+        self.connector._state = {"seq_hw": 0, "seeded": [], "exposed": [self.cwd]}
         self.connector._seeded = set()
+        # Per-workspace observation set (added with per-workspace connect/disconnect):
+        # first-connect only fires for a workspace the user has opted into observing.
+        self.connector._exposed = {self.workspace_id}
         self.connector._marker_inited = set()
         self.connector.buffer = sb_connector.OutboundBuffer(start_seq=0)
         self.connector._new_event = asyncio.Event()
+        # Serializes concurrent first-connect fan-outs so a reconnect storm can't run
+        # the summary ask_all more than once per workspace.
+        self.connector._emit_lock = asyncio.Lock()
 
     def _rows(self) -> list[sessions.DashboardRow]:
         return [

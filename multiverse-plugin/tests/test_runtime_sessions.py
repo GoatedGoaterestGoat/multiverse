@@ -164,6 +164,63 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(metadata["preview"], "Original prompt")
         self.assertEqual(metadata["ancestor_ids"], ["ancestor-thread"])
 
+    def test_codex_preview_reads_current_response_item_user_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            rollout = Path(raw) / "rollout.jsonl"
+            rollout.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "current-thread",
+                                    "cwd": "/workspace",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": (
+                                                "<environment_context>hidden"
+                                                "</environment_context>"
+                                            ),
+                                        }
+                                    ],
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [
+                                        {
+                                            "type": "input_text",
+                                            "text": "Do the spawned work.\nStart here.",
+                                        }
+                                    ],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n"
+            )
+
+            metadata = sessions._read_codex_session_metadata(rollout)
+
+        self.assertEqual(metadata["preview"], "Do the spawned work. Start here.")
+
     def test_codex_discovery_hides_named_resume_ancestor(self) -> None:
         resumed = {
             "id": "current-thread",
@@ -1006,35 +1063,41 @@ class CodexRunnerTests(unittest.TestCase):
             temp_dir = Path(raw)
             status = temp_dir / "status.json"
             native_id = temp_dir / "runtime_session_id"
-            rename_request = temp_dir / "rename-request.json"
-            received_prompt = temp_dir / "received-prompt.txt"
+            codex_args_capture = temp_dir / "codex-args.txt"
+            startup_capture = temp_dir / "startup.json"
             status.write_text(json.dumps({"status": "starting", "ts": 1}))
             fake_codex = temp_dir / "codex"
             fake_codex.write_text(
                 "#!/usr/bin/env bash\n"
                 "set -euo pipefail\n"
-                "if [ \"${1:-}\" = app-server ]; then\n"
-                "  IFS= read -r initialize\n"
-                "  printf '%s\\n' '{\"id\":1,\"result\":{}}'\n"
-                "  IFS= read -r initialized\n"
-                "  IFS= read -r rename\n"
-                "  printf '%s\\n' \"$rename\" > \"$RENAME_REQUEST\"\n"
-                "  printf '%s\\n' '{\"id\":2,\"result\":{}}'\n"
-                "  exit 0\n"
-                "fi\n"
-                "printf '%s\\n' \"${!#}\" > \"$RECEIVED_PROMPT\"\n"
-                "printf '%s\\n' "
-                "'{\"hook_event_name\":\"SessionStart\",'"
-                "'\"session_id\":\"spawned-thread\"}' "
-                "| \"$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/session-hook.py\"\n"
+                "printf '%s\\n' \"$@\" > \"$CODEX_ARGS_CAPTURE\"\n"
+                "printf '%s\\n' spawned-thread > \"$MULTIVERSE_RUNTIME_SESSION_ID_PATH\"\n"
                 "attempt=0\n"
-                "while [ ! -s \"$RENAME_REQUEST\" ] && [ \"$attempt\" -lt 100 ]; do\n"
+                "while [ ! -s \"$STARTUP_CAPTURE\" ] && [ \"$attempt\" -lt 100 ]; do\n"
                 "  attempt=$((attempt + 1))\n"
                 "  sleep 0.02\n"
                 "done\n"
-                "[ -s \"$RENAME_REQUEST\" ]\n"
+                "[ -s \"$STARTUP_CAPTURE\" ]\n"
             )
             fake_codex.chmod(0o755)
+            fake_startup_python = temp_dir / "startup-python"
+            fake_startup_python.write_text(
+                "#!/usr/bin/env python3\n"
+                "import json, os, pathlib, sys\n"
+                "args = sys.argv[1:]\n"
+                "def value(flag):\n"
+                "    return args[args.index(flag) + 1]\n"
+                "prompt_path = pathlib.Path(value('--prompt-file'))\n"
+                "payload = {\n"
+                "    'module': value('-m'),\n"
+                "    'name': value('--name'),\n"
+                "    'tmux_name': value('--tmux-name'),\n"
+                "    'prompt': prompt_path.read_text(),\n"
+                "}\n"
+                "pathlib.Path(os.environ['STARTUP_CAPTURE']).write_text(json.dumps(payload))\n"
+                "prompt_path.unlink()\n"
+            )
+            fake_startup_python.chmod(0o755)
             prompt_file = temp_dir / "initial-prompt.txt"
             prompt_file.write_text("Do the spawned work.")
             env = {
@@ -1043,11 +1106,15 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
                 "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_SESSION_ID": "wrapper-id",
                 "MULTIVERSE_SESSION_NAME": "named-child",
                 "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(native_id),
+                "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime-pid"),
                 "MULTIVERSE_INITIAL_PROMPT_FILE": str(prompt_file),
-                "RENAME_REQUEST": str(rename_request),
-                "RECEIVED_PROMPT": str(received_prompt),
+                "MULTIVERSE_CODEX_STARTUP_PYTHON": str(fake_startup_python),
+                "CODEX_HOME": str(temp_dir / "codex-home"),
+                "CODEX_ARGS_CAPTURE": str(codex_args_capture),
+                "STARTUP_CAPTURE": str(startup_capture),
             }
 
             proc = subprocess.run(
@@ -1059,15 +1126,12 @@ class CodexRunnerTests(unittest.TestCase):
             )
 
             self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(
-                received_prompt.read_text().strip(), "Do the spawned work."
-            )
-            request = json.loads(rename_request.read_text())
-            self.assertEqual(request["method"], "thread/name/set")
-            self.assertEqual(
-                request["params"],
-                {"threadId": "spawned-thread", "name": "named-child"},
-            )
+            startup = json.loads(startup_capture.read_text())
+            self.assertEqual(startup["module"], "src.codex_startup_input")
+            self.assertEqual(startup["name"], "named-child")
+            self.assertEqual(startup["tmux_name"], "multiverse-wrapper-id")
+            self.assertEqual(startup["prompt"], "Do the spawned work.")
+            self.assertNotIn("Do the spawned work.", codex_args_capture.read_text())
 
     def test_runner_injects_plugin_config_before_resume_command(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

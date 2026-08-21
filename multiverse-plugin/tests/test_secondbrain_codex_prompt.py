@@ -165,6 +165,19 @@ class CodexPromptTmuxTests(unittest.TestCase):
             "Draft while active\nSecond line",
         )
 
+    def test_codex_composer_parser_recognizes_current_context_used_footer(self) -> None:
+        pane = (
+            "• Working (4s • esc to interrupt)\n\n"
+            "› Draft on Codex 0.147\n\n"
+            "  gpt-5.6-sol xhigh · Approve for me · Context 16% used · "
+            "258K window · 67.7K used · 01a021d1-5d8d-7bc2-9738-0b195f9efd67\n"
+        )
+
+        self.assertEqual(
+            sb_actions.parse_input_box_text(pane, runtime=sessions.RUNTIME_CODEX),
+            "Draft on Codex 0.147",
+        )
+
     def test_codex_delivery_saves_submits_and_restores_draft(self) -> None:
         draft = "Draft first\nDraft second"
         pane = f"› Draft first\n  Draft second\n\n{CODEX_FOOTER}\n"

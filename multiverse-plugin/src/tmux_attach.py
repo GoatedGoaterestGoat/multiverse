@@ -23,6 +23,7 @@ import sys
 import termios
 import time
 import tty
+from collections.abc import Callable
 
 
 # Responses describe a conservative xterm-compatible terminal. tmux uses them only
@@ -290,7 +291,11 @@ def _relay(
                 _write_all(master_fd, pending_input)
 
 
-def attach_tmux_session(tmux_session: str) -> int:
+def attach_tmux_session(
+    tmux_session: str,
+    *,
+    on_client_started: Callable[[int], None] | None = None,
+) -> int:
     """Attach to ``tmux_session`` through the capability-probe relay."""
     stdin_fd = sys.stdin.fileno()
     stdout_fd = sys.stdout.fileno()
@@ -306,6 +311,8 @@ def attach_tmux_session(tmux_session: str) -> int:
             start_new_session=True,
             close_fds=True,
         )
+        if on_client_started is not None:
+            on_client_started(process.pid)
     finally:
         os.close(slave_fd)
 

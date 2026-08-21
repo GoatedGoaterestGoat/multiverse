@@ -99,11 +99,18 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         Path(self.cwd).mkdir()
         sb_dir = self.state_root / "secondbrain"
         sb_dir.mkdir(parents=True)
+        # Hooks only record for a workspace the device has been granted AND the user
+        # is currently observing, so the fixture has to carry both — the same shape
+        # enroll() and expose_workspace() write in production.
         (sb_dir / "device.key.json").write_text(
-            json.dumps({"device_id": "device-id"}), encoding="utf-8"
+            json.dumps({"device_id": "device-id", "granted_workspaces": [self.cwd]}),
+            encoding="utf-8",
         )
         (sb_dir / "state.json").write_text(
-            json.dumps({"seeded": [f"device-id:{self.cwd}"]}), encoding="utf-8"
+            json.dumps(
+                {"seeded": [f"device-id:{self.cwd}"], "exposed": [self.cwd]}
+            ),
+            encoding="utf-8",
         )
         self.hook = (
             Path(__file__).resolve().parents[2]
@@ -201,11 +208,15 @@ class CodexSecondBrainEventTests(unittest.TestCase):
         self.workspace_id = f"device-id:{self.cwd}"
         sb_dir = self.state_root / "secondbrain"
         sb_dir.mkdir(parents=True)
+        # Granted + exposed, matching what enroll()/expose_workspace() write — the
+        # recording gate needs both, not just the legacy seeded set.
         (sb_dir / "device.key.json").write_text(
-            json.dumps({"device_id": "device-id"}), encoding="utf-8"
+            json.dumps({"device_id": "device-id", "granted_workspaces": [self.cwd]}),
+            encoding="utf-8",
         )
         (sb_dir / "state.json").write_text(
-            json.dumps({"seeded": [self.workspace_id]}), encoding="utf-8"
+            json.dumps({"seeded": [self.workspace_id], "exposed": [self.cwd]}),
+            encoding="utf-8",
         )
         self.env_patch = patch.dict(
             os.environ, {"MULTIVERSE_ROOT": str(self.state_root)}

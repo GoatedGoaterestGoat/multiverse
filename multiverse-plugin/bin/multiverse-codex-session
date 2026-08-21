@@ -80,7 +80,7 @@ unset MCP_ENV_NAME
 
 CODEX_ARGS=("$@")
 READY_WATCHER_PID=""
-NAME_WATCHER_PID=""
+STARTUP_INPUT_PID=""
 RUNTIME_PID=""
 
 write_status() {
@@ -99,9 +99,9 @@ cleanup() {
     kill "$READY_WATCHER_PID" 2>/dev/null || true
     wait "$READY_WATCHER_PID" 2>/dev/null || true
   fi
-  if [ -n "$NAME_WATCHER_PID" ]; then
-    kill "$NAME_WATCHER_PID" 2>/dev/null || true
-    wait "$NAME_WATCHER_PID" 2>/dev/null || true
+  if [ -n "$STARTUP_INPUT_PID" ]; then
+    kill "$STARTUP_INPUT_PID" 2>/dev/null || true
+    wait "$STARTUP_INPUT_PID" 2>/dev/null || true
   fi
   write_status ended || true
 }
@@ -129,10 +129,9 @@ trap 'terminate_runtime INT 130' INT
 trap 'terminate_runtime TERM 143' TERM
 
 INITIAL_PROMPT=""
-if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
-  INITIAL_PROMPT=$(< "$MULTIVERSE_INITIAL_PROMPT_FILE")
-  rm -f "$MULTIVERSE_INITIAL_PROMPT_FILE" 2>/dev/null || true
-  unset MULTIVERSE_INITIAL_PROMPT_FILE
+INITIAL_PROMPT_FILE="${MULTIVERSE_INITIAL_PROMPT_FILE:-}"
+if [ -n "$INITIAL_PROMPT_FILE" ] && [ -f "$INITIAL_PROMPT_FILE" ]; then
+  INITIAL_PROMPT=$(< "$INITIAL_PROMPT_FILE")
 fi
 
 resolve_multiverse_root() {
@@ -170,10 +169,46 @@ if [ -n "$INBOX_PROMPT" ]; then
   fi
 fi
 
-PROMPT_ARGS=()
-if [ -n "$PROMPT" ]; then
-  PROMPT_ARGS=("$PROMPT")
+USE_STARTUP_INPUT=0
+if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
+  for arg in "${CODEX_ARGS[@]}"; do
+    if [ "$arg" = "resume" ]; then
+      USE_STARTUP_INPUT=-1
+      break
+    fi
+  done
 fi
+if [ "$USE_STARTUP_INPUT" = 0 ] \
+  && [ -n "${MULTIVERSE_SESSION_ID:-}" ] \
+  && [ -n "${MULTIVERSE_SESSION_NAME:-}" ] \
+  && [ -n "${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}" ]; then
+  USE_STARTUP_INPUT=1
+fi
+
+PROMPT_ARGS=()
+STARTUP_PROMPT_FILE=""
+if [ "$USE_STARTUP_INPUT" = 1 ]; then
+  if [ -n "$PROMPT" ]; then
+    STARTUP_PROMPT_FILE="${INITIAL_PROMPT_FILE:-$(dirname "$MULTIVERSE_STATUS")/startup_prompt.txt}"
+    prompt_tmp="${STARTUP_PROMPT_FILE}.$$.$RANDOM.tmp"
+    if printf '%s' "$PROMPT" > "$prompt_tmp"; then
+      mv -f "$prompt_tmp" "$STARTUP_PROMPT_FILE"
+    else
+      rm -f "$prompt_tmp" 2>/dev/null || true
+      STARTUP_PROMPT_FILE=""
+    fi
+  elif [ -n "$INITIAL_PROMPT_FILE" ]; then
+    rm -f "$INITIAL_PROMPT_FILE" 2>/dev/null || true
+  fi
+else
+  if [ -n "$PROMPT" ]; then
+    PROMPT_ARGS=("$PROMPT")
+  fi
+  if [ -n "$INITIAL_PROMPT_FILE" ]; then
+    rm -f "$INITIAL_PROMPT_FILE" 2>/dev/null || true
+  fi
+fi
+unset MULTIVERSE_INITIAL_PROMPT_FILE
 
 # Codex does not fire SessionStart for an interactive resume until the first
 # prompt is submitted. Watch both the native ID (the hook-backed fast path)
@@ -208,32 +243,8 @@ mark_idle_when_codex_is_ready() {
   done
 }
 
-# SessionStart must return promptly, so the hook only records Codex's native
-# thread ID. Keep the native rename retry under this long-lived runner instead
-# of leaving an unsupervised child behind when the hook process exits.
-set_native_name_when_codex_starts() {
-  local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
-  local name="${MULTIVERSE_SESSION_NAME:-}"
-  local attempt=0 session_id
-  [ -z "$id_path" ] && return 0
-  [ -z "$name" ] && return 0
-
-  while [ "$attempt" -lt 2400 ]; do
-    attempt=$((attempt + 1))
-    if [ -s "$id_path" ]; then
-      session_id=$(head -n 1 "$id_path" 2>/dev/null || true)
-      if [ -n "$session_id" ]; then
-        exec "$HOOK_SCRIPT" --set-name "$session_id" "$name" >/dev/null 2>&1
-      fi
-    fi
-    sleep 0.25
-  done
-}
-
 mark_idle_when_codex_is_ready &
 READY_WATCHER_PID=$!
-set_native_name_when_codex_starts &
-NAME_WATCHER_PID=$!
 
 # An explicit stdin redirection prevents non-interactive Bash from replacing a
 # background command's stdin with /dev/null. Codex remains in the pane's
@@ -249,5 +260,33 @@ if printf '%s\n' "$RUNTIME_PID" > "$RUNTIME_PID_TMP"; then
 else
   rm -f "$RUNTIME_PID_TMP" 2>/dev/null || true
 fi
+
+# A separate app-server can persist a thread name, but it cannot update the live
+# TUI's in-memory title. For a fresh named thread, start Codex without the
+# positional prompt, submit Codex's own /rename command, wait for its
+# acknowledgement, and only then deliver the saved initial prompt. Resumes
+# already load their persisted name.
+if [ "$USE_STARTUP_INPUT" = 1 ]; then
+  STARTUP_PYTHON="${MULTIVERSE_CODEX_STARTUP_PYTHON:-$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python3}"
+  if [ ! -x "$STARTUP_PYTHON" ]; then
+    STARTUP_PYTHON=$(command -v python3)
+  fi
+  STARTUP_ERROR_FILE="$(dirname "$MULTIVERSE_STATUS")/startup_input_error"
+  STARTUP_ARGS=(
+    -m src.codex_startup_input
+    --tmux-name "multiverse-${MULTIVERSE_SESSION_ID}"
+    --name "$MULTIVERSE_SESSION_NAME"
+    --native-id-path "$MULTIVERSE_RUNTIME_SESSION_ID_PATH"
+    --codex-home "${CODEX_HOME:-$HOME/.codex}"
+    --error-file "$STARTUP_ERROR_FILE"
+  )
+  if [ -n "$STARTUP_PROMPT_FILE" ]; then
+    STARTUP_ARGS+=(--prompt-file "$STARTUP_PROMPT_FILE")
+  fi
+  PYTHONPATH="$MULTIVERSE_PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$STARTUP_PYTHON" "${STARTUP_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+  STARTUP_INPUT_PID=$!
+fi
+
 wait "$RUNTIME_PID" 2>/dev/null || true
 RUNTIME_PID=""

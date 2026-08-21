@@ -30,6 +30,7 @@ _INBOX_RESUME_RE = re.compile(
     r"respond or act as appropriate\.\s*$"
 )
 _SYNTHETIC_USER_PREFIXES = (
+    "<environment_context>",
     "<task-notification>",
     "<local-command-caveat>",
 )
@@ -172,10 +173,8 @@ class _HistoryBuilder:
             self.pending_synthetic_user = False
             return
 
-        if typ == "event_msg" and payload_type == "user_message":
-            raw_text = payload.get("message")
-            if not isinstance(raw_text, str):
-                raw_text = ""
+        raw_text = _raw_user_text(record)
+        if raw_text is not None:
             synthetic = is_synthetic_user_text(raw_text)
             text = clean_user_text(raw_text)
             images = payload.get("images") or payload.get("local_images") or []
@@ -245,12 +244,35 @@ def _message_text(content: Any) -> str:
     for item in content:
         if not isinstance(item, dict):
             continue
-        if item.get("type") not in ("output_text", "text"):
+        if item.get("type") not in ("input_text", "output_text", "text"):
             continue
         text = item.get("text")
         if isinstance(text, str) and text.strip():
             chunks.append(text.strip())
     return "\n".join(chunks)
+
+
+def _raw_user_text(record: dict) -> str | None:
+    """Return user text from either supported Codex rollout representation."""
+    payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    if record.get("type") == "event_msg" and payload.get("type") == "user_message":
+        value = payload.get("message")
+        return value if isinstance(value, str) else ""
+    if (
+        record.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "user"
+    ):
+        return _message_text(payload.get("content"))
+    return None
+
+
+def user_text_from_record(record: dict) -> str:
+    """Extract cleaned user-authored text from one Codex rollout record."""
+    raw_text = _raw_user_text(record)
+    return "" if raw_text is None else clean_user_text(raw_text)
 
 
 def clean_user_text(text: str) -> str:

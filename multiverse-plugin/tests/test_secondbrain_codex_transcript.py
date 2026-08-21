@@ -186,6 +186,70 @@ class CodexRolloutTranscriptTests(unittest.TestCase):
             "[assistant] Second answer",
         )
 
+    def test_current_response_item_user_schema_is_rendered(self) -> None:
+        timestamp = "2026-07-19T00:01:00Z"
+        self.rollout.append_records(
+            [
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_started", "turn_id": "turn-a"},
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "<environment_context>hidden</environment_context>",
+                            }
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "user-a",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Visible current prompt"}
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "id": "assistant-a",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [
+                            {"type": "output_text", "text": "Visible answer"}
+                        ],
+                    },
+                },
+                {
+                    "timestamp": timestamp,
+                    "type": "event_msg",
+                    "payload": {"type": "task_complete", "turn_id": "turn-a"},
+                },
+            ]
+        )
+
+        peeked = codex_transcript.peek_partial_transcript(
+            self.rollout.codex_home, self.rollout.thread_id, None
+        )
+        assert peeked is not None
+        self.assertIn("[user] Visible current prompt", peeked[0])
+        self.assertIn("[assistant] Visible answer", peeked[0])
+        self.assertNotIn("environment_context", peeked[0])
+
     def test_rollback_finds_common_turn_and_delivers_only_new_branch(self) -> None:
         self.rollout.append_turn("turn-a", "A prompt", "A answer", minute=1)
         self.rollout.append_turn("turn-b", "B prompt", "B answer", minute=2)
