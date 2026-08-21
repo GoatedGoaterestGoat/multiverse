@@ -946,6 +946,14 @@ class SecondBrainScreen(ModalScreen[None]):
       Esc    — close (the daemon keeps running)
     """
 
+    #: Open with nothing focused. Textual's default ("" inherits the app's "*") would
+    #: grab the first focusable widget — the endpoint URL box — which puts a cursor in
+    #: a field the user usually doesn't want to edit and swallows the single-key
+    #: bindings below until they escape out of it. Empty string disables auto-focus
+    #: outright (``None`` would inherit, not disable); the user clicks into a field
+    #: when they actually want one.
+    AUTO_FOCUS = ""
+
     BINDINGS = [
         Binding("escape", "close", "Close"),
         Binding("enter", "primary", "Enroll/Connect (this workspace)"),
@@ -1010,7 +1018,6 @@ class SecondBrainScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         self._refresh_status()
-        self.query_one("#sb-url", Input).focus()
 
     def _refresh_status(self) -> None:
         st = sb_control.status()
