@@ -512,7 +512,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
         submit.assert_not_called()
         restore.assert_called_once_with("multiverse-target", draft)
 
-    def test_codex_tmux_wake_retries_tab_until_composer_clears(self) -> None:
+    def test_codex_tmux_wake_retries_enter_until_composer_clears(self) -> None:
         calls: list[list[str]] = []
 
         def fake_run(command, **kwargs):
@@ -534,12 +534,12 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
         self.assertEqual(
             calls,
             [
-                ["tmux", "send-keys", "-t", "multiverse-target", "Tab"],
-                ["tmux", "send-keys", "-t", "multiverse-target", "Tab"],
+                ["tmux", "send-keys", "-t", "multiverse-target", "Enter"],
+                ["tmux", "send-keys", "-t", "multiverse-target", "Enter"],
             ],
         )
 
-    def test_codex_tmux_wake_fails_if_tab_never_clears_composer(self) -> None:
+    def test_codex_tmux_wake_fails_if_enter_never_clears_composer(self) -> None:
         with (
             patch.object(
                 server.subprocess,

@@ -275,15 +275,17 @@ def _wait_for_codex_wake_prompt_to_clear(tmux_name: str) -> bool:
 
 
 def _submit_codex_wake_prompt(tmux_name: str) -> bool:
-    """Submit or queue a validated Codex wake prompt, with acknowledgement.
+    """Submit a validated Codex wake prompt, with acknowledgement.
 
-    Codex assigns Tab the desired cross-state behavior: it submits while idle and
-    queues while a turn is running. tmux accepting a key does not prove that the TUI
-    handled it, so retry only while the exact validated prompt remains in the composer.
+    Codex assigns Enter to submit: it starts a turn while idle and steers the active
+    turn at its next tool boundary while working. Tab is the distinct follow-up queue
+    action and must not be used here because it waits for the current turn to finish.
+    tmux accepting a key does not prove that the TUI handled it, so retry only while
+    the exact validated prompt remains in the composer.
     """
     for _ in range(_CODEX_WAKE_SUBMIT_ATTEMPTS):
         subprocess.run(
-            ["tmux", "send-keys", "-t", tmux_name, "Tab"],
+            ["tmux", "send-keys", "-t", tmux_name, "Enter"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=3,
@@ -366,9 +368,10 @@ def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
 
     Claude uses literal ``send-keys`` for the text. Codex uses tmux's explicit
     bracketed-paste path, requires the composer to be focused, saves and clears any
-    partial draft, then uses Tab to submit while idle or queue while working. Codex
-    submission and draft restoration are both verified. Returns False on any tmux
-    error, unavailable composer, or unexpected Codex composer content.
+    partial draft, then uses Enter to submit while idle or steer at the next tool
+    boundary while working. Codex submission and draft restoration are both verified.
+    Returns False on any tmux error, unavailable composer, or unexpected Codex
+    composer content.
     """
     try:
         if runtime == RUNTIME_CODEX:
