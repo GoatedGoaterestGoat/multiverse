@@ -23,7 +23,11 @@ from typing import Any
 
 
 ARG_TRUNC = 100
-_WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
+_WAKE_PROMPT = (
+    "Please check your inbox — one or more new inter-agent messages have arrived. "
+    "Use the multiverse check_inbox tool to read and clear them, then respond or act "
+    "as appropriate."
+)
 _INBOX_RESUME_RE = re.compile(
     r"(?:\n\n)?You have \d+ pending inbox messages? from other agents in your "
     r"workspace\. Call the multiverse check_inbox tool to read and clear them, then "

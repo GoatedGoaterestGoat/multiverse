@@ -169,7 +169,11 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         synthetic = {
             **prompt_event,
             "turn_id": "turn-inbox",
-            "prompt": "Please check your inbox — a new inter-agent message just arrived.",
+            "prompt": (
+                "Please check your inbox — one or more new inter-agent messages have "
+                "arrived. Use the multiverse check_inbox tool to read and clear them, "
+                "then respond or act as appropriate."
+            ),
         }
         self.assertEqual(self._run(synthetic).returncode, 0)
         self.assertEqual(len(list(prompt_files[0].parent.glob("*.json"))), 1)

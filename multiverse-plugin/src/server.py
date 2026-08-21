@@ -232,7 +232,11 @@ def _write_session_status(status: str) -> None:
 # push-notified message. Claude may also receive the message through its
 # UserPromptSubmit inbox hook. Codex uses this prompt to call check_inbox;
 # the message remains durable until that tool atomically claims it.
-_WAKE_PROMPT = "Please check your inbox — a new inter-agent message just arrived."
+_WAKE_PROMPT = (
+    "Please check your inbox — one or more new inter-agent messages have arrived. "
+    "Use the multiverse check_inbox tool to read and clear them, then respond or act "
+    "as appropriate."
+)
 _CODEX_WAKE_COMPOSER_POLL_INTERVAL_S = 0.025
 _CODEX_WAKE_SUBMIT_ACK_TIMEOUT_S = 0.5
 _CODEX_WAKE_SUBMIT_ATTEMPTS = 3

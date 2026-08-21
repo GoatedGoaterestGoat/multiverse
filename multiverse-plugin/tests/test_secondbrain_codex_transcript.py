@@ -536,7 +536,11 @@ class CodexRolloutTranscriptTests(unittest.TestCase):
     def test_multiverse_inbox_prompts_are_filtered_from_user_text(self) -> None:
         self.rollout.append_turn(
             "turn-a",
-            "Please check your inbox — a new inter-agent message just arrived.",
+            (
+                "Please check your inbox — one or more new inter-agent messages have "
+                "arrived. Use the multiverse check_inbox tool to read and clear them, "
+                "then respond or act as appropriate."
+            ),
             "Inbox handled",
             minute=1,
         )
