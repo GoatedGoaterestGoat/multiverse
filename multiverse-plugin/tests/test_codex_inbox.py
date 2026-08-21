@@ -132,6 +132,16 @@ class CodexMonitorInboxTests(unittest.IsolatedAsyncioTestCase):
         statuses: list[str] = []
         with (
             patch.object(server, "pending_inbox_count", return_value=0),
+            # Pin identity resolution: patching the time module globally means
+            # ANY time.time() consumes one of the two values below, and the
+            # Claude branch of _resolve_self_identity calls it while scanning
+            # transcripts. That made this test pass or fail on the ambient
+            # MULTIVERSE_RUNTIME of whoever ran it — green from a Codex
+            # session (early return, no clock read), StopIteration from a
+            # Claude one.
+            patch.object(
+                server, "_resolve_self_identity", return_value=("agent", "/tmp/ws")
+            ),
             patch.object(server.time, "time", side_effect=[0, 2]),
             patch.object(
                 server, "_write_session_status", side_effect=statuses.append

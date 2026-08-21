@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inbox import (  # noqa: E402
     claim_pending_messages,
+    clear_wake_sent,
     commit_claimed_messages,
     render_messages_as_system_reminder,
 )
@@ -65,6 +66,11 @@ def main() -> None:
     messages = claim_pending_messages(cwd, name)
     if not messages:
         return  # nothing to deliver (or someone else already claimed it)
+
+    # Claude consumes its inbox through this hook, not through check_inbox, so
+    # this is where a typed wake prompt gets retired for a Claude agent —
+    # senders may prompt it again from here on.
+    clear_wake_sent(cwd, name)
 
     hook_input = _read_input()
     event = hook_input.get("hook_event_name") or "UserPromptSubmit"

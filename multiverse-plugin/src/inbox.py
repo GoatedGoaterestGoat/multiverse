@@ -23,10 +23,11 @@ import re
 import threading
 import time
 import uuid
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Optional
 
-from .atomic_files import atomic_write_json
+from .atomic_files import atomic_write_json, exclusive_file_lock
 from .paths import multiverse_dir
 
 
@@ -244,6 +245,103 @@ def pending_inbox_count(cwd: str, name: str) -> int:
         return sum(1 for _ in d.glob("*.json"))
     except OSError:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Outstanding-wake tracking
+#
+# Delivery is always active: every message_agent call to a live agent types a
+# wake prompt ("check your inbox") into its terminal. Sending three messages to
+# a busy agent therefore queued three prompts — but check_inbox drains the
+# WHOLE inbox in one go, so prompts 2 and 3 are pure waste: they burn a turn
+# each to find an empty inbox.
+#
+# A marker records "we typed a prompt this agent hasn't consumed yet". While it
+# is set, further messages are still written to the inbox but no new prompt is
+# typed — the outstanding one collects them all when it fires.
+# ---------------------------------------------------------------------------
+
+WAKE_PENDING_DIR = MULTIVERSE_DIR / "wake_pending"
+
+
+def _wake_marker_path(cwd: str, name: str) -> Path:
+    return WAKE_PENDING_DIR / _encode_cwd(cwd) / name
+
+
+@contextmanager
+def wake_delivery_lock(cwd: str, name: str):
+    """Serialize check→ping→mark for one recipient, across processes.
+
+    Every sender runs in its own MCP server process, and this workspace
+    routinely has several messaging at once. Without a lock, two senders can
+    both read "no outstanding prompt", both ping, and the agent gets exactly
+    the double interruption this is meant to prevent.
+
+    The lock spans the terminal I/O rather than just the marker write. A
+    reserve-then-ping scheme (mark first, ping after) would be cheaper but is
+    unsafe: if the winner's ping then fails, the loser has already skipped, and
+    the message sits with no prompt behind it at all. Holding the lock across
+    the ping means the loser re-checks *after* the winner's outcome is known —
+    a failed ping leaves the marker unset, so the loser pings for real.
+
+    Best-effort: if the lock can't be taken (odd filesystem, no fcntl), the
+    body still runs. The failure mode is a redundant prompt, which is just the
+    pre-existing behaviour, never a dropped message.
+
+    Only ACQUISITION failure is swallowed. Wrapping the ``yield`` in a
+    ``try/except OSError`` instead would catch exceptions raised by the
+    protected body — thrown back in at the yield point — and then yield a
+    second time, which a @contextmanager cannot do ("generator didn't stop
+    after throw()"). That turned any tmux OSError during delivery into a
+    misleading RuntimeError. ExitStack keeps acquisition failure and body
+    failure separate: exactly one yield either way, and body exceptions
+    propagate untouched.
+    """
+    path = _wake_marker_path(cwd, name).with_name(f"{name}.lock")
+    with ExitStack() as stack:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stack.enter_context(exclusive_file_lock(path))
+        except OSError:
+            pass  # unlocked fallback — see above
+        yield
+
+
+def mark_wake_sent(cwd: str, name: str) -> None:
+    """Record that a wake prompt was typed into ``name``'s terminal.
+
+    Call only after the keystrokes actually landed. A failed ping must leave
+    the marker unset, or the failure would suppress every later ping too.
+    """
+    path = _wake_marker_path(cwd, name)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(time.time()))
+    except OSError:
+        pass  # best-effort: worst case we send a redundant prompt
+
+
+def clear_wake_sent(cwd: str, name: str) -> None:
+    """Record that ``name`` consumed its inbox, so the next message may ping."""
+    try:
+        _wake_marker_path(cwd, name).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def wake_is_outstanding(cwd: str, name: str) -> bool:
+    """Whether a typed wake prompt is still waiting to be acted on.
+
+    Self-heals on an empty inbox: a marker only means anything while there is
+    something left to collect. Without that, an agent killed after being pinged
+    would keep its marker forever and never be pinged again.
+    """
+    if not _wake_marker_path(cwd, name).exists():
+        return False
+    if pending_inbox_count(cwd, name) == 0:
+        clear_wake_sent(cwd, name)
+        return False
+    return True
 
 
 def _fmt_lines(text: str, prefix: str = "> ") -> list[str]:

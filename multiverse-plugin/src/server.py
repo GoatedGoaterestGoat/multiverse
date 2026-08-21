@@ -47,9 +47,13 @@ from src.sessions import (
 )
 from src.inbox import (
     claim_pending_messages,
+    clear_wake_sent,
     commit_claimed_messages,
+    mark_wake_sent,
     pending_inbox_count,
     render_messages_as_tool_result,
+    wake_delivery_lock,
+    wake_is_outstanding,
     write_message_to_inbox,
 )
 from src.interagent_log import (
@@ -68,6 +72,7 @@ from src.spawn_requests import (
 )
 from src.sb_actions import (
     capture_pane,
+    claude_input_box,
     capture_focused_codex_composer_draft,
     clear_composer_text_via_tmux,
     codex_composer_first_line_text,
@@ -367,6 +372,44 @@ def _wake_codex_via_tmux(tmux_name: str) -> bool:
     return _restore_codex_composer_text(tmux_name, saved)
 
 
+# How long to wait for Claude's TUI to render after a submit before deciding
+# the wake prompt never landed. Polled, so a healthy submit confirms in ~one
+# render cycle and only a genuine failure pays the full wait.
+_WAKE_CONFIRM_TIMEOUT_S = 3.0
+_WAKE_CONFIRM_POLL_S = 0.1
+
+
+def _claude_wake_confirmed(tmux_name: str, expected_draft: str) -> bool:
+    """Whether Claude actually accepted the wake prompt we just typed.
+
+    ``send_prompt_via_tmux`` reports success once its tmux commands succeed,
+    which is NOT the same as Claude having submitted the prompt — a dropped
+    Enter leaves our wake text sitting in the composer, unsent. Codex confirms
+    this itself (it waits for the prompt to leave the composer); Claude does
+    not, so we check here.
+
+    This gate exists because marking a wake as outstanding is a promise to stop
+    pinging. Get it wrong and delivery to that agent stops permanently: the
+    empty-inbox self-heal can't rescue it, since nothing is being delivered and
+    so the inbox never empties.
+
+    After a successful send the composer holds exactly what we restored — the
+    user's draft, or nothing. Anything else (notably our own wake text) means
+    the submit didn't land, so we report unconfirmed and let the next message
+    ping again. Erring toward a redundant prompt is the safe direction.
+    """
+    deadline = time.time() + _WAKE_CONFIRM_TIMEOUT_S
+    while True:
+        ok, pane = capture_pane(tmux_name, join_wrapped=True, include_styles=True)
+        if ok:
+            visible, draft = claude_input_box(pane)
+            if visible and draft == expected_draft:
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(_WAKE_CONFIRM_POLL_S)
+
+
 def _wake_via_tmux(tmux_name: str, *, runtime: str = RUNTIME_CLAUDE) -> bool:
     """Type and submit the wake prompt in a session's tmux pane.
 
@@ -647,6 +690,13 @@ def message_agent(
     delivery path. The tool result tells you exactly what happened (woke a
     dormant agent, pinged a live one, fell back to queued delivery, etc.).
 
+    At most one outstanding prompt: if the recipient was already asked to
+    check its inbox and hasn't done so yet, no second prompt is sent. Your
+    message is still queued and the pending prompt collects it along with
+    everything else — reading an inbox drains all of it at once. So sending
+    several messages in a row to a busy agent costs it one interruption, not
+    one per message, and nothing is lost.
+
     Args:
         target_name: Name of the agent to message. Use ``list_agents`` to
             see who's available.
@@ -694,6 +744,13 @@ def message_agent(
             f"Call list_agents(working_directory='{cwd}') to see who's "
             "available."
         )
+
+    # Called for its side effect, not its answer: wake_is_outstanding() retires
+    # a stale marker (one with an empty inbox behind it — e.g. the agent was
+    # killed after being pinged). That check only works BEFORE our own write
+    # adds a message, which is why it happens here. The decision itself is made
+    # later, re-checked under the per-recipient lock.
+    wake_is_outstanding(cwd, target_name)
 
     # Always write the inbox file before any auto-resume. Claude's SessionStart
     # hook and Codex's wrapper-side startup prompt must both observe the queued
@@ -823,69 +880,92 @@ def message_agent(
             + reply_hint
         )
 
-    if status in ("idle", "working") and target.runtime == RUNTIME_CLAUDE:
-        # Claude delivery is composer-gated rather than attachment-gated. Whether a
-        # user is attached is irrelevant — what matters is whether the composer is on
-        # screen to receive keystrokes:
-        #   composer visible  → deliver, preserving any typed-but-unsent draft
-        #                       (save → clear → send+submit → restore).
-        #   composer missing  → a permission prompt / AskUserQuestion modal is up (or
-        #                       the pane is scrolled away). Keystrokes would answer the
-        #                       modal, so leave the message queued.
-        tmux_name = target.session.tmux_name
-        ok, saved, err = send_prompt_via_tmux(
-            tmux_name, _WAKE_PROMPT, runtime=RUNTIME_CLAUDE, require_composer=True
-        )
-        if not ok and "composer is not visible" in err:
-            log_route("passive_fallback_no_composer")
-            return (
-                f"Message queued for '{target_name}' — its input box isn't on screen "
-                "(it's on a permission prompt or a question modal), so no keystrokes "
-                "were sent. The message will be delivered on the recipient's next "
-                "turn." + reply_hint
-            )
-        log_route("wake_tmux", success=ok)
-        if not ok:
-            return (
-                f"Message queued for '{target_name}', but the terminal ping failed "
-                f"({err}) — it will be delivered on the recipient's next turn."
-                + reply_hint
-            )
-        preserved = (
-            " Its typed-but-unsent input was saved and restored." if saved else ""
-        )
-        return (
-            f"Delivered to '{target_name}' and pinged its terminal to check its "
-            f"inbox now (it was {status})." + preserved + reply_hint
-        )
-
     if status in ("idle", "working"):
-        tmux_name = target.session.tmux_name
-        woke = _wake_via_tmux(tmux_name, runtime=target.runtime)
-        log_route("wake_tmux", success=woke)
-        if woke:
-            if target.runtime == RUNTIME_CODEX:
+        # Serialized per recipient across sender processes: the check below,
+        # the ping, and the resulting mark must be one indivisible step, or two
+        # concurrent senders both read "nothing outstanding" and both ping.
+        with wake_delivery_lock(cwd, target_name):
+            # Authoritative re-check, inside the lock. The earlier call ran
+            # before our own inbox write so it could still see an empty inbox
+            # and retire a stale marker; this one decides.
+            if wake_is_outstanding(cwd, target_name):
+                # A wake prompt is already sitting with this agent, accepted
+                # but not yet acted on. Typing another buys nothing: reading an
+                # inbox drains ALL of it, so the outstanding prompt collects
+                # this message too and a second would burn a turn arriving at
+                # an empty inbox.
+                log_route("skipped_wake_outstanding")
                 return (
-                    f"Message queued for '{target_name}' and its terminal was "
-                    f"pinged to call check_inbox now (it was {status})."
+                    f"Message queued for '{target_name}'. It was already asked to "
+                    "check its inbox and hasn't done so yet, so no second prompt "
+                    "was sent — the pending one will pick this message up too."
                     + reply_hint
                 )
-            return (
-                f"Delivered to '{target_name}' and pinged its terminal to "
-                f"check its inbox now (it was {status})." + reply_hint
-            )
-        return (
-            (
-                f"Message queued for '{target_name}', but the terminal ping "
-                "failed — it will be delivered on the recipient's next turn."
-                if target.runtime == RUNTIME_CLAUDE
-                else (
-                    f"Message queued for '{target_name}', but the terminal ping "
-                    "failed. " + _queued_next_step(target.runtime)
+
+            tmux_name = target.session.tmux_name
+
+            if target.runtime == RUNTIME_CLAUDE:
+                # Claude delivery is composer-gated rather than attachment-gated.
+                # Whether a user is attached is irrelevant — what matters is whether
+                # the composer is on screen to receive keystrokes:
+                #   composer visible  → deliver, preserving any typed-but-unsent
+                #                       draft (save → clear → send+submit → restore).
+                #   composer missing  → a permission prompt / AskUserQuestion modal
+                #                       is up (or the pane is scrolled away).
+                #                       Keystrokes would answer the modal, so leave
+                #                       the message queued.
+                ok, saved, err = send_prompt_via_tmux(
+                    tmux_name,
+                    _WAKE_PROMPT,
+                    runtime=RUNTIME_CLAUDE,
+                    require_composer=True,
                 )
+                if not ok and "composer is not visible" in err:
+                    log_route("passive_fallback_no_composer")
+                    return (
+                        f"Message queued for '{target_name}' — its input box isn't "
+                        "on screen (it's on a permission prompt or a question "
+                        "modal), so no keystrokes were sent. The message will be "
+                        "delivered on the recipient's next turn." + reply_hint
+                    )
+                log_route("wake_tmux", success=ok)
+                if not ok:
+                    return (
+                        f"Message queued for '{target_name}', but the terminal ping "
+                        f"failed ({err}) — it will be delivered on the recipient's "
+                        "next turn." + reply_hint
+                    )
+                # Mark only once the submit is CONFIRMED, not merely attempted:
+                # the marker suppresses later pings, so a wake still sitting in
+                # the composer would stop delivery to this agent for good.
+                # Marking inside the lock is also what lets a loser re-check
+                # after our outcome is known, so a failure here doesn't strand
+                # their message.
+                if _claude_wake_confirmed(tmux_name, saved):
+                    mark_wake_sent(cwd, target_name)
+                preserved = (
+                    " Its typed-but-unsent input was saved and restored."
+                    if saved
+                    else ""
+                )
+                return (
+                    f"Delivered to '{target_name}' and pinged its terminal to check "
+                    f"its inbox now (it was {status})." + preserved + reply_hint
+                )
+
+            woke = _wake_via_tmux(tmux_name, runtime=target.runtime)
+            log_route("wake_tmux", success=woke)
+            if woke:
+                # Success only — see the Claude branch above for why.
+                mark_wake_sent(cwd, target_name)
+                return (
+                    f"Message queued for '{target_name}' and its terminal was "
+                    f"pinged to call check_inbox now (it was {status})." + reply_hint
+                )
+            return (
+                f"Message queued for '{target_name}', but the terminal ping "
+                "failed. " + _queued_next_step(target.runtime) + reply_hint
             )
-            + reply_hint
-        )
 
     # Unknown or future live states are never safe targets for terminal input.
     log_route("passive_fallback_status")
@@ -927,6 +1007,11 @@ def check_inbox() -> str:
             "Error: this tool requires running inside a multiverse-managed "
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
         )
+
+    # Acting on the wake prompt is what clears it — checking and finding an
+    # empty inbox still counts, so senders may prompt us again. Done before
+    # the early return below for exactly that case.
+    clear_wake_sent(cwd, name)
 
     # Claims (reads + STAGES) — safe if a duplicate-session process is
     # also polling this same inbox; see claim_pending_messages. The
@@ -987,6 +1072,13 @@ async def monitor_inbox(
             "Error: this tool requires running inside a multiverse-managed "
             "session (MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
         )
+
+    # Deliberately does NOT clear the outstanding-wake marker: this tool only
+    # DETECTS, it doesn't consume. Clearing here would open a window where the
+    # agent has been told a message exists but hasn't read it yet, and a new
+    # sender would type a redundant prompt at it. A parked agent reads as
+    # `listening`, which is already excluded from pinging, and the marker is
+    # retired for real once check_inbox drains the inbox.
 
     if pending_inbox_count(cwd, name) > 0:
         return (

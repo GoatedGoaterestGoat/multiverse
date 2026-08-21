@@ -170,6 +170,15 @@ Several MCP tools are available to any agent running under the wrapper. They def
 
 The states that can't be woken still receive the message through their normal delivery path (Claude's inbox hooks; Codex's `check_inbox`). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
 
+**At most one outstanding prompt.** Reading an inbox drains *all* of it, so a second "check your inbox" prompt sent before the agent acted on the first is wasted — it burns a turn to arrive at an empty inbox. A marker under `~/.multiverse/wake_pending/<encoded-cwd>/<name>` records that a prompt was accepted by the target's composer and not yet acted on; while it's set, further messages are queued without typing anything (route `skipped_wake_outstanding`).
+
+- **Set only on a confirmed submit**, never on "we ran some tmux commands". The marker is a promise to stop pinging, so a wake still sitting unsent in the composer would stop delivery to that agent permanently — and the self-heal below can't rescue that, since nothing is being delivered and so the inbox never empties. Codex confirms its own submit (it waits for the prompt to leave the composer). Claude does not: `send_prompt_via_tmux` returns once its tmux commands succeed, so `message_agent` adds the postcondition itself — re-capture the pane and require the composer to hold exactly the restored draft (empty if there was none), polled briefly for TUI render latency. Unconfirmed, or a failed ping, leaves the marker unset and the next message pings again.
+- **Cleared on real consumption only.** `deliver-inbox.py` for Claude (its hook path), `check_inbox` for either runtime — Codex's only path. Deliberately *not* `monitor_inbox`, which detects without consuming: clearing there would let a redundant prompt through in the window between "agent told a message exists" and "agent reads it".
+- **Self-heals.** A marker with an empty inbox behind it is stale and gets retired, so an agent killed after being pinged doesn't go permanently unpingable.
+- **Serialized per recipient.** The check, the ping, and the mark run under an `flock` on the recipient (`wake_delivery_lock`), because every sender is a separate MCP process. Without it two concurrent senders both read "nothing outstanding" and both ping. The lock spans the terminal I/O rather than reserving the marker up front: if a winner's ping fails, the loser re-checks after that outcome is known and pings for real, instead of skipping behind a prompt that never landed.
+
+Net effect: a burst of five messages to a busy agent costs it one interruption, not five, and no message is dropped.
+
 > The old `push_notification` argument is retired — delivery is always active now. Passing it (either spelling) is silently ignored.
 
 **`ask_agent(target_name, question, timeout_seconds=60)`** — send a quick ephemeral question. Use this for facts the target already knows.
