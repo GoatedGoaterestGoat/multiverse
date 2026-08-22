@@ -257,7 +257,9 @@ def _codex_wake_prompt_matches(rendered: str) -> bool:
     has no logical newlines, so replacing only rendered row breaks with spaces
     reconstructs it without weakening validation for any other payload.
     """
-    return rendered == _WAKE_PROMPT or rendered.replace("\n", " ") == _WAKE_PROMPT
+    return rendered == _WAKE_PROMPT or " ".join(
+        line.strip() for line in rendered.splitlines()
+    ) == _WAKE_PROMPT
 
 
 def _codex_wake_prompt_state(tmux_name: str) -> bool | None:

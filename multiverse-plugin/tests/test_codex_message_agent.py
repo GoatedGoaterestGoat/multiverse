@@ -592,7 +592,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
     def test_codex_wake_insert_accepts_visual_row_wraps(self) -> None:
         rendered = server._WAKE_PROMPT.replace(
-            " read and clear ", " read and clear\n"
+            " read and clear ", " read and clear   \n"
         )
         with patch.object(
             server,
