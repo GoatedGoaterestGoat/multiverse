@@ -265,6 +265,22 @@ def codex_composer_first_line_text(pane: str) -> str | None:
     return None
 
 
+def codex_composer_text(pane: str) -> str | None:
+    """Return the rendered text of the last visible Codex composer.
+
+    Codex lays long single-line drafts out across explicit terminal rows, so
+    ``capture-pane -J`` cannot join those visual wraps.  Callers that know the
+    original text can account for those row breaks while still validating the
+    entire composer instead of trusting only its first line.
+    """
+    visible, draft = _codex_composer(pane)
+    if not visible:
+        return None
+    if _codex_composer_is_ghost(pane):
+        return ""
+    return draft
+
+
 def codex_composer_has_focus(tmux_name: str) -> tuple[bool, str]:
     """Whether tmux's visible cursor is inside the last Codex composer.
 

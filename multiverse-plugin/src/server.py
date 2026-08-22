@@ -75,7 +75,7 @@ from src.sb_actions import (
     claude_input_box,
     capture_focused_codex_composer_draft,
     clear_composer_text_via_tmux,
-    codex_composer_first_line_text,
+    codex_composer_text,
     parse_input_box_text,
     paste_text_via_tmux,
     send_prompt_via_tmux,
@@ -248,6 +248,18 @@ _CODEX_WAKE_SUBMIT_ATTEMPTS = 3
 _CODEX_WAKE_DRAFT_TIMEOUT_S = 3.0
 
 
+def _codex_wake_prompt_matches(rendered: str) -> bool:
+    """Whether a rendered composer contains exactly our wake prompt.
+
+    Ratatui renders a long single-line Codex draft over explicit rows rather
+    than terminal soft-wrap rows.  Tmux therefore returns newlines at those
+    visual boundaries even with ``capture-pane -J``.  The wake prompt itself
+    has no logical newlines, so replacing only rendered row breaks with spaces
+    reconstructs it without weakening validation for any other payload.
+    """
+    return rendered == _WAKE_PROMPT or rendered.replace("\n", " ") == _WAKE_PROMPT
+
+
 def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
     """Whether Codex's visible composer contains exactly the wake prompt.
 
@@ -264,7 +276,8 @@ def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
     )
     if not ok:
         return None
-    return codex_composer_first_line_text(pane) == _WAKE_PROMPT
+    rendered = codex_composer_text(pane)
+    return rendered is not None and _codex_wake_prompt_matches(rendered)
 
 
 def _codex_wake_prompt_ready(tmux_name: str) -> bool:
@@ -310,7 +323,10 @@ def _wait_for_codex_composer_text(tmux_name: str, expected: str) -> bool:
     deadline = time.monotonic() + _CODEX_WAKE_DRAFT_TIMEOUT_S
     while True:
         ok, draft, _ = capture_focused_codex_composer_draft(tmux_name)
-        if ok and draft == expected:
+        if ok and (
+            draft == expected
+            or (expected == _WAKE_PROMPT and _codex_wake_prompt_matches(draft))
+        ):
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:

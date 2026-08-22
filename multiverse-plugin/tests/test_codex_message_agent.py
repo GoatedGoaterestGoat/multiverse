@@ -577,6 +577,34 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
         self.assertTrue(ready)
 
+    def test_codex_wake_prompt_validation_accepts_visual_row_wraps(self) -> None:
+        first, rest = server._WAKE_PROMPT.split(" read and clear ", 1)
+        pane = (
+            "transcript\n"
+            f"› {first} read and clear\n"
+            f"  {rest}\n"
+            "  gpt-5.6-sol · Ready · 100% left\n"
+        )
+        with patch.object(server, "capture_pane", return_value=(True, pane)):
+            ready = server._codex_wake_prompt_ready("multiverse-target")
+
+        self.assertTrue(ready)
+
+    def test_codex_wake_insert_accepts_visual_row_wraps(self) -> None:
+        rendered = server._WAKE_PROMPT.replace(
+            " read and clear ", " read and clear\n"
+        )
+        with patch.object(
+            server,
+            "capture_focused_codex_composer_draft",
+            return_value=(True, rendered, ""),
+        ):
+            inserted = server._wait_for_codex_composer_text(
+                "multiverse-target", server._WAKE_PROMPT
+            )
+
+        self.assertTrue(inserted)
+
     def test_codex_wake_prompt_validation_does_not_depend_on_footer_state(self) -> None:
         pane = (
             "transcript\n"
