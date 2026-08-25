@@ -1255,6 +1255,11 @@ async def spawn_agent(
     to give up; that cancels the request and no subagent is created.) If
     rejected, no subagent is created.
 
+    A rejection may come with the user's reason, which is quoted back to you
+    in the tool result. Read it and adapt — narrow the request, do the work
+    yourself, or drop it. Re-sending the same request unchanged after being
+    told why it was declined is the one response guaranteed to be wrong.
+
     Args:
         instruction: The first user message for the new agent. Can be
             multi-line, can include task context, code, a summary of your
@@ -1364,8 +1369,19 @@ async def spawn_agent(
 
         status = res.get("status")
         if status != "accepted":
-            reason = res.get("reason") or status or "rejected"
-            return f"Spawn request rejected by user ({reason}). No subagent was created."
+            reason = (res.get("reason") or "").strip()
+            # "cancelled" is the marker for a bare Esc / external resolve — no
+            # person typed anything, so don't dress it up as an explanation.
+            if reason and reason != "cancelled":
+                return (
+                    "Spawn request rejected by the user, who said: "
+                    f"{reason}\n\nNo subagent was created. Take the reason into "
+                    "account — do not simply re-send the same request."
+                )
+            return (
+                "Spawn request rejected by the user, with no reason given. No "
+                "subagent was created."
+            )
 
         chosen = (res.get("name") or "").strip()
         if not chosen:

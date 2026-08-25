@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 from textual import events, on, work
@@ -278,13 +279,32 @@ class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
         self.dismiss(None)
 
 
-class SpawnRequestScreen(ModalScreen[Optional[tuple[str, str]]]):
+@dataclass
+class SpawnDecision:
+    """What the user chose in :class:`SpawnRequestScreen`.
+
+    Distinct from a ``None`` dismissal, which means the modal was closed
+    externally (another monitor resolved the request first) rather than by a
+    person — only a real rejection can carry a reason to send back.
+    """
+
+    accepted: bool
+    name: str = ""
+    runtime: str = ""
+    reason: str = ""
+
+
+class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
     """Approval widget for an agent-initiated spawn request.
 
-    Returns the chosen name and runtime on accept, or ``None`` on Esc. The
-    monitor's watcher may also dismiss this externally (if another monitor
-    resolved the request first) — in that case the callback still sees
-    ``None`` and ``write_resolution`` no-ops via O_EXCL.
+    Returns a :class:`SpawnDecision` for either choice the user makes, or
+    ``None`` when dismissed externally (another monitor resolved the request
+    first) — in that case ``write_resolution`` no-ops via O_EXCL.
+
+    Rejecting can carry a short explanation, which is handed back to the
+    requesting agent as its tool result. Without it the agent only learns
+    "rejected", and its usual next move is to ask again — the reason is what
+    lets it adjust or drop the idea instead.
     """
 
     BINDINGS = [
@@ -339,9 +359,15 @@ class SpawnRequestScreen(ModalScreen[Optional[tuple[str, str]]]):
                 ),
                 id="spawn-runtime",
             ),
+            Static("Reason, if rejecting (optional):", id="spawn-reject-prompt"),
+            Input(
+                placeholder="Sent back to the agent — e.g. why, or what to do instead",
+                id="spawn-reject-reason",
+            ),
             Static("", id="spawn-error"),
             Static(
-                "Tab to choose runtime · Enter to accept · Esc to reject",
+                "Tab to move · Enter to accept · Esc to reject "
+                "(Enter in the reason box rejects too)",
                 id="spawn-hint",
             ),
             id="spawn-dialog",
@@ -356,10 +382,27 @@ class SpawnRequestScreen(ModalScreen[Optional[tuple[str, str]]]):
             pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "spawn-reject-reason":
+            self.action_cancel()
+            return
         self._try_submit()
 
     def action_submit(self) -> None:
+        # Enter is bound at screen level with priority, so it fires even while
+        # the reason box has focus. Typing a rejection and pressing Enter must
+        # reject, not silently create the agent you were declining.
+        focused = self.focused
+        if focused is not None and getattr(focused, "id", None) == "spawn-reject-reason":
+            self.action_cancel()
+            return
         self._try_submit()
+
+    def _reject_reason(self) -> str:
+        try:
+            return self.query_one("#spawn-reject-reason", Input).value.strip()
+        except Exception:
+            # Dismissed before compose finished (external resolve).
+            return ""
 
     def _try_submit(self) -> None:
         name = self.query_one("#spawn-name", Input).value.strip()
@@ -377,10 +420,10 @@ class SpawnRequestScreen(ModalScreen[Optional[tuple[str, str]]]):
             if self.query_one("#spawn-runtime-codex", RadioButton).value
             else RUNTIME_CLAUDE
         )
-        self.dismiss((name, runtime))
+        self.dismiss(SpawnDecision(accepted=True, name=name, runtime=runtime))
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self.dismiss(SpawnDecision(accepted=False, reason=self._reject_reason()))
 
 
 class NameInputScreen(ModalScreen[Optional[str]]):
@@ -3062,6 +3105,11 @@ class MonitorApp(App):
         height: auto;
         padding-bottom: 1;
     }
+    #spawn-reject-prompt {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     #spawn-error {
         color: $error;
         height: auto;
@@ -3332,38 +3380,53 @@ class MonitorApp(App):
         rid = req.get("id") or ""
         self._active_spawn_id = rid
 
-        def on_close(selection: Optional[tuple[str, str]]) -> None:
+        def on_close(decision: Optional[SpawnDecision]) -> None:
             self._active_spawn_id = None
             self._active_spawn_modal = None
-            if selection:
-                chosen_name, chosen_runtime = selection
-                won = write_resolution(
-                    rid,
-                    status="accepted",
-                    name=chosen_name,
-                    runtime=chosen_runtime,
-                )
-                if won:
-                    self.notify(
-                        f"Approved spawn from '{req.get('from', '?')}' "
-                        f"as '{chosen_name}' ({chosen_runtime})"
-                    )
-                else:
-                    # Another monitor beat us to the resolution. Show what
-                    # actually won, if anything meaningful.
-                    actual = read_resolution(rid)
-                    if actual and actual.get("status") == "accepted":
-                        won_name = actual.get("name") or "?"
-                        won_runtime = actual.get("runtime") or RUNTIME_CLAUDE
-                        self.notify(
-                            f"Another monitor already accepted this "
-                            f"spawn as '{won_name}' ({won_runtime})",
-                            severity="warning",
-                        )
-            else:
-                # Could be user Esc OR external dismiss. O_EXCL makes the
-                # second case a no-op.
+            if decision is None:
+                # External dismiss: another monitor resolved this first, so
+                # there's no person here to explain anything. O_EXCL makes the
+                # write a no-op against the winner.
                 write_resolution(rid, status="rejected", reason="cancelled")
+                return
+            if not decision.accepted:
+                # "cancelled" stays the default so an unexplained Esc reads the
+                # same as it always did to the requesting agent.
+                write_resolution(
+                    rid,
+                    status="rejected",
+                    reason=decision.reason or "cancelled",
+                )
+                who = req.get("from", "?")
+                if decision.reason:
+                    self.notify(f"Rejected spawn from '{who}': {decision.reason}")
+                else:
+                    self.notify(f"Rejected spawn from '{who}'")
+                return
+            chosen_name, chosen_runtime = decision.name, decision.runtime
+            won = write_resolution(
+                rid,
+                status="accepted",
+                name=chosen_name,
+                runtime=chosen_runtime,
+            )
+            if won:
+                self.notify(
+                    f"Approved spawn from '{req.get('from', '?')}' "
+                    f"as '{chosen_name}' ({chosen_runtime})"
+                )
+            else:
+                # Another monitor beat us to the resolution. Show what
+                # actually won, if anything meaningful.
+                actual = read_resolution(rid)
+                if actual and actual.get("status") == "accepted":
+                    won_name = actual.get("name") or "?"
+                    won_runtime = actual.get("runtime") or RUNTIME_CLAUDE
+                    self.notify(
+                        f"Another monitor already accepted this "
+                        f"spawn as '{won_name}' ({won_runtime})",
+                        severity="warning",
+                    )
 
         modal = SpawnRequestScreen(self.monitor_cwd, req)
         self._active_spawn_modal = modal

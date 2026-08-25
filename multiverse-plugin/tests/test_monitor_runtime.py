@@ -185,7 +185,14 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
 
         self.assertEqual(
-            results, [("codex-child", monitor.RUNTIME_CODEX)]
+            results,
+            [
+                monitor.SpawnDecision(
+                    accepted=True,
+                    name="codex-child",
+                    runtime=monitor.RUNTIME_CODEX,
+                )
+            ],
         )
 
     async def test_spawn_modal_resolution_includes_selected_runtime(self) -> None:
@@ -213,7 +220,13 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
                 ) as write_resolution,
             ):
                 app._show_spawn_modal(request)
-                callbacks[0](("codex-child", monitor.RUNTIME_CODEX))
+                callbacks[0](
+                    monitor.SpawnDecision(
+                        accepted=True,
+                        name="codex-child",
+                        runtime=monitor.RUNTIME_CODEX,
+                    )
+                )
 
         write_resolution.assert_called_once_with(
             "request-id",
