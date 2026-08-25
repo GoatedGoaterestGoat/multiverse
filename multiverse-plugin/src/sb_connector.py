@@ -2083,8 +2083,14 @@ class SBConnector:
             if not ok:
                 return ("deliver_failed", "", f"target didn't become ready: {err}")
 
+        # require_composer closes the window between the status read above and these
+        # keystrokes. `waiting` is refused up front, but status is a snapshot -- a target
+        # can raise a modal in between, and typing a prompt into one is not a benign
+        # miss: the modal reads digits as selections, so an ordinary prompt containing
+        # a "1" picks option 1. No intent needed for that, which is what makes it worth
+        # a second check rather than trusting the first.
         ok, saved, err = sb_actions.send_prompt_via_tmux(
-            tmux_name, text, runtime=target.runtime
+            tmux_name, text, runtime=target.runtime, require_composer=True
         )
         if not ok:
             return ("deliver_failed", "", err)

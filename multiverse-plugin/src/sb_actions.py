@@ -537,10 +537,11 @@ def send_prompt_via_tmux(
 
     ``require_composer`` makes step 1 fail when Claude's composer isn't on screen,
     which means a permission prompt or AskUserQuestion modal has replaced it and our
-    keystrokes would answer the modal instead of typing a prompt. Callers that can
-    fall back to queued delivery (``message_agent``) pass True; the SecondBrain
-    connector leaves it False, which preserves its existing behaviour of delivering to
-    ``waiting`` targets. Codex always requires its composer.
+    keystrokes would answer the modal instead of typing a prompt -- digits especially,
+    which a modal reads as selecting that numbered option. Every caller passes True:
+    ``message_agent`` because it can fall back to queued delivery, and the SecondBrain
+    connector because it refuses ``waiting`` targets anyway and this closes the gap
+    between that status check and the keystrokes. Codex always requires its composer.
 
     Returns ``(ok, saved_text, error)`` — the saved text lets the caller construct the
     success message ("Prompt delivered to X, saved and restored the text..." when non-empty).

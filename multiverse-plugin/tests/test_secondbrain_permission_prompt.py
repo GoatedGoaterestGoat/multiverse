@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor"))
 
 from secondbrain import protocol as p  # noqa: E402
 
-from src import sb_actions, sb_connector, sb_notify, sessions  # noqa: E402
+from src import compact_state, sb_actions, sb_connector, sb_notify, sessions  # noqa: E402
 from src.sb_actions import _permission_target, parse_permission_options  # noqa: E402
 
 LABELS = ["Yes", "Yes, and don't ask again for rm commands in /r", "No"]
@@ -276,6 +276,79 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
                 result, fake = await self._run(payload, **kwargs)
                 self.assertEqual(result["error"]["code"], code)
                 self.assertEqual(fake.sent, [], "a rejected action must send no keys")
+
+
+class PromptAgentModalGuardTests(unittest.IsolatedAsyncioTestCase):
+    """``prompt_agent`` must not type into a modal, even when status says otherwise.
+
+    ``waiting`` is refused up front, but status is a snapshot: a target can raise a
+    modal between that read and the keystrokes. Typing into one isn't a benign miss --
+    the modal reads digits as selections, so an ordinary prompt containing a "1" picks
+    option 1, which on some prompts is an elevated-mode option. No intent required,
+    which is what makes the second check worth its cost.
+    """
+
+    MODAL = (
+        "│ Do you want to proceed?  │\n"
+        "│ ❯ 1. Yes                 │\n"
+        "│   2. No                  │\n"
+    )
+    COMPOSER = "──────────────────── Forge ──\n❯\xa0\n─────────────────────────────\n"
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        os.environ["MULTIVERSE_ROOT"] = self.temp.name
+        self.cwd = str(Path(self.temp.name, "workspace").resolve())
+        Path(self.cwd).mkdir()
+
+    def _target(self) -> sessions.DashboardRow:
+        session = sessions.Session(
+            id="w1", cwd=self.cwd, created_at=1, status="idle", status_ts=2,
+            name="Forge", runtime=sessions.RUNTIME_CLAUDE, host="local-host",
+        )
+        return sessions.DashboardRow(
+            name="Forge", cwd=self.cwd, status="idle", status_ts=2,
+            runtime=sessions.RUNTIME_CLAUDE, session=session, claude_uuid="u-1",
+        )
+
+    async def _deliver(self, pane: str):
+        sent: list[list[str]] = []
+
+        def run(args, capture=False, input_text=None):  # noqa: ANN001, ARG001
+            if args[0] == "capture-pane":
+                return True, pane
+            sent.append(args)
+            return True, ""
+
+        ws = MockWS()
+        conn = object.__new__(sb_connector.SBConnector)
+        conn.identity = SimpleNamespace(device_id="dev", granted_workspaces=[self.cwd])
+        conn.dedup = sb_connector.ActionDedup()
+        conn.channel = None
+        action = p.Action(
+            action_id="a1", ts="2026-08-25T00:00:00Z", workspace_id=f"dev:{self.cwd}",
+            kind=p.ActionKind.PROMPT_AGENT, actor="sb", authority="autonomous",
+            agent="Forge", payload={"text": "try running step 1 of the plan"},
+        )
+        with patch.object(sessions, "find_agent_by_name", return_value=self._target()),              patch.object(sessions, "current_host", return_value="local-host"),              patch.object(sessions, "tmux_session_exists", return_value=True),              patch.object(compact_state, "is_locked", return_value=False),              patch.object(sb_actions, "_run_tmux", run):
+            await conn._on_action(ws, action)
+            for _ in range(200):
+                if ws.sent:
+                    break
+                await asyncio.sleep(0.02)
+        typed = [a[-1] for a in sent if "-l" in a]
+        return ws.sent[-1], typed
+
+    async def test_refuses_and_types_nothing_when_a_modal_replaced_the_composer(self) -> None:
+        result, typed = await self._deliver(self.MODAL)
+        self.assertEqual(result["status"], "rejected")
+        self.assertEqual(typed, [], "a prompt's digits would have selected options")
+
+    async def test_still_delivers_when_the_composer_is_present(self) -> None:
+        result, typed = await self._deliver(self.COMPOSER)
+        self.assertEqual(result["status"], "ok")
+        self.assertTrue(typed)
 
 
 if __name__ == "__main__":
