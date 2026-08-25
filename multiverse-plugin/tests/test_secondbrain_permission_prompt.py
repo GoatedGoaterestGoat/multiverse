@@ -1,0 +1,261 @@
+"""SecondBrain ``answer_permission_prompt`` — parser, target resolution, handler.
+
+This verb approves work the user's own settings flagged for a human, so the tests
+lean on the cases where a wrong keystroke would approve something. Two properties
+matter more than the happy path:
+
+* deny must never land on the "don't ask again" row, which sits between Yes and No
+  and only renders sometimes;
+* anything the pane doesn't clearly say must produce a refusal with NO keystrokes
+  sent, rather than a hopeful guess.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor"))
+
+from secondbrain import protocol as p  # noqa: E402
+
+from src import sb_actions, sb_connector, sb_notify, sessions  # noqa: E402
+from src.sb_actions import _permission_target, parse_permission_options  # noqa: E402
+
+LABELS = ["Yes", "Yes, and don't ask again for rm commands in /r", "No"]
+GONE = "agent output, no modal\n"
+
+
+class FakeTmux:
+    """A permission modal that tracks its own cursor.
+
+    Honours the keys the driver actually sends: a digit selects, Down/Up move, Tab
+    enters input mode, Enter submits. ``sticky`` keeps the modal up after answering
+    so the post-condition check can be exercised.
+    """
+
+    def __init__(self, *, sticky: bool = False) -> None:
+        self.sent: list[list[str]] = []
+        self.focus = 1
+        self.done = False
+        self.sticky = sticky
+        self.input_mode = False
+        self.typed = ""
+
+    def pane(self) -> str:
+        if self.done and not self.sticky:
+            return GONE
+        rows = ["│ Do you want to proceed?   │"]
+        for i, label in enumerate(LABELS, 1):
+            cursor = "❯" if i == self.focus else " "
+            text = (
+                f"{label}: {self.typed}"
+                if self.input_mode and i == self.focus and self.typed
+                else label
+            )
+            rows.append(f"│ {cursor} {i}. {text}   │")
+        return "\n".join(rows) + "\n"
+
+    def run(self, args, capture=False, input_text=None):  # noqa: ANN001, ARG002
+        if args[0] == "capture-pane":
+            return True, self.pane()
+        self.sent.append(args)
+        key = args[-1]
+        if "-l" in args:
+            if key.isdigit():
+                self.focus = int(key)
+                self.done = True
+            else:
+                self.typed += key
+        elif key == "Down":
+            self.focus = min(len(LABELS), self.focus + 1)
+        elif key == "Up":
+            self.focus = max(1, self.focus - 1)
+        elif key == "Tab":
+            self.input_mode = True
+        elif key == "Enter":
+            self.done = True
+        return True, ""
+
+    @property
+    def keys(self) -> list[str]:
+        return [a[-1] for a in self.sent]
+
+
+class NoModalTmux(FakeTmux):
+    def pane(self) -> str:
+        return GONE
+
+
+class MockWS:
+    def __init__(self) -> None:
+        self.sent: list[dict] = []
+
+    async def send(self, raw: str) -> None:
+        self.sent.append(json.loads(raw))
+
+
+class PermissionParseTests(unittest.TestCase):
+    def test_parses_rows_and_cursor(self) -> None:
+        pane = (
+            "│ Do you want to proceed?  │\n"
+            "│ ❯ 1. Yes                 │\n"
+            "│   2. Yes, and don't ask again for rm commands in /r │\n"
+            "│   3. No                  │\n"
+        )
+        options, focused = parse_permission_options(pane)
+        self.assertEqual([label for _, label in options], LABELS)
+        self.assertEqual(focused, 1)
+
+    def test_ignores_numbered_list_in_scrollback(self) -> None:
+        pane = (
+            "  Here is my plan:\n"
+            "  1. refactor the parser\n"
+            "  2. add tests\n"
+            "\n"
+            "│ ❯ 1. Yes │\n"
+            "│   2. No  │\n"
+        )
+        options, focused = parse_permission_options(pane)
+        self.assertEqual([label for _, label in options], ["Yes", "No"])
+        self.assertEqual(focused, 1)
+
+    def test_refuses_when_no_modal_or_gappy_numbering(self) -> None:
+        self.assertEqual(parse_permission_options(GONE), ([], None))
+        self.assertEqual(parse_permission_options("  1. Yes\n  3. No\n"), ([], None))
+
+    def test_deny_never_resolves_to_the_always_allow_row(self) -> None:
+        three = list(enumerate(LABELS, 1))
+        self.assertEqual(_permission_target(three, "allow"), 1)
+        self.assertEqual(_permission_target(three, "deny"), 3)
+        two = [(1, "Yes"), (2, "No")]
+        self.assertEqual(_permission_target(two, "deny"), 2)
+
+    def test_refuses_unrecognised_option_sets(self) -> None:
+        self.assertIsNone(_permission_target([(1, "Nope"), (2, "No")], "allow"))
+        self.assertIsNone(_permission_target([(1, "Yes"), (2, "Yes, always")], "deny"))
+
+
+class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        os.environ["MULTIVERSE_ROOT"] = self.temp.name
+        self.cwd = str(Path(self.temp.name, "workspace").resolve())
+        Path(self.cwd).mkdir()
+        self.wsid = f"dev:{self.cwd}"
+        self.row = sessions.DashboardRow(
+            name="Forge", cwd=self.cwd, status="waiting", status_ts=1,
+            session=SimpleNamespace(tmux_name="mv-forge"), claude_uuid="u-1",
+            preview="", is_ghost=False, folded_at=None,
+        )
+        # The driver's real pacing is irrelevant here and would only slow the suite.
+        for attr in ("_KEY_DELAY_S", "_CLAUDE_SUBMIT_DELAY_S"):
+            patcher = patch.object(sb_actions, attr, 0.0)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    async def _run(
+        self, payload, *, row=..., tmux=None, locked=False,
+        pending=None, wsid=None,
+    ):
+        row = self.row if row is ... else row
+        if pending is None:
+            pending = {"agent": "Forge"}
+        elif pending == "__none__":
+            pending = None
+        fake = tmux or FakeTmux()
+        ws = MockWS()
+        conn = object.__new__(sb_connector.SBConnector)
+        conn.identity = SimpleNamespace(device_id="dev", granted_workspaces=[self.cwd])
+        conn.dedup = sb_connector.ActionDedup()
+        conn.channel = None
+        action = p.Action(
+            action_id="a1", ts="2026-08-25T00:00:00Z", workspace_id=wsid or self.wsid,
+            kind=p.ActionKind.ANSWER_PERMISSION_PROMPT, actor="sb",
+            authority="autonomous", agent="Forge", payload=payload,
+        )
+        with patch.object(
+            sessions, "find_agent_by_name",
+            lambda c, n: row if row and n == row.name else None,
+        ), patch.object(sb_actions, "_run_tmux", fake.run), patch(
+            "src.sessions.tmux_session_exists", lambda n: True
+        ), patch("src.compact_state.is_locked", lambda u: locked), patch.object(
+            sb_notify, "pending_tool_data", lambda tid: pending
+        ):
+            await conn._on_action(ws, action)
+            for _ in range(300):
+                if ws.sent:
+                    break
+                await asyncio.sleep(0.02)
+        self.assertTrue(ws.sent, "handler produced no ActionResult")
+        return ws.sent[-1], fake
+
+    async def test_allow_types_the_yes_digit(self) -> None:
+        result, fake = await self._run({"tool_use_id": "t1", "decision": "allow"})
+        self.assertEqual(result["status"], "ok")
+        self.assertIn("Yes", json.dumps(result))
+        self.assertEqual(fake.keys, ["1"])
+
+    async def test_deny_skips_the_always_allow_row(self) -> None:
+        result, fake = await self._run({"tool_use_id": "t1", "decision": "deny"})
+        self.assertEqual(result["status"], "ok")
+        # Row 2 is "Yes, and don't ask again" — landing there would silently widen
+        # what this agent may do from now on, while reporting a denial.
+        self.assertEqual(fake.keys, ["3"])
+
+    async def test_feedback_navigates_then_types(self) -> None:
+        result, fake = await self._run(
+            {"tool_use_id": "t1", "decision": "deny", "feedback": "use --dry-run first"}
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            fake.keys, ["Down", "Down", "Tab", "use --dry-run first", "Enter"]
+        )
+
+    async def test_refuses_without_sending_keys_when_no_prompt_is_up(self) -> None:
+        result, fake = await self._run({"decision": "deny"}, tmux=NoModalTmux())
+        self.assertEqual(result["error"]["code"], "no_pending_permission")
+        self.assertEqual(fake.sent, [], "must not touch a pane it can't read")
+
+    async def test_reports_failure_when_prompt_survives(self) -> None:
+        result, _ = await self._run(
+            {"decision": "allow"}, tmux=FakeTmux(sticky=True)
+        )
+        self.assertEqual(result["error"]["code"], "deliver_failed")
+
+    async def test_rejects_bad_input_and_stale_or_foreign_handles(self) -> None:
+        # MISSING is distinct from None here: None means "use the default pending
+        # record", MISSING means "no record exists", which is the stale case.
+        MISSING = object()
+        cases = [
+            ("unknown agent", {"decision": "allow"}, {"row": None}, "not_found"),
+            ("bad decision", {"decision": "sideways"}, {}, "bad_request"),
+            ("compacting", {"decision": "allow"}, {"locked": True}, "locked"),
+            ("handle already answered",
+             {"tool_use_id": "x", "decision": "allow"}, {"pending": MISSING},
+             "stale_prompt"),
+            ("handle owned by another agent",
+             {"tool_use_id": "x", "decision": "allow"},
+             {"pending": {"agent": "Other"}}, "stale_prompt"),
+            ("ungranted workspace", {"decision": "allow"},
+             {"wsid": "dev:/tmp/elsewhere"}, "forbidden"),
+        ]
+        for name, payload, kwargs, code in cases:
+            with self.subTest(case=name):
+                if kwargs.get("pending") is MISSING:
+                    kwargs = {**kwargs, "pending": "__none__"}
+                result, fake = await self._run(payload, **kwargs)
+                self.assertEqual(result["error"]["code"], code)
+                self.assertEqual(fake.sent, [], "a rejected action must send no keys")
+
+
+if __name__ == "__main__":
+    unittest.main()

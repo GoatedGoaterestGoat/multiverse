@@ -1885,6 +1885,9 @@ class SBConnector:
         if action.kind == p.ActionKind.SPAWN_AGENT:
             asyncio.create_task(self._handle_spawn_agent_action(ws, action))
             return
+        if action.kind == p.ActionKind.ANSWER_PERMISSION_PROMPT:
+            asyncio.create_task(self._handle_answer_permission_action(ws, action))
+            return
         # TODO(binding): map the verb to a real Multiverse operation:
         #   answer_permission_prompt / message_agent
         result = p.ActionResult(
@@ -2630,6 +2633,158 @@ class SBConnector:
         else:
             text = f"Spawned '{name}' idle in '{label}' (no initial task)."
         return ("ok", text, name, "", "")
+
+    async def _handle_answer_permission_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
+        """Answer a pending permission prompt on the target agent (contract locked with
+        the SB toolsmith, 2026-08-25). Runs as a background task off the receiver.
+
+        Payload: ``{tool_use_id, decision: "allow"|"deny", feedback?}``. v1 deliberately
+        offers allow-once and deny ONLY — no "don't ask again". That option writes a
+        persistence rule whose destination can be a settings file and whose breadth is a
+        user-editable pattern, so it outlives the call it was approving. It is also the
+        conditional row, so excluding it keeps the option set we must recognise to the
+        two that always render.
+
+        Worth knowing why this verb is handled so defensively: in auto mode Claude routes
+        ``ask`` decisions to a classifier instead of a human, and the source is explicit
+        that non-classifier-approvable safety checks are immune to every auto-approve
+        path. So a prompt that reached a human at all is the residue that FAILED a safety
+        check — this handler acts on the hardest cases, not a representative sample.
+
+        Errors: ``not_found`` | ``no_pending_permission`` | ``unsupported_option`` |
+        ``stale_prompt`` | ``forbidden`` | ``bad_request`` | ``locked`` | ``deliver_failed``.
+        """
+        payload = action.payload or {}
+        tool_use_id = str(payload.get("tool_use_id") or "").strip()
+        decision = str(payload.get("decision") or "").strip().lower()
+        feedback = payload.get("feedback")
+        agent_name = str(action.agent or "").strip()
+
+        def _finalize(status: p.ResultStatus, *, result=None, error=None) -> p.ActionResult:
+            r = p.ActionResult(
+                action_id=action.action_id, status=status, result=result, error=error,
+            )
+            self.dedup.remember(r)
+            return r
+
+        wsid = action.workspace_id or ""
+        _, sep, cwd = wsid.partition(":")
+        if not sep or not cwd:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "workspace_id missing/malformed"},
+            ))
+        try:
+            cwd_abs = str(Path(cwd).expanduser().resolve())
+        except (OSError, RuntimeError) as exc:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": f"invalid cwd: {exc}"},
+            ))
+        granted = {str(Path(w).expanduser().resolve()) for w in self.identity.granted_workspaces}
+        if cwd_abs not in granted:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "forbidden", "message": "unknown/ungranted workspace"},
+            ))
+        if not agent_name:
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "agent required"},
+            ))
+        if decision not in ("allow", "deny"):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request",
+                       "message": "decision must be 'allow' or 'deny'"},
+            ))
+        if feedback is not None and not isinstance(feedback, str):
+            return await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": "bad_request", "message": "feedback must be a string"},
+            ))
+
+        loop = asyncio.get_running_loop()
+        try:
+            status_str, status_text, err = await loop.run_in_executor(
+                None, self._deliver_permission_blocking,
+                cwd_abs, agent_name, tool_use_id, decision, feedback or "",
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.exception("answer_permission_prompt crashed")
+            return await self._send(ws, _finalize(
+                p.ResultStatus.ERROR,
+                error={"code": "deliver_failed", "message": str(exc)},
+            ))
+
+        if status_str == "ok":
+            await self._send(ws, _finalize(
+                p.ResultStatus.OK, result={"status": status_text},
+            ))
+            log.info("answer_permission_prompt delivered to %s: %s", agent_name, status_text)
+        else:
+            await self._send(ws, _finalize(
+                p.ResultStatus.REJECTED,
+                error={"code": status_str, "message": err or ""},
+            ))
+            log.info("answer_permission_prompt %s for %s: %s", status_str, agent_name, err)
+
+    def _deliver_permission_blocking(
+        self, cwd: str, agent_name: str, tool_use_id: str, decision: str, feedback: str,
+    ) -> tuple[str, str, str]:
+        """Blocking half of ``answer_permission_prompt``. ``(outcome, status_text, error)``.
+
+        The live pane is the authority on whether a prompt is up and what it offers.
+        ``tool_use_id`` is checked when supplied, but only to catch SB answering a prompt
+        that has since been replaced — a cache entry can outlive the modal it described,
+        which is exactly how the AskUserQuestion detection went wrong.
+        """
+        from . import sb_actions, sb_notify
+        from .compact_state import is_locked
+        from .sessions import find_agent_by_name, tmux_session_exists
+
+        target = find_agent_by_name(cwd, agent_name)
+        if target is None:
+            return "not_found", "", f"no agent named '{agent_name}' in this workspace"
+        if target.claude_uuid and is_locked(target.claude_uuid):
+            return "locked", "", f"'{agent_name}' is compacting; cannot answer right now"
+        tmux_name = target.session.tmux_name if target.session else None
+        if not tmux_name or not tmux_session_exists(tmux_name):
+            return (
+                "no_pending_permission", "",
+                f"'{agent_name}' has no live session, so no prompt can be pending",
+            )
+
+        if tool_use_id:
+            record = sb_notify.pending_tool_data(tool_use_id)
+            if record is None:
+                return (
+                    "stale_prompt", "",
+                    f"no pending tool call {tool_use_id} — the prompt was likely "
+                    "already answered",
+                )
+            if record.get("agent") not in ("", None, agent_name):
+                return (
+                    "stale_prompt", "",
+                    f"tool call {tool_use_id} belongs to "
+                    f"'{record.get('agent')}', not '{agent_name}'",
+                )
+
+        ok, label, err = sb_actions.answer_permission_via_tmux(
+            tmux_name, decision, feedback=feedback or None,
+        )
+        if not ok:
+            if "no permission prompt on screen" in err:
+                return "no_pending_permission", "", err
+            if "no option implements" in err:
+                return "unsupported_option", "", err
+            return "deliver_failed", "", err
+
+        verb = "Allowed" if decision == "allow" else "Denied"
+        text = f"{verb} '{agent_name}''s pending tool call (chose \"{label}\")."
+        if feedback:
+            text += f" Told it: {feedback}"
+        return "ok", text, ""
 
     async def _on_query(self, ws, query: p.Query) -> None:  # noqa: ANN001
         """Answer a read-only backfill query from Multiverse state (§10.4)."""

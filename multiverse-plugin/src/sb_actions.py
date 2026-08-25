@@ -899,3 +899,161 @@ def wait_for_ready(
                     return True, ""
         time.sleep(interval)
     return False, last_err
+
+
+# ---------------------------------------------------------------------------
+# Permission prompt (SecondBrain ``answer_permission_prompt``)
+# ---------------------------------------------------------------------------
+
+#: One rendered row of a permission prompt: ``❯ 1. Yes`` / ``  3. No``. The trailing
+#: group drops the box border and any right-hand padding tmux captured with the row.
+_PERM_ROW_RE = re.compile(r"^[^\w❯]*(❯)?\s*(\d{1,2})\.\s+(.*?)(?:\s*[│┃]\s*)?$")
+
+
+def parse_permission_options(pane: str) -> tuple[list[tuple[int, str]], int | None]:
+    """Parse a permission prompt's rendered options out of a captured pane.
+
+    Returns ``(options, focused)`` where ``options`` is ``[(number, label), ...]`` in
+    render order and ``focused`` is the number the ``❯`` cursor sits on (``None`` if
+    it isn't visible).
+
+    Scans bottom-up so the live modal wins over anything similar in scrollback, and
+    only accepts a contiguous ``1..N`` run — a stray "2. something" in transcript text
+    can't masquerade as an option list. Returns ``([], None)`` when the pane doesn't
+    hold a well-formed option list, which callers MUST treat as "refuse to act".
+    """
+    found: dict[int, str] = {}
+    focused: int | None = None
+    for line in reversed(pane.splitlines()):
+        match = _PERM_ROW_RE.match(line.rstrip())
+        if not match:
+            # A blank or non-row line ends the run once we've started collecting.
+            if found and line.strip():
+                break
+            continue
+        cursor, number_text, label = match.groups()
+        number = int(number_text)
+        if number in found:  # scrollback copy of a row we already have — stop
+            break
+        found[number] = label.strip().rstrip('│┃').strip()
+        if cursor:
+            focused = number
+    if not found:
+        return [], None
+    count = max(found)
+    if set(found) != set(range(1, count + 1)):  # not a contiguous 1..N run
+        return [], None
+    return [(n, found[n]) for n in range(1, count + 1)], focused
+
+
+def _permission_target(options: list[tuple[int, str]], decision: str) -> int | None:
+    """The option number implementing ``decision``, or ``None`` if it isn't offered.
+
+    Resolves by LABEL, never by position. The option list varies by tool and by
+    runtime state (the "don't ask again" row is conditional, Bash adds editable
+    rule rows), so an index computed from a fixed vocabulary is unsafe — this is
+    the same class of bug as the AskUserQuestion position arithmetic.
+    """
+    if decision == "allow":
+        # "Yes" is pushed first unconditionally by every option builder, but confirm
+        # rather than assume — if row 1 isn't a plain Yes, something changed upstream.
+        number, label = options[0]
+        return number if label.lower().startswith("yes") else None
+    # Deny: the plain "No" row. Rejected deliberately if it looks like a variant we
+    # don't understand, so we can never approve something while aiming to deny.
+    for number, label in options:
+        cleaned = label.lower().rstrip(".")
+        if cleaned == "no" or cleaned.startswith("no,") or cleaned.startswith("no "):
+            return number
+    return None
+
+
+def answer_permission_via_tmux(
+    tmux_name: str,
+    decision: str,
+    *,
+    feedback: str | None = None,
+) -> tuple[bool, str, str]:
+    """Answer a live permission prompt. Returns ``(ok, status_detail, error)``.
+
+    Two delivery paths, both resolving the target by label first:
+
+    * no feedback -> type the option's DIGIT. The select maps a digit straight to
+      that option and fires immediately, so nothing depends on where the cursor
+      happens to be or on how the list wraps.
+    * with feedback -> arrow to the option (an exact delta from the ``❯`` we just
+      read, so wrapping never comes into play), confirm the cursor actually landed,
+      then Tab into input mode, type, and submit.
+
+    Refuses rather than guesses at every step where the pane doesn't say what we
+    expect. This verb approves work the user's own settings flagged for a human, so
+    a failed delivery is always the better outcome than a hopeful keystroke.
+    """
+    if decision not in ("allow", "deny"):
+        return False, "", f"unsupported decision {decision!r}"
+
+    ok, pane = capture_pane(tmux_name)
+    if not ok:
+        return False, "", f"capture-pane failed: {pane}"
+
+    options, focused = parse_permission_options(pane)
+    if not options:
+        return False, "", "no permission prompt on screen (pane has no option list)"
+
+    target = _permission_target(options, decision)
+    if target is None:
+        rendered = "; ".join(f"{n}. {label}" for n, label in options)
+        return False, "", f"no option implements {decision!r}; prompt offers: {rendered}"
+    if target > 9:
+        return False, "", f"option {target} is past the single-digit range"
+
+    label = dict(options)[target]
+
+    if not feedback:
+        time.sleep(_KEY_DELAY_S)
+        ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", "--", str(target)])
+        if not ok:
+            return False, "", err
+    else:
+        if focused is None:
+            return False, "", "cursor not visible; cannot navigate to attach feedback"
+        # Exact delta from a position we just read, so the list wrapping (this select
+        # wraps in both directions) is irrelevant — we never run off an end.
+        delta = target - focused
+        key = "Down" if delta > 0 else "Up"
+        for _ in range(abs(delta)):
+            time.sleep(_KEY_DELAY_S)
+            ok, err = _run_tmux(["send-keys", "-t", tmux_name, key])
+            if not ok:
+                return False, "", err
+        time.sleep(_KEY_DELAY_S)
+        ok, pane = capture_pane(tmux_name)
+        if not ok:
+            return False, "", f"capture-pane failed: {pane}"
+        _, now_focused = parse_permission_options(pane)
+        if now_focused != target:
+            return False, "", (
+                f"cursor did not land on option {target} "
+                f"(it is on {now_focused}); refusing to submit"
+            )
+        time.sleep(_KEY_DELAY_S)
+        ok, err = _run_tmux(["send-keys", "-t", tmux_name, "Tab"])  # enter input mode
+        if not ok:
+            return False, "", err
+        time.sleep(_KEY_DELAY_S)
+        ok, err = _run_tmux(["send-keys", "-t", tmux_name, "-l", "--", feedback])
+        if not ok:
+            return False, "", err
+        time.sleep(_CLAUDE_SUBMIT_DELAY_S)
+        ok, err = _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
+        if not ok:
+            return False, "", err
+
+    # Post-condition: answering dismisses the prompt. If it's still up, the keystroke
+    # didn't take (e.g. the row was an input that only took focus) — report failure
+    # rather than pressing anything else at a modal we no longer understand.
+    time.sleep(_KEY_DELAY_S)
+    ok, pane = capture_pane(tmux_name)
+    if ok and parse_permission_options(pane)[0]:
+        return False, "", "prompt still on screen after answering; nothing further sent"
+    return True, label, ""
