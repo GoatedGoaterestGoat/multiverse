@@ -1648,7 +1648,7 @@ def create_session(
     if resumed_from is None and name:
         try:
             from . import sb_notify
-            sb_notify.record_agent_created(cwd_abs, name, initial_prompt)
+            sb_notify.record_agent_created(cwd_abs, name, initial_prompt, sid)
         except Exception:  # noqa: BLE001 — never break session creation
             pass
 

@@ -733,25 +733,35 @@ def delete_permission_decision_signal(record: dict) -> None:
         pass
 
 
-def record_agent_created(cwd: str, name: str, initial_prompt: str | None = None) -> None:
+def record_agent_created(
+    cwd: str, name: str, initial_prompt: str | None = None, session_id: str = "",
+) -> None:
     """Record an ``agent.created`` event at session-creation time (called from
     ``sessions.create_session`` when ``resumed_from is None`` — i.e. a fresh new agent,
     not a resume). Gated on the workspace being seeded. ``initial_prompt`` is present
     only when the agent was spawn-request-created (the requesting agent's instruction);
     absent for user-created agents (where the name is the only input).
 
-    Event ID uses the agent name — an agent's name is unique per workspace by the
-    monitor's uniqueness check, so this is deterministic per creation. If a stale
-    agent-name is re-created after the previous one ended (rare but possible over long
-    horizons), the ts distinguishes them in SB's ingest even though the event_id string
-    matches — SB dedups by (event_id, ts) not event_id alone. Fine for practice."""
+    Event ID is ``created:<name>:<session_id>``. The name alone is not enough: SB
+    dedups on ``event_id`` and NOTHING ELSE (``ingest.py`` keeps a set of bare id
+    strings), so if an agent name were re-used after the previous one ended, the
+    second creation would collide with the first and be dropped silently — SB would
+    simply never learn the agent exists. An earlier version of this comment claimed
+    SB distinguished them by timestamp; it does not, and that mistake is why the id
+    was too weak. The session id is unique per creation, so a re-used name still
+    produces a fresh event while a retry of the SAME creation still dedups.
+
+    DEPENDS ON: SB deduping by ``event_id`` alone. If it ever keys on more than that,
+    this id can be relaxed back to the name; if it ever dedups on less, this breaks
+    and needs revisiting."""
     try:
         wsid = _recordable_workspace_id(cwd)
         if wsid is None or not name:
             return
         payload = sb_events.agent_created_event_fields(initial_prompt)
+        event_id = f"created:{name}:{session_id}" if session_id else f"created:{name}"
         _write_record(
-            f"created:{name}", "agent.created",
+            event_id, "agent.created",
             wsid, cwd, name, payload,
         )
     except Exception:  # noqa: BLE001 - never break session creation

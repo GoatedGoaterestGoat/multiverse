@@ -514,7 +514,11 @@ class CodexAgentCreatedEventTests(unittest.TestCase):
 
         self.assertIsNotNone(created)
         record_created.assert_called_once_with(
-            str(self.root.resolve()), "codex-child", "Do the work."
+            str(self.root.resolve()), "codex-child", "Do the work.",
+            # The session id is part of agent.created's event_id: SB dedups on that id
+            # alone, so name-only would make a re-used agent name collide with the
+            # earlier agent's creation and be dropped. short_id is patched above.
+            "session-id",
         )
         self.assertEqual(
             sb_events.agent_created_event_fields("Do the work."),
