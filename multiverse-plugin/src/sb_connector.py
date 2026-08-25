@@ -2670,7 +2670,14 @@ class SBConnector:
         """Answer a pending permission prompt on the target agent (contract locked with
         the SB toolsmith, 2026-08-25). Runs as a background task off the receiver.
 
-        Payload: ``{tool_use_id, decision: "allow"|"deny", feedback?}``. v1 deliberately
+        Payload: ``{tool_use_id, decision: "allow"|"deny", feedback?}``, and the Action's
+        ``agent`` field is REQUIRED -- the handler cross-checks that ``tool_use_id``
+        belongs to that agent and refuses with ``stale_prompt`` otherwise, so a handle
+        can't be used to answer a different agent's prompt. That requirement was missing
+        from the contract as written and made the caller's first attempt fail on every
+        call; it is stated here because the payload spec alone does not imply it.
+
+        v1 deliberately
         offers allow-once and deny ONLY — no "don't ask again". That option writes a
         persistence rule whose destination can be a settings file and whose breadth is a
         user-editable pattern, so it outlives the call it was approving. It is also the
