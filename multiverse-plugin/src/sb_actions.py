@@ -7,13 +7,19 @@ focused on the decision flow.
 
 Delivery strategies by target status:
 
-- **idle / working / waiting / listening** → :func:`send_prompt_via_tmux`. We ALWAYS
+- **idle / working / listening** → :func:`send_prompt_via_tmux`. We ALWAYS
   send-keys (even when a user is attached), and preserve typed-but-unsent input with
   save-clear-deliver-restore. Claude multiline prompts use ``\\`` + Enter between
   lines; Codex uses an explicit bracketed paste. ``message_agent`` calls the same
   helper with ``require_composer=True`` so it can fall back to queued delivery when a
-  modal has replaced the composer; the connector leaves it False and delivers to
-  ``waiting`` targets regardless.
+  modal has replaced the composer.
+- **waiting** → REFUSED, never delivered. The target has a modal open and its TUI
+  is consuming keystrokes to navigate it, so send-keys would drive the modal rather
+  than type a prompt -- and the keys of an ordinary prompt include digits, which
+  that modal reads as selections. The connector returns a ``waiting`` error; SB is
+  expected to close the modal with ``answer_question`` / ``answer_permission_prompt``
+  and then retry. This is also what stops a caller reaching a blocked agent's own
+  permission prompt by proxy.
 - **dormant / ended** → :func:`prompt_dormant_via_resume`. NOT send-keys — we call
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
   the runtime wrapper hands to the resumed CLI as a positional prompt argument.
