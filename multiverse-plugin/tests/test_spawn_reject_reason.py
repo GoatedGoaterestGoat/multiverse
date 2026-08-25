@@ -181,19 +181,33 @@ class SpawnToolResultTests(unittest.TestCase):
     def test_user_reason_is_quoted_back_to_the_agent(self) -> None:
         out, create = self._reject_result("we already have an indexer running")
         create.assert_not_called()
-        self.assertIn("we already have an indexer running", out)
-        self.assertIn("rejected by the user", out)
-        # Nudge against an immediate identical retry.
-        self.assertIn("do not simply re-send", out)
+        self.assertEqual(
+            out,
+            'Spawn request rejected by the user with the message '
+            '"we already have an indexer running"\n'
+            "No subagent was created.",
+        )
 
-    def test_cancelled_is_not_dressed_up_as_an_explanation(self) -> None:
+    def test_cancelled_carries_no_message_clause(self) -> None:
+        """The internal bare-Esc marker must not surface as a quoted message."""
         out, _ = self._reject_result("cancelled")
-        self.assertIn("no reason given", out)
+        self.assertEqual(
+            out,
+            "Spawn request rejected by the user\nNo subagent was created.",
+        )
         self.assertNotIn("cancelled", out)
+        self.assertNotIn("with the message", out)
 
-    def test_missing_reason_is_not_dressed_up_either(self) -> None:
+    def test_missing_reason_carries_no_message_clause(self) -> None:
         out, _ = self._reject_result(None)
-        self.assertIn("no reason given", out)
+        self.assertEqual(
+            out,
+            "Spawn request rejected by the user\nNo subagent was created.",
+        )
+
+    def test_blank_reason_carries_no_message_clause(self) -> None:
+        out, _ = self._reject_result("   ")
+        self.assertNotIn("with the message", out)
 
 
 if __name__ == "__main__":

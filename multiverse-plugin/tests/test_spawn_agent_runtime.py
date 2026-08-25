@@ -192,12 +192,10 @@ class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
             )
 
         # "cancelled" is the internal marker for a bare Esc, not something a
-        # person typed, so it is reported as "no reason given" rather than
-        # quoted back to the agent as an explanation.
+        # person typed, so no quoted-message clause is added.
         self.assertEqual(
             result,
-            "Spawn request rejected by the user, with no reason given. "
-            "No subagent was created.",
+            "Spawn request rejected by the user\nNo subagent was created.",
         )
         create.assert_not_called()
         cleanup.assert_called_once_with("request-id")
