@@ -167,11 +167,29 @@ def user_permission_decision_event_fields(
     """``user.permission_decision`` payload — close of the permission pair. Shares
     ``tool_use_id`` with the earlier ``agent.permission_request``. ``decision`` is
     ``"allow"`` or ``"deny"`` (Claude Code UX wording, per the locked contract with SB).
-    ``summary`` is kept short so SB's pair-combine reads clean (the held first already
-    carries the tool + command). No transcript — agent was blocked between prompt and
-    decision, nothing happened."""
+
+    ``summary`` NAMES THE TOOL AND COMMAND rather than just the verdict, so the event
+    stands on its own. It used to be a bare "user allowed", on the reasoning that the
+    held first already carried the tool + command — true only if the pair actually
+    combines. It doesn't always: SB drops a held first whose close misses its pairing
+    window, and a human taking longer than that window to answer a prompt is ordinary
+    (79 minutes, twice, on a live workspace). The close then arrives orphaned, and a
+    bare verdict renders as "the user responded to a permission prompt — allow" with
+    no indication of what was permitted. A decision with no question attached is worse
+    than silence.
+
+    The cost is mild redundancy when the pair does combine, which is cosmetic; SB has
+    both halves in that case and can trim. Being unreadable when it doesn't combine is
+    not recoverable at all.
+
+    No transcript — agent was blocked between prompt and decision, nothing happened."""
     decision = "deny" if str(decision).lower().startswith("d") else "allow"
-    summary = "user allowed" if decision == "allow" else "user denied"
+    verdict = "user allowed" if decision == "allow" else "user denied"
+    # Name the tool as well as its argument: "`/etc/hosts`" alone doesn't say whether
+    # the agent wanted to read it or overwrite it.
+    detail = _summarize_tool_input(tool_name, tool_input)
+    parts = [verdict, tool_name.strip(), detail if detail not in ("`{}`", "") else ""]
+    summary = " ".join(x for x in parts if x)
     return {
         "tool_use_id": tool_use_id,
         "decision": decision,

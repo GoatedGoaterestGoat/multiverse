@@ -25,7 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src import sb_notify
+from src import sb_events, sb_notify
 
 
 class DeniedPermissionSweepTests(unittest.TestCase):
@@ -117,6 +117,38 @@ class DeniedPermissionSweepTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self._decisions(), [("t_via_hook", "deny")])
+
+
+class DecisionSummaryStandsAloneTests(unittest.TestCase):
+    """The close must be readable without the request it pairs with.
+
+    SB drops a held pairable-first whose close misses the pairing window, and a human
+    taking longer than that window to answer is ordinary. The close then arrives
+    orphaned, so a bare "user allowed" renders as a decision with no question attached
+    — worse than silence, because it looks informative.
+    """
+
+    def _summary(self, decision: str, tool: str, tool_input) -> str:
+        return sb_events.user_permission_decision_event_fields(
+            "Alice", "t1", decision, tool, tool_input
+        )["summary"]
+
+    def test_names_the_tool_and_its_argument(self) -> None:
+        self.assertEqual(
+            self._summary("deny", "Bash", {"command": "rm -rf build"}),
+            "user denied Bash `rm -rf build`",
+        )
+
+    def test_distinguishes_tools_sharing_an_argument(self) -> None:
+        # "/etc/hosts" alone doesn't say whether it was to be read or overwritten.
+        self.assertNotEqual(
+            self._summary("allow", "Write", {"file_path": "/etc/hosts"}),
+            self._summary("allow", "Read", {"file_path": "/etc/hosts"}),
+        )
+
+    def test_degrades_cleanly_with_no_input(self) -> None:
+        self.assertEqual(self._summary("deny", "SomeTool", None), "user denied SomeTool")
+        self.assertEqual(self._summary("deny", "", None), "user denied")
 
 
 if __name__ == "__main__":
