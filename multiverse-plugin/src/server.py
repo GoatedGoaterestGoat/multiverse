@@ -1256,9 +1256,7 @@ async def spawn_agent(
     rejected, no subagent is created.
 
     A rejection may come with a message from the user, quoted back to you in
-    the tool result. Read it and adapt — narrow the request, do the work
-    yourself, or drop it. Re-sending the same request unchanged after being
-    told why it was declined is the one response guaranteed to be wrong.
+    the tool result.
 
     Args:
         instruction: The first user message for the new agent. Can be
