@@ -687,6 +687,62 @@ def delete_permission_request_signal(record: dict) -> None:
         pass
 
 
+def sweep_unresolved_permissions(cwd: str, agent_name: str) -> int:
+    """Close out permission prompts that were denied. Called at Stop; returns how many.
+
+    Claude Code fires NO hook when a user denies a permission prompt, which is easy to
+    get wrong because three events look like they should:
+
+      * ``PostToolUse`` is documented as running after a *successful* tool, and a denied
+        tool never runs.
+      * ``PostToolUseFailure`` sits in the ``catch`` around tool execution, and the
+        denial path returns before execution is reached.
+      * ``PermissionDenied`` is gated on ``decisionReason.classifier == 'auto-mode'``,
+        so it covers classifier denials only, not a human (or SB) answering the modal.
+
+    So an allow emits ``user.permission_decision`` from PostToolUse and a deny emitted
+    nothing at all: the pair never closed, and SB could not tell a denied prompt from
+    one still waiting on a human. Stop is the first moment we can observe it.
+
+    Detection is by absence: ``mark_permission_requested`` writes a ``.perm`` marker,
+    and PostToolUse deletes it via :func:`cleanup_pending_tool` when the tool runs. A
+    marker still present at end of turn therefore means the tool never ran.
+
+    That covers denial and also interrupt (Esc at the prompt). We report both as
+    ``deny`` deliberately: the two are indistinguishable from here, the observable
+    outcome is identical -- the tool did not run -- and reporting the wrong *reason*
+    is much cheaper than leaving the pair open forever, which is the status quo.
+    """
+    closed = 0
+    try:
+        d = pending_tools_dir()
+        if not d.is_dir():
+            return 0
+        cwd_r = _resolve(cwd)
+        for marker in list(d.glob("*.perm")):
+            record = _read_json(d / f"{marker.stem}.json") or {}
+            # Only this agent's prompts: one Stop must not close another's.
+            if record.get("cwd") != cwd_r or record.get("agent") != agent_name:
+                continue
+            tool_use_id = record.get("tool_use_id") or ""
+            if not tool_use_id:
+                continue
+            record_permission_decision_signal(
+                cwd,
+                agent_name,
+                tool_use_id,
+                "deny",
+                record.get("tool_name") or "",
+                record.get("tool_input"),
+                None,  # the tool never ran, so there is no response to carry
+            )
+            cleanup_pending_tool(tool_use_id)
+            closed += 1
+    except Exception:  # noqa: BLE001 - a sweep must never break the Stop hook
+        return closed
+    return closed
+
+
 def record_permission_decision_signal(
     cwd: str,
     agent_name: str,
