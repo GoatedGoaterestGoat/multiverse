@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import asyncio
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import patch
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
 
 from src import ask_agents, sb_connector, sb_transcript, sessions
 from secondbrain import protocol as sb_protocol
@@ -26,24 +27,30 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         Path(self.cwd).mkdir()
         self.workspace_id = f"device-id:{self.cwd}"
 
-        self.connector = object.__new__(sb_connector.SBConnector)
-        self.connector.identity = SimpleNamespace(
-            device_id="device-id", granted_workspaces=[self.cwd]
+        # Built through the REAL constructor, deliberately. A fixture using
+        # object.__new__ has to re-list every attribute __init__ sets, which makes it
+        # a snapshot that breaks whenever the class gains a field -- it cost three
+        # rounds of this exact churn while the connector was growing. Constructing for
+        # real keeps the dependency local: new attributes simply exist.
+        #
+        # The constructor reads its state from disk, so point the state root at the
+        # temp dir and write the state this test wants it to load.
+        os.environ["MULTIVERSE_ROOT"] = self.temp_dir.name
+        self.addCleanup(os.environ.pop, "MULTIVERSE_ROOT", None)
+        sb_dir = Path(self.temp_dir.name) / "secondbrain"
+        sb_dir.mkdir(parents=True, exist_ok=True)
+        (sb_dir / "state.json").write_text(
+            json.dumps({"seq_hw": 0, "seeded": [], "exposed": [self.cwd]}),
+            encoding="utf-8",
         )
-        self.connector._state = {"seq_hw": 0, "seeded": [], "exposed": [self.cwd]}
-        self.connector._seeded = set()
-        # Onboarding epoch per workspace — part of the workspace.connected
-        # event_id so a re-onboarded workspace doesn't collide with its first.
-        self.connector._seed_epochs = {}
-        # Per-workspace observation set (added with per-workspace connect/disconnect):
-        # first-connect only fires for a workspace the user has opted into observing.
-        self.connector._exposed = {self.workspace_id}
-        self.connector._marker_inited = set()
-        self.connector.buffer = sb_connector.OutboundBuffer(start_seq=0)
-        self.connector._new_event = asyncio.Event()
-        # Serializes concurrent first-connect fan-outs so a reconnect storm can't run
-        # the summary ask_all more than once per workspace.
-        self.connector._emit_lock = asyncio.Lock()
+        identity = sb_connector.DeviceIdentity(
+            device_id="device-id",
+            private_key=ed25519.Ed25519PrivateKey.generate(),
+            pinned_server_fingerprint="FINGERPRINT",
+            granted_workspaces=[self.cwd],
+            device_name="test-device",
+        )
+        self.connector = sb_connector.SBConnector("ws://test", identity)
 
     def _rows(self) -> list[sessions.DashboardRow]:
         return [
@@ -106,7 +113,6 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
                 side_effect=initialize_marker,
             ) as init_marker,
             patch.object(ask_agents, "_ask_one", side_effect=ask_one) as ask,
-            patch.object(sb_connector, "save_conn_state") as save_state,
         ):
             await self.connector._emit_workspace_connected(from_seq=0)
             await self.connector._emit_workspace_connected(from_seq=1)
@@ -162,12 +168,11 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(self.connector._seeded, {self.workspace_id})
         self.assertEqual(self.connector._marker_inited, {self.workspace_id})
-        self.assertEqual(self.connector._state["seeded"], [self.workspace_id])
-        # Saved twice on purpose: the epoch is persisted BEFORE the event is built,
-        # so a crash between emitting and recording `seeded` replays the identical
-        # id instead of inventing a second onboarding. The seeded set follows.
-        self.assertEqual(save_state.call_count, 2)
-        save_state.assert_called_with(self.connector._state)
+        # Assert what reached disk rather than how many times the writer was called:
+        # a restarted daemon reads this back, so persistence is the real requirement.
+        persisted = sb_connector.load_conn_state()
+        self.assertEqual(persisted["seeded"], [self.workspace_id])
+        self.assertEqual(persisted["seed_epochs"][self.workspace_id], epoch)
 
     async def test_codex_ask_failure_is_kept_in_first_connect_payload(self) -> None:
         codex = self._rows()[1]
@@ -185,7 +190,6 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(sb_transcript, "initialize_marker", return_value=True),
             patch.object(ask_agents, "_ask_one", return_value=failed),
-            patch.object(sb_connector, "save_conn_state"),
         ):
             await self.connector._emit_workspace_connected(from_seq=0)
 
@@ -207,7 +211,6 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
             ) as list_agents,
             patch.object(sb_transcript, "initialize_marker") as init_marker,
             patch.object(ask_agents, "_ask_one") as ask,
-            patch.object(sb_connector, "save_conn_state") as save_state,
         ):
             await self.connector._emit_workspace_connected(from_seq=0)
             await self.connector._emit_workspace_connected(from_seq=1)
@@ -221,11 +224,9 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list_agents.call_count, 2)
         init_marker.assert_not_called()
         ask.assert_not_called()
-        # Saved twice on purpose: the epoch is persisted BEFORE the event is built,
-        # so a crash between emitting and recording `seeded` replays the identical
-        # id instead of inventing a second onboarding. The seeded set follows.
-        self.assertEqual(save_state.call_count, 2)
-        save_state.assert_called_with(self.connector._state)
+        self.assertEqual(
+            sb_connector.load_conn_state()["seeded"], [self.workspace_id]
+        )
 
 
 if __name__ == "__main__":
