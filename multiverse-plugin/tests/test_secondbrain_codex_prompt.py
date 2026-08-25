@@ -419,6 +419,10 @@ class CodexPromptConnectorTests(unittest.TestCase):
                     "multiverse-wrapper-id",
                     "Remote prompt",
                     runtime=sessions.RUNTIME_CODEX,
+                    # The connector requires the composer so a modal raised between
+                    # the status read and the keystrokes can't be typed into. Codex
+                    # checks its own composer regardless, so this is a no-op there.
+                    require_composer=True,
                 )
                 wait.assert_not_called()
 
