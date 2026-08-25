@@ -448,6 +448,7 @@ def load_conn_state() -> dict:
     return {
         "seq_hw": int(data.get("seq_hw", 0)),
         "seeded": list(data.get("seeded", [])),
+        "seed_epochs": dict(data.get("seed_epochs") or {}),
         "exposed": list(exposed_raw),
     }
 
@@ -458,6 +459,7 @@ def save_conn_state(state: dict) -> None:
         {
             "seq_hw": int(state.get("seq_hw", 0)),
             "seeded": sorted(set(state.get("seeded", []))),
+            "seed_epochs": dict(state.get("seed_epochs") or {}),
             "exposed": sorted(set(state.get("exposed", []))),
         },
     )
@@ -1026,6 +1028,9 @@ class SBConnector:
         self._locked = False  # between lock and unlock (§9)
         self._stop = asyncio.Event()
         self._seeded: set[str] = set(self._state["seeded"])
+        # workspace_id -> onboarding epoch, so a re-onboarded workspace emits a
+        # distinct workspace.connected instead of colliding with the earlier one.
+        self._seed_epochs: dict[str, str] = dict(self._state.get("seed_epochs") or {})
         # ``_exposed`` is the user's per-workspace opt-in — the subset of granted
         # workspaces we're actively observing right now. Emission is gated on this
         # so `d` in the widget can unexpose a single workspace without affecting
@@ -1251,6 +1256,26 @@ class SBConnector:
                 return
 
             for cwd, workspace_id in pending_first:
+                # The id has to survive a re-onboarding. SB dedups on event_id alone,
+                # so an id keyed only on workspace_id is unique per SUBJECT, not per
+                # event -- and workspace_id (device:cwd) is reusable forever. Today
+                # `seeded` only ever grows, so it can't repeat by itself; but wiping
+                # state.json to re-onboard a workspace is a real operation, and it
+                # would re-emit the same id and have this silently dropped. That is
+                # the most expensive event we produce -- an ask_all across every agent
+                # in the workspace -- so losing it without an error is the worst case.
+                #
+                # The epoch makes the id unique per onboarding while still dedupng a
+                # retry of the SAME one. It is persisted BEFORE the event is built, so
+                # a crash between emitting and recording `seeded` replays the identical
+                # id rather than inventing a second onboarding.
+                epoch = self._seed_epochs.get(workspace_id)
+                if not epoch:
+                    epoch = uuid.uuid4().hex[:8]
+                    self._seed_epochs[workspace_id] = epoch
+                    self._state["seed_epochs"] = dict(self._seed_epochs)
+                    save_conn_state(self._state)
+
                 self._init_markers_for_workspace(cwd)
                 summary = await self._gather_workspace_summary(cwd)
                 self.make_event(
@@ -1258,12 +1283,13 @@ class SBConnector:
                     workspace_label=_workspace_label(cwd),
                     kind=p.EventKind.WORKSPACE_CONNECTED,
                     payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
-                    event_id=f"wsconn-first:{workspace_id}",
+                    event_id=f"wsconn-first:{workspace_id}:{epoch}",
                 )
                 self._seeded.add(workspace_id)
                 self._marker_inited.add(workspace_id)
 
             self._state["seeded"] = sorted(self._seeded)
+            self._state["seed_epochs"] = dict(self._seed_epochs)
             save_conn_state(self._state)
 
     def _init_markers_for_workspace(self, cwd: str) -> None:

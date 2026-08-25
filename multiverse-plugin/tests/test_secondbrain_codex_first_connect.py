@@ -32,6 +32,9 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         )
         self.connector._state = {"seq_hw": 0, "seeded": [], "exposed": [self.cwd]}
         self.connector._seeded = set()
+        # Onboarding epoch per workspace — part of the workspace.connected
+        # event_id so a re-onboarded workspace doesn't collide with its first.
+        self.connector._seed_epochs = {}
         # Per-workspace observation set (added with per-workspace connect/disconnect):
         # first-connect only fires for a workspace the user has opted into observing.
         self.connector._exposed = {self.workspace_id}
@@ -114,7 +117,16 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event.kind, sb_protocol.EventKind.WORKSPACE_CONNECTED)
         self.assertEqual(event.workspace_id, self.workspace_id)
         self.assertEqual(event.workspace_label, "mixed-workspace")
-        self.assertEqual(event.event_id, f"wsconn-first:{self.workspace_id}")
+        # workspace_id alone is unique per SUBJECT, not per event, and a workspace
+        # can be re-onboarded (state wiped) -- SB dedups on event_id alone and
+        # would drop the second one silently. The epoch suffix separates them.
+        self.assertTrue(
+            event.event_id.startswith(f"wsconn-first:{self.workspace_id}:"),
+            event.event_id,
+        )
+        epoch = event.event_id.rsplit(":", 1)[1]
+        self.assertTrue(epoch, "expected an onboarding epoch in the event_id")
+        self.assertEqual(self.connector._seed_epochs[self.workspace_id], epoch)
         self.assertIsNone(event.agent)
         self.assertEqual(
             event.payload,
@@ -151,7 +163,11 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.connector._seeded, {self.workspace_id})
         self.assertEqual(self.connector._marker_inited, {self.workspace_id})
         self.assertEqual(self.connector._state["seeded"], [self.workspace_id])
-        save_state.assert_called_once_with(self.connector._state)
+        # Saved twice on purpose: the epoch is persisted BEFORE the event is built,
+        # so a crash between emitting and recording `seeded` replays the identical
+        # id instead of inventing a second onboarding. The seeded set follows.
+        self.assertEqual(save_state.call_count, 2)
+        save_state.assert_called_with(self.connector._state)
 
     async def test_codex_ask_failure_is_kept_in_first_connect_payload(self) -> None:
         codex = self._rows()[1]
@@ -205,7 +221,11 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list_agents.call_count, 2)
         init_marker.assert_not_called()
         ask.assert_not_called()
-        save_state.assert_called_once_with(self.connector._state)
+        # Saved twice on purpose: the epoch is persisted BEFORE the event is built,
+        # so a crash between emitting and recording `seeded` replays the identical
+        # id instead of inventing a second onboarding. The seeded set follows.
+        self.assertEqual(save_state.call_count, 2)
+        save_state.assert_called_with(self.connector._state)
 
 
 if __name__ == "__main__":
