@@ -946,24 +946,41 @@ def parse_permission_options(pane: str) -> tuple[list[tuple[int, str]], int | No
     return [(n, found[n]) for n in range(1, count + 1)], focused
 
 
+def _permission_label_head(label: str) -> str:
+    """The option's own label, with any inline description/placeholder removed.
+
+    ``PermissionPrompt`` renders with ``inlineDescriptions``, and input-type rows show
+    a placeholder beside the label, so a row can capture as ``No   Tell Claude what to
+    change``. Those trail after a run of spaces; a label's OWN words never do.
+    """
+    return re.split(r"\s{2,}", label.strip(), maxsplit=1)[0].strip().lower()
+
+
 def _permission_target(options: list[tuple[int, str]], decision: str) -> int | None:
     """The option number implementing ``decision``, or ``None`` if it isn't offered.
 
-    Resolves by LABEL, never by position. The option list varies by tool and by
-    runtime state (the "don't ask again" row is conditional, Bash adds editable
-    rule rows), so an index computed from a fixed vocabulary is unsafe — this is
-    the same class of bug as the AskUserQuestion position arithmetic.
+    Matches the label EXACTLY (``yes`` / ``no``) rather than by prefix or position.
+    Both looser rules are unsafe, and not hypothetically:
+
+    * Position: the option set varies by tool and runtime state — the "don't ask
+      again" row is conditional, Bash adds editable rule rows. Same class of bug as
+      the AskUserQuestion position arithmetic.
+    * Prefix: ``ExitPlanMode`` renders NO plain "Yes" at all. Its first row is an
+      elevated-mode option — "Yes, and bypass permissions", "Yes, and use auto mode",
+      "Yes, auto-accept edits" — and a ``startswith("yes")`` rule would select one for
+      a caller that asked to allow a single call, silently granting a standing
+      permission. Its deny side is no better: "No, refine with Ultraplan on Claude
+      Code on the web" sits ABOVE "No, keep planning", so a prefix rule denies by
+      sending the plan to a web service.
+
+    So anything that isn't a bare Yes/No is refused, and the caller reports
+    ``unsupported_option``. A verb that speaks only allow-once and deny has no
+    business choosing among mode changes; being inert there is the correct behaviour,
+    and it is visible rather than silent.
     """
-    if decision == "allow":
-        # "Yes" is pushed first unconditionally by every option builder, but confirm
-        # rather than assume — if row 1 isn't a plain Yes, something changed upstream.
-        number, label = options[0]
-        return number if label.lower().startswith("yes") else None
-    # Deny: the plain "No" row. Rejected deliberately if it looks like a variant we
-    # don't understand, so we can never approve something while aiming to deny.
+    want = "yes" if decision == "allow" else "no"
     for number, label in options:
-        cleaned = label.lower().rstrip(".")
-        if cleaned == "no" or cleaned.startswith("no,") or cleaned.startswith("no "):
+        if _permission_label_head(label) == want:
             return number
     return None
 

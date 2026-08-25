@@ -142,6 +142,27 @@ class PermissionParseTests(unittest.TestCase):
         self.assertIsNone(_permission_target([(1, "Nope"), (2, "No")], "allow"))
         self.assertIsNone(_permission_target([(1, "Yes"), (2, "Yes, always")], "deny"))
 
+    def test_refuses_exit_plan_mode_which_has_no_plain_yes_or_no(self) -> None:
+        # ExitPlanMode offers only elevated-mode variants. A prefix rule would read
+        # row 1 as an allow and silently switch the agent into bypass-permissions,
+        # and would deny by picking Ultraplan (a web round-trip) over "keep
+        # planning". Neither decision is expressible here, so both must refuse.
+        exit_plan = [
+            (1, "Yes, clear context (12% used) and bypass permissions"),
+            (2, "Yes, and bypass permissions"),
+            (3, "Yes, manually approve edits"),
+            (4, "No, refine with Ultraplan on Claude Code on the web"),
+            (5, "No, keep planning"),
+        ]
+        self.assertIsNone(_permission_target(exit_plan, "allow"))
+        self.assertIsNone(_permission_target(exit_plan, "deny"))
+
+    def test_matches_through_an_inline_description(self) -> None:
+        # Rows render with inline descriptions/placeholders after a run of spaces;
+        # the label's own words never contain one.
+        rows = [(1, "Yes"), (2, "No   Tell Claude what to do differently")]
+        self.assertEqual(_permission_target(rows, "deny"), 2)
+
 
 class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
