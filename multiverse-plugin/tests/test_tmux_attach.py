@@ -115,3 +115,7 @@ class AttachClientIdentityTests(unittest.TestCase):
         callback.assert_called_once_with(4242)
         self.assertEqual(events, ["client", "relay"])
         relay.assert_called_once_with(10, stdin_fd=7, stdout_fd=7)
+
+
+if __name__ == "__main__":
+    unittest.main()
