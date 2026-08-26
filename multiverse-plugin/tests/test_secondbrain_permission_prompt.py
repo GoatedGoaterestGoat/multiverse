@@ -265,15 +265,20 @@ class PermissionParseTests(unittest.TestCase):
 
     def test_codex_parser_supports_mcp_approval_without_persistent_choice(self) -> None:
         pane = (
-            "  Tool call needs your approval. Reason: Requires repository access\n\n"
+            "  Field 1/1\n"
+            '  Allow the multiverse MCP server to run tool "check_inbox"?\n'
             "› 1. Allow   Run the tool and continue.\n"
-            "  2. Allow for this session   Remember this choice for this session.\n"
-            "  3. Cancel   Cancel this tool call\n"
+            "  2. Allow for this session  Run the tool and remember this choice for this\n"
+            "                             session.\n"
+            "  3. Always allow            Run the tool and remember this choice for\n"
+            "                             future tool calls.\n"
+            "  4. Cancel                  Cancel this tool call\n"
+            "  enter to submit | esc to cancel\n"
         )
         options, focused = parse_codex_permission_options(pane)
         self.assertEqual(focused, 1)
         self.assertEqual(_codex_permission_target(options, "allow"), 1)
-        self.assertEqual(_codex_permission_target(options, "deny"), 3)
+        self.assertEqual(_codex_permission_target(options, "deny"), 4)
 
     def test_codex_parser_recognizes_each_supported_approval_surface(self) -> None:
         surfaces = [

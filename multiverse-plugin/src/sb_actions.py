@@ -1094,6 +1094,7 @@ _CODEX_PERMISSION_TITLE_RE = re.compile(
     r"|Would you like to grant these permissions\?"
     r"|Do you want to approve network access to .+\?"
     r"|Approve app tool call\?"
+    r"|Allow the .+ MCP server to run tool .+\?"
     r"|.+ needs your approval(?:\.\s*(?:Reason:.*)?)?"
     r")\s*$",
     re.IGNORECASE,
