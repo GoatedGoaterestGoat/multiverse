@@ -131,6 +131,11 @@ class CodexSecondBrainHookTests(unittest.TestCase):
             "MULTIVERSE_SESSION_NAME": "codex-agent",
             "MULTIVERSE_PLUGIN_ROOT": str(Path(__file__).resolve().parents[1]),
         }
+        self.env_patch = patch.dict(
+            os.environ, {"MULTIVERSE_ROOT": str(self.state_root)}
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
 
     def _run(self, event: dict) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -202,6 +207,111 @@ class CodexSecondBrainHookTests(unittest.TestCase):
             json.loads(response_files[0].read_text(encoding="utf-8"))["turn_id"],
             "turn-real",
         )
+
+    def _tool_event(self, event_name: str, tool_use_id: str) -> dict:
+        return {
+            "hook_event_name": event_name,
+            "session_id": "thread-main",
+            "turn_id": "turn-permission",
+            "cwd": self.cwd,
+            "tool_use_id": tool_use_id,
+            "tool_name": "Bash",
+            "tool_input": {"command": "touch /tmp/probe"},
+        }
+
+    def test_permission_request_correlates_to_pretool_and_allow_closes_on_posttool(
+        self,
+    ) -> None:
+        pre = self._tool_event("PreToolUse", "call-allow")
+        self.assertEqual(self._run(pre).returncode, 0)
+
+        permission = {
+            key: value for key, value in pre.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        permission["tool_input"] = {
+            "command": "touch /tmp/probe",
+            "description": "Create the requested probe file?",
+        }
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        requests = sb_notify.list_permission_request_signals()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["tool_use_id"], "call-allow")
+        self.assertEqual(requests[0]["tool_input"], permission["tool_input"])
+        self.assertTrue(sb_notify.had_permission_prompt("call-allow"))
+
+        post = self._tool_event("PostToolUse", "call-allow")
+        post["tool_response"] = {"exit_code": 0}
+        self.assertEqual(self._run(post).returncode, 0)
+
+        decisions = sb_notify.list_permission_decision_signals()
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["tool_use_id"], "call-allow")
+        self.assertEqual(decisions[0]["decision"], "allow")
+        self.assertIsNone(sb_notify.pending_tool_data("call-allow"))
+        self.assertFalse(sb_notify.had_permission_prompt("call-allow"))
+
+    def test_cancelled_permission_closes_as_deny_on_stop_without_response(self) -> None:
+        pre = self._tool_event("PreToolUse", "call-deny")
+        permission = {
+            key: value for key, value in pre.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        self.assertEqual(self._run(pre).returncode, 0)
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "thread-main",
+            "turn_id": "turn-permission",
+            "last_assistant_message": None,
+            "cwd": self.cwd,
+        }
+        self.assertEqual(self._run(stop).returncode, 0)
+
+        decisions = sb_notify.list_permission_decision_signals()
+        self.assertEqual(len(decisions), 1)
+        self.assertEqual(decisions[0]["tool_use_id"], "call-deny")
+        self.assertEqual(decisions[0]["decision"], "deny")
+        self.assertFalse(
+            (self.state_root / "secondbrain" / "response_signals").exists()
+        )
+
+    def test_permission_request_refuses_ambiguous_concurrent_candidates(self) -> None:
+        first = self._tool_event("PreToolUse", "call-one")
+        second = self._tool_event("PreToolUse", "call-two")
+        self.assertEqual(self._run(first).returncode, 0)
+        self.assertEqual(self._run(second).returncode, 0)
+
+        permission = {
+            key: value for key, value in first.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
+        self.assertIsNotNone(sb_notify.pending_tool_data("call-one"))
+        self.assertIsNotNone(sb_notify.pending_tool_data("call-two"))
+
+    def test_permission_request_selects_exact_concurrent_candidate(self) -> None:
+        first = self._tool_event("PreToolUse", "call-one")
+        second = self._tool_event("PreToolUse", "call-two")
+        second["tool_input"] = {"command": "touch /tmp/other"}
+        self.assertEqual(self._run(first).returncode, 0)
+        self.assertEqual(self._run(second).returncode, 0)
+
+        permission = {
+            key: value for key, value in second.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        requests = sb_notify.list_permission_request_signals()
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["tool_use_id"], "call-two")
+        self.assertFalse(sb_notify.had_permission_prompt("call-one"))
+        self.assertTrue(sb_notify.had_permission_prompt("call-two"))
 
 
 class CodexSecondBrainEventTests(unittest.TestCase):
@@ -340,6 +450,59 @@ class CodexSecondBrainEventTests(unittest.TestCase):
         self.connector._consume_response_signals()
         self.assertEqual(self._events(), [])
         self.assertEqual(sb_notify.list_response_signals(), [])
+
+    def test_permission_notification_waits_for_rollout_and_keeps_wire_contract(
+        self,
+    ) -> None:
+        tool_input = {
+            "command": "rm generated.txt",
+            "description": "Remove generated output?",
+        }
+        sb_notify.record_permission_request_signal(
+            self.cwd,
+            self.agent,
+            "call-delete",
+            "Bash",
+            tool_input,
+            codex_turn_id="turn-permission",
+        )
+        sb_notify.record_permission_decision_signal(
+            self.cwd,
+            self.agent,
+            "call-delete",
+            "allow",
+            "Bash",
+            tool_input,
+            {"exit_code": 0},
+        )
+
+        self.connector._consume_permission_request_signals()
+        self.connector._consume_permission_decision_signals()
+        self.assertEqual(self._events(), [])
+        self.assertEqual(len(sb_notify.list_permission_request_signals()), 1)
+        self.assertEqual(len(sb_notify.list_permission_decision_signals()), 1)
+
+        self.rollout.start("turn-permission", "Delete the generated file")
+        self.connector._consume_permission_request_signals()
+        self.connector._consume_permission_decision_signals()
+
+        events = self._events()
+        self.assertEqual(
+            [event.kind for event in events],
+            ["agent.permission_request", "user.permission_decision"],
+        )
+        event = events[0]
+        self.assertEqual(event.kind, "agent.permission_request")
+        self.assertEqual(event.agent, self.agent)
+        self.assertEqual(event.payload["tool_use_id"], "call-delete")
+        self.assertEqual(event.payload["tool_name"], "Bash")
+        self.assertEqual(event.payload["tool_input"], tool_input)
+        self.assertIn("[user] Delete the generated file", event.payload["full"])
+        self.assertNotIn("runtime", json.dumps(event.to_json()))
+        self.assertEqual(events[1].payload["tool_use_id"], "call-delete")
+        self.assertNotIn("runtime", json.dumps(events[1].to_json()))
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
+        self.assertEqual(sb_notify.list_permission_decision_signals(), [])
 
 
 if __name__ == "__main__":

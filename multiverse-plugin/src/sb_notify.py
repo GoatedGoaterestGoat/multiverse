@@ -500,14 +500,14 @@ def delete_answered_signal(record: dict) -> None:
 
 
 # ---- permission pair signals ----------------------------------------------------------
-# Firsthand production points, spread across three hooks (Notification alone doesn't
-# expose tool_use_id, so we correlate via PreToolUse):
+# Firsthand production points, spread across runtime hooks. Neither Claude's
+# Notification nor Codex's PermissionRequest exposes tool_use_id, so both correlate
+# against the earlier PreToolUse record:
 #   PreToolUse[.*]          → pending_tools/<tool_use_id>.json  (candidate)
-#   Notification (perm)     → pending_tools/<tool_use_id>.perm  (marker) + question_request signal
+#   runtime permission hook → pending_tools/<tool_use_id>.perm  (marker) + request signal
 #   PostToolUse[.*]         → if .perm exists → decision signal; always cleanup candidate + marker
-# Candidate carries session context so Notification can find "the most recent PreToolUse
-# for THIS session that hasn't had PostToolUse yet" (the tool the user is being asked to
-# permit). Parallel tool_use within one turn is the imperfect edge case, per the doc.
+# Claude uses its latest session-local candidate. Codex adds native session/turn/tool
+# identity and refuses an ambiguous parallel match rather than guessing a wire handle.
 
 def pending_tools_dir() -> Path:
     return _sb_dir() / "pending_tools"
@@ -522,10 +522,18 @@ def permission_decision_signals_dir() -> Path:
 
 
 def record_pending_tool(
-    cwd: str, agent_name: str, tool_use_id: str, tool_name: str, tool_input
+    cwd: str,
+    agent_name: str,
+    tool_use_id: str,
+    tool_name: str,
+    tool_input,
+    *,
+    runtime: str | None = None,
+    session_id: str | None = None,
+    turn_id: str | None = None,
 ) -> None:
     """Stash a tool-use candidate (from PreToolUse[.*]) — cheap and unconditional. The
-    Notification hook may later flag it with a ``.perm`` marker; PostToolUse cleans up
+    permission hook may later flag it with a ``.perm`` marker; PostToolUse cleans up
     unconditionally. Not seeded-gated at record time: we don't know at PreToolUse whether
     this session's workspace is seeded (env vars can lie for background sessions), and
     the record is a bounded working set anyway. The gate applies at the SIGNAL writes."""
@@ -542,6 +550,15 @@ def record_pending_tool(
             "tool_input": tool_input,
             "ts": _now_iso(),
         }
+        # Codex's PermissionRequest hook omits tool_use_id, unlike PreToolUse.
+        # Keep its native session/turn identity on the candidate so the later hook can
+        # recover the real call id without inventing a new SecondBrain wire handle.
+        if runtime:
+            rec["runtime"] = runtime
+        if session_id:
+            rec["session_id"] = session_id
+        if turn_id:
+            rec["turn_id"] = turn_id
         path = d / f"{_safe(tool_use_id)}.json"
         atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
@@ -569,6 +586,63 @@ def latest_pending_tool_for_session(cwd: str, agent_name: str) -> dict | None:
             rec["_path"] = str(p)
             best = rec
     return best
+
+
+def pending_codex_tool_for_permission(
+    cwd: str,
+    agent_name: str,
+    session_id: str,
+    turn_id: str,
+    tool_name: str,
+    tool_input,
+) -> dict | None:
+    """Resolve a Codex ``PermissionRequest`` to its earlier ``PreToolUse`` record.
+
+    Codex intentionally omits ``tool_use_id`` from PermissionRequest but includes it in
+    PreToolUse. Match within one native session and turn, preferring an exact tool-input
+    match. PermissionRequest may add a human-only ``description`` field that PreToolUse
+    does not carry, so that field is ignored for correlation only; the full permission
+    input still rides in the emitted event.
+
+    If multiple calls remain indistinguishable, return ``None``. Guessing would attach
+    SecondBrain's answer handle to the wrong live approval, which is worse than omitting
+    one notification and leaving the user to answer it locally.
+    """
+    d = pending_tools_dir()
+    if not d.is_dir():
+        return None
+    cwd_r = _resolve(cwd)
+    candidates: list[dict] = []
+    for path in d.glob("*.json"):
+        if path.name.endswith(".json.tmp"):
+            continue
+        rec = _read_json(path)
+        if not rec:
+            continue
+        if (
+            rec.get("cwd") != cwd_r
+            or rec.get("agent") != agent_name
+            or rec.get("runtime") != "codex"
+            or rec.get("session_id") != session_id
+            or rec.get("turn_id") != turn_id
+            or rec.get("tool_name") != tool_name
+        ):
+            continue
+        rec["_path"] = str(path)
+        candidates.append(rec)
+
+    request_input = tool_input
+    if isinstance(request_input, dict) and "description" in request_input:
+        request_input = {k: v for k, v in request_input.items() if k != "description"}
+    exact = [rec for rec in candidates if rec.get("tool_input") == request_input]
+    if len(exact) == 1:
+        return exact[0]
+    if not exact and len(candidates) == 1:
+        # Managed-network approval can replace the original Bash input with its
+        # synthesized approval command. Session + turn + canonical tool still make a
+        # sole candidate unambiguous.
+        return candidates[0]
+    return None
 
 
 def mark_permission_requested(tool_use_id: str) -> None:
@@ -648,9 +722,15 @@ def cleanup_pending_tool(tool_use_id: str) -> None:
 
 
 def record_permission_request_signal(
-    cwd: str, agent_name: str, tool_use_id: str, tool_name: str, tool_input
+    cwd: str,
+    agent_name: str,
+    tool_use_id: str,
+    tool_name: str,
+    tool_input,
+    *,
+    codex_turn_id: str | None = None,
 ) -> None:
-    """Fast signal (from the Notification hook) → connector expands to
+    """Fast signal (from a runtime permission hook) → connector expands to
     ``agent.permission_request`` (attaching the partial transcript = "why" context, off the
     agent's critical path). Gated on the workspace being seeded. Filename = tool_use_id
     (idempotent — a Notification re-fire overwrites the same signal)."""
@@ -670,6 +750,10 @@ def record_permission_request_signal(
             "tool_input": tool_input,
             "ts": _now_iso(),
         }
+        if codex_turn_id:
+            # Internal Codex correlation only. The connector uses this to wait for the
+            # matching rollout row before composing the unchanged SecondBrain payload.
+            rec["codex_turn_id"] = codex_turn_id
         path = d / f"{_safe(tool_use_id)}.json"
         atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
@@ -690,8 +774,9 @@ def delete_permission_request_signal(record: dict) -> None:
 def sweep_unresolved_permissions(cwd: str, agent_name: str) -> int:
     """Close out permission prompts that were denied. Called at Stop; returns how many.
 
-    Claude Code fires NO hook when a user denies a permission prompt, which is easy to
-    get wrong because three events look like they should:
+    Claude Code fires no dedicated hook when a user denies a permission prompt, and
+    Codex likewise does not reach PostToolUse after a deny. For Claude, three events
+    look like they should close the pair but do not:
 
       * ``PostToolUse`` is documented as running after a *successful* tool, and a denied
         tool never runs.

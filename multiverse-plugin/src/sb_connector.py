@@ -1782,6 +1782,12 @@ class SBConnector:
             tool_use_id = sig.get("tool_use_id", "")
             tool_name = sig.get("tool_name", "")
             tool_input = sig.get("tool_input")
+            turn_id = sig.get("codex_turn_id")
+            if turn_id and sb_transcript.codex_turn_state(cwd, agent, turn_id) is None:
+                # Codex can invoke PermissionRequest before its rollout append becomes
+                # visible. Keep the durable signal for the next producer pass so the
+                # existing "why" transcript contract is not silently emptied.
+                continue
             peeked = sb_transcript.peek_partial_transcript(cwd, agent)
             transcript = ""
             cursor: dict | None = None
@@ -1806,12 +1812,24 @@ class SBConnector:
     def _consume_permission_decision_signals(self) -> None:
         """Turn each decision signal into a ``user.permission_decision`` event — shares
         ``tool_use_id`` with the earlier ``agent.permission_request``. No transcript
-        (agent was blocked between prompt and decision)."""
+        (agent was blocked between prompt and decision).
+
+        Codex may finish an allowed tool before its rollout row is readable. In that
+        case the request consumer deliberately keeps its signal pending so it can
+        preserve the transcript contract; keep the matching decision pending too so
+        the durable outbox can never publish the pair in reverse order.
+        """
         from . import sb_events, sb_notify
 
+        pending_requests = {
+            sig.get("tool_use_id", "")
+            for sig in sb_notify.list_permission_request_signals()
+        }
         for sig in sb_notify.list_permission_decision_signals():
             agent = sig.get("agent", "")
             tool_use_id = sig.get("tool_use_id", "")
+            if tool_use_id in pending_requests:
+                continue
             payload = sb_events.user_permission_decision_event_fields(
                 agent,
                 tool_use_id,
@@ -2684,11 +2702,10 @@ class SBConnector:
         conditional row, so excluding it keeps the option set we must recognise to the
         two that always render.
 
-        Worth knowing why this verb is handled so defensively: in auto mode Claude routes
-        ``ask`` decisions to a classifier instead of a human, and the source is explicit
-        that non-classifier-approvable safety checks are immune to every auto-approve
-        path. So a prompt that reached a human at all is the residue that FAILED a safety
-        check — this handler acts on the hardest cases, not a representative sample.
+        Worth knowing why this verb is handled so defensively: a prompt that reached a
+        human is the residue that the active runtime's policy did not approve. The pane
+        is therefore re-read immediately before every decision, and each runtime driver
+        accepts only an explicit one-time allow or non-persistent denial label.
 
         Errors: ``not_found`` | ``no_pending_permission`` | ``unsupported_option`` |
         ``stale_prompt`` | ``forbidden`` | ``bad_request`` | ``locked`` | ``deliver_failed``.
@@ -2780,7 +2797,7 @@ class SBConnector:
         """
         from . import sb_actions, sb_notify
         from .compact_state import is_locked
-        from .sessions import find_agent_by_name, tmux_session_exists
+        from .sessions import RUNTIME_CODEX, find_agent_by_name, tmux_session_exists
 
         target = find_agent_by_name(cwd, agent_name)
         if target is None:
@@ -2809,11 +2826,19 @@ class SBConnector:
                     f"'{record.get('agent')}', not '{agent_name}'",
                 )
 
-        ok, label, err = sb_actions.answer_permission_via_tmux(
-            tmux_name, decision, feedback=feedback or None,
-        )
+        if target.runtime == RUNTIME_CODEX:
+            ok, label, err = sb_actions.answer_codex_permission_via_tmux(
+                tmux_name, decision, feedback=feedback or None,
+            )
+        else:
+            ok, label, err = sb_actions.answer_permission_via_tmux(
+                tmux_name, decision, feedback=feedback or None,
+            )
         if not ok:
-            if "no permission prompt on screen" in err:
+            if (
+                "no permission prompt on screen" in err
+                or "no Codex permission prompt on screen" in err
+            ):
                 return "no_pending_permission", "", err
             if "no option implements" in err:
                 return "unsupported_option", "", err

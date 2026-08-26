@@ -325,9 +325,9 @@ and are not Codex parity blockers.
 
 ### Other Protocol Actions
 
-- [ ] Implement connector-wide `answer_permission_prompt` before treating Codex
-      permission decisions as remotely actionable; the action is not yet implemented
-      for Claude either.
+- [x] Route connector-wide `answer_permission_prompt` through a runtime-specific
+      Codex approval driver while preserving the existing SecondBrain action schema
+      and Claude behavior.
 - [ ] Implement connector-wide `message_agent` only if durable agent-to-agent inbox
       delivery is intentionally exposed through SecondBrain; it is not implemented
       by the current connector.
@@ -364,9 +364,9 @@ and are not Codex parity blockers.
 - [x] Verify both spawn event payloads and their ordering for a Codex caller.
 - [ ] Emit paired `agent.question` and `user.answered` events only when a stable Codex
       question ID and structured answer can be correlated.
-- [ ] Emit paired `agent.permission_request` and `user.permission_decision` events
-      only when Codex exposes a stable tool/request ID and reliable allow/deny result.
-- [ ] Keep waiting question and permission events separate from normal
+- [x] Emit paired `agent.permission_request` and `user.permission_decision` events
+      by correlating Codex permission hooks to the stable preceding tool-call ID.
+- [x] Keep waiting question and permission events separate from normal
       `agent.response` completion events.
 - [x] Leave protocol-only `workspace.disconnected` and `user.status_changed` outside
       Codex parity until the shared connector has baseline producers for them.

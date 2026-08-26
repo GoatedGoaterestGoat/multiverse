@@ -27,7 +27,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor"))
 from secondbrain import protocol as p  # noqa: E402
 
 from src import compact_state, sb_actions, sb_connector, sb_notify, sessions  # noqa: E402
-from src.sb_actions import _permission_target, parse_permission_options  # noqa: E402
+from src.sb_actions import (  # noqa: E402
+    _codex_permission_target,
+    _permission_target,
+    parse_codex_permission_options,
+    parse_permission_options,
+)
 
 LABELS = ["Yes", "Yes, and don't ask again for rm commands in /r", "No"]
 GONE = "agent output, no modal\n"
@@ -92,6 +97,83 @@ class FakeTmux:
 class NoModalTmux(FakeTmux):
     def pane(self) -> str:
         return GONE
+
+
+CODEX_LABELS = [
+    "Yes, proceed (y)",
+    "Yes, and don't ask again for commands that start with `rm build` (p)",
+    "No, and tell Codex what to do differently (esc)",
+]
+
+
+class FakeCodexTmux:
+    """Codex approval overlay followed by its normal focused composer."""
+
+    def __init__(self, *, sticky: bool = False, draft: str = "") -> None:
+        self.sent: list[list[str]] = []
+        self.focus = 1
+        self.done = False
+        self.sticky = sticky
+        self.draft = draft
+        self.buffer = ""
+        self.submitted: list[str] = []
+
+    def pane(self) -> str:
+        if self.done and not self.sticky:
+            return (
+                "agent output\n\n"
+                f"› {self.draft}\n"
+                "  gpt-test · Ready · Context 99% used\n"
+            )
+        rows = ["  Would you like to run the following command?", ""]
+        for index, label in enumerate(CODEX_LABELS, 1):
+            cursor = "›" if index == self.focus else " "
+            rows.append(f"{cursor} {index}. {label}")
+        rows.extend(["", "  Press enter to confirm or esc to cancel"])
+        return "\n".join(rows) + "\n"
+
+    def run(self, args, capture=False, input_text=None):  # noqa: ANN001, ARG002
+        command = args[0]
+        if command == "capture-pane":
+            return True, self.pane()
+        if command == "display-message":
+            return True, "2 1\n"
+        if command == "load-buffer":
+            self.buffer = input_text or ""
+            self.sent.append(args)
+            return True, ""
+        if command == "paste-buffer":
+            self.draft += self.buffer
+            self.sent.append(args)
+            return True, ""
+
+        self.sent.append(args)
+        keys = args[3:] if len(args) > 3 else [args[-1]]
+        for key in keys:
+            if key == "Down":
+                self.focus = min(len(CODEX_LABELS), self.focus + 1)
+            elif key == "Up":
+                self.focus = max(1, self.focus - 1)
+            elif key == "BSpace":
+                self.draft = self.draft[:-1]
+            elif key == "Enter":
+                if not self.done:
+                    self.done = True
+                else:
+                    self.submitted.append(self.draft)
+                    self.draft = ""
+        return True, ""
+
+    @property
+    def keys(self) -> list[str]:
+        return [args[-1] for args in self.sent if args[0] == "send-keys"]
+
+
+class NoComposerAfterCodexTmux(FakeCodexTmux):
+    def pane(self) -> str:
+        if self.done and not self.sticky:
+            return "agent output, approval gone but composer not focused\n"
+        return super().pane()
 
 
 class MockWS:
@@ -162,6 +244,82 @@ class PermissionParseTests(unittest.TestCase):
         # the label's own words never contain one.
         rows = [(1, "Yes"), (2, "No   Tell Claude what to do differently")]
         self.assertEqual(_permission_target(rows, "deny"), 2)
+
+    def test_parses_codex_overlay_and_chooses_only_one_time_options(self) -> None:
+        pane = FakeCodexTmux().pane()
+        options, focused = parse_codex_permission_options(pane)
+        self.assertEqual([label for _, label in options], CODEX_LABELS)
+        self.assertEqual(focused, 1)
+        self.assertEqual(_codex_permission_target(options, "allow"), 1)
+        self.assertEqual(_codex_permission_target(options, "deny"), 3)
+
+    def test_codex_parser_requires_approval_title_and_refuses_standing_grants(self) -> None:
+        transcript = "› 1. Yes, proceed (y)\n  2. No (n)\n"
+        self.assertEqual(parse_codex_permission_options(transcript), ([], None))
+        standing_only = [
+            (1, "Yes, and don't ask again for this command (a)"),
+            (2, "No, and block this host in the future (d)"),
+        ]
+        self.assertIsNone(_codex_permission_target(standing_only, "allow"))
+        self.assertIsNone(_codex_permission_target(standing_only, "deny"))
+
+    def test_codex_parser_supports_mcp_approval_without_persistent_choice(self) -> None:
+        pane = (
+            "  Tool call needs your approval. Reason: Requires repository access\n\n"
+            "› 1. Allow   Run the tool and continue.\n"
+            "  2. Allow for this session   Remember this choice for this session.\n"
+            "  3. Cancel   Cancel this tool call\n"
+        )
+        options, focused = parse_codex_permission_options(pane)
+        self.assertEqual(focused, 1)
+        self.assertEqual(_codex_permission_target(options, "allow"), 1)
+        self.assertEqual(_codex_permission_target(options, "deny"), 3)
+
+    def test_codex_parser_recognizes_each_supported_approval_surface(self) -> None:
+        surfaces = [
+            (
+                "Would you like to make the following edits?",
+                "Yes, proceed (y)",
+                "No, and tell Codex what to do differently (esc)",
+            ),
+            (
+                "Would you like to grant these permissions?",
+                "Yes, grant these permissions for this turn (y)",
+                "No, continue without permissions (esc)",
+            ),
+            (
+                "Do you want to approve network access to api.example.com?",
+                "Yes, just this once (y)",
+                "No (esc)",
+            ),
+            (
+                "Approve app tool call?",
+                "Allow   Run the tool and continue.",
+                "Cancel   Cancel this tool call",
+            ),
+        ]
+        for title, allow, deny in surfaces:
+            with self.subTest(title=title):
+                pane = f"  {title}\n\n› 1. {allow}\n  2. {deny}\n"
+                options, focused = parse_codex_permission_options(pane)
+                self.assertEqual(focused, 1)
+                self.assertEqual(_codex_permission_target(options, "allow"), 1)
+                self.assertEqual(_codex_permission_target(options, "deny"), 2)
+
+    def test_codex_parser_joins_visually_wrapped_safe_label(self) -> None:
+        pane = (
+            "  Would you like to run the following command?\n\n"
+            "› 1. Yes, proceed (y)\n"
+            "  2. Yes, and don't ask again for commands that\n"
+            "     start with `rm build` (p)\n"
+            "  3. No, and tell Codex what to do\n"
+            "     differently (esc)\n\n"
+            "  Press enter to confirm or esc to cancel\n"
+        )
+        options, focused = parse_codex_permission_options(pane)
+        self.assertEqual(focused, 1)
+        self.assertEqual(_codex_permission_target(options, "allow"), 1)
+        self.assertEqual(_codex_permission_target(options, "deny"), 3)
 
 
 class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
@@ -240,6 +398,73 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             fake.keys, ["Down", "Down", "Tab", "use --dry-run first", "Enter"]
         )
+
+    async def test_codex_allow_confirms_explicit_one_time_option(self) -> None:
+        row = sessions.DashboardRow(
+            name="Forge",
+            cwd=self.cwd,
+            status="waiting",
+            status_ts=1,
+            runtime=sessions.RUNTIME_CODEX,
+            session=SimpleNamespace(tmux_name="mv-forge"),
+            session_id="thread-1",
+        )
+        result, fake = await self._run(
+            {"tool_use_id": "t1", "decision": "allow"},
+            row=row,
+            tmux=FakeCodexTmux(),
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(fake.keys, ["Enter"])
+        self.assertIn("Yes, proceed", json.dumps(result))
+
+    async def test_codex_deny_then_feedback_uses_focused_composer(self) -> None:
+        row = sessions.DashboardRow(
+            name="Forge",
+            cwd=self.cwd,
+            status="waiting",
+            status_ts=1,
+            runtime=sessions.RUNTIME_CODEX,
+            session=SimpleNamespace(tmux_name="mv-forge"),
+            session_id="thread-1",
+        )
+        fake = FakeCodexTmux(draft="unfinished user draft")
+        result, fake = await self._run(
+            {
+                "tool_use_id": "t1",
+                "decision": "deny",
+                "feedback": "use --dry-run first",
+            },
+            row=row,
+            tmux=fake,
+        )
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(fake.keys[:3], ["Down", "Down", "Enter"])
+        self.assertEqual(fake.submitted, ["use --dry-run first"])
+        self.assertEqual(fake.draft, "unfinished user draft")
+
+    async def test_codex_feedback_fails_closed_without_focused_composer(self) -> None:
+        row = sessions.DashboardRow(
+            name="Forge",
+            cwd=self.cwd,
+            status="waiting",
+            status_ts=1,
+            runtime=sessions.RUNTIME_CODEX,
+            session=SimpleNamespace(tmux_name="mv-forge"),
+            session_id="thread-1",
+        )
+        result, fake = await self._run(
+            {
+                "tool_use_id": "t1",
+                "decision": "deny",
+                "feedback": "use --dry-run first",
+            },
+            row=row,
+            tmux=NoComposerAfterCodexTmux(),
+        )
+        self.assertEqual(result["error"]["code"], "deliver_failed")
+        self.assertEqual(fake.keys, ["Down", "Down", "Enter"])
+        self.assertEqual(fake.submitted, [])
 
     async def test_refuses_without_sending_keys_when_no_prompt_is_up(self) -> None:
         result, fake = await self._run({"decision": "deny"}, tmux=NoModalTmux())

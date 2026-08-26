@@ -1081,3 +1081,205 @@ def answer_permission_via_tmux(
     if ok and parse_permission_options(pane)[0]:
         return False, "", "prompt still on screen after answering; nothing further sent"
     return True, label, ""
+
+
+# Codex renders a list-selection approval overlay rather than Claude's boxed
+# PermissionPrompt. Keep its parser separate: the label sets and keyboard semantics are
+# runtime contracts, and accepting one runtime's row as the other's would turn ordinary
+# transcript text into an approval surface.
+_CODEX_PERMISSION_TITLE_RE = re.compile(
+    r"^\s*(?:"
+    r"Would you like to run the following command\?"
+    r"|Would you like to make the following edits\?"
+    r"|Would you like to grant these permissions\?"
+    r"|Do you want to approve network access to .+\?"
+    r"|Approve app tool call\?"
+    r"|.+ needs your approval(?:\.\s*(?:Reason:.*)?)?"
+    r")\s*$",
+    re.IGNORECASE,
+)
+_CODEX_PERMISSION_ROW_RE = re.compile(r"^\s*(›)?\s*(\d{1,2})\.\s+(.+?)\s*$")
+_CODEX_PERMISSION_RENDER_TIMEOUT_S = 2.0
+_CODEX_PERMISSION_DISMISS_TIMEOUT_S = 3.0
+
+
+def parse_codex_permission_options(
+    pane: str,
+) -> tuple[list[tuple[int, str]], int | None]:
+    """Return the live Codex approval options and selected row.
+
+    A numbered trust prompt and many transcript snippets use the same ``› N.`` shape,
+    so rows are accepted only after a recognized approval title. Wrapped continuation
+    text is joined only when it has the list widget's continuation indent, so narrow
+    panes keep the same exact-label safety checks.
+    """
+    lines = _ANSI_SGR_RE.sub("", pane).splitlines()
+    title = next(
+        (
+            index
+            for index in range(len(lines) - 1, -1, -1)
+            if _CODEX_PERMISSION_TITLE_RE.match(lines[index])
+        ),
+        None,
+    )
+    if title is None:
+        return [], None
+
+    found: dict[int, str] = {}
+    focused: int | None = None
+    current: int | None = None
+    for line in lines[title + 1 :]:
+        match = _CODEX_PERMISSION_ROW_RE.match(line)
+        if not match:
+            if current is not None and line.startswith("    ") and line.strip():
+                found[current] = f"{found[current]} {line.strip()}"
+            elif not line.strip():
+                current = None
+            continue
+        cursor, number_text, label = match.groups()
+        number = int(number_text)
+        if number in found:
+            return [], None
+        found[number] = label.strip()
+        current = number
+        if cursor:
+            focused = number
+    if not found:
+        return [], None
+    count = max(found)
+    if set(found) != set(range(1, count + 1)):
+        return [], None
+    return [(number, found[number]) for number in range(1, count + 1)], focused
+
+
+def _codex_permission_label(label: str) -> str:
+    """Normalize a Codex approval label while retaining its complete decision text."""
+    without_key = re.sub(r"\s+\([^()]*(?:\)|$)", "", label.strip()).strip()
+    return " ".join(without_key.lower().split())
+
+
+def _codex_permission_target(
+    options: list[tuple[int, str]], decision: str
+) -> int | None:
+    """Find only an explicit one-time allow or non-persistent denial option."""
+    allowed = {
+        "yes",
+        "yes, proceed",
+        "yes, just this once",
+        "yes, grant these permissions for this turn",
+        "allow run the tool and continue.",
+    }
+    denied = {
+        "no",
+        "no, continue without running it",
+        "no, continue without permissions",
+        "no, and tell codex what to do differently",
+        "cancel cancel this tool call",
+    }
+    wanted = allowed if decision == "allow" else denied
+    for number, label in options:
+        if _codex_permission_label(label) in wanted:
+            return number
+    return None
+
+
+def answer_codex_permission_via_tmux(
+    tmux_name: str,
+    decision: str,
+    *,
+    feedback: str | None = None,
+) -> tuple[bool, str, str]:
+    """Answer Codex's live approval overlay without selecting a standing grant.
+
+    The currently highlighted row is read first, navigation is an exact Up/Down delta,
+    and Enter is sent only after a second capture proves the requested label is focused.
+    Optional feedback follows Codex's own cancellation flow: after the approval overlay
+    is proven gone and the normal composer is proven focused, it is submitted as the
+    next user-style message with any existing draft saved and restored.
+    """
+    if decision not in ("allow", "deny"):
+        return False, "", f"unsupported decision {decision!r}"
+
+    deadline = time.monotonic() + _CODEX_PERMISSION_RENDER_TIMEOUT_S
+    options: list[tuple[int, str]] = []
+    focused: int | None = None
+    pane = ""
+    while True:
+        ok, pane = capture_pane(tmux_name)
+        if not ok:
+            return False, "", f"capture-pane failed: {pane}"
+        options, focused = parse_codex_permission_options(pane)
+        if options or time.monotonic() >= deadline:
+            break
+        time.sleep(0.05)
+    if not options:
+        return False, "", "no Codex permission prompt on screen"
+    if focused is None:
+        return False, "", "Codex permission prompt cursor is not visible"
+
+    target = _codex_permission_target(options, decision)
+    if target is None:
+        rendered = "; ".join(f"{n}. {label}" for n, label in options)
+        return False, "", f"no option implements {decision!r}; prompt offers: {rendered}"
+    label = dict(options)[target]
+
+    delta = target - focused
+    key = "Down" if delta > 0 else "Up"
+    for _ in range(abs(delta)):
+        time.sleep(_KEY_DELAY_S)
+        ok, err = _run_tmux(["send-keys", "-t", tmux_name, key])
+        if not ok:
+            return False, "", err
+
+    time.sleep(_KEY_DELAY_S)
+    ok, pane = capture_pane(tmux_name)
+    if not ok:
+        return False, "", f"capture-pane failed: {pane}"
+    _, now_focused = parse_codex_permission_options(pane)
+    if now_focused != target:
+        return False, "", (
+            f"cursor did not land on Codex option {target} "
+            f"(it is on {now_focused}); refusing to submit"
+        )
+
+    ok, err = _run_tmux(["send-keys", "-t", tmux_name, "Enter"])
+    if not ok:
+        return False, "", err
+
+    deadline = time.monotonic() + _CODEX_PERMISSION_DISMISS_TIMEOUT_S
+    while True:
+        time.sleep(0.05)
+        ok, pane = capture_pane(tmux_name)
+        if not ok:
+            return False, "", f"capture-pane failed after answer: {pane}"
+        if not parse_codex_permission_options(pane)[0]:
+            break
+        if time.monotonic() >= deadline:
+            return False, "", "Codex permission prompt is still on screen after answering"
+
+    if feedback:
+        deadline = time.monotonic() + _CODEX_PERMISSION_DISMISS_TIMEOUT_S
+        last_error = "Codex composer did not become focused after answering"
+        while time.monotonic() < deadline:
+            composer_ok, _, last_error = capture_focused_codex_composer_draft(tmux_name)
+            if composer_ok:
+                sent, _, send_error = send_prompt_via_tmux(
+                    tmux_name,
+                    feedback,
+                    runtime="codex",
+                    require_composer=True,
+                )
+                if not sent:
+                    return False, "", (
+                        "permission answered but feedback could not be delivered: "
+                        + send_error
+                    )
+                break
+            time.sleep(0.05)
+        else:
+            return False, "", (
+                "permission answered but feedback could not be delivered safely: "
+                + last_error
+            )
+
+    return True, re.sub(r"\s+\([^()]*(?:\)|$)", "", label).strip(), ""
