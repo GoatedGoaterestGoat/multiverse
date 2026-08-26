@@ -48,6 +48,14 @@ During repository development, `multiverse-codex-session` injects these same
 hook and MCP definitions into the wrapped Codex process. Installing the plugin
 is therefore not required to exercise the wrapper from this checkout.
 
+## Approval mode
+
+The wrapper starts every fresh or resumed Codex session with `--approve-for-me`.
+Codex routes approval requests through its automatic reviewer and uses the
+`workspace-write` sandbox for this preset. The CLI rejects combining
+`--approve-for-me` with `--sandbox danger-full-access`, so the wrapper does not
+add a separate sandbox flag.
+
 ## Agent discovery
 
 `list_agents()` uses one workspace registry for Claude and Codex sessions, so

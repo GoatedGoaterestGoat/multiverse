@@ -1114,11 +1114,12 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             args = capture.read_text().splitlines()
             self.assertIn("--dangerously-bypass-hook-trust", args)
-            sandbox_index = args.index("--sandbox")
-            self.assertEqual(args[sandbox_index + 1], "danger-full-access")
+            self.assertIn("--approve-for-me", args)
+            self.assertNotIn("--sandbox", args)
+            self.assertNotIn("danger-full-access", args)
             resume_index = args.index("resume")
             self.assertGreater(resume_index, args.index("-c"))
-            self.assertLess(sandbox_index, resume_index)
+            self.assertLess(args.index("--approve-for-me"), resume_index)
             self.assertEqual(
                 args[resume_index : resume_index + 2],
                 ["resume", "codex-thread"],

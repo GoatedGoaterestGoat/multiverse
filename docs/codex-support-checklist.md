@@ -54,7 +54,8 @@ the monitor, inbox, spawn-request, or SecondBrain state machines.
 - [x] Persist or restore the Codex configuration needed to resume sessions from a
       different terminal.
 - [x] Keep Claude arguments from being forwarded accidentally to Codex sessions.
-- [ ] Define how runtime-specific default arguments are configured.
+- [x] Define runtime-specific permission defaults: Claude uses its existing auto
+      permission mode, while every wrapped Codex launch uses `--approve-for-me`.
 - [x] Propagate runtime-specific environment variables through `tmux new-session -e`.
 - [x] Load the Claude plugin only for Claude sessions.
 - [x] Load the Codex plugin only for Codex sessions.
