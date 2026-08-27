@@ -27,8 +27,16 @@ HOOK_COMMAND=$(printf '%s' "$HOOK_SCRIPT" | jq -Rs .)
 MCP_COMMAND=$(printf '%s' "$MCP_SCRIPT" | jq -Rs .)
 RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
 export MULTIVERSE_RUNTIME_PID_PATH="$RUNTIME_PID_PATH"
+# Permission/sandbox flags for wrapped Codex sessions. Configurable so a
+# machine can choose its own level without editing this tracked file — set
+# MULTIVERSE_CODEX_PERMISSION_ARGS in bin/multiverse.local (space-separated,
+# word-split intentionally so multi-flag values like
+# "-s danger-full-access -a never" work). Defaults to --approve-for-me, the
+# historical behaviour. Only sensible on a host that is itself sandboxed.
+read -r -a CODEX_PERMISSION_ARGS \
+  <<< "${MULTIVERSE_CODEX_PERMISSION_ARGS:---approve-for-me}"
 CODEX_CONFIG_ARGS=(
-  --approve-for-me
+  ${CODEX_PERMISSION_ARGS[@]+"${CODEX_PERMISSION_ARGS[@]}"}
   --dangerously-bypass-hook-trust
   -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
