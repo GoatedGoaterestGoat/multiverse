@@ -37,10 +37,21 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import forks
-from .paths import claude_projects_dir
+from .paths import claude_projects_dir, multiverse_dir
 
 
 CLAUDE_PROJECTS_DIR = claude_projects_dir()
+
+
+def _full_dir():
+    """Directory holding the append-only full-JSONL mirrors.
+
+    Resolved per call (not cached at import) so a caller that sets
+    MULTIVERSE_ROOT after import still reaps into the right place. Mirrors
+    ``full_jsonl._full_dir``; kept local to avoid importing that module,
+    which pulls the vendored compaction parser onto sys.path.
+    """
+    return multiverse_dir() / "full_jsonls"
 
 
 SIDE_QUESTION_WRAPPER = """<system-reminder>This is a side question from the user. You must answer this question directly in a single response.
@@ -545,10 +556,24 @@ def _ask_one_claude(
     except Exception as e:  # noqa: BLE001 — surface anything else as error text
         err = f"subprocess error: {e}"
     finally:
-        try:
-            jsonl.unlink(missing_ok=True)
-        except OSError:
-            pass
+        # Reap every on-disk trace of the fork. The live JSONL is the one the
+        # dashboard scans, but the fork also runs with --plugin-dir, so its
+        # multiverse hooks fire and mirror-jsonl.py writes
+        # ~/.multiverse/full_jsonls/<fork_uuid>.jsonl (+ .marker). Deleting
+        # only the live one left those behind, and — worse — any fork whose
+        # live JSONL survived (process killed between spawn and here) then
+        # looked exactly like a real dormant agent: it inherits the origin
+        # session's custom-title, so it surfaces as a second, preview-less
+        # row under the SAME agent name, forever.
+        for stale in (
+            jsonl,
+            _full_dir() / f"{fork_uuid}.jsonl",
+            _full_dir() / f"{fork_uuid}.marker",
+        ):
+            try:
+                stale.unlink(missing_ok=True)
+            except OSError:
+                pass
         forks.mark_done(fork_uuid)
         if register_fork:
             register_fork(fork_uuid, False)
