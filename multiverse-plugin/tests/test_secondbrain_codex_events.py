@@ -239,7 +239,11 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["tool_use_id"], "call-allow")
         self.assertEqual(requests[0]["tool_input"], permission["tool_input"])
-        self.assertTrue(sb_notify.had_permission_prompt("call-allow"))
+        self.assertTrue(requests[0]["await_user_confirmation"])
+        self.assertFalse(sb_notify.had_permission_prompt("call-allow"))
+
+        # The connector confirms the actual user-facing selector before emitting.
+        sb_notify.mark_permission_requested("call-allow")
 
         post = self._tool_event("PostToolUse", "call-allow")
         post["tool_response"] = {"exit_code": 0}
@@ -260,6 +264,7 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         permission["hook_event_name"] = "PermissionRequest"
         self.assertEqual(self._run(pre).returncode, 0)
         self.assertEqual(self._run(permission).returncode, 0)
+        sb_notify.mark_permission_requested("call-deny")
 
         stop = {
             "hook_event_name": "Stop",
@@ -277,6 +282,47 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         self.assertFalse(
             (self.state_root / "secondbrain" / "response_signals").exists()
         )
+
+    def test_auto_approved_permission_is_discarded_without_secondbrain_pair(
+        self,
+    ) -> None:
+        pre = self._tool_event("PreToolUse", "call-auto-allow")
+        permission = {
+            key: value for key, value in pre.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        self.assertEqual(self._run(pre).returncode, 0)
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        post = self._tool_event("PostToolUse", "call-auto-allow")
+        post["tool_response"] = {"exit_code": 0}
+        self.assertEqual(self._run(post).returncode, 0)
+
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
+        self.assertEqual(sb_notify.list_permission_decision_signals(), [])
+        self.assertIsNone(sb_notify.pending_tool_data("call-auto-allow"))
+
+    def test_auto_denied_permission_is_discarded_on_stop_without_pair(self) -> None:
+        pre = self._tool_event("PreToolUse", "call-auto-deny")
+        permission = {
+            key: value for key, value in pre.items() if key != "tool_use_id"
+        }
+        permission["hook_event_name"] = "PermissionRequest"
+        self.assertEqual(self._run(pre).returncode, 0)
+        self.assertEqual(self._run(permission).returncode, 0)
+
+        stop = {
+            "hook_event_name": "Stop",
+            "session_id": "thread-main",
+            "turn_id": "turn-permission",
+            "last_assistant_message": None,
+            "cwd": self.cwd,
+        }
+        self.assertEqual(self._run(stop).returncode, 0)
+
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
+        self.assertEqual(sb_notify.list_permission_decision_signals(), [])
+        self.assertIsNone(sb_notify.pending_tool_data("call-auto-deny"))
 
     def test_permission_request_refuses_ambiguous_concurrent_candidates(self) -> None:
         first = self._tool_event("PreToolUse", "call-one")
@@ -310,8 +356,9 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         requests = sb_notify.list_permission_request_signals()
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["tool_use_id"], "call-two")
+        self.assertTrue(requests[0]["await_user_confirmation"])
         self.assertFalse(sb_notify.had_permission_prompt("call-one"))
-        self.assertTrue(sb_notify.had_permission_prompt("call-two"))
+        self.assertFalse(sb_notify.had_permission_prompt("call-two"))
 
 
 class CodexSecondBrainEventTests(unittest.TestCase):
@@ -503,6 +550,42 @@ class CodexSecondBrainEventTests(unittest.TestCase):
         self.assertNotIn("runtime", json.dumps(events[1].to_json()))
         self.assertEqual(sb_notify.list_permission_request_signals(), [])
         self.assertEqual(sb_notify.list_permission_decision_signals(), [])
+
+    def test_codex_permission_candidate_waits_for_visible_user_prompt(self) -> None:
+        tool_input = {"command": "rm generated.txt"}
+        self.rollout.start("turn-user-approval", "Delete the generated file")
+        sb_notify.record_permission_request_signal(
+            self.cwd,
+            self.agent,
+            "call-user-approval",
+            "Bash",
+            tool_input,
+            codex_turn_id="turn-user-approval",
+            await_user_confirmation=True,
+        )
+
+        with patch.object(
+            self.connector,
+            "_codex_user_permission_prompt_is_visible",
+            return_value=False,
+        ):
+            self.connector._consume_permission_request_signals()
+        self.assertEqual(self._events(), [])
+        self.assertEqual(len(sb_notify.list_permission_request_signals()), 1)
+        self.assertFalse(sb_notify.had_permission_prompt("call-user-approval"))
+
+        with patch.object(
+            self.connector,
+            "_codex_user_permission_prompt_is_visible",
+            return_value=True,
+        ):
+            self.connector._consume_permission_request_signals()
+        events = self._events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].kind, "agent.permission_request")
+        self.assertEqual(events[0].payload["tool_use_id"], "call-user-approval")
+        self.assertTrue(sb_notify.had_permission_prompt("call-user-approval"))
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
 
 
 if __name__ == "__main__":

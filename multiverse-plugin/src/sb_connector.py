@@ -1773,7 +1773,14 @@ class SBConnector:
         """Expand each permission-request signal into an ``agent.permission_request``
         event: generate the partial transcript (peek) as the "why" context, compose the
         payload, buffer it, commit the marker, drop the signal. Order = make_event →
-        commit → delete for at-least-once (SB dedups by ``event_id``)."""
+        commit → delete for at-least-once (SB dedups by ``event_id``).
+
+        Codex invokes ``PermissionRequest`` before choosing its automatic reviewer or
+        the user. Its hook therefore records a candidate, not proof that anybody is
+        blocked. Promote that candidate only after the live tmux pane shows a focused
+        approval selector; auto-approved/denied candidates are cleaned by PostToolUse
+        or Stop without reaching the wire.
+        """
         from . import sb_events, sb_notify, sb_transcript
 
         for sig in sb_notify.list_permission_request_signals():
@@ -1783,6 +1790,14 @@ class SBConnector:
             tool_name = sig.get("tool_name", "")
             tool_input = sig.get("tool_input")
             turn_id = sig.get("codex_turn_id")
+            if sig.get("await_user_confirmation") and not sb_notify.had_permission_prompt(
+                tool_use_id
+            ):
+                if not self._codex_user_permission_prompt_is_visible(cwd, agent):
+                    continue
+                # Marker first: if the local user answers between this pane capture and
+                # event composition, PostToolUse/Stop still closes the same pair.
+                sb_notify.mark_permission_requested(tool_use_id)
             if turn_id and sb_transcript.codex_turn_state(cwd, agent, turn_id) is None:
                 # Codex can invoke PermissionRequest before its rollout append becomes
                 # visible. Keep the durable signal for the next producer pass so the
@@ -1808,6 +1823,30 @@ class SBConnector:
                 sb_transcript.commit_marker(cwd, agent, cursor)
             sb_notify.delete_permission_request_signal(sig)
             log.info("relayed agent.permission_request (%s) for %s", tool_use_id, agent)
+
+    @staticmethod
+    def _codex_user_permission_prompt_is_visible(cwd: str, agent: str) -> bool:
+        """Whether ``agent`` is blocked on an interactive Codex approval selector.
+
+        This is deliberately the same strict parser used by
+        ``answer_permission_prompt``. Merely seeing PermissionRequest hook output or a
+        rendered composer is insufficient: auto-review receives the former, while an
+        inactive/old approval surface must not be treated as a request for the user.
+        """
+        from . import sb_actions
+        from .sessions import RUNTIME_CODEX, find_agent_by_name, tmux_session_exists
+
+        target = find_agent_by_name(cwd, agent)
+        if target is None or target.runtime != RUNTIME_CODEX or target.session is None:
+            return False
+        tmux_name = target.session.tmux_name
+        if not tmux_session_exists(tmux_name):
+            return False
+        ok, pane = sb_actions.capture_pane(tmux_name)
+        if not ok:
+            return False
+        options, focused = sb_actions.parse_codex_permission_options(pane)
+        return bool(options) and focused is not None
 
     def _consume_permission_decision_signals(self) -> None:
         """Turn each decision signal into a ``user.permission_decision`` event — shares

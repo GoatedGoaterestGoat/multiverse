@@ -173,7 +173,6 @@ def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
             tool_use_id = str(candidate.get("tool_use_id") or "")
             if not tool_use_id:
                 return
-            sb_notify.mark_permission_requested(tool_use_id)
             sb_notify.record_permission_request_signal(
                 cwd,
                 agent,
@@ -181,10 +180,11 @@ def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
                 tool_name,
                 event.get("tool_input"),
                 codex_turn_id=turn_id,
+                await_user_confirmation=True,
             )
             sb_notify.log_hook_outcome(
                 _SCRIPT,
-                "recorded-permission-request",
+                "recorded-permission-candidate",
                 cwd=cwd,
                 agent=agent,
                 detail=f"turn_id={turn_id} tool_use_id={tool_use_id}",
@@ -195,7 +195,8 @@ def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
             tool_use_id = event.get("tool_use_id")
             if not isinstance(tool_use_id, str) or not tool_use_id:
                 return
-            if sb_notify.had_permission_prompt(tool_use_id):
+            had_user_prompt = sb_notify.had_permission_prompt(tool_use_id)
+            if had_user_prompt:
                 sb_notify.record_permission_decision_signal(
                     cwd,
                     agent,
@@ -205,6 +206,12 @@ def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
                     event.get("tool_input"),
                     event.get("tool_response"),
                 )
+            else:
+                # PermissionRequest runs before Codex's automatic reviewer. Reaching
+                # PostToolUse without the connector confirming a live approval overlay
+                # means the request was auto-approved, so suppress the unrelayed
+                # SecondBrain request candidate.
+                sb_notify.delete_permission_request_signal_for_tool(tool_use_id)
             sb_notify.cleanup_pending_tool(tool_use_id)
             sb_notify.log_hook_outcome(
                 _SCRIPT,
@@ -216,6 +223,19 @@ def _emit_secondbrain_signal(event: dict, event_name: str) -> None:
             return
 
         if event_name == "Stop":
+            # Auto-review denial has no PostToolUse. Drop its unconfirmed request
+            # candidate before sweeping actual user-facing prompts as denied.
+            discarded = sb_notify.discard_unconfirmed_codex_permissions(
+                cwd, agent, turn_id=turn_id
+            )
+            if discarded:
+                sb_notify.log_hook_outcome(
+                    _SCRIPT,
+                    "discarded-auto-reviewed-permissions",
+                    cwd=cwd,
+                    agent=agent,
+                    detail=f"count={discarded}",
+                )
             # A denied/cancelled approval never reaches PostToolUse. Once Codex stops
             # the turn, any marked candidate left behind is therefore the denied half
             # of the permission pair, matching Claude's Stop-sweep semantics.

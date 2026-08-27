@@ -504,10 +504,13 @@ def delete_answered_signal(record: dict) -> None:
 # Notification nor Codex's PermissionRequest exposes tool_use_id, so both correlate
 # against the earlier PreToolUse record:
 #   PreToolUse[.*]          → pending_tools/<tool_use_id>.json  (candidate)
-#   runtime permission hook → pending_tools/<tool_use_id>.perm  (marker) + request signal
+#   runtime permission hook → request candidate signal
+#   confirmed user prompt    → pending_tools/<tool_use_id>.perm  (marker)
 #   PostToolUse[.*]         → if .perm exists → decision signal; always cleanup candidate + marker
 # Claude uses its latest session-local candidate. Codex adds native session/turn/tool
 # identity and refuses an ambiguous parallel match rather than guessing a wire handle.
+# Codex's hook runs before its automatic reviewer, so the connector confirms the live
+# approval overlay before creating the marker or relaying the request to SecondBrain.
 
 def pending_tools_dir() -> Path:
     return _sb_dir() / "pending_tools"
@@ -721,6 +724,61 @@ def cleanup_pending_tool(tool_use_id: str) -> None:
             pass
 
 
+def delete_permission_request_signal_for_tool(tool_use_id: str) -> None:
+    """Delete an unrelayed permission-request candidate by tool id.
+
+    Codex's ``PermissionRequest`` hook runs before automatic review. If the tool reaches
+    ``PostToolUse`` without the connector having confirmed a live user-facing prompt,
+    the reviewer approved it automatically and no SecondBrain permission pair should
+    be emitted.
+    """
+    try:
+        (permission_request_signals_dir() / f"{_safe(tool_use_id)}.json").unlink()
+    except (OSError, FileNotFoundError):
+        pass
+
+
+def discard_unconfirmed_codex_permissions(
+    cwd: str,
+    agent_name: str,
+    *,
+    turn_id: str | None = None,
+) -> int:
+    """Discard Codex approval candidates that never became a user-facing prompt.
+
+    Automatic-review denial does not reach ``PostToolUse``. At ``Stop``, any matching
+    Codex pending tool without a ``.perm`` confirmation marker was therefore resolved
+    without SecondBrain or the local user answering it. Remove both the candidate and
+    its unrelayed request signal without manufacturing a permission decision.
+    """
+    discarded = 0
+    try:
+        d = pending_tools_dir()
+        if not d.is_dir():
+            return 0
+        cwd_r = _resolve(cwd)
+        for path in list(d.glob("*.json")):
+            if path.name.endswith(".json.tmp"):
+                continue
+            record = _read_json(path) or {}
+            if (
+                record.get("runtime") != "codex"
+                or record.get("cwd") != cwd_r
+                or record.get("agent") != agent_name
+                or (turn_id and record.get("turn_id") != turn_id)
+            ):
+                continue
+            tool_use_id = str(record.get("tool_use_id") or "")
+            if not tool_use_id or had_permission_prompt(tool_use_id):
+                continue
+            delete_permission_request_signal_for_tool(tool_use_id)
+            cleanup_pending_tool(tool_use_id)
+            discarded += 1
+    except Exception:  # noqa: BLE001 - a Stop cleanup must never break the hook
+        return discarded
+    return discarded
+
+
 def record_permission_request_signal(
     cwd: str,
     agent_name: str,
@@ -729,6 +787,7 @@ def record_permission_request_signal(
     tool_input,
     *,
     codex_turn_id: str | None = None,
+    await_user_confirmation: bool = False,
 ) -> None:
     """Fast signal (from a runtime permission hook) → connector expands to
     ``agent.permission_request`` (attaching the partial transcript = "why" context, off the
@@ -754,6 +813,10 @@ def record_permission_request_signal(
             # Internal Codex correlation only. The connector uses this to wait for the
             # matching rollout row before composing the unchanged SecondBrain payload.
             rec["codex_turn_id"] = codex_turn_id
+        if await_user_confirmation:
+            # Internal-only lifecycle flag. It is consumed before payload composition
+            # and never changes SecondBrain's agent.permission_request schema.
+            rec["await_user_confirmation"] = True
         path = d / f"{_safe(tool_use_id)}.json"
         atomic_write_json(path, rec)
     except Exception:  # noqa: BLE001 - never break the hook
