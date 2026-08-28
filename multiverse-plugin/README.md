@@ -1,20 +1,52 @@
-# Multiverse Plugin for Claude Code
+# Multiverse Plugin
 
-Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messaging, and frontier-coherent context compaction.
+Harness-agnostic multi-agent orchestration: parallel sessions, inter-agent messaging, and frontier-coherent context compaction. Runs [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [pi](https://pi.dev) sessions side by side in one dashboard.
 
 ## What it does
 
-Three things, all designed to scale past the limits of a single `claude` process:
+Three things, all designed to scale past the limits of a single agent process:
 
-**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `listening` / `dormant` / `ended` / `compacting`) is driven by hooks, the MCP server, and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
+**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every agent session in a workspace — Claude Code and pi, mixed freely. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `listening` / `dormant` / `ended` / `compacting`) is driven by hooks, the MCP server, and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
 
 **2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Messages are delivered to the recipient as system-reminders injected into their next turn via hooks; ephemeral questions use forked claude subprocesses that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
 
 **3. Frontier-coherent compaction.** A bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
 
+## Harnesses
+
+Multiverse orchestrates *agent harnesses*: CLI coding agents that keep a
+per-session transcript on disk and can be resumed from it. Two are supported.
+
+| | Claude Code | pi |
+|:---|:---|:---|
+| Integration | plugin (MCP server + hook scripts) | [extension](pi-extension/README.md) (`--extension`) |
+| Inter-agent tools | ✅ six MCP tools | ✅ same six, registered by the extension |
+| Waking an idle recipient | tmux `send-keys`; skipped when a user is attached | direct `sendMessage(..., {triggerTurn})` |
+| Compaction | rewrite the live JSONL; append-only mirror keeps the original | one appended `compaction` entry; originals stay in place |
+| Tree building | `claude --resume` per merge | `pi -p` appended to one session per turn |
+| Permission gate | yes (`--permission-mode auto` by default) | none — pi has no approval prompts |
+
+Pick one per session: press `n` in the monitor and `ctrl+h` to switch harness
+(the picker only offers CLIs actually on your PATH), or set
+`MULTIVERSE_HARNESS=pi` to change the default. The choice is recorded in the
+session's `meta.json`, so every later action — resume, `ask_agent`, compaction
+— reaches for the right CLI. Sessions created before multi-harness support are
+read as `claude`, so nothing needs migrating.
+
+Everything not in that table is shared: the inbox, spawn brokering, status
+files, the fork registry, the summary-tree cache, and the compaction algorithm
+itself. What differs lives in `src/harness/` — a small adapter supplying
+transcript discovery, launch argv, the ephemeral-fork argv behind `ask_agent`,
+and compaction I/O. Adding a third harness means writing one adapter and one
+integration; it does not mean touching the orchestrator.
+
+Non-Python harnesses reach the shared state through `mvctl` (`src/mvctl.py`),
+a CLI over the same functions the MCP server calls, so behavior cannot drift
+between harnesses.
+
 ## Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
+- At least one harness installed and authenticated: [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and/or [pi](https://pi.dev) (`npm i -g @earendil-works/pi-coding-agent`)
 - Python 3.11+
 - A system package manager for `multiverse setup` to install the rest: Homebrew (macOS), `apt`/`dnf`/`pacman` (Linux). If you'd rather install manually, the deps are [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/), and [tmux](https://github.com/tmux/tmux) ≥ 3.2.
 
@@ -70,6 +102,9 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 | Variable | Default | What it does |
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
+| `MULTIVERSE_PI_BIN` | `pi` | The pi binary the stack invokes for pi sessions — interactive sessions, the `ask_agent` fork path, and pi tree construction. Same role `MULTIVERSE_CLAUDE_BIN` plays for Claude Code. |
+| `MULTIVERSE_HARNESS` | `claude` | Default harness for new sessions. The monitor's new-session dialog can still switch per session with `ctrl+h`. |
+| `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` | *(unset)* | pi's own config / session directories. Set here if your pi install uses non-default locations, so the monitor lists the right sessions. Propagated into every spawned session. |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
 | `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
 | `CLAUDE_CODE_MAX_RETRIES` | `30` | Rate-limit / transient-error retry count for the underlying claude CLI (its own default is 10). Multiverse tends to saturate rate limits — many active agents plus a background tree-build worker per session, all hitting one account — so claude's 10-retry / ~8-min ceiling burns through fast under a real traffic wave. This raises the ceiling. Set to `10` to restore claude's default; only takes effect on rate-limit / 5xx / connection failures, so a healthy request never touches it. |
@@ -94,7 +129,7 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse`. Starts in `--permission-mode auto` by default (see below). |
+| `n` | New session — name prompt plus a harness picker (`ctrl+h` cycles between the CLIs installed on this machine); cwd is fixed at the workspace where you launched `multiverse`. Claude Code sessions start in `--permission-mode auto` by default (see below); pi has no permission gate. |
 | `R` | Resume — pick from claude sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Also starts in auto mode. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
@@ -110,7 +145,7 @@ Run `multiverse` in your project directory. The TUI lists every multiverse sessi
 
 **Auto permission mode by default.** Every session `create_session` spawns — new (`n`), resumed (`R` / `Enter` on a dormant/ended row, including right after compaction, which claude treats as a new session since it's a freshly-written live JSONL), auto-resumed via a push-notification `message_agent` call, or spawned via `spawn_agent` — starts with `--permission-mode auto` unless the caller already passed an explicit `--permission-mode` (e.g. via `multiverse --permission-mode plan`), which is left untouched.
 
-**Dashboard columns**: `ID · Name · Inbox · Build · Status · Tokens · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks — press `i` to peek at them. The Build column shows `on` (green) / `off` for the per-session auto tree-build toggle — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
+**Dashboard columns**: `ID · Name · Agent · Inbox · Build · Status · Tokens · Updated · Preview`. The Agent column names the row's harness (`claude` / `pi`). The Inbox column shows `📩 N` when an agent has pending `message_agent` messages waiting on its hooks — press `i` to peek at them. The Build column shows `on` (green) / `off` for the per-session auto tree-build toggle — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
 
 The scroll wheel works natively inside attached sessions — the monitor sets per-session `tmux mouse on`, so you scroll the pane's history without entering tmux copy-mode (`Ctrl-b [`). To select text, hold Shift while dragging (terminal-native selection).
 
@@ -337,7 +372,8 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 | `MULTIVERSE_SESSION_NAME=<name>` | inter-agent tools (caller identity) |
 | `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
 | `MULTIVERSE_STATUS=…/status.json` | hook scripts |
-| `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir`) |
+| `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir` / `--extension`) |
+| `MULTIVERSE_HARNESS=<claude\|pi>` | inner script (which CLI to exec), plus every plugin process that has to resolve transcripts |
 | `MULTIVERSE_CLAUDE_BIN=<binary>` | inner script + fork/compaction paths — which Claude binary to run (default `claude`; see [Machine-local config](#machine-local-config-binmultiverselocal)) |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS=<dir:dir>` | inner script — extra `--plugin-dir` entries for interactive sessions |
 | `CLAUDE_CONFIG_DIR` / `CLAUDE_LOCAL_DATA_DIR` / `PATH` | propagated when set so spawned sessions resolve transcripts under the same Claude config dir (and find the same binary) the monitor used |
@@ -483,8 +519,23 @@ multiverse-plugin/
 │   ├── spawn-tree-builder.py # UserPromptSubmit hook: detach a tree-build worker
 │   ├── tree-builder-worker.py# Long-running worker: build a summary tree per completed turn
 │   └── build_tree_priv_cli.py# Per-turn build entry point (privileged-mode constructor via claude CLI)
+├── pi-extension/
+│   ├── index.ts              # pi's counterpart to the plugin: the six tools,
+│   │                         #  status writing, inbox delivery, goat compaction
+│   └── README.md
+├── tests/
+│   ├── mock_openai_server.py # scriptable OpenAI-compatible endpoint
+│   ├── mock-provider.ts      # registers it as a pi provider
+│   └── test_pi_extension.sh  # end-to-end: tools, delivery, compaction
 ├── src/
 │   ├── __init__.py
+│   ├── harness/              # harness adapters — the only harness-specific code
+│   │   ├── base.py           #   the interface: transcripts, launch, fork, compaction I/O
+│   │   ├── claude.py         #   Claude Code
+│   │   ├── pi.py             #   pi
+│   │   └── __init__.py       #   registry + resolution (arg > env > claude)
+│   ├── mvctl.py              # CLI bridge: how non-Python harnesses reach shared state
+│   ├── tree_cache.py         # read side of the summary-tree cache
 │   ├── server.py             # MCP server: all six tools
 │   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find,
 │   │                         #  applies compacting status override from list_locked();
@@ -502,7 +553,10 @@ multiverse-plugin/
 │   └── names.py              # Random name pool for new sessions
 ├── vendor/
 │   └── compaction/           # Vendored copy of the standalone compaction package
-│       ├── parser.py         #   JSONL → Forest of Turns
+│       ├── parser.py         #   Claude Code JSONL → Forest of Turns
+│       ├── pi_parser.py      #   pi JSONL → Forest of Turns
+│       ├── pi_render.py      #   Forest → pi compaction entry (append, never rewrite)
+│       ├── pi_constructor.py #   append-mode tree construction via `pi -p`
 │       ├── preprocess.py     #   per-turn cleanup; off by default
 │       ├── constructor.py    #   bottom-up tree builder (privileged + CLI variants)
 │       ├── compactor.py      #   expand_to_budget + schedulers (proportional / recency_decay / …)
@@ -522,7 +576,24 @@ The plugin is designed so new agent capabilities can be added as MCP tools or ho
 3. **If the tool needs the target session to react**, wire a hook script that reads the relevant state and returns `additionalContext` (for SessionStart/UserPromptSubmit) or `decision: "block"` with `reason` (for Stop). All hooks run as separate processes; keep them stdlib-only Python or bash for fast startup.
 4. **The full set of `MULTIVERSE_*` env vars** is available to every MCP server process and hook script spawned by a multiverse-managed claude session.
 
-For deeper architectural notes, hidden CLI flags, hook output quirks, and lessons learned along the way, see [`docs/PROGRESS.md`](../docs/PROGRESS.md) in the repo root.
+### Adding a harness
+
+1. **Write an adapter** in `src/harness/`, subclassing `Harness`. It supplies
+   four things: where transcripts live and how to list/name them, the argv for
+   an interactive session, the argv for a one-shot tool-less fork (`ask_agent`),
+   and compaction I/O (transcript → `Forest`, compacted `Forest` → transcript).
+2. **Register it** in `src/harness/__init__.py`.
+3. **Write the harness-side integration** — whatever that CLI's extension
+   mechanism is. It needs to write `status.json`, record the session id,
+   deliver inbox messages, and expose the six inter-agent tools. If the harness
+   is not Python, drive `src/mvctl.py` rather than reimplementing the on-disk
+   protocol; `pi-extension/index.ts` is the worked example.
+4. **Teach `bin/multiverse-session`** which binary and integration flag to use.
+
+Nothing in the monitor, the inbox, spawn brokering, or the compaction
+algorithm should need to change.
+
+For deeper architectural notes, hidden CLI flags, hook output quirks, and lessons learned along the way, see [`docs/PROGRESS.md`](../docs/PROGRESS.md) in the repo root. For where compaction sits against production harnesses and the literature — and what it costs — see [`docs/compaction-research.md`](../docs/compaction-research.md).
 
 ## Authors
 

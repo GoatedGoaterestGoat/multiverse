@@ -1,49 +1,67 @@
 #!/usr/bin/env bash
-# multiverse-session — inner loop that wraps ONE claude process.
+# multiverse-session — inner loop that wraps ONE agent process.
 #
 # Launched by the multiverse monitor inside a detached tmux session.
-# Responsible for running claude, building the per-launch positional
-# prompt arg (initial spawn-agent task and/or pending inbox messages),
-# and exiting when claude exits.
+# Responsible for running the session's harness CLI, building the per-launch
+# positional prompt arg (initial spawn-agent task and/or pending inbox
+# messages), and exiting when the agent exits.
 #
 # Required env (set by the monitor on `tmux new-session -e ...`):
 #   MULTIVERSE_SESSION_ID — short id for this multiverse session
-#   MULTIVERSE_STATUS     — path to status.json (written by hook scripts)
+#   MULTIVERSE_STATUS     — path to status.json (written by hooks/extension)
+#   MULTIVERSE_HARNESS    — `claude` (default) or `pi`
 
 set -euo pipefail
 
-# Which claude binary to run. Defaults to `claude`; override with
-# MULTIVERSE_CLAUDE_BIN to point at an alternate build (see multiverse.local).
-# Exported by bin/multiverse / propagated into the tmux session env.
-CLAUDE_BIN="${MULTIVERSE_CLAUDE_BIN:-claude}"
+: "${MULTIVERSE_STATUS:?multiverse-session must be launched by the monitor}"
 
-if ! command -v "$CLAUDE_BIN" &>/dev/null; then
-  echo "[multiverse-session] '$CLAUDE_BIN' CLI not found in PATH" >&2
+HARNESS="${MULTIVERSE_HARNESS:-claude}"
+
+# Which binary to run for this harness. Defaults to the harness name;
+# override with MULTIVERSE_CLAUDE_BIN / MULTIVERSE_PI_BIN to point at an
+# alternate build (see multiverse.local). Exported by bin/multiverse and
+# propagated into the tmux session env.
+case "$HARNESS" in
+  claude) AGENT_BIN="${MULTIVERSE_CLAUDE_BIN:-claude}" ;;
+  pi)     AGENT_BIN="${MULTIVERSE_PI_BIN:-pi}" ;;
+  *)
+    echo "[multiverse-session] unknown MULTIVERSE_HARNESS '$HARNESS'" >&2
+    exit 1
+    ;;
+esac
+
+if ! command -v "$AGENT_BIN" &>/dev/null; then
+  echo "[multiverse-session] '$AGENT_BIN' CLI not found in PATH" >&2
   exit 1
 fi
 
-: "${MULTIVERSE_STATUS:?multiverse-session must be launched by the monitor}"
-
-# Load the multiverse plugin into every claude invocation (dev mode), plus
-# any extra local dev plugin dirs from MULTIVERSE_EXTRA_PLUGIN_DIRS (a
-# colon-separated list of plugin roots). --plugin-dir is repeatable, so each
-# extra dir gets its own flag pair. These apply to the interactive session
-# only — the forked/compaction claude calls deny all tools, so extra MCP
-# plugins there would be dead weight.
+# Load the multiverse integration into every invocation (dev mode), plus any
+# extra local dev plugin dirs from MULTIVERSE_EXTRA_PLUGIN_DIRS (a
+# colon-separated list). Claude Code takes repeated --plugin-dir; pi takes
+# repeated --extension pointing at a TypeScript entry point. Either way this
+# applies to the interactive session only — the fork/compaction calls deny
+# all tools, so extra integrations there would be dead weight.
 PLUGIN_ARGS=()
 if [ -n "${MULTIVERSE_PLUGIN_ROOT:-}" ]; then
-  PLUGIN_ARGS=(--plugin-dir "$MULTIVERSE_PLUGIN_ROOT")
+  case "$HARNESS" in
+    claude) PLUGIN_ARGS=(--plugin-dir "$MULTIVERSE_PLUGIN_ROOT") ;;
+    pi)     PLUGIN_ARGS=(--extension "$MULTIVERSE_PLUGIN_ROOT/pi-extension/index.ts") ;;
+  esac
 fi
 if [ -n "${MULTIVERSE_EXTRA_PLUGIN_DIRS:-}" ]; then
   _OLD_IFS="$IFS"
   IFS=':'
   for _extra in $MULTIVERSE_EXTRA_PLUGIN_DIRS; do
-    [ -n "$_extra" ] && PLUGIN_ARGS+=(--plugin-dir "$_extra")
+    [ -z "$_extra" ] && continue
+    case "$HARNESS" in
+      claude) PLUGIN_ARGS+=(--plugin-dir "$_extra") ;;
+      pi)     PLUGIN_ARGS+=(--extension "$_extra") ;;
+    esac
   done
   IFS="$_OLD_IFS"
 fi
 
-# Apply the multiverse session name to every claude invocation.
+# Apply the multiverse session name. Both CLIs spell this --name.
 NAME_ARGS=()
 if [ -n "${MULTIVERSE_SESSION_NAME:-}" ]; then
   NAME_ARGS=(--name "$MULTIVERSE_SESSION_NAME")
@@ -78,10 +96,10 @@ resolve_multiverse_root() {
   fi
 }
 
-# Build a positional-arg prompt to inject into the next interactive claude
-# launch if this session has pending inbox messages. claude treats a
-# positional prompt as the first user message and auto-submits it on
-# startup — same approach `spawn_agent` uses.
+# Build a positional-arg prompt to inject into the next interactive launch
+# if this session has pending inbox messages. Both CLIs treat a positional
+# prompt as the first user message and auto-submit it on startup — the same
+# approach `spawn_agent` uses.
 #
 # Why this replaced the previous `claude -p` prime call: print mode is
 # headless and can't surface permission prompts. If the model wanted to
@@ -91,8 +109,13 @@ resolve_multiverse_root() {
 # never start. Passing the prompt as a positional arg makes the inbox
 # processing happen *inside* the interactive session — permissions can
 # be granted, the user can attach mid-stream, and there's only one
-# claude process at a time.
+# agent process at a time.
+#
+# pi does not need this at all: its extension delivers into a live session
+# and triggers a turn itself (see pi-extension/index.ts), so the wake-up
+# prompt is Claude-Code-only. Emitting it for pi too would double-deliver.
 build_inbox_prompt() {
+  [ "$HARNESS" = "claude" ] || return 0
   [ -z "${MULTIVERSE_SESSION_NAME:-}" ] && return 0
   [ -z "${MULTIVERSE_SESSION_CWD:-}" ] && return 0
 
@@ -130,7 +153,7 @@ elif [ -n "$INBOX_PROMPT" ]; then
   PROMPT_ARGS=("$INBOX_PROMPT")
 fi
 
-"$CLAUDE_BIN" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+"$AGENT_BIN" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
        ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
        ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
        ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true

@@ -153,6 +153,39 @@ def claim_pending_messages(cwd: str, name: str) -> list[dict]:
     return claimed
 
 
+def ack_messages(cwd: str, name: str, message_ids: list[str]) -> int:
+    """Delete messages by id after they have been successfully delivered.
+
+    The hook-driven Claude path claims and delivers in one step, which is safe
+    because the claim result goes straight into the hook's JSON response — the
+    same process either delivers it or fails visibly.
+
+    pi's extension cannot do that: ``pi.sendMessage`` is fire-and-forget, so a
+    claim-then-send sequence has a window where the claim succeeded and the
+    send did not, and the message is gone with nothing to show for it. So the
+    pi path peeks (``list_pending_messages``, non-destructive), sends, then
+    acks here. A crash between send and ack costs a duplicate delivery on the
+    next poll, which is strictly better than a silent loss.
+
+    Returns how many files were actually removed.
+    """
+    d = agent_inbox_dir(cwd, name)
+    if not d.is_dir():
+        return 0
+    n = 0
+    for mid in message_ids:
+        # Ids come from message filenames; refuse anything that could escape
+        # the inbox directory rather than trusting the caller.
+        if not mid or "/" in mid or ".." in mid:
+            continue
+        try:
+            (d / f"{mid}.json").unlink()
+            n += 1
+        except OSError:
+            continue
+    return n
+
+
 def pending_inbox_count(cwd: str, name: str) -> int:
     """Cheap count for TUI display. Doesn't parse files."""
     d = agent_inbox_dir(cwd, name)

@@ -7,8 +7,9 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase | Status | Notes |
 |:------|:-------|:------|
 | Phase 0: Foundation | 🟡 In progress | Repo set up, plugin scaffolding done |
+| Harness abstraction | 🟢 Substantial | `src/harness/` adapters; Claude Code + pi, mixed in one dashboard. Ask / message / inbox / spawn / compaction all work on both |
 | Phase 1: Branching conversations | ⚪ Not started | |
-| Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle |
+| Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle; on pi, compaction is an appended entry with no mirror needed. Cost survey + measurements in [`compaction-research.md`](compaction-research.md) |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
 | Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `message_agent` / `ask_agent` / `spawn_agent` with file-based inbox delivery and monitor-brokered spawn approval |
 | Phase 5: UI | 🟡 Partial | Monitor TUI as the first UI surface; remote browser access via the `w` web share (ttyd-over-monitor + outbound tunnel) |
@@ -607,7 +608,8 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 - [ ] Multi-turn asker/responder protocol — `ask_agent` is currently one-shot per ask_id; threading subsequent follow-ups into the same conversation isn't supported
 - [ ] Persistent thread mailbox (`agentA-agentB.jsonl`) for ongoing relationships, distinct from the per-message inbox files we have now
 - [x] **Resume-without-engagement blind spot**: SessionStart's `additionalContext` is buffered in claude's REPL but doesn't autonomously trigger an API call, so a dormant recipient that gets `message_agent`'d (or any agent the user resumes via Enter) would have inbox messages sitting in memory with no model engagement until a human attached and typed. Fixed by `bin/multiverse-session::prime_inbox_if_needed`: at the top of each loop iteration, if inbox is non-empty AND `--resume <uuid>` is in CLAUDE_ARGS, run a print-mode `claude -p "You have N pending messages…" --resume <uuid>` first. SessionStart fires there too, delivers the inbox as `additionalContext`, and the synthetic prompt forces a model turn that processes both. Response lands in the JSONL; the interactive claude that follows resumes the same UUID and surfaces it to whoever attaches.
-- [ ] **Idle-live blind spot** (still open): if recipient B is *live and idle* (not dormant, just waiting), no hook fires until something else triggers one — `message_agent` writes to inbox but B's interactive claude doesn't pick it up until UserPromptSubmit or Stop fires. Workaround: dashboard's `📩 N` indicator, plus the next-time-they-resume the prime above will catch it. Real fix would need a way to nudge a live-idle claude (none exists in the public hook API today).
+- [ ] **Idle-live blind spot** (still open on Claude Code): if recipient B is *live and idle* (not dormant, just waiting), no hook fires until something else triggers one — `message_agent` writes to inbox but B's interactive claude doesn't pick it up until UserPromptSubmit or Stop fires. Workaround: dashboard's `📩 N` indicator, the `push_notification=True` tmux `send-keys` ping (refused when a user is attached, since it would clobber their input), and the resume prime above. A real fix needs a way to nudge a live-idle claude; none exists in the public hook API today.
+  - **Solved on pi.** `pi.sendMessage(..., { triggerTurn: true })` delivers into a live session and starts a turn, so the extension just polls the inbox while idle and delivers directly — no terminal manipulation, and it works the same whether or not a user is attached. This is the single clearest case where the harness API, not the design, was the constraint.
 - [ ] Context assembly logic per the rules in the root README
 - [ ] Garbage-collect orphan asks (timed-out, unanswered) — currently `~/.multiverse/asks/<id>.json` lingers if respond is never called
 
@@ -623,6 +625,16 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 - [ ] Plugin marketplace setup
 - [ ] CHANGELOG, semver discipline
 - [ ] User-facing installation docs
+
+### Harness abstraction
+
+- [x] **`src/harness/` adapter interface** — transcript discovery, launch argv, ephemeral-fork argv, compaction I/O. Claude Code adapter verified to produce listings identical to the legacy path.
+- [x] **pi harness**: `pi-extension/index.ts` (six tools, status, inbox delivery, `session_before_compact`), `vendor/compaction/pi_parser.py` / `pi_render.py` / `pi_constructor.py`, `src/mvctl.py` bridge, harness column + picker in the monitor.
+- [x] **End-to-end test** against a scriptable mock provider (`tests/test_pi_extension.sh`) — no network, no credentials.
+- [ ] **pi in the monitor's Compact widget.** The `c` action is the Claude-Code pipeline (mirror, tree worker, atomic replace); pi rows are refused with a pointer to `mvctl compact-apply`. Worth folding into the widget once the pipeline is harness-parameterized.
+- [ ] **Tree-build worker for pi.** `pi_constructor.py` exists but nothing schedules it; pi compaction currently falls back to greedy leaf-prefix expansion for turns without a cached tree.
+- [ ] **Repeated pi compaction via the extension path** appends a new compaction entry each time, and pi renders the superseded one inside the new keep range. The CLI path replaces in place and does not have this; the extension path cannot, since pi owns the append.
+- [ ] **A third harness** would be the real test of the abstraction. OpenCode is the obvious candidate.
 
 ## Open questions
 

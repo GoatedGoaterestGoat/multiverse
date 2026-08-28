@@ -2,7 +2,9 @@
 
 > *What if agent conversations were a tree instead of a line?*
 
-Multiverse is a multi-agent orchestration layer built on top of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that introduces **branching conversations**, **parallel agents on git worktrees**, **intelligent context management**, and **inter-agent communication** -- inspired by [5D Chess with Multiverse Time Travel](https://store.steampowered.com/app/1349230/5D_Chess_With_Multiverse_Time_Travel/).
+Multiverse is a **harness-agnostic** multi-agent orchestration layer that introduces **branching conversations**, **parallel agents on git worktrees**, **intelligent context management**, and **inter-agent communication** -- inspired by [5D Chess with Multiverse Time Travel](https://store.steampowered.com/app/1349230/5D_Chess_With_Multiverse_Time_Travel/).
+
+It runs on top of an *agent harness* -- a CLI coding agent that keeps a per-session transcript on disk and can be resumed from it. [Claude Code](https://docs.anthropic.com/en/docs/claude-code) and [pi](https://pi.dev) are both supported today, and sessions of either kind share one dashboard, one inbox, and one compaction pipeline. Adding a harness means writing one adapter (`multiverse-plugin/src/harness/`) and one integration; the orchestrator itself does not change.
 
 ---
 
@@ -117,9 +119,9 @@ The key asymmetry: an agent always sees responses it *received* from others but 
 
 ## Architecture
 
-### Building on Claude Code
+### Building on a harness
 
-Claude Code provides extensive extension points that Multiverse can leverage:
+Multiverse needs a handful of things from whatever agent CLI it drives: resumable on-disk sessions, a way to inject context, a way to add tools, and lifecycle events. Claude Code and pi both provide them, by different names -- plugin/MCP/hooks on one side, a single extension on the other. The table below is Claude Code's vocabulary; `multiverse-plugin/pi-extension/` is the same list in pi's.
 
 | Claude Code Feature | Multiverse Use |
 |---|---|
@@ -227,6 +229,8 @@ Claude Code provides extensive extension points that Multiverse can leverage:
 - [ ] "5D Chess" style multi-timeline view
 
 ### Phase 6: Polish & Distribution
+- [x] Harness abstraction — `src/harness/` adapters so the orchestrator is not tied to one agent CLI
+- [x] Second harness: [pi](https://pi.dev) — inter-agent tools, inbox delivery, and frontier-coherent compaction
 - [ ] Package as a Claude Code plugin
 - [ ] Configuration system (which model for context manager, parallelism limits, etc.)
 - [ ] Error recovery (agent crashes, worktree corruption, merge failures)
@@ -257,6 +261,13 @@ Claude Code provides extensive extension points that Multiverse can leverage:
    - Have agents negotiate?
 
 ---
+
+## Design Notes
+
+- [`docs/compaction-algorithm.md`](docs/compaction-algorithm.md) — frontier-coherent tree compaction: the design
+- [`docs/compaction-research.md`](docs/compaction-research.md) — how production harnesses and the literature do compaction, what ours costs (measured), and what to do about it
+- [`docs/PROGRESS.md`](docs/PROGRESS.md) — what is built, what was learned, what is next
+- [`multiverse-plugin/README.md`](multiverse-plugin/README.md) — the implementation
 
 ## Prior Art & Inspiration
 

@@ -47,6 +47,12 @@ from textual.widgets import (
 from .ask_agents import AskResult, AskTarget, ask_all
 from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
+from .harness import (
+    DEFAULT_HARNESS,
+    get_harness,
+    installed as installed_harnesses,
+    live_tokens as harness_live_tokens,
+)
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
@@ -157,21 +163,48 @@ class _SpawnAttachGuard:
                 return
 
 
-class NewSessionScreen(ModalScreen[Optional[str]]):
-    """Prompt for a session name for a new session in the monitor's cwd."""
+class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Prompt for a name — and a harness — for a new session in the cwd.
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    Returns ``(name, harness)``. Only harnesses whose CLI is actually on PATH
+    are offered, so a machine with just Claude Code installed sees the same
+    single-choice dialog it always did.
+    """
 
-    def __init__(self, cwd: str) -> None:
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+h", "cycle_harness", "Harness", show=False),
+    ]
+
+    def __init__(self, cwd: str, default_harness: Optional[str] = None) -> None:
         super().__init__()
         self.cwd = cwd
         suggestion = pick_random_name(existing_names_in_cwd(cwd))
         self.default_name = suggestion or ""
+        self.harnesses = installed_harnesses() or [DEFAULT_HARNESS]
+        want = default_harness or DEFAULT_HARNESS
+        self.harness_idx = (
+            self.harnesses.index(want) if want in self.harnesses else 0
+        )
+
+    @property
+    def harness(self) -> str:
+        return self.harnesses[self.harness_idx]
+
+    def _harness_line(self) -> str:
+        if len(self.harnesses) < 2:
+            return f"[dim]harness: {self.harness}[/]"
+        opts = " ".join(
+            f"[reverse] {h} [/]" if h == self.harness else f"[dim]{h}[/]"
+            for h in self.harnesses
+        )
+        return f"harness: {opts}   [dim](ctrl+h to switch)[/]"
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static("New session"),
             Static(f"[dim]cwd: {self.cwd}[/]"),
+            Static(self._harness_line(), id="new-harness"),
             Static("Session name:"),
             Input(value=self.default_name, id="new-name"),
             Static("", id="new-error"),
@@ -181,6 +214,12 @@ class NewSessionScreen(ModalScreen[Optional[str]]):
 
     def on_mount(self) -> None:
         self.query_one("#new-name", Input).focus()
+
+    def action_cycle_harness(self) -> None:
+        if len(self.harnesses) < 2:
+            return
+        self.harness_idx = (self.harness_idx + 1) % len(self.harnesses)
+        self.query_one("#new-harness", Static).update(self._harness_line())
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         self._try_submit()
@@ -196,7 +235,7 @@ class NewSessionScreen(ModalScreen[Optional[str]]):
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
             return
-        self.dismiss(name)
+        self.dismiss((name, self.harness))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -345,6 +384,51 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
                 id="confirm-delete-body",
             ),
             Static("Enter to confirm · Esc to cancel", id="confirm-delete-hint"),
+            id="confirm-delete-dialog",
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+
+class ConfirmForeignResumeScreen(ModalScreen[bool]):
+    """Yes/no confirmation before resuming a session whose tmux is gone
+    locally but whose (different) host still reports it non-ended.
+
+    This is the ambiguous case: the owning host may have been recycled
+    (safe to reclaim) or may still be alive elsewhere sharing this
+    MULTIVERSE_ROOT (resuming would spawn a duplicate). Only the user
+    knows which, so ask. Returns ``True`` on confirm, ``False`` on cancel.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(self, display_name: str, host: str) -> None:
+        super().__init__()
+        self.display_name = display_name
+        self.host = host
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                f"Resume [bold]'{self.display_name}'[/] here?",
+                id="confirm-delete-header",
+            ),
+            Static(
+                f"It was created on host [bold]{self.host}[/], which this "
+                "host's tmux can't see, but its status there isn't 'ended'. "
+                "If that host is gone (e.g. a recycled pod), resume here. "
+                "If it's still alive elsewhere, resuming will create a "
+                "duplicate.",
+                id="confirm-delete-body",
+            ),
+            Static("Enter to resume · Esc to cancel", id="confirm-delete-hint"),
             id="confirm-delete-dialog",
         )
 
@@ -2413,7 +2497,10 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
-        table.add_columns("ID", "Name", "Inbox", "Build", "Status", "Tokens", "Updated", "Preview")
+        table.add_columns(
+            "ID", "Name", "Agent", "Inbox", "Build", "Status", "Tokens",
+            "Updated", "Preview",
+        )
         yield table
         yield Footer()
 
@@ -2593,17 +2680,29 @@ class MonitorApp(App):
                 build_cell = "[bold green]on[/]"
             else:
                 build_cell = "[dim]off[/]"
+            harness_cell = (
+                "[dim]claude[/]" if e.harness == DEFAULT_HARNESS
+                else f"[cyan]{e.harness}[/]"
+            )
+            # The token column reads the live transcript, which is a
+            # per-harness format. Only Claude Code has the cached counter;
+            # other harnesses report what their own usage records say, and
+            # fall back to "-" when there is nothing to read yet.
+            tokens_cell = "[dim]-[/]"
             if e.claude_uuid:
-                live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
-                tokens_cell = f"{live_toks:,}"
-            else:
-                tokens_cell = "[dim]-[/]"
+                if e.harness == DEFAULT_HARNESS:
+                    live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
+                    tokens_cell = f"{live_toks:,}"
+                else:
+                    live_toks = harness_live_tokens(e.harness, e.claude_uuid, e.cwd)
+                    if live_toks:
+                        tokens_cell = f"{live_toks:,}"
             preview = e.preview or "[dim](empty)[/]"
             if len(preview) > 60:
                 preview = preview[:59] + "…"
             table.add_row(
-                id_cell, e.name, inbox_cell, build_cell, status_cell, tokens_cell,
-                updated, preview,
+                id_cell, e.name, harness_cell, inbox_cell, build_cell,
+                status_cell, tokens_cell, updated, preview,
                 key=e.row_key,
             )
         if self.entries:
@@ -2623,16 +2722,21 @@ class MonitorApp(App):
         return None
 
     def action_new_session(self) -> None:
-        def cb(name: Optional[str]) -> None:
-            if not name:
+        def cb(result: Optional[tuple[str, str]]) -> None:
+            if not result:
                 return
+            name, harness = result
+            # Default claude args come from `multiverse <args>` and are
+            # written for Claude Code; forwarding them to a different CLI
+            # would just make it reject its own argv.
+            args = self.claude_args if harness == DEFAULT_HARNESS else []
             try:
-                create_session(self.monitor_cwd, self.claude_args, name=name)
+                create_session(self.monitor_cwd, args, name=name, harness=harness)
             except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
                 self.notify(f"Spawn failed: {e}", severity="error")
                 return
             self.refresh_sessions()
-            self.notify(f"Spawned {name}")
+            self.notify(f"Spawned {name} ({harness})")
 
         self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
 
@@ -2696,19 +2800,48 @@ class MonitorApp(App):
                 "will reattach when the queue clears."
             )
 
-    def _spawn_resumed(self, cwd: str, uuid: str, name: str) -> None:
+    def _spawn_resumed(
+        self, cwd: str, uuid: str, name: str, harness: str = DEFAULT_HARNESS
+    ) -> None:
         # Strip ghost-row display suffixes — passing the literal "step2b
         # (folded 02:33)" as `--name` would write that into the new
         # session's custom-title and the dashboard would re-suffix it on
         # the next refresh, accumulating ad infinitum.
         name = strip_fold_suffix(name) or name
+        # Resume spelling differs per harness (`--resume <id>` for Claude
+        # Code, `--session <id>` for pi), so ask the adapter.
+        resume_args = get_harness(harness).launch_argv(
+            session_id=uuid, resume=True, name=None,
+            plugin_root=None, extra_args=[], prompt=None,
+        )[1:]
         try:
-            create_session(cwd, ["--resume", uuid], resumed_from=uuid, name=name)
+            create_session(
+                cwd, resume_args, resumed_from=uuid, name=name, harness=harness
+            )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
             self.notify(f"Resume failed: {e}", severity="error")
             return
         self.refresh_sessions()
-        self.notify(f"Resumed {uuid[:8]} as {name}")
+        self.notify(f"Resumed {uuid[:8]} as {name} ({harness})")
+
+    def _reap_and_resume(self, session: Session, cwd: str, name: str) -> None:
+        """Reap a session whose tmux is gone on this host, then resume its
+        underlying claude JSONL as a fresh multiverse session here.
+
+        Mirrors the ended-row resume path (kill_session → _spawn_resumed):
+        the stale state dir is removed to free the name, and the transcript
+        is re-wrapped under a new tmux on the current host.
+        """
+        uuid = session.effective_claude_uuid
+        if not uuid:
+            self.notify(
+                f"Session {session.id} has no local tmux and no tracked "
+                "claude UUID — cannot resume",
+                severity="warning",
+            )
+            return
+        kill_session(session)
+        self._spawn_resumed(cwd, uuid, name, session.harness)
 
     def action_primary(self) -> None:
         """Enter: attach for live sessions, resume for dormant/ended ones."""
@@ -2726,7 +2859,33 @@ class MonitorApp(App):
         # Live multiverse → attach.
         if e.is_live and e.session is not None:
             if not tmux_session_exists(e.session.tmux_name):
-                self.notify(f"Session {e.session.id} is not running", severity="warning")
+                # status.json says live, but this host has no tmux session
+                # for it. Either it died without a SessionEnd hook (its
+                # host/pod was recycled or SIGKILLed, freezing status at its
+                # last value instead of "ended"), or it's genuinely alive on
+                # another host's tmux server sharing this MULTIVERSE_ROOT.
+                # The old behavior dead-ended with "not running" even though
+                # the underlying claude JSONL is perfectly resumable — the
+                # exact case where the user falls back to `claude --resume`.
+                # Reap the stale session and resume it here. If a *different*
+                # host still reports it non-ended, confirm first so we don't
+                # duplicate a session that's actually live elsewhere.
+                if foreign_host_still_reported_live(e.session):
+                    def _on_confirm(
+                        ok: bool,
+                        session: Session = e.session,
+                        cwd: str = e.cwd,
+                        name: str = e.name,
+                    ) -> None:
+                        if ok:
+                            self._reap_and_resume(session, cwd, name)
+
+                    self.push_screen(
+                        ConfirmForeignResumeScreen(e.name, e.session.host or "?"),
+                        _on_confirm,
+                    )
+                    return
+                self._reap_and_resume(e.session, e.cwd, e.name)
                 return
             self._attach_to(e.session.tmux_name)
             self.refresh_sessions()
@@ -2755,7 +2914,7 @@ class MonitorApp(App):
                 return
             kill_session(e.session)
 
-        self._spawn_resumed(e.cwd, uuid, e.name)
+        self._spawn_resumed(e.cwd, uuid, e.name, e.harness)
 
     def _register_fork(self, fork_uuid: str, active: bool) -> None:
         with self._fork_lock:
@@ -2769,7 +2928,10 @@ class MonitorApp(App):
         for e in self.entries:
             if e.claude_uuid:
                 targets.append(
-                    AskTarget(name=e.name, cwd=e.cwd, claude_uuid=e.claude_uuid)
+                    AskTarget(
+                        name=e.name, cwd=e.cwd, claude_uuid=e.claude_uuid,
+                        harness=e.harness,
+                    )
                 )
         if not targets:
             self.notify("No named sessions to ask", severity="warning")
@@ -2891,8 +3053,23 @@ class MonitorApp(App):
             return
         if not e.claude_uuid:
             self.notify(
-                "No claude UUID tracked for this row — cannot compact",
+                "No session id tracked for this row — cannot compact",
                 severity="warning",
+            )
+            return
+        if e.harness != DEFAULT_HARNESS:
+            # The Compact widget drives the Claude-Code-specific pipeline:
+            # two-JSONL mirror, tree-build worker, atomic live-JSONL replace.
+            # pi does not need any of it — its extension answers pi's own
+            # compaction request with a frontier-expanded summary, so
+            # compaction happens in-session on pi's schedule or on /compact.
+            self.notify(
+                f"{e.harness} sessions compact in-session: run /compact "
+                f"inside the session, or let it trigger at pi's threshold. "
+                f"For a whole-session pass use "
+                f"`mvctl compact-apply --session <transcript> --budget N`.",
+                severity="information",
+                timeout=12,
             )
             return
         if e.status not in _COMPACTABLE_STATUSES:

@@ -53,6 +53,7 @@ from src.interagent_log import (
     log_notification_routed,
 )
 from src.ask_agents import AskTarget, ask_one
+from src.harness import get_harness
 from src.names import pick_random_name
 from src.spawn_requests import (
     cleanup_request,
@@ -157,7 +158,7 @@ def _auto_resume(target, cwd: str) -> None:
     """
     if target.claude_uuid is None:
         raise RuntimeError(
-            f"target '{target.name}' has no tracked claude UUID — "
+            f"target '{target.name}' has no tracked session id — "
             "cannot resume programmatically"
         )
     if target.session is not None and target.status == "ended":
@@ -170,11 +171,24 @@ def _auto_resume(target, cwd: str) -> None:
                 "inbox"
             )
         kill_session(target.session)
+    # Resume flags differ per harness (`--resume <id>` vs `--session <id>`),
+    # so let the adapter build them rather than hard-coding Claude Code's.
+    harness_name = getattr(target, "harness", None) or "claude"
+    harness = get_harness(harness_name)
+    resume_args = harness.launch_argv(
+        session_id=target.claude_uuid,
+        resume=True,
+        name=None,
+        plugin_root=None,
+        extra_args=[],
+        prompt=None,
+    )[1:]  # drop argv[0]; multiverse-session supplies the binary
     create_session(
         cwd=cwd,
-        claude_args=["--resume", target.claude_uuid],
+        claude_args=resume_args,
         resumed_from=target.claude_uuid,
         name=target.name,
+        harness=harness_name,
     )
 
 
@@ -672,7 +686,7 @@ def ask_agent(
         )
     if target.claude_uuid is None:
         return (
-            f"Error: '{target_name}' has no tracked claude UUID yet "
+            f"Error: '{target_name}' has no tracked session id yet "
             "(may have just started). Try again in a moment."
         )
 
@@ -680,7 +694,10 @@ def ask_agent(
     result = ask_one(
         question=question,
         target=AskTarget(
-            name=target.name, cwd=target.cwd, claude_uuid=target.claude_uuid
+            name=target.name,
+            cwd=target.cwd,
+            claude_uuid=target.claude_uuid,
+            harness=getattr(target, "harness", None) or "claude",
         ),
         timeout=float(timeout),
     )

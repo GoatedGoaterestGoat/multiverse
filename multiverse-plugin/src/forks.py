@@ -1,9 +1,9 @@
 """On-disk registry of ask-fork session UUIDs.
 
-``ask_agent`` / ``ask_all`` spawn ephemeral ``claude --fork-session``
-subprocesses to answer side-questions. Each fork's JSONL inherits the
-origin session's ``custom-title``, so a leftover fork would masquerade as
-a dormant agent on the dashboard and in ``list_agents``.
+``ask_agent`` / ``ask_all`` spawn an ephemeral forked subprocess per target
+to answer side-questions (``claude --fork-session`` / ``pi --fork``). A
+fork's transcript inherits the origin session's display name, so a leftover
+would masquerade as a dormant agent on the dashboard and in ``list_agents``.
 
 The monitor has an in-memory ``_active_fork_uuids`` set, but it only ever
 covered the TUI ask-all path — the only one that runs inside the monitor
@@ -23,6 +23,7 @@ a fork killed mid-ask doesn't linger forever.
 
 from __future__ import annotations
 
+import shutil
 import time
 from pathlib import Path
 
@@ -101,8 +102,14 @@ def gc(max_age_seconds: float = 3600.0) -> None:
         if now - ts < max_age_seconds:
             continue
         if len(lines) >= 2 and lines[1].strip():
+            # Claude Code forks record a single JSONL; pi forks record the
+            # scratch session DIRECTORY they were pointed at, so handle both.
+            orphan = Path(lines[1].strip())
             try:
-                Path(lines[1].strip()).unlink(missing_ok=True)
+                if orphan.is_dir():
+                    shutil.rmtree(orphan, ignore_errors=True)
+                else:
+                    orphan.unlink(missing_ok=True)
             except OSError:
                 pass
         try:

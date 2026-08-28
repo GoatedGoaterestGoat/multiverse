@@ -29,6 +29,8 @@ from typing import Any, Optional
 
 from . import forks
 from .compact_state import list_locked
+from .harness import DEFAULT_HARNESS, get_harness
+from .harness import available as available_harnesses
 from .paths import claude_projects_dir, multiverse_dir
 
 
@@ -226,6 +228,10 @@ class Session:
     # it isn't, when MULTIVERSE_ROOT is shared network storage and the
     # session was actually spawned on a different host's tmux server.
     host: Optional[str] = None
+    # Which agent CLI this session runs. Recorded at creation; absent in
+    # meta.json for every session created before multi-harness support, which
+    # is why the default is the historical one rather than an env lookup.
+    harness: str = DEFAULT_HARNESS
 
     @property
     def tmux_name(self) -> str:
@@ -275,6 +281,7 @@ class DashboardRow:
     # out of the inter-agent registry (list_agents/message_agent/ask_agent).
     is_ghost: bool = False
     folded_at: Optional[float] = None
+    harness: str = DEFAULT_HARNESS
 
     @property
     def is_dormant(self) -> bool:
@@ -322,6 +329,7 @@ def load_session(session_id: str) -> Optional[Session]:
         claude_uuid=_read_text_stripped(d / "claude_uuid"),
         superseded_uuids=superseded,
         host=meta.get("host"),
+        harness=str(meta.get("harness") or DEFAULT_HARNESS),
     )
     st = _read_json(s.status_path)
     if st:
@@ -445,6 +453,8 @@ def build_dashboard_rows(
             except (TypeError, ValueError):
                 ghost_map[uid] = 0.0
 
+    # Ghost (context-fold) detection is a Claude Code concept — the markers
+    # live in claude JSONLs — so it stays scoped to the claude project dir.
     project_dir = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd)
 
     if project_dir.is_dir():
@@ -462,13 +472,18 @@ def build_dashboard_rows(
     for s in sessions:
         if not s.name:
             continue
-        # Look up the live session's JSONL preview if we know the claude UUID.
+        # Preview comes from the session's own harness: a pi transcript is a
+        # different file layout and a different first-user-message shape.
         preview = ""
         u = s.effective_claude_uuid
-        if u and project_dir.is_dir():
-            jsonl = project_dir / f"{u}.jsonl"
-            if jsonl.exists():
-                preview = _read_session_metadata(jsonl).get("preview") or ""
+        if u:
+            try:
+                h = get_harness(s.harness)
+                jsonl = h.transcript_path(u, s.cwd)
+                if jsonl.exists():
+                    preview = h.read_meta(jsonl).get("preview") or ""
+            except ValueError:
+                preview = ""
         rows.append(
             DashboardRow(
                 name=s.name,
@@ -478,33 +493,39 @@ def build_dashboard_rows(
                 session=s,
                 claude_uuid=s.effective_claude_uuid,
                 preview=preview,
+                harness=s.harness,
             )
         )
 
-    if project_dir.is_dir():
-        for path in project_dir.glob("*.jsonl"):
-            uuid = path.stem
-            if uuid in wrapped_uuids:
+    # Dormant rows: every harness's transcripts for this workspace, so one
+    # dashboard covers a mixed set of claude and pi agents. A row remembers
+    # which harness it came from, because every action on it (resume, ask,
+    # compact) has to run the right CLI.
+    for harness_name in available_harnesses():
+        try:
+            harness = get_harness(harness_name)
+        except ValueError:
+            continue
+        for info in harness.list_transcripts(cwd):
+            if info.session_id in wrapped_uuids:
                 continue
-            meta = _read_session_metadata(path)
-            title = meta.get("title")
-            if not title:
+            if not info.name:
+                # Unnamed sessions are not reachable by the inter-agent tools
+                # and are usually one-off `claude`/`pi` invocations, so they
+                # stay off the dashboard.
                 continue
+            meta = harness.read_meta(info.path)
             recorded_cwd = meta.get("cwd")
             if recorded_cwd and recorded_cwd != cwd:
                 continue
-            try:
-                st = path.stat()
-            except OSError:
-                continue
 
-            ghost_ts = ghost_map.get(uuid)
+            ghost_ts = ghost_map.get(info.session_id)
             if ghost_ts is not None:
-                display_name = f"{title} (folded {_format_fold_time(ghost_ts)})"
-                status_ts = ghost_ts or st.st_mtime
+                display_name = f"{info.name} (folded {_format_fold_time(ghost_ts)})"
+                status_ts = ghost_ts or info.mtime
             else:
-                display_name = title
-                status_ts = st.st_mtime
+                display_name = info.name
+                status_ts = info.mtime
 
             rows.append(
                 DashboardRow(
@@ -513,10 +534,11 @@ def build_dashboard_rows(
                     status="dormant",
                     status_ts=status_ts,
                     session=None,
-                    claude_uuid=uuid,
-                    preview=meta.get("preview") or "",
+                    claude_uuid=info.session_id,
+                    preview=info.preview,
                     is_ghost=ghost_ts is not None,
                     folded_at=ghost_ts,
+                    harness=harness_name,
                 )
             )
 
@@ -666,13 +688,25 @@ def create_session(
     resumed_from: Optional[str] = None,
     name: Optional[str] = None,
     initial_prompt: Optional[str] = None,
+    harness: Optional[str] = None,
 ) -> Session:
-    """Spawn a multiverse-managed claude session in a detached tmux session.
+    """Spawn a multiverse-managed agent session in a detached tmux session.
 
     Used by the monitor (interactive: new session / resume from picker) and
     by the MCP server (programmatic: auto-resume dormant agent for inter-
     agent comms).
+
+    ``harness`` names the agent CLI to run (``claude`` / ``pi``); it defaults
+    to ``$MULTIVERSE_HARNESS`` and then to ``claude``. The choice is recorded
+    in ``meta.json`` and exported into the tmux environment, because every
+    later action on the session — resume, ask-fork, compaction — has to reach
+    for the same CLI. ``claude_args`` keeps its name for compatibility with
+    existing callers but is passed through to whichever harness runs.
     """
+    harness_name = (harness or os.environ.get("MULTIVERSE_HARNESS")
+                    or DEFAULT_HARNESS)
+    # Fail here rather than after the tmux session exists.
+    get_harness(harness_name)
     sid = short_id()
     d = STATE_DIR / sid
     d.mkdir(parents=True, exist_ok=True)
@@ -687,7 +721,11 @@ def create_session(
     # in claude's default (prompt-for-everything) mode. Skipped if the
     # caller already specified a mode, so an explicit `multiverse
     # --permission-mode plan` (or similar) isn't silently overridden.
-    if not any(a == "--permission-mode" for a in claude_args):
+    # pi has no tool-approval gate, so the flag does not exist there; adding
+    # it would just make pi reject its own argv.
+    if harness_name == "claude" and not any(
+        a == "--permission-mode" for a in claude_args
+    ):
         claude_args = [*claude_args, "--permission-mode", "auto"]
 
     now = time.time()
@@ -696,6 +734,7 @@ def create_session(
         "created_at": now,
         "claude_args": claude_args,
         "host": current_host(),
+        "harness": harness_name,
     }
     if resumed_from:
         meta["resumed_from"] = resumed_from
@@ -713,7 +752,7 @@ def create_session(
         if arg == "--resume" and i + 1 < len(claude_args):
             resume_uuid = claude_args[i + 1]
             break
-    if resume_uuid:
+    if resume_uuid and harness_name == "claude":
         jsonl_path = CLAUDE_PROJECTS_DIR / _encode_cwd(cwd_abs) / f"{resume_uuid}.jsonl"
         ancestors = detect_fold_ancestors(jsonl_path) if jsonl_path.exists() else []
         if ancestors:
@@ -750,6 +789,7 @@ def create_session(
         "-e", f"MULTIVERSE_SESSION_CWD={cwd_abs}",
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
+        "-e", f"MULTIVERSE_HARNESS={harness_name}",
     ]
 
     # Propagate the user's Claude install env so the inner `claude`
@@ -767,7 +807,11 @@ def create_session(
                     # defaults + rationale. Propagated so interactive
                     # claude sessions inside tmux honor them, not just
                     # subprocess-inherited workers.
-                    "CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_UNATTENDED_RETRY"):
+                    "CLAUDE_CODE_MAX_RETRIES", "CLAUDE_CODE_UNATTENDED_RETRY",
+                    # pi's equivalents: which binary to run, and where its
+                    # config / sessions live when they are not under ~/.pi.
+                    "MULTIVERSE_PI_BIN", "PI_CODING_AGENT_DIR",
+                    "PI_CODING_AGENT_SESSION_DIR"):
         val = os.environ.get(env_key)
         if val:
             cmd += ["-e", f"{env_key}={val}"]
@@ -798,6 +842,8 @@ def create_session(
         stderr=subprocess.DEVNULL,
     )
 
+    _install_quick_ask_binding(plugin_root)
+
     return Session(
         id=sid,
         cwd=cwd_abs,
@@ -807,7 +853,48 @@ def create_session(
         resumed_from=resumed_from,
         name=name,
         host=meta["host"],
+        harness=harness_name,
     )
+
+
+#: Key that opens the quick-ask popup from inside an attached session,
+#: pressed after the tmux prefix (``C-b k`` by default).
+#:
+#: The prefix table rather than the root table, deliberately. A root binding
+#: would have to be a Meta chord, and macOS terminals do not send Option as
+#: Meta unless the user reconfigures the terminal — so the one-keystroke
+#: version silently does nothing for most Mac users. Going through the prefix
+#: costs one extra keystroke and works everywhere, with no chance of shadowing
+#: a key the agent CLI wants.
+#:
+#: tmux has no per-session bindings (``bind-key`` is server-global), so this
+#: lands on every session on the server; ``quick_ask`` no-ops with a message
+#: on any session whose name lacks TMUX_PREFIX.
+QUICK_ASK_KEY = os.environ.get("MULTIVERSE_ASK_KEY", "k")
+
+
+def _install_quick_ask_binding(plugin_root: str) -> None:
+    """Bind the quick-ask popup on the tmux server.
+
+    Idempotent: ``bind-key`` overwrites an existing binding for the same key,
+    so re-running on every session creation simply refreshes it (and picks up
+    a changed MULTIVERSE_ASK_KEY / plugin root without a server restart).
+
+    Best-effort by design. A missing binding costs the user a feature; a raised
+    exception here would abort session creation, which is far worse.
+    """
+    script = str(Path(plugin_root) / "bin" / "multiverse-ask")
+    popup_cmd = f"{shlex.quote(script)} '#{{pane_id}}' '#{{session_name}}'"
+    try:
+        subprocess.run(
+            ["tmux", "bind-key", "-T", "prefix", QUICK_ASK_KEY,
+             "display-popup", "-E", "-w", "80%", "-h", "70%", popup_cmd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def current_host() -> str:
