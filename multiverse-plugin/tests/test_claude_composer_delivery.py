@@ -105,6 +105,80 @@ class ClaudeInputBoxDetectionTests(unittest.TestCase):
         visible, _ = sb_actions.claude_input_box(pane)
         self.assertTrue(visible, "composer must be visible or delivery degrades")
 
+    def test_queued_messages_placeholder_is_not_a_draft(self) -> None:
+        """Claude shows this whenever prompts are queued mid-turn.
+
+        Captured verbatim from a live session: the marker, then a dim span
+        holding the placeholder. Treating it as a draft means typing "Press up
+        to edit queued messages" back into the box after every delivery.
+        """
+        pane = "\n".join(
+            [
+                f"\x1b[38;5;244m{RULE}",
+                "\x1b[38;5;246m❯\xa0\x1b[2m\x1b[39mPress up to edit queued messages\x1b[0m",
+                f"\x1b[38;5;244m{RULE}",
+                "\x1b[39m  ⏵⏵ auto mode on (shift+tab to cycle)",
+            ]
+        )
+        self.assertEqual(sb_actions.claude_input_box(pane), (True, ""))
+
+    def test_placeholder_ignored_even_without_style_codes(self) -> None:
+        """The dim strip needs ``-e``; the text match must not.
+
+        A caller that captures without styles sees the placeholder as ordinary
+        glyphs. Before the literal-text fallback that read back as a draft, so
+        the protection hung entirely on one flag surviving in every call site.
+        """
+        pane = "\n".join(
+            [
+                RULE,
+                "❯\xa0Press up to edit queued messages",
+                RULE,
+                "  ⏵⏵ auto mode on (shift+tab to cycle)",
+            ]
+        )
+        self.assertEqual(sb_actions.claude_input_box(pane), (True, ""))
+
+    def test_placeholder_match_is_case_insensitive(self) -> None:
+        pane = "\n".join([RULE, "❯\xa0PRESS UP TO EDIT QUEUED MESSAGES", RULE, "  x"])
+        self.assertEqual(sb_actions.claude_input_box(pane)[1], "")
+
+    def test_a_real_draft_is_still_preserved_without_styles(self) -> None:
+        """The fallback must not swallow genuine typed text."""
+        pane = "\n".join([RULE, "❯\xa0press up and check the logs", RULE, "  x"])
+        self.assertEqual(
+            sb_actions.claude_input_box(pane), (True, "press up and check the logs")
+        )
+
+    def test_queued_placeholder_is_never_typed_back(self) -> None:
+        """End-to-end: delivery against a queued-state pane types only the wake."""
+        pane = "\n".join(
+            [
+                f"\x1b[38;5;244m{RULE}",
+                "\x1b[38;5;246m❯\xa0\x1b[2m\x1b[39mPress up to edit queued messages\x1b[0m",
+                f"\x1b[38;5;244m{RULE}",
+                "\x1b[39m  ⏵⏵ auto mode on",
+            ]
+        )
+        sends: list[list[str]] = []
+
+        def fake_run_tmux(args, *, capture=False, input_text=None):
+            if args and args[0] == "capture-pane":
+                return True, pane
+            sends.append(args)
+            return True, ""
+
+        with patch.object(sb_actions, "_run_tmux", side_effect=fake_run_tmux):
+            ok, saved, err = sb_actions.send_prompt_via_tmux(
+                "multiverse-x", "WAKE", runtime="claude", require_composer=True
+            )
+
+        self.assertTrue(ok, err)
+        self.assertEqual(saved, "")
+        flat = " ".join(" ".join(map(str, c)) for c in sends)
+        self.assertNotIn("Press up", flat)
+        self.assertNotIn("BSpace", flat)
+
     def test_modal_hides_composer(self) -> None:
         self.assertEqual(sb_actions.claude_input_box(modal_pane()), (False, ""))
 
@@ -265,6 +339,10 @@ class MessageAgentClaudeRoutingTests(unittest.TestCase):
         with (
             patch.object(server, "find_agent_by_name", return_value=target),
             patch.object(server, "is_locked", return_value=False),
+            # Routing is what's under test here. Left unstubbed, the submit
+            # postcondition polls a pane that doesn't exist for its full
+            # timeout on every one of these.
+            patch.object(server, "_claude_wake_confirmed", return_value=True),
         ):
             return fn("bravo", "hello")
 

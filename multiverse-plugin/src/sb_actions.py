@@ -192,6 +192,25 @@ _RULE_MIN_RATIO = 0.6
 # span whose reset lands on a later line by dimming to end-of-line instead.
 _GHOST_DIM_RE = re.compile(r"\x1b\[2m[^\n]*?(?:\x1b\[0m|$)", re.MULTILINE)
 
+# Belt and braces for the same problem. Dim-stripping is the general defence, but
+# it only works when the pane was captured with ``-e``; a caller that forgets the
+# flag sees a placeholder as ordinary glyphs, "saves" it as a draft, and types it
+# back into the box after delivering. Claude Code shows this one whenever prompts
+# are queued mid-turn:
+#
+#     ❯\xa0\x1b[2m\x1b[39mPress up to edit queued messages\x1b[0m
+#
+# Matching the literal text catches it whether or not the styling survived. Real
+# drafts that happen to equal a placeholder are not worth protecting — nobody
+# types "Press up to edit queued messages" as a prompt, and dropping it costs a
+# restore, while typing it back corrupts the composer.
+_CLAUDE_PLACEHOLDERS = frozenset(
+    {
+        "press up to edit queued messages",
+        "press up to edit queued message",
+    }
+)
+
 
 def _is_rule_line(line: str) -> bool:
     """Whether ``line`` is one of the composer's horizontal rules."""
@@ -241,7 +260,12 @@ def claude_input_box(pane: str) -> tuple[bool, str]:
     # U+00A0 padding after the marker is ordinary whitespace to str.strip().
     parts = [first[len(_CLAUDE_MARKER) :].strip()]
     parts.extend(line.strip() for line in region[1:])
-    return True, "\n".join(parts).strip()
+    draft = "\n".join(parts).strip()
+    if draft.lower() in _CLAUDE_PLACEHOLDERS:
+        # Composer is on screen and effectively empty — the box is showing a
+        # placeholder, not something the user typed.
+        return True, ""
+    return True, draft
 
 # Codex's composer has no box border. Its first line begins with ``›`` and its status
 # footer follows below it. Continuation lines are indented by two spaces.
