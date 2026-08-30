@@ -28,13 +28,14 @@ import signal
 import socket
 import subprocess
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from . import forks
-from .atomic_files import atomic_write_json
+from .atomic_files import atomic_write_json, exclusive_file_lock
 from .compact_state import list_locked
 from .paths import claude_projects_dir, codex_home, multiverse_dir
 from .pi_transcript import list_pi_sessions_in
@@ -644,18 +645,59 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
+_TERMINAL_STATUSES = ("ended", "ending")
+
+
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
-    """Atomically persist the common Multiverse status shape."""
-    # Dashboard-initiated teardown owns the status until tmux is gone. Runtime
-    # hooks can still fire while SIGTERM is being handled; without this marker a
-    # Stop/SessionEnd hook could replace ``ending`` with idle/ended before the
-    # teardown operation has actually finished.
-    if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
-        return
-    atomic_write_json(
-        path,
-        {"status": status, "ts": time.time() if ts is None else ts},
-    )
+    """Atomically persist the common Multiverse status shape.
+
+    The guards below are read-then-write, so they are only sound while a
+    cross-process lock is held. Each status write is its own short-lived
+    process — six Claude hooks, or one detached ``mvctl status`` per pi
+    lifecycle event — and unlocked they interleave as
+    ``idle: read (not ended) → ended: write → idle: write``, which is exactly
+    the stale-``idle``-over-``ended`` outcome the ended guard exists to stop.
+    ``atomic_write_json`` makes each write indivisible; it does not order two
+    of them against each other.
+
+    Best-effort, matching ``inbox.wake_delivery_lock``: if the lock cannot be
+    taken (odd filesystem, no fcntl) the body still runs, degrading to the
+    unordered behaviour rather than to no status at all. Only ACQUISITION
+    failure is swallowed — see that function for why the ExitStack shape
+    matters rather than a ``try`` around the protected body.
+    """
+    with ExitStack() as stack:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stack.enter_context(
+                exclusive_file_lock(path.with_name(path.name + ".lock"))
+            )
+        except OSError:
+            pass  # unlocked fallback — see above
+        # Dashboard-initiated teardown owns the status until tmux is gone.
+        # Runtime hooks can still fire while SIGTERM is being handled; without
+        # this marker a Stop/SessionEnd hook could replace ``ending`` with
+        # idle/ended before the teardown operation has actually finished.
+        if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
+            return
+        # ``ended`` is terminal. A session whose status.json says ended never
+        # goes live again — resuming builds a new session dir — so a live
+        # status arriving afterwards is always the stale one, whichever
+        # process emitted it.
+        if status not in _TERMINAL_STATUSES and _status_is_ended(path):
+            return
+        atomic_write_json(
+            path,
+            {"status": status, "ts": time.time() if ts is None else ts},
+        )
+
+
+def _status_is_ended(path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8") as fh:
+            return json.load(fh).get("status") == "ended"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _pid_alive(pid: int) -> bool:

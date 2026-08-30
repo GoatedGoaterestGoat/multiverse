@@ -250,7 +250,7 @@ def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
-def _env_without_session_vars() -> dict[str, str]:
+def _env_without_session_vars(*, drop_prefixes: tuple[str, ...] = ()) -> dict[str, str]:
     """Return ``os.environ`` minus session-scoped ``MULTIVERSE_*`` vars.
 
     Why this matters: when ``ask_agent`` is called by a running multiverse
@@ -271,8 +271,17 @@ def _env_without_session_vars() -> dict[str, str]:
 
     ``MULTIVERSE_PLUGIN_ROOT`` is read by the caller BEFORE calling this,
     so the ``--plugin-dir`` CLI flag is still correctly populated.
+
+    ``drop_prefixes`` strips additional runtime-owned prefixes. The pi fork
+    passes ``PI_CODING_AGENT_`` so its scratch ``--session-dir`` cannot be
+    overridden by an inherited session root — see ``_ask_one_pi``.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("MULTIVERSE_")}
+    dropped = ("MULTIVERSE_",) + drop_prefixes
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not any(k.startswith(prefix) for prefix in dropped)
+    }
 
 
 def _response_result(message: dict, request_id: int) -> dict:
@@ -622,7 +631,15 @@ def _ask_one_pi(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=_env_without_session_vars(),
+                # bin/multiverse forwards PI_CODING_AGENT_DIR /
+                # PI_CODING_AGENT_SESSION_DIR into every managed pi session, so
+                # the MCP server inherits them here. Drop them rather than
+                # relying on --session-dir winning the precedence fight: if the
+                # env var won, the fork transcript would land in the real
+                # session root, survive the rmtree below, and — pi has no
+                # equivalent of the Claude `forks` registry — surface as a
+                # phantom dormant row under the origin agent's name.
+                env=_env_without_session_vars(drop_prefixes=("PI_CODING_AGENT_",)),
             )
             if result.returncode != 0:
                 err = (
@@ -641,9 +658,10 @@ def _ask_one_pi(
     except Exception as exc:  # noqa: BLE001 — surface transport failures
         err = f"subprocess error: {exc}"[:400]
     finally:
-        # The fork is deliberately outside pi's configured session roots, so
-        # it can never surface as a dormant agent. No global fork registry is
-        # needed and an empty artifact can never become a dangerous Path('.').
+        # The fork is deliberately outside pi's configured session roots (both
+        # by --session-dir and by stripping PI_CODING_AGENT_* above), so it can
+        # never surface as a dormant agent. No global fork registry is needed
+        # and an empty artifact can never become a dangerous Path('.').
         shutil.rmtree(scratch, ignore_errors=True)
 
     return AskResult(

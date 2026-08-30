@@ -202,6 +202,45 @@ def commit_claimed_messages(messages: list[dict]) -> None:
             pass
 
 
+def release_claimed_messages(cwd: str, name: str, basenames: list[str]) -> int:
+    """Return named staged files to the unclaimed pool immediately.
+
+    ``claim_pending_messages`` stages by renaming, and the staged name is
+    invisible to ``list_pending_messages`` / ``pending_inbox_count``. If the
+    hand-over then fails, ``_readopt_stale_claims`` only re-adopts the files
+    after ``_STALE_CLAIM_SECONDS`` — a minute during which the sender is
+    waiting on a reply for a message nothing will deliver.
+
+    A deliverer that KNOWS its delivery failed does not have to wait out that
+    window: it can undo its own claim at once. Staleness recovery stays as the
+    backstop for the case this cannot cover, a deliverer that dies outright.
+
+    Accepts staged basenames (as handed back by ``claim-inbox``) rather than
+    paths, and ignores anything that is not one: this is reachable from a
+    subprocess bridge, and a rename driven by unvalidated argv is not something
+    to hand a local caller.
+    """
+    d = agent_inbox_dir(cwd, name)
+    if not d.is_dir():
+        return 0
+    released = 0
+    for basename in basenames:
+        if (
+            not basename
+            or Path(basename).name != basename
+            or ".json.claim-" not in basename
+        ):
+            continue
+        claim_path = d / basename
+        original = claim_path.with_name(claim_path.name.split(".claim-")[0])
+        try:
+            claim_path.rename(original)
+        except OSError:
+            continue
+        released += 1
+    return released
+
+
 def _readopt_stale_claims(d: Path) -> None:
     """Return abandoned staged files to the unclaimed pool.
 

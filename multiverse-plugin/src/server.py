@@ -128,10 +128,13 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
     """
     env_name = os.environ.get("MULTIVERSE_SESSION_NAME")
     env_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    # The shared bg-pty-host issue is specific to Claude. Each managed Codex
-    # session starts its own MCP server with wrapper-owned identity variables,
-    # so Claude transcript discovery could only misidentify a Codex caller.
-    if os.environ.get("MULTIVERSE_RUNTIME") == RUNTIME_CODEX:
+    # The shared bg-pty-host issue is specific to Claude. Every other managed
+    # runtime starts its own MCP server with wrapper-owned identity variables,
+    # so Claude transcript discovery could only misidentify a non-Claude
+    # caller — it would hand back whichever Claude agent happened to write a
+    # jsonl row in the last 10s. Unset means Claude, matching the default used
+    # everywhere else in this module.
+    if os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE) != RUNTIME_CLAUDE:
         return env_name, env_cwd
     try:
         cfg = Path(

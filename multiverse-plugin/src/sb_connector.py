@@ -2214,6 +2214,7 @@ class SBConnector:
         the message_agent auto_resume flow, but hands ``initial_prompt`` to create_session
         so the SB prompt becomes the runtime's first user turn."""
         from .sessions import (
+            RUNTIME_CLAUDE,
             RUNTIME_CODEX,
             create_session,
             foreign_host_still_reported_live,
@@ -2234,11 +2235,14 @@ class SBConnector:
                     "as a new session here"
                 )
             kill_session(target.session)
-        runtime_args = (
-            ["resume", native_session_id]
-            if target.runtime == RUNTIME_CODEX
-            else ["--resume", native_session_id]
-        )
+        # Same three-way dispatch as server._auto_resume and
+        # monitor._spawn_resumed — pi takes --session, not Claude's --resume.
+        if target.runtime == RUNTIME_CLAUDE:
+            runtime_args = ["--resume", native_session_id]
+        elif target.runtime == RUNTIME_CODEX:
+            runtime_args = ["resume", native_session_id]
+        else:
+            runtime_args = ["--session", native_session_id]
         create_session(
             cwd=cwd,
             claude_args=runtime_args,
