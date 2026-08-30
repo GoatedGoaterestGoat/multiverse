@@ -146,7 +146,44 @@ export default function multiverse(pi: ExtensionAPI) {
 	// never blocks on user approval. It moves between idle / working /
 	// listening / ended only.
 
-	const setStatus = (status: string) => mvctlDetached(exec, ["status", status]);
+	// Status writes are SERIALIZED, not fire-and-forget. Each one is its own
+	// Python process, so racing them means the OS decides which lands last: the
+	// `idle` from agent_settled could outlive pi and overwrite
+	// session_shutdown's `ended`, leaving a dead agent rendered idle — and
+	// message_agent then routes to it as a live target. Chaining makes the
+	// order here match the order the events fired. mvctl's writer holds a
+	// cross-process lock and refuses a live status over `ended` as well, which
+	// is what covers a racer outside this process.
+	//
+	// `ended` is additionally terminal in-process once pi itself is quitting:
+	// a late lifecycle event must not queue another live status behind it.
+	//
+	// Consecutive identical values are dropped. Every write costs an
+	// interpreter startup plus the src.sessions import chain, and
+	// `tool_execution_start` fires once per tool call — a 30-tool turn spawned
+	// 30 processes to rewrite the same `working`. Only transitions matter.
+	let sessionEnded = false;
+	let lastStatus: string | undefined;
+	let statusChain: Promise<void> = Promise.resolve();
+	const setStatus = (status: string): Promise<void> => {
+		if (sessionEnded || status === lastStatus) return statusChain;
+		if (status === "ended") sessionEnded = true;
+		lastStatus = status;
+		statusChain = statusChain
+			.then(async () => {
+				const r = await mvctl(exec, ["status", status], { timeout: 15_000 });
+				// A failed write must not be remembered as the current value,
+				// or the dedupe above would suppress every retry of it and the
+				// session would keep displaying whatever it last managed to
+				// write.
+				if (!r.ok) {
+					if (lastStatus === status) lastStatus = undefined;
+					if (status === "ended") sessionEnded = false;
+				}
+			})
+			.catch(() => undefined);
+		return statusChain;
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		const id = ctx.sessionManager.getSessionId();
@@ -170,12 +207,26 @@ export default function multiverse(pi: ExtensionAPI) {
 		setStatus("idle");
 		// End-of-turn is the natural delivery point: anything that arrived
 		// while we were working gets picked up without interrupting the run.
-		if (WRAPPED && isLongLived(ctx)) await deliverInbox(pi, ctx, { trigger: true });
+		// Swallow send failures exactly as the watcher does — a throw out of a
+		// lifecycle handler buys nothing, and the claim is recovered by main's
+		// stale-claim sweep either way.
+		if (WRAPPED && isLongLived(ctx)) {
+			await deliverInbox(pi, ctx, { trigger: true }).catch(() => undefined);
+		}
 	});
 
-	pi.on("session_shutdown", async () => {
+	pi.on("session_shutdown", async (event) => {
 		stopInboxWatcher();
-		setStatus("ended");
+		if (event.reason === "quit") {
+			// Awaited: the runner's fallback also writes `ended`, but this is the
+			// path that runs while pi is still alive to be waited on.
+			await setStatus("ended");
+		} else {
+			// `/new`, `/resume`, `/fork`, and reload replace the session inside
+			// the same live pi process. Marking the wrapper ended here would make
+			// Python's terminal-status guard reject the replacement's idle write.
+			await statusChain;
+		}
 	});
 
 	// ----- inter-agent tools ----------------------------------------------
@@ -397,11 +448,11 @@ export default function multiverse(pi: ExtensionAPI) {
  *
  * The ordering matters. `claim-inbox` stages messages rather than deleting
  * them, and only `commit-inbox` removes them after `pi.sendMessage` accepts
- * the injection call. A synchronous injection failure or process exit before
- * that point leaves the claim for stale-claim recovery. If the commit itself
- * fails, the safe failure mode is a duplicate delivery. pi's fire-and-forget
- * API provides no later acknowledgement, so asynchronous failures beyond
- * that call are not observable here.
+ * the injection call. A synchronous injection failure releases this
+ * deliverer's claims immediately; process death leaves them for stale-claim
+ * recovery. If the commit itself fails, the safe failure mode is a duplicate
+ * delivery. pi's fire-and-forget API provides no later acknowledgement, so
+ * asynchronous failures beyond that call are not observable here.
  *
  * Delivered as a `custom` message rather than a user message: it participates
  * in LLM context, which is the point, but is not attributed to the user, who
@@ -424,24 +475,46 @@ async function deliverInbox(
 	}
 	if (!pending.count) return false;
 
-	pi.sendMessage(
-		{
-			customType: "multiverse-inbox",
-			content:
-				"[Multiverse Inter-Agent] You have new messages from other agents.\n\n" +
-				pending.text +
-				"\n\nYou may use any tools to act on these. To reply, call " +
-				"message_agent with the sender's name. Replies are optional — only " +
-				"respond if it is useful.",
-			display: true,
-		},
-		// While a turn is running, followUp queues the delivery until the model
-		// has finished with its current tool results, so we never interleave an
-		// inbox message with a half-finished chain of thought. Idle,
-		// triggerTurn starts a turn so the agent actually acts on it — this is
-		// what replaces Claude Code's tmux send-keys wake.
-		ctx.isIdle() ? { triggerTurn: opts.trigger } : { deliverAs: "followUp" },
-	);
+	try {
+		pi.sendMessage(
+			{
+				customType: "multiverse-inbox",
+				content:
+					"[Multiverse Inter-Agent] You have new messages from other agents.\n\n" +
+					pending.text +
+					"\n\nYou may use any tools to act on these. To reply, call " +
+					"message_agent with the sender's name. Replies are optional — only " +
+					"respond if it is useful.",
+				display: true,
+			},
+			// While a turn is running, followUp queues the delivery until the
+			// model has finished with its current tool results, so we never
+			// interleave an inbox message with a half-finished chain of
+			// thought. Idle, triggerTurn starts a turn so the agent actually
+			// acts on it — this is what replaces Claude Code's tmux send-keys
+			// wake.
+			ctx.isIdle() ? { triggerTurn: opts.trigger } : { deliverAs: "followUp" },
+		);
+	} catch (err) {
+		// claim-inbox already staged these out of the pending pool, so they are
+		// invisible to every other deliverer. Swallowing the throw would leave
+		// them that way until the 60s stale-claim sweep — with the sender
+		// blocked on a reply the whole time. Undo our own claim instead, and
+		// the 2s watcher poll retries almost immediately.
+		if (pending.claims.length) {
+			const args = ["release-inbox"];
+			for (const claim of pending.claims) args.push("--claim", claim);
+			await mvctl(exec, args, { timeout: 15_000 });
+		}
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`multiverse: could not deliver ${pending.count} message(s), returned them ` +
+					`to the inbox for retry (${String(err)})`,
+				"warning",
+			);
+		}
+		return false;
+	}
 
 	if (pending.claims.length) {
 		const args = ["commit-inbox"];

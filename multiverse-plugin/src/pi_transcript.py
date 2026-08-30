@@ -25,8 +25,20 @@ def pi_agent_dir() -> Path:
 
 
 def encode_pi_cwd(cwd: str) -> str:
-    """Match pi's ``--<cwd with separators mapped to ->--`` directory."""
-    resolved = str(Path(cwd).expanduser())
+    """Match pi's ``--<cwd with separators mapped to ->--`` directory.
+
+    The path is fully resolved first. pi derives this name from its own
+    process cwd, which the OS already reports symlink-free, so the resolved
+    form is the only one that can match on disk. Canonicalizing here — the
+    single boundary every session-dir derivation goes through — keeps
+    ``pi_session_path`` and ``list_pi_sessions_in`` from computing different
+    directories for the same workspace when the caller's path is a symlink,
+    contains ``..``, or is ``~``-relative.
+    """
+    try:
+        resolved = str(Path(cwd).expanduser().resolve())
+    except (OSError, RuntimeError):
+        resolved = str(Path(cwd).expanduser())
     stripped = re.sub(r"^[/\\]", "", resolved)
     return f"--{re.sub(r'[/\\:]', '-', stripped)}--"
 
@@ -73,16 +85,22 @@ def read_pi_session_metadata(path: Path) -> dict[str, Any]:
                     native_id = row.get("id") or native_id
                     cwd = row.get("cwd") or cwd
                 elif typ == "session_info":
+                    # Match pi's SessionManager: the latest session_info row is
+                    # authoritative, and a missing/blank name explicitly clears
+                    # the title. Keeping the previous value would make a name
+                    # cleared with `/name` remain reserved in Multiverse.
                     value = row.get("name")
-                    name = str(value) if value else None
+                    name = str(value).strip() if value else None
                 elif typ == "message" and preview is None:
                     message = row.get("message") or {}
                     if message.get("role") != "user":
                         continue
                     text = _extract_text(message.get("content")).strip()
-                    # Hook-style context is not a useful user preview. Custom
-                    # extension messages are separate pi entry types, so a
-                    # normal user prompt beginning with "[" remains valid.
+                    # Injected context blocks (<system-reminder>, and the
+                    # inbox envelopes the extension sends) are not useful user
+                    # previews. Only "<" is filtered: custom extension messages
+                    # are separate pi entry types, so a normal user prompt
+                    # beginning with "[" remains valid.
                     if text and not text.startswith("<"):
                         text = text.replace("\n", " ")
                         preview = text[:79] + "…" if len(text) > 80 else text

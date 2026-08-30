@@ -19,7 +19,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
-def _emit(text: str, as_json: bool, ok: bool = True) -> int:
+def _emit(text: str, as_json: bool, ok: bool | None = None) -> int:
+    """Print a tool result and return the process exit code.
+
+    The server-side tools report failure in-band, as a string starting with
+    ``Error`` — they have no other error channel. Emitting that with ``ok=True``
+    made every mvctl command exit 0, so the extension's ``r.ok`` was always
+    true and a hard failure surfaced as an informational notification. Infer
+    ``ok`` from that convention unless the caller states it outright.
+    """
+    if ok is None:
+        ok = not text.lstrip().startswith("Error")
     if as_json:
         json.dump({"ok": ok, "text": text}, sys.stdout)
         sys.stdout.write("\n")
@@ -119,9 +129,9 @@ def cmd_inbox_count(args) -> int:
 def cmd_claim_inbox(args) -> int:
     """Stage pending messages and return a delivery payload.
 
-    The staged files remain durable until ``commit-inbox``.  If pi exits or
-    ``sendMessage`` throws before commit, main's stale-claim recovery puts the
-    messages back into the pending pool instead of silently losing them.
+    The staged files remain durable until ``commit-inbox``. A known injection
+    failure uses ``release-inbox`` immediately; if pi exits outright, main's
+    stale-claim recovery returns them instead of silently losing them.
     """
     from src.inbox import (
         claim_pending_messages,
@@ -190,6 +200,22 @@ def cmd_commit_inbox(args) -> int:
     return _emit(str(len(messages)), args.json)
 
 
+def cmd_release_inbox(args) -> int:
+    """Undo this deliverer's own claim after a failed hand-over.
+
+    ``claim-inbox`` stages messages out of the pending pool; if the extension
+    then fails to inject them, they are invisible until the 60s stale-claim
+    sweep.  Releasing puts them back immediately, so the next delivery attempt
+    (the 2s watcher poll) picks them up instead of the sender waiting a minute.
+    """
+    from src.inbox import release_claimed_messages
+
+    name, cwd = _identity(args)
+    if not name or not cwd:
+        return _emit("0", args.json)
+    return _emit(str(release_claimed_messages(cwd, name, list(args.claim))), args.json)
+
+
 def cmd_status(args) -> int:
     from src.sessions import write_status_path
 
@@ -232,8 +258,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--to", required=True)
     p.add_argument("--body", default=None)
     p.add_argument("--cwd", default="")
-    # Compatibility with pi sessions running an older loaded extension while
-    # the checkout is updated in place. Delivery is always active on main.
+    # Compatibility for pi processes that loaded the branch's older extension
+    # before an in-place checkout update. Delivery is always active now.
     p.add_argument("--push", action="store_true", help=argparse.SUPPRESS)
 
     p = sub.add_parser("check-inbox")
@@ -261,11 +287,15 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--name", default="")
         p.add_argument("--cwd", default="")
 
-    p = sub.add_parser("commit-inbox")
-    p.set_defaults(fn=cmd_commit_inbox)
-    p.add_argument("--claim", action="append", default=[])
-    p.add_argument("--name", default="")
-    p.add_argument("--cwd", default="")
+    for command, fn in (
+        ("commit-inbox", cmd_commit_inbox),
+        ("release-inbox", cmd_release_inbox),
+    ):
+        p = sub.add_parser(command)
+        p.set_defaults(fn=fn)
+        p.add_argument("--claim", action="append", default=[])
+        p.add_argument("--name", default="")
+        p.add_argument("--cwd", default="")
 
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)

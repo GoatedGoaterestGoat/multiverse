@@ -250,7 +250,7 @@ def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
-def _env_without_session_vars() -> dict[str, str]:
+def _env_without_session_vars(*, drop_keys: tuple[str, ...] = ()) -> dict[str, str]:
     """Return ``os.environ`` minus session-scoped ``MULTIVERSE_*`` vars.
 
     Why this matters: when ``ask_agent`` is called by a running multiverse
@@ -271,8 +271,17 @@ def _env_without_session_vars() -> dict[str, str]:
 
     ``MULTIVERSE_PLUGIN_ROOT`` is read by the caller BEFORE calling this,
     so the ``--plugin-dir`` CLI flag is still correctly populated.
+
+    ``drop_keys`` strips additional runtime-owned session variables. The pi
+    fork drops only ``PI_CODING_AGENT_SESSION_DIR``: its explicit scratch
+    directory must win, while ``PI_CODING_AGENT_DIR`` must remain available
+    because it carries the target runtime's settings and credentials.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("MULTIVERSE_")}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("MULTIVERSE_") and k not in drop_keys
+    }
 
 
 def _response_result(message: dict, request_id: int) -> dict:
@@ -622,7 +631,12 @@ def _ask_one_pi(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=_env_without_session_vars(),
+                # Do not let an inherited session-dir override the scratch
+                # fork location. Keep PI_CODING_AGENT_DIR, though: it carries
+                # the target runtime's settings and credentials.
+                env=_env_without_session_vars(
+                    drop_keys=("PI_CODING_AGENT_SESSION_DIR",)
+                ),
             )
             if result.returncode != 0:
                 err = (
@@ -641,9 +655,10 @@ def _ask_one_pi(
     except Exception as exc:  # noqa: BLE001 — surface transport failures
         err = f"subprocess error: {exc}"[:400]
     finally:
-        # The fork is deliberately outside pi's configured session roots, so
-        # it can never surface as a dormant agent. No global fork registry is
-        # needed and an empty artifact can never become a dangerous Path('.').
+        # The fork is deliberately outside pi's configured session roots (both
+        # by --session-dir and by stripping its session-dir override above), so it can
+        # never surface as a dormant agent. No global fork registry is needed
+        # and an empty artifact can never become a dangerous Path('.').
         shutil.rmtree(scratch, ignore_errors=True)
 
     return AskResult(

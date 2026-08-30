@@ -2237,6 +2237,10 @@ class SBConnector:
             foreign_host_still_reported_live,
             kill_session,
         )
+        if not _supports_secondbrain_runtime(target.runtime):
+            raise RuntimeError(
+                f"runtime '{target.runtime}' is not supported by SecondBrain"
+            )
         native_session_id = target.session_id
         if not native_session_id and target.session is not None:
             native_session_id = target.session.runtime_session_id

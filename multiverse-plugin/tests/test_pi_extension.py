@@ -240,8 +240,8 @@ class PiExtensionEndToEndTests(unittest.TestCase):
         d = _inbox_dir(self.state, self.ws, self.name)
         return len(list(d.glob("*.json"))) if d.is_dir() else 0
 
-    def test_idle_rpc_session_delivers_and_commits_inbox_message(self) -> None:
-        """Exercise the live watcher through pi's long-lived RPC mode."""
+    def test_idle_rpc_delivery_commit_and_internal_session_switch(self) -> None:
+        """Exercise the live watcher and `/new` lifecycle through RPC mode."""
         self._queue("MARKER-LIVE-INBOX-DELIVERY")
         script_path = self.work / "rpc-script.json"
         script_path.write_text(json.dumps([{"text": "Inbox acknowledged."}]))
@@ -281,6 +281,34 @@ class PiExtensionEndToEndTests(unittest.TestCase):
                     delivered = True
                     break
                 time.sleep(0.1)
+            # A pi `/new` emits session_shutdown for the old native session,
+            # but the managed process remains live. It must not mark the
+            # Multiverse wrapper terminally ended before the replacement's
+            # session_start/idle event.
+            native_id_path = self.session_dir / "runtime_session_id"
+            old_native_id = native_id_path.read_text().strip()
+            assert rpc.stdin is not None
+            rpc.stdin.write('{"id":"switch","type":"new_session"}\n')
+            rpc.stdin.flush()
+            switched_live = False
+            switch_deadline = time.monotonic() + 15
+            while time.monotonic() < switch_deadline:
+                if rpc.poll() is not None:
+                    break
+                if native_id_path.is_file():
+                    new_native_id = native_id_path.read_text().strip()
+                    try:
+                        current_status = json.loads(
+                            self.status_path.read_text()
+                        )["status"]
+                    except (OSError, ValueError, KeyError):
+                        current_status = ""
+                    if new_native_id and new_native_id != old_native_id:
+                        if current_status == "idle":
+                            switched_live = True
+                            break
+                time.sleep(0.1)
+
             rpc.terminate()
             rpc.wait(timeout=10)
             if rpc.stdin is not None:
@@ -296,6 +324,10 @@ class PiExtensionEndToEndTests(unittest.TestCase):
         self.assertTrue(
             delivered,
             "the live pi watcher did not inject the inbox message\n" + diagnostics,
+        )
+        self.assertTrue(
+            switched_live,
+            "an internal pi session switch left the wrapper ended\n" + diagnostics,
         )
         inbox = _inbox_dir(self.state, self.ws, self.name)
         self.assertEqual(

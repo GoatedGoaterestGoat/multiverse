@@ -55,10 +55,10 @@ behaves the same whether or not someone is attached.
 
 `mvctl claim-inbox` *stages* pending messages and returns their claim names;
 only `mvctl commit-inbox --claim <name>` removes them after `pi.sendMessage`
-accepts the injection call. A synchronous injection failure or process exit
-before that point leaves the staged files for Multiverse's stale-claim
-recovery. If the commit fails, the safe failure mode is a duplicate delivery
-on the next poll.
+accepts the injection call. A synchronous injection failure releases this
+deliverer's claims immediately so the next poll can retry; process death leaves
+the staged files for Multiverse's stale-claim recovery. If the commit fails,
+the safe failure mode is a duplicate delivery on the next poll.
 
 `pi.sendMessage` is fire-and-forget and provides no later acknowledgement, so
 an asynchronous rejection beyond the injection call cannot be observed by the
