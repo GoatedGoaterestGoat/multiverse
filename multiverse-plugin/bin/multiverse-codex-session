@@ -93,6 +93,10 @@ RUNTIME_PID=""
 
 write_status() {
   local status="$1" ts tmp
+  if [ "$status" != "ending" ] \
+    && [ -e "$(dirname "$MULTIVERSE_STATUS")/ending" ]; then
+    return 0
+  fi
   ts=$(date +%s)
   tmp="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
   if printf '{"status":"%s","ts":%d}\n' "$status" "$ts" > "$tmp"; then

@@ -24,6 +24,11 @@ _SCRIPT = "codex-session-hook"
 
 def _write_status(status_path: Path, status: str) -> None:
     try:
+        # Dashboard teardown creates this before writing `ending`. Codex may
+        # emit Stop/PostToolUse while handling SIGTERM; those late lifecycle
+        # events must not make the session look interactive again.
+        if (status_path.parent / "ending").is_file():
+            return
         status_path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp_name = tempfile.mkstemp(
             prefix=f".{status_path.name}.",

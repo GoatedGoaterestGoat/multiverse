@@ -1992,12 +1992,13 @@ class SBConnector:
         toolsmith). Runs as a background task off the receiver.
 
         Routing by target status:
-          idle/working/waiting/listening → tmux send-keys with save/clear/restore
+          idle/working/listening         → tmux send-keys with save/clear/restore
                                             (ignores attached-check — per user directive)
+          waiting                       → refuse while its interactive modal is open
           dormant/ended                  → create_session(initial_prompt=text) — auto-submits
                                             as the first user turn via the runtime wrapper
           starting                       → wait bounded for ready, then send-keys
-          compacting (locked)            → refuse with a specific message; SB retries later
+          compacting/ending (locked)     → refuse with a specific message; SB retries later
 
         Errors: not_found | forbidden | locked | deliver_failed. All ActionResults are
         cached in ``self.dedup`` so a retry with the same action_id returns the cached
@@ -2097,11 +2098,24 @@ class SBConnector:
         if not native_session_id and target.session is not None:
             native_session_id = target.session.runtime_session_id
 
-        # Compacting → locked → refuse with the user's phrasing.
-        if target.claude_uuid and is_locked(target.claude_uuid):
+        # The status is part of the durable roster and must be sufficient on
+        # its own. The lock remains an authoritative second source for the
+        # small cross-monitor windows where a compaction status is stale.
+        if target.status == "compacting" or (
+            target.claude_uuid and is_locked(target.claude_uuid)
+        ):
             return (
                 "locked", "",
                 f"'{agent_name}' can't be prompted right now because it is compacting.",
+            )
+
+        if target.status == "ending" or (
+            target.session is not None
+            and target.session.ending_marker_path.is_file()
+        ):
+            return (
+                "locked", "",
+                f"'{agent_name}' can't be prompted right now because it is ending.",
             )
 
         # If the session is None (never wrapped) or ended → dormant path.
@@ -2165,6 +2179,15 @@ class SBConnector:
             ok, err = sb_actions.wait_for_ready(tmux_name, runtime=target.runtime)
             if not ok:
                 return ("deliver_failed", "", f"target didn't become ready: {err}")
+
+        # Re-check the teardown claim immediately before terminal input. A
+        # prompt may have entered the bounded starting wait just before the
+        # user pressed `k`; the earlier status snapshot is no longer enough.
+        if session.ending_marker_path.is_file():
+            return (
+                "locked", "",
+                f"'{agent_name}' can't be prompted right now because it is ending.",
+            )
 
         # require_composer closes the window between the status read above and these
         # keystrokes. `waiting` is refused up front, but status is a snapshot -- a target

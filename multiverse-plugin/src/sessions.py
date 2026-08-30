@@ -52,6 +52,7 @@ _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _PANE_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _PANE_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _CLAIM_DIR_NAME = "session_claims"
+_ENDING_MARKER_NAME = "ending"
 
 # Custom-title stamped on the throwaway transcripts our OWN compaction
 # machinery writes (vendor/compaction/priv_session.py::_metadata_row). The
@@ -503,6 +504,10 @@ class Session:
         return self.dir / "runtime_pid"
 
     @property
+    def ending_marker_path(self) -> Path:
+        return self.dir / _ENDING_MARKER_NAME
+
+    @property
     def meta_path(self) -> Path:
         return self.dir / "meta.json"
 
@@ -630,6 +635,12 @@ def _read_text_stripped(path: Path) -> Optional[str]:
 
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
     """Atomically persist the common Multiverse status shape."""
+    # Dashboard-initiated teardown owns the status until tmux is gone. Runtime
+    # hooks can still fire while SIGTERM is being handled; without this marker a
+    # Stop/SessionEnd hook could replace ``ending`` with idle/ended before the
+    # teardown operation has actually finished.
+    if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
+        return
     atomic_write_json(
         path,
         {"status": status, "ts": time.time() if ts is None else ts},
@@ -852,10 +863,32 @@ def _terminate_tmux_pane_runtime(
 def _mark_session_ended(s: Session) -> None:
     now = time.time()
     try:
+        s.ending_marker_path.unlink(missing_ok=True)
         write_status_path(s.status_path, "ended", now)
     except OSError:
         pass
     s.status = "ended"
+    s.status_ts = now
+
+
+def mark_session_ending(s: Session) -> None:
+    """Persist the non-interactive state used during dashboard teardown.
+
+    The marker is created before the status write so a racing runtime hook
+    either wins before us (and is immediately overwritten by ``ending``) or
+    sees the marker and leaves the teardown-owned status alone.
+    """
+    now = time.time()
+    s.ending_marker_path.touch(exist_ok=True)
+    try:
+        write_status_path(s.status_path, "ending", now)
+    except Exception:
+        try:
+            s.ending_marker_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    s.status = "ending"
     s.status_ts = now
 
 
@@ -880,6 +913,11 @@ def _correct_local_liveness(s: Session) -> bool:
     runtime_is_owned = bool(
         runtime_pid and _codex_runtime_pid_matches(s, runtime_pid)
     )
+    # Runtime-first teardown deliberately leaves a short interval where Codex
+    # has exited but its tmux session still exists. Keep rendering ``ending``
+    # for that whole interval instead of correcting it prematurely to ended.
+    if s.status == "ending" and tmux_exists:
+        return False
     if not tmux_exists:
         if within_startup_grace:
             return False
@@ -969,9 +1007,10 @@ _STATUS_SORT = {
     "listening": 1,
     "starting": 1,
     "idle": 1,
+    "ending": 1,
     "unknown": 2,
-    "dormant": 3,
-    "ended": 4,
+    "ended": 3,
+    "dormant": 4,
 }
 
 

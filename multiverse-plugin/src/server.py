@@ -522,9 +522,10 @@ _STATUS_PRIORITY = {
     "listening": 1,
     "starting": 1,
     "idle": 1,
+    "ending": 1,
     "unknown": 2,
-    "dormant": 3,
-    "ended": 4,
+    "ended": 3,
+    "dormant": 4,
 }
 
 
@@ -542,6 +543,7 @@ def list_agents(
 
     Status values:
       - idle / working / waiting / starting — currently running
+      - ending   — runtime teardown is in progress (not interactive)
       - ended    — was running, now stopped (still resumable)
       - dormant  — never wrapped by multiverse this run, but the underlying
                    transcript exists and is named
@@ -702,6 +704,8 @@ def message_agent(
         the user can't interact with it during compaction), so it is NOT
         woken; the message queues and is delivered once compaction finishes
         and the session resumes.
+      - ending → runtime teardown is already in progress, so it is NOT woken
+        or auto-resumed; the message stays queued for the next resume.
 
     In every case the message is queued in the recipient's inbox first, so
     the states that can't be woken still receive it through their normal
@@ -816,19 +820,37 @@ def message_agent(
         "call monitor_inbox to wait for it (it blocks), or check_inbox later."
     )
 
+    def ending_queue_result() -> str:
+        log_route("passive_fallback_ending")
+        return (
+            f"Message queued for '{target_name}' — it's currently ending, so "
+            "no terminal ping or auto-resume was attempted. "
+            + _queued_next_step(target.runtime, dormant=True)
+            + reply_hint
+        )
+
     # A compacting agent is LOCKED: its tmux pane is killed for the duration
     # of the compaction and even the user can't attach/interact. Never wake
     # it (no auto-resume, no terminal ping) — leave the message queued, to
     # be picked up when compaction finishes and the session resumes. Checked
-    # against the compaction lock directly (authoritative) rather than the
-    # status string.
-    if target.claude_uuid and is_locked(target.claude_uuid):
+    # against both the durable status and compaction lock. The explicit status
+    # check closes the short windows before lock discovery or after a stale
+    # lock has been cleaned up.
+    if target.status == "compacting" or (
+        target.claude_uuid and is_locked(target.claude_uuid)
+    ):
         log_route("passive_fallback_compacting")
         return (
             f"Message queued for '{target_name}' — it's currently compacting "
             "(locked), so the message will be delivered once compaction "
             "finishes and the session resumes." + reply_hint
         )
+
+    if target.status == "ending" or (
+        target.session is not None
+        and target.session.ending_marker_path.is_file()
+    ):
+        return ending_queue_result()
 
     # Actively wake the recipient.
     if is_dormant:
@@ -903,6 +925,12 @@ def message_agent(
         # the ping, and the resulting mark must be one indivisible step, or two
         # concurrent senders both read "nothing outstanding" and both ping.
         with wake_delivery_lock(cwd, target_name):
+            # The dashboard can claim teardown after our roster snapshot but
+            # before we acquire the recipient delivery lock. Re-check the
+            # durable marker before sending any keystrokes.
+            if target.session.ending_marker_path.is_file():
+                return ending_queue_result()
+
             # Authoritative re-check, inside the lock. The earlier call ran
             # before our own inbox write so it could still see an empty inbox
             # and retire a stale marker; this one decides.

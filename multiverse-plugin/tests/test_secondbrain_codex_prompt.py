@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -463,6 +464,50 @@ class CodexPromptConnectorTests(unittest.TestCase):
         foreign, send, _ = self._deliver(self._target(host="remote-host"))
         self.assertEqual(foreign[0], "deliver_failed")
         self.assertIn("remote-host", foreign[2])
+        send.assert_not_called()
+
+    def test_ending_and_status_only_compacting_sessions_are_locked(self) -> None:
+        for status in ("ending", "compacting"):
+            with self.subTest(status=status):
+                result, send, wait = self._deliver(
+                    self._target(status=status)
+                )
+
+                self.assertEqual(result[0], "locked")
+                self.assertIn(status, result[2])
+                send.assert_not_called()
+                wait.assert_not_called()
+
+    def test_starting_prompt_is_not_sent_if_kill_begins_while_waiting(
+        self,
+    ) -> None:
+        target = self._target(status="starting")
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = state_dir / target.session.id
+            session_dir.mkdir()
+
+            def begin_ending(*_args, **_kwargs):
+                (session_dir / "ending").touch()
+                return True, ""
+
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "find_agent_by_name", return_value=target),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=True),
+                patch.object(compact_state, "is_locked", return_value=False),
+                patch.object(
+                    sb_actions, "wait_for_ready", side_effect=begin_ending
+                ),
+                patch.object(sb_actions, "send_prompt_via_tmux") as send,
+            ):
+                result = self.connector._deliver_prompt_blocking(
+                    self.cwd, target.name, "Remote prompt"
+                )
+
+        self.assertEqual(result[0], "locked")
+        self.assertIn("ending", result[2])
         send.assert_not_called()
 
     def test_missing_tmux_and_injection_failure_keep_delivery_error(self) -> None:

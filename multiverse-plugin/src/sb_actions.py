@@ -24,6 +24,8 @@ Delivery strategies by target status:
   ``create_session`` with ``initial_prompt=<text>``, which writes it to a file that
   the runtime wrapper hands to the resumed CLI as a positional prompt argument.
 - **starting** → :func:`wait_for_ready` first (bounded), then send-keys.
+- **compacting / ending** → REFUSED by the connector before this module is
+  called. Both are non-interactive transition states.
 
 All tmux calls are subprocess with tight timeouts so a hung tmux client can't wedge the
 handler. Every helper returns a plain error string on failure; the caller maps to an

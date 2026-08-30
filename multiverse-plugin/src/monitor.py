@@ -84,6 +84,7 @@ from .sessions import (
     list_claude_sessions_in,
     list_codex_sessions_in,
     list_sessions,
+    mark_session_ending,
     strip_fold_suffix,
     tmux_session_exists,
     wrapped_runtime_session_ids,
@@ -105,6 +106,7 @@ STATUS_STYLES = {
     "waiting": "bold red",
     "listening": "bold cyan",
     "starting": "cyan",
+    "ending": "bold red",
     "ended": "dim strike",
     "dormant": "blue",
     "compacting": "bold magenta",
@@ -115,6 +117,7 @@ STATUS_STYLES = {
 # waiting/starting/compacting are excluded — the session is busy or
 # already locked.
 _COMPACTABLE_STATUSES = {"idle", "ended", "dormant"}
+_ENDING_MIN_VISIBLE_SECONDS = 0.25
 
 
 class _SpawnAttachGuard:
@@ -3572,6 +3575,19 @@ class MonitorApp(App):
         arrives while they're inside. On forced detach, queues a reattach
         that will fire once the spawn queue fully drains.
         """
+        session = next(
+            (item for item in self.sessions if item.tmux_name == tmux_session),
+            None,
+        )
+        if session is not None and (
+            session.status == "ending" or session.ending_marker_path.is_file()
+        ):
+            self.notify(
+                "Session is ending — attach is disabled until teardown finishes",
+                severity="warning",
+            )
+            return
+
         guard = _SpawnAttachGuard(cwd=self.monitor_cwd, tmux_session=tmux_session)
         guard.start()
         try:
@@ -3629,6 +3645,13 @@ class MonitorApp(App):
             self.notify(
                 "Session is compacting in another monitor — wait until it "
                 "finishes",
+                severity="warning",
+            )
+            return
+
+        if e.status == "ending":
+            self.notify(
+                "Session is ending — attach is disabled until teardown finishes",
                 severity="warning",
             )
             return
@@ -3806,6 +3829,9 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
+        if e.status == "ending":
+            self.notify("Session is already ending", severity="warning")
+            return
         if e.session is None:
             native_session_id = e.session_id
             cwd = e.cwd
@@ -3857,18 +3883,11 @@ class MonitorApp(App):
             def _on_force_close(confirmed: Optional[bool]) -> None:
                 if not confirmed:
                     return
-                try:
-                    kill_session(session)
-                except RuntimeError as exc:
-                    self.notify(
-                        f"Could not stop runtime: {exc}", severity="error"
-                    )
-                    return
-                self.notify(
+                self._begin_session_kill(
+                    session,
                     f"Force-killed '{display_name}' "
-                    f"(was on host {session.host})"
+                    f"(was on host {session.host})",
                 )
-                self.refresh_sessions()
 
             self.push_screen(
                 ConfirmForceKillScreen(
@@ -3879,12 +3898,49 @@ class MonitorApp(App):
                 _on_force_close,
             )
             return
+
+        self._begin_session_kill(e.session, f"Killed {e.session.id}")
+
+    def _begin_session_kill(self, session: Session, success_message: str) -> None:
+        """Render ``ending`` before starting runtime teardown in a worker."""
         try:
-            kill_session(e.session)
-        except RuntimeError as exc:
-            self.notify(f"Could not stop runtime: {exc}", severity="error")
+            mark_session_ending(session)
+        except OSError as exc:
+            self.notify(f"Could not mark session as ending: {exc}", severity="error")
             return
-        self.notify(f"Killed {e.session.id}")
+
+        # Rebuild from the durable status so this monitor and every other
+        # monitor agree before teardown starts. The blocking signals/waits run
+        # in a worker so Textual can actually present and maintain this state.
+        self.refresh_sessions()
+        self.call_after_refresh(
+            self._kill_session_worker, session, success_message
+        )
+
+    @work(thread=True, group="session_kill")
+    def _kill_session_worker(
+        self, session: Session, success_message: str
+    ) -> None:
+        # A fast-exiting runtime can otherwise transition from idle to dormant
+        # between terminal frames. Keep the explicit transition visible long
+        # enough to be useful without materially delaying teardown.
+        time.sleep(_ENDING_MIN_VISIBLE_SECONDS)
+        error: Optional[str] = None
+        try:
+            kill_session(session)
+        except RuntimeError as exc:
+            error = str(exc)
+        self.call_from_thread(
+            self._finish_session_kill, success_message, error
+        )
+
+    def _finish_session_kill(
+        self, success_message: str, error: Optional[str]
+    ) -> None:
+        if error is not None:
+            self.notify(f"Could not stop runtime: {error}", severity="error")
+        else:
+            self.notify(success_message)
         self.refresh_sessions()
 
     def action_compact(self) -> None:

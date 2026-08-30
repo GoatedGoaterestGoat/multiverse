@@ -169,6 +169,19 @@ class AtomicFilePrimitiveTests(unittest.TestCase):
             [],
         )
 
+    def test_claude_status_hook_preserves_dashboard_ending_state(self) -> None:
+        path = self.root / "status.json"
+        path.write_text(json.dumps({"status": "ending", "ts": 1}))
+        (self.root / "ending").touch()
+        script = Path(__file__).resolve().parents[1] / "scripts" / "set-status.sh"
+        env = {**os.environ, "MULTIVERSE_STATUS": str(path)}
+
+        for status in ("idle", "working", "ended"):
+            proc = subprocess.run([str(script), status], env=env, check=False)
+            self.assertEqual(proc.returncode, 0)
+
+        self.assertEqual(json.loads(path.read_text())["status"], "ending")
+
 
 class SharedStateRaceTests(unittest.TestCase):
     def setUp(self) -> None:

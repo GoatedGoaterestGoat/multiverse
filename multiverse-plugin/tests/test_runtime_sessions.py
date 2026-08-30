@@ -379,6 +379,91 @@ class RuntimeMetadataTests(unittest.TestCase):
         )
 
 
+class EndingStatusTests(unittest.TestCase):
+    def test_ending_marker_owns_status_until_session_is_reaped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = state_dir / "wrapped"
+            session_dir.mkdir()
+            (session_dir / "status.json").write_text(
+                json.dumps({"status": "idle", "ts": 1})
+            )
+            wrapped = sessions.Session(
+                id="wrapped",
+                cwd="/workspace",
+                created_at=1,
+                status="idle",
+                name="agent",
+            )
+            with patch.object(sessions, "STATE_DIR", state_dir):
+                sessions.mark_session_ending(wrapped)
+                sessions.write_status_path(wrapped.status_path, "ended", 3)
+
+                self.assertTrue(wrapped.ending_marker_path.is_file())
+                self.assertEqual(wrapped.status, "ending")
+                self.assertEqual(
+                    json.loads(wrapped.status_path.read_text())["status"],
+                    "ending",
+                )
+
+                sessions._mark_session_ended(wrapped)
+
+                self.assertFalse(wrapped.ending_marker_path.exists())
+                self.assertEqual(
+                    json.loads(wrapped.status_path.read_text())["status"],
+                    "ended",
+                )
+
+    def test_dashboard_orders_ending_with_idle_and_ended_before_dormant(
+        self,
+    ) -> None:
+        wrapped = [
+            sessions.Session(
+                id="idle",
+                cwd="/workspace",
+                created_at=1,
+                status="idle",
+                status_ts=50,
+                name="idle-agent",
+            ),
+            sessions.Session(
+                id="ending",
+                cwd="/workspace",
+                created_at=1,
+                status="ending",
+                status_ts=40,
+                name="ending-agent",
+            ),
+            sessions.Session(
+                id="ended",
+                cwd="/workspace",
+                created_at=1,
+                status="ended",
+                status_ts=1,
+                name="ended-agent",
+            ),
+        ]
+        dormant = [{
+            "id": "dormant-thread",
+            "name": "dormant-agent",
+            "preview": "prompt",
+            "mtime": 100,
+        }]
+        with (
+            patch.object(sessions.forks, "gc"),
+            patch.object(sessions.forks, "active_uuids", return_value=set()),
+            patch.object(sessions, "list_codex_sessions_in", return_value=dormant),
+            patch.object(sessions, "list_locked", return_value=set()),
+            patch.object(sessions, "CLAUDE_PROJECTS_DIR", Path("/missing")),
+        ):
+            rows = sessions.build_dashboard_rows(wrapped, "/workspace")
+
+        self.assertEqual(
+            [row.name for row in rows],
+            ["idle-agent", "ending-agent", "ended-agent", "dormant-agent"],
+        )
+
+
 class RuntimeLivenessTests(unittest.TestCase):
     def _write_session(
         self,
@@ -456,6 +541,26 @@ class RuntimeLivenessTests(unittest.TestCase):
             self.assertEqual(
                 json.loads((session_dir / "status.json").read_text())["status"],
                 "ended",
+            )
+
+    def test_ending_is_not_corrected_while_tmux_teardown_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state_dir = Path(raw)
+            session_dir = self._write_session(state_dir, status="ending")
+            (session_dir / "ending").touch()
+            (session_dir / "runtime_pid").write_text("4242\n")
+            with (
+                patch.object(sessions, "STATE_DIR", state_dir),
+                patch.object(sessions, "current_host", return_value="local-host"),
+                patch.object(sessions, "tmux_session_exists", return_value=True),
+                patch.object(sessions, "_pid_alive", return_value=False),
+            ):
+                found = sessions.list_sessions()
+
+            self.assertEqual(found[0].status, "ending")
+            self.assertEqual(
+                json.loads((session_dir / "status.json").read_text())["status"],
+                "ending",
             )
 
     def test_live_codex_pid_keeps_current_status(self) -> None:
@@ -1059,7 +1164,69 @@ class CodexHookTests(unittest.TestCase):
             self.assertEqual(native_id.read_text().strip(), "codex-thread")
             self.assertEqual(json.loads(status.read_text())["status"], "idle")
 
+    def test_hook_does_not_overwrite_dashboard_ending_state(self) -> None:
+        hook = (
+            Path(__file__).resolve().parents[2]
+            / "plugins"
+            / "multiverse-codex"
+            / "scripts"
+            / "session-hook.py"
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            state = Path(raw)
+            status = state / "status.json"
+            status.write_text(json.dumps({"status": "ending", "ts": 1}))
+            (state / "ending").touch()
+            env = {
+                **_isolated_process_env(),
+                "MULTIVERSE_STATUS": str(status),
+            }
+
+            proc = subprocess.run(
+                [sys.executable, str(hook)],
+                input=json.dumps({"hook_event_name": "Stop", "cwd": str(state)}),
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(status.read_text())["status"], "ending")
+
 class CodexRunnerTests(unittest.TestCase):
+    def test_runner_cleanup_preserves_dashboard_ending_state(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
+        plugin_root = repo_root / "plugins" / "multiverse-codex"
+        with tempfile.TemporaryDirectory() as raw:
+            temp_dir = Path(raw)
+            status = temp_dir / "status.json"
+            status.write_text(json.dumps({"status": "ending", "ts": 1}))
+            (temp_dir / "ending").touch()
+            fake_codex = temp_dir / "codex"
+            fake_codex.write_text("#!/usr/bin/env bash\nexit 0\n")
+            fake_codex.chmod(0o755)
+            env = {
+                **_isolated_process_env(),
+                "MULTIVERSE_CODEX_BIN": str(fake_codex),
+                "MULTIVERSE_CODEX_PLUGIN_ROOT": str(plugin_root),
+                "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
+                "MULTIVERSE_STATUS": str(status),
+                "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime_pid"),
+            }
+
+            proc = subprocess.run(
+                [str(runner)],
+                text=True,
+                capture_output=True,
+                env=env,
+                check=False,
+            )
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(json.loads(status.read_text())["status"], "ending")
+
     def test_runner_names_spawned_thread_after_session_start(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         runner = (

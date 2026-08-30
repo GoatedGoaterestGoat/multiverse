@@ -265,6 +265,51 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
                     f"passive_fallback_{status}",
                 )
 
+    def test_ending_and_status_only_compacting_never_receive_terminal_input(
+        self,
+    ) -> None:
+        for status in ("ending", "compacting"):
+            with self.subTest(status=status):
+                target = self._target(name=f"target-{status}", status=status)
+                with (
+                    patch.object(server, "_wake_via_tmux") as wake,
+                    patch.object(server, "send_prompt_via_tmux") as send,
+                    patch.object(server, "_auto_resume") as resume,
+                ):
+                    result, _, routed = self._message(target)
+
+                wake.assert_not_called()
+                send.assert_not_called()
+                resume.assert_not_called()
+                self.assertEqual(
+                    inbox.pending_inbox_count(self.cwd, target.name), 1
+                )
+                self.assertIn(f"currently {status}", result)
+                self.assertEqual(
+                    routed.call_args.kwargs["route"],
+                    f"passive_fallback_{status}",
+                )
+
+    def test_durable_ending_marker_overrides_stale_idle_snapshot(self) -> None:
+        target = self._target(status="idle")
+        state_dir = self.root / "sessions"
+        target_dir = state_dir / target.session.id
+        target_dir.mkdir(parents=True)
+        (target_dir / "ending").touch()
+        with (
+            patch.object(sessions, "STATE_DIR", state_dir),
+            patch.object(server, "_wake_via_tmux") as wake,
+            patch.object(server, "send_prompt_via_tmux") as send,
+        ):
+            result, _, routed = self._message(target)
+
+        wake.assert_not_called()
+        send.assert_not_called()
+        self.assertIn("currently ending", result)
+        self.assertEqual(
+            routed.call_args.kwargs["route"], "passive_fallback_ending"
+        )
+
     def test_failed_terminal_ping_keeps_codex_message_queued(self) -> None:
         target = self._target()
         with patch.object(server, "_wake_via_tmux", return_value=False):

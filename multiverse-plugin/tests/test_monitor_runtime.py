@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -36,6 +38,180 @@ class DashboardRuntimeRenderingTests(unittest.TestCase):
 
         build_enabled.assert_not_called()
         self.assertEqual(table.add_row.call_args.args[4], "[dim]-[/]")
+
+
+class DashboardEndingTests(unittest.TestCase):
+    def _session(self) -> monitor.Session:
+        return monitor.Session(
+            id="wrapper-id",
+            cwd="/workspace",
+            created_at=1,
+            status="ending",
+            status_ts=2,
+            name="agent",
+            runtime=monitor.RUNTIME_CODEX,
+        )
+
+    def test_enter_refuses_to_attach_to_ending_session(self) -> None:
+        session = self._session()
+        row = monitor.DashboardRow(
+            name="agent",
+            cwd="/workspace",
+            status="ending",
+            status_ts=2,
+            runtime=monitor.RUNTIME_CODEX,
+            session=session,
+        )
+        app = monitor.MonitorApp([])
+        with (
+            patch.object(app, "_current_entry", return_value=row),
+            patch.object(app, "_attach_to") as attach,
+            patch.object(app, "notify") as notify,
+        ):
+            app.action_primary()
+
+        attach.assert_not_called()
+        self.assertIn("attach is disabled", notify.call_args.args[0])
+
+    def test_internal_reattach_path_also_refuses_ending_session(self) -> None:
+        session = self._session()
+        app = monitor.MonitorApp([])
+        app.sessions = [session]
+        with (
+            patch.object(monitor, "_SpawnAttachGuard") as guard,
+            patch.object(monitor, "attach_tmux_session") as attach,
+            patch.object(app, "notify") as notify,
+        ):
+            app._attach_to(session.tmux_name)
+
+        guard.assert_not_called()
+        attach.assert_not_called()
+        self.assertIn("attach is disabled", notify.call_args.args[0])
+
+    def test_kill_worker_is_deferred_until_after_ending_refresh(self) -> None:
+        session = self._session()
+        session.status = "idle"
+        events: list[str] = []
+        callbacks = []
+        app = monitor.MonitorApp([])
+
+        def mark(_session):
+            events.append("mark")
+
+        def refresh():
+            events.append("refresh")
+
+        def schedule(callback, *args):
+            events.append("schedule")
+            callbacks.append(lambda: callback(*args))
+
+        with (
+            patch.object(monitor, "mark_session_ending", side_effect=mark),
+            patch.object(app, "refresh_sessions", side_effect=refresh),
+            patch.object(app, "call_after_refresh", side_effect=schedule),
+            patch.object(
+                app,
+                "_kill_session_worker",
+                side_effect=lambda *_args: events.append("worker"),
+            ) as worker,
+        ):
+            app._begin_session_kill(session, "Killed wrapper-id")
+
+            self.assertEqual(events, ["mark", "refresh", "schedule"])
+            worker.assert_not_called()
+
+            callbacks[0]()
+
+        self.assertEqual(
+            events,
+            ["mark", "refresh", "schedule", "worker"],
+        )
+
+    def test_kill_worker_completion_refreshes_success_and_failure(self) -> None:
+        app = monitor.MonitorApp([])
+        with (
+            patch.object(app, "notify") as notify,
+            patch.object(app, "refresh_sessions") as refresh,
+        ):
+            app._finish_session_kill("Killed wrapper-id", None)
+            app._finish_session_kill("Killed wrapper-id", "signal failed")
+
+        self.assertEqual(notify.call_count, 2)
+        self.assertEqual(notify.call_args_list[0].args[0], "Killed wrapper-id")
+        self.assertIn("signal failed", notify.call_args_list[1].args[0])
+        self.assertEqual(notify.call_args_list[1].kwargs["severity"], "error")
+        self.assertEqual(refresh.call_count, 2)
+
+
+class DashboardEndingAsyncTests(unittest.IsolatedAsyncioTestCase):
+    async def test_claude_teardown_keeps_ui_live_in_ending_state(self) -> None:
+        session = monitor.Session(
+            id="claude-wrapper",
+            cwd="/workspace",
+            created_at=1,
+            status="idle",
+            status_ts=1,
+            name="claude-agent",
+            runtime=monitor.RUNTIME_CLAUDE,
+        )
+        kill_started = threading.Event()
+        release_kill = threading.Event()
+
+        def rows(items, cwd=None, **_kwargs):
+            current = items[0]
+            return [
+                monitor.DashboardRow(
+                    name=current.name or "claude-agent",
+                    cwd=current.cwd,
+                    status=current.status,
+                    status_ts=current.status_ts,
+                    runtime=current.runtime,
+                    session=current,
+                )
+            ]
+
+        def mark_ending(current):
+            current.status = "ending"
+            current.status_ts = 2
+
+        def block_kill(current):
+            kill_started.set()
+            release_kill.wait(timeout=2)
+            current.status = "ended"
+            current.status_ts = 3
+
+        with (
+            patch.object(monitor, "list_sessions", return_value=[session]),
+            patch.object(monitor, "build_dashboard_rows", side_effect=rows),
+            patch.object(monitor, "list_pending_requests", return_value=[]),
+            patch.object(monitor.web_share, "status", return_value=None),
+            patch.object(monitor, "pending_inbox_count", return_value=0),
+            patch.object(monitor, "foreign_host_still_reported_live", return_value=False),
+            patch.object(monitor, "mark_session_ending", side_effect=mark_ending),
+            patch.object(monitor, "kill_session", side_effect=block_kill),
+            patch.object(monitor, "_ENDING_MIN_VISIBLE_SECONDS", 0.01),
+            patch.dict("os.environ", {"MULTIVERSE_ORIG_CWD": "/workspace"}),
+        ):
+            app = monitor.MonitorApp([])
+            try:
+                async with app.run_test() as pilot:
+                    await pilot.press("k")
+                    for _ in range(20):
+                        if kill_started.is_set():
+                            break
+                        await asyncio.sleep(0.01)
+
+                    self.assertTrue(kill_started.is_set())
+                    self.assertEqual(app.entries[0].status, "ending")
+                    self.assertTrue(app.is_running)
+                    release_kill.set()
+                    for _ in range(20):
+                        if app.entries[0].status == "ended":
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertEqual(app.entries[0].status, "ended")
+            finally:
+                release_kill.set()
 
 
 class SpawnAttachGuardTests(unittest.TestCase):
