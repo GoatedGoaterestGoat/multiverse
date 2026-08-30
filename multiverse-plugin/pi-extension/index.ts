@@ -448,10 +448,12 @@ async function deliverInbox(
 		for (const claim of pending.claims) args.push("--claim", claim);
 		await mvctl(exec, args, { timeout: 15_000 });
 	}
-	ctx.ui.notify(
-		`multiverse: delivered ${pending.count} inter-agent message(s)`,
-		"info",
-	);
+	if (ctx.hasUI) {
+		ctx.ui.notify(
+			`multiverse: delivered ${pending.count} inter-agent message(s)`,
+			"info",
+		);
+	}
 	return true;
 }
 

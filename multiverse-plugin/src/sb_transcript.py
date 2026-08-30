@@ -171,9 +171,16 @@ def _now_iso() -> str:
 
 
 def _resolve_agent_row(cwd: str, agent_name: str):  # noqa: ANN202
-    from .sessions import find_agent_by_name  # lazy: heavy deps, avoid cycle
+    from .sessions import (  # lazy: heavy deps, avoid cycle
+        RUNTIME_CLAUDE,
+        RUNTIME_CODEX,
+        find_agent_by_name,
+    )
 
-    return find_agent_by_name(cwd, agent_name)
+    row = find_agent_by_name(cwd, agent_name)
+    if row is None or row.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
+        return None
+    return row
 
 
 def _load_forest(claude_uuid: str, cwd: str):

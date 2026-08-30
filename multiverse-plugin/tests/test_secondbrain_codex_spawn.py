@@ -166,6 +166,19 @@ class SecondBrainSpawnDecisionRuntimeTests(unittest.TestCase):
         )
         recorder.assert_not_called()
 
+    def test_pi_spawn_request_cannot_be_approved_through_secondbrain(self) -> None:
+        self._write_request(runtime=sessions.RUNTIME_PI)
+
+        result, recorder = self._resolve("approve")
+
+        self.assertEqual(result[0], "err")
+        self.assertEqual(result[2], "deliver_failed")
+        self.assertIn("not supported by SecondBrain", result[3])
+        self.assertFalse(
+            (self.request_dir / "request-id.resolved.json").exists()
+        )
+        recorder.assert_not_called()
+
     def test_codex_spawn_events_do_not_add_runtime_to_wire_payloads(self) -> None:
         request = self._write_request()
 
@@ -254,6 +267,14 @@ class SecondBrainDirectSpawnRuntimeTests(unittest.TestCase):
             runtime=sessions.RUNTIME_CLAUDE,
             initial_prompt=None,
         )
+
+    def test_pi_policy_is_rejected_without_creating_an_agent(self) -> None:
+        result, create = self._deliver(runtime=sessions.RUNTIME_PI)
+
+        self.assertEqual(result[0], "err")
+        self.assertEqual(result[3], "deliver_failed")
+        self.assertIn("must be 'claude' or 'codex'", result[4])
+        create.assert_not_called()
 
     def test_duplicate_name_and_invalid_policy_do_not_create(self) -> None:
         with (

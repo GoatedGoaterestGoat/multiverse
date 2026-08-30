@@ -71,6 +71,11 @@ def resolution_path(req_id: str) -> Path:
     return SPAWN_REQUESTS_DIR / f"{req_id}.resolved.json"
 
 
+def _notifies_secondbrain(request: dict) -> bool:
+    """Pi spawn activity stays outside the unsupported SecondBrain seam."""
+    return request.get("caller_runtime", "claude") in ("claude", "codex")
+
+
 def write_spawn_request(
     req_id: str,
     from_name: str,
@@ -94,9 +99,11 @@ def write_spawn_request(
         "ts": time.time(),
     }
     atomic_write_json(path, data)
-    # Firsthand: record an agent.spawn_request for the SecondBrain connector at creation
-    # (no-op unless this workspace has connected to SB before). Never breaks the spawn flow.
-    sb_notify.record_spawn_request(data)
+    # Firsthand: record supported-runtime requests for the SecondBrain
+    # connector (no-op unless this workspace connected before). Pi explicitly
+    # has no SecondBrain integration. Never break the spawn flow.
+    if _notifies_secondbrain(data):
+        sb_notify.record_spawn_request(data)
     return path
 
 
@@ -188,7 +195,8 @@ def write_resolution(
     # details. This is exactly what a poll-based observer would miss on a fast rejection.
     try:
         req = json.loads(request_path(req_id).read_text())
-        sb_notify.record_spawn_decision(req, status, name)
+        if _notifies_secondbrain(req):
+            sb_notify.record_spawn_decision(req, status, name)
     except Exception:  # noqa: BLE001 - never break the resolution write
         pass
     return True

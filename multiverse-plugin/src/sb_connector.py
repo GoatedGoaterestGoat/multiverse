@@ -95,6 +95,16 @@ _WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
 _WORKSPACE_MAX_PARALLEL = 5
 
 
+def _supports_secondbrain_runtime(runtime: str) -> bool:
+    """SecondBrain is intentionally limited to Claude and Codex.
+
+    Pi participates in Multiverse's own dashboard and inter-agent protocol,
+    but this PR does not add Pi transcript, prompt, permission, or event
+    support to the separate SecondBrain seam.
+    """
+    return runtime in ("claude", "codex")
+
+
 def _ssl_for(url: str) -> "ssl.SSLContext | None":
     """Build an SSL context for a ``wss://`` URL using certifi's CA bundle.
 
@@ -1301,7 +1311,10 @@ class SBConnector:
         from . import sb_transcript
         from .sessions import list_named_agents_in_cwd
         try:
-            agents = list_named_agents_in_cwd(cwd)
+            agents = [
+                row for row in list_named_agents_in_cwd(cwd)
+                if _supports_secondbrain_runtime(row.runtime)
+            ]
         except Exception:  # noqa: BLE001
             log.debug("list_named_agents failed for %s", cwd, exc_info=True)
             return
@@ -1345,7 +1358,10 @@ class SBConnector:
 
         def _blocking() -> dict[str, str]:
             try:
-                agents = list_named_agents_in_cwd(cwd)
+                agents = [
+                    row for row in list_named_agents_in_cwd(cwd)
+                    if _supports_secondbrain_runtime(row.runtime)
+                ]
             except Exception as exc:  # noqa: BLE001
                 log.info("workspace summary: agent enumeration failed for %s: %s", cwd, exc)
                 return {}
@@ -1509,6 +1525,8 @@ class SBConnector:
             _, _, cwd = workspace_id.partition(":")
             try:
                 for row in list_named_agents_in_cwd(cwd):
+                    if not _supports_secondbrain_runtime(row.runtime):
+                        continue
                     sb_transcript.initialize_marker(cwd, row.name)
             except Exception:  # noqa: BLE001
                 log.debug("marker init failed for %s", cwd, exc_info=True)
@@ -2091,7 +2109,7 @@ class SBConnector:
         from .sessions import find_agent_by_name, current_host, tmux_session_exists
 
         target = find_agent_by_name(cwd_abs, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
 
         native_session_id = target.session_id
@@ -2347,7 +2365,7 @@ class SBConnector:
         from .sessions import find_agent_by_name, current_host, tmux_session_exists
 
         target = find_agent_by_name(cwd_abs, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
 
         # Locate the pending AskUserQuestion for this agent. Two paths:
@@ -2587,6 +2605,12 @@ class SBConnector:
             except ValueError as exc:
                 return ("err", "", "deliver_failed",
                         f"spawn request '{request_id}' has an invalid caller runtime: {exc}")
+            if not _supports_secondbrain_runtime(child_runtime):
+                return (
+                    "err", "", "deliver_failed",
+                    f"spawn request '{request_id}' uses runtime '{child_runtime}', "
+                    "which is not supported by SecondBrain",
+                )
             final_name = name if name else default_name
             wrote = sr.write_resolution(
                 request_id, "accepted", final_name, runtime=child_runtime
@@ -2729,6 +2753,11 @@ class SBConnector:
                 "err", "", "", "deliver_failed",
                 "invalid MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME: " + str(exc),
             )
+        if not _supports_secondbrain_runtime(runtime):
+            return (
+                "err", "", "", "deliver_failed",
+                "MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME must be 'claude' or 'codex'",
+            )
 
         try:
             sessions.create_session(
@@ -2862,7 +2891,7 @@ class SBConnector:
         from .sessions import RUNTIME_CODEX, find_agent_by_name, tmux_session_exists
 
         target = find_agent_by_name(cwd, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return "not_found", "", f"no agent named '{agent_name}' in this workspace"
         if target.claude_uuid and is_locked(target.claude_uuid):
             return "locked", "", f"'{agent_name}' is compacting; cannot answer right now"
@@ -3006,7 +3035,7 @@ class SBConnector:
             """Return (status, answer_or_none, error_message_or_none) where status is
             one of "ok"/"not_found"/"timeout"/"ask_failed"."""
             target = find_agent_by_name(cwd, agent_name)
-            if target is None:
+            if target is None or not _supports_secondbrain_runtime(target.runtime):
                 return ("not_found", None, f"no agent '{agent_name}' in this workspace")
             if not target.session_id and not target.claude_uuid:
                 return (

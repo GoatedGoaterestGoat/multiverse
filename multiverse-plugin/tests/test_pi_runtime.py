@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from src import ask_agents, pi_transcript, sb_notify, server, sessions
+from src import ask_agents, pi_transcript, sb_connector, sb_notify, server, sessions
 
 
 class PiTranscriptTests(unittest.TestCase):
@@ -226,6 +226,29 @@ class PiAskTests(unittest.TestCase):
 
 
 class PiMessageRoutingTests(unittest.TestCase):
+    def test_secondbrain_prompt_path_does_not_target_pi(self) -> None:
+        target = sessions.DashboardRow(
+            name="pi-agent",
+            cwd="/tmp/pi-message-workspace",
+            status="idle",
+            status_ts=1,
+            runtime=sessions.RUNTIME_PI,
+            session_id="native-pi",
+        )
+        connector = object.__new__(sb_connector.SBConnector)
+        with (
+            patch("src.sessions.find_agent_by_name", return_value=target),
+            patch(
+                "src.sb_actions.send_prompt_via_tmux",
+                side_effect=AssertionError("tmux used"),
+            ),
+        ):
+            result = connector._deliver_prompt_blocking(
+                target.cwd, target.name, "hello"
+            )
+
+        self.assertEqual(result[0], "not_found")
+
     def test_live_pi_delivery_never_types_into_tmux(self) -> None:
         cwd = "/tmp/pi-message-workspace"
         wrapped = sessions.Session(

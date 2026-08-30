@@ -240,6 +240,70 @@ class PiExtensionEndToEndTests(unittest.TestCase):
         d = _inbox_dir(self.state, self.ws, self.name)
         return len(list(d.glob("*.json"))) if d.is_dir() else 0
 
+    def test_idle_rpc_session_delivers_and_commits_inbox_message(self) -> None:
+        """Exercise the live watcher through pi's long-lived RPC mode."""
+        self._queue("MARKER-LIVE-INBOX-DELIVERY")
+        script_path = self.work / "rpc-script.json"
+        script_path.write_text(json.dumps([{"text": "Inbox acknowledged."}]))
+        requests_path = script_path.with_suffix(".requests.jsonl")
+
+        server = subprocess.Popen(
+            [sys.executable, str(MOCK_SERVER), "--port", str(self.port),
+             "--script", str(script_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(server.kill)
+        self._await_server()
+
+        rpc_log_path = self.work / "rpc.log"
+        with rpc_log_path.open("w") as rpc_log:
+            rpc = subprocess.Popen(
+                ["pi",
+                 "-e", str(MOCK_PROVIDER),
+                 "-e", str(EXTENSION),
+                 "--provider", "mock", "--model", "mock-model",
+                 "--no-extensions", "--no-skills", "--no-context-files",
+                 "--mode", "rpc"],
+                cwd=str(self.ws), env=self.env, stdin=subprocess.PIPE,
+                stdout=rpc_log, stderr=subprocess.STDOUT, text=True,
+            )
+            self.addCleanup(rpc.kill)
+            deadline = time.monotonic() + 20
+            delivered = False
+            while time.monotonic() < deadline:
+                if rpc.poll() is not None:
+                    break
+                if (
+                    requests_path.is_file()
+                    and "MARKER-LIVE-INBOX-DELIVERY"
+                    in requests_path.read_text(encoding="utf-8")
+                ):
+                    delivered = True
+                    break
+                time.sleep(0.1)
+            rpc.terminate()
+            rpc.wait(timeout=10)
+            if rpc.stdin is not None:
+                rpc.stdin.close()
+
+        server.terminate()
+        server.wait(timeout=10)
+        diagnostics = (
+            rpc_log_path.read_text(encoding="utf-8")
+            if rpc_log_path.is_file()
+            else ""
+        )
+        self.assertTrue(
+            delivered,
+            "the live pi watcher did not inject the inbox message\n" + diagnostics,
+        )
+        inbox = _inbox_dir(self.state, self.ws, self.name)
+        self.assertEqual(
+            list(inbox.iterdir()) if inbox.is_dir() else [],
+            [],
+            "delivery left a pending or staged message behind",
+        )
+
     def test_one_shot_runs_do_not_consume_the_inbox(self) -> None:
         # `pi -p` exits after one turn. Delivering there would consume a
         # message into a process that is about to disappear, and waking it with
