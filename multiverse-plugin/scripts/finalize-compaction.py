@@ -33,7 +33,12 @@ _PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PLUGIN))
 sys.path.insert(0, str(_PLUGIN / "vendor"))
 
-from src.compact_runner import _is_aborted_stub, _reconstruct_tree  # noqa: E402
+from src.compact_runner import (  # noqa: E402
+    _collect_state_rows,
+    _is_aborted_stub,
+    _reconstruct_tree,
+    splice_state_rows,
+)
 from src.compact_state import lock_path, release_lock  # noqa: E402
 from src.full_jsonl import (  # noqa: E402
     full_jsonl_path,
@@ -158,6 +163,18 @@ def main() -> int:
           f"{len(jsonl_text):,}B in {time.time()-t0:.1f}s", file=sys.stderr)
 
     live = live_jsonl_path(uuid, cwd)
+
+    # Carry session-state rows (Remote Control's bridge-session pointer,
+    # permission-mode, agent-name, mode) across the rewrite — the
+    # renderer only emits transcript rows. Read from the OUTGOING live
+    # before it's replaced. Same logic the monitor-driven path uses.
+    state_rows = _collect_state_rows(live, full_jsonl_path(uuid))
+    if state_rows:
+        jsonl_text = splice_state_rows(jsonl_text, state_rows)
+        print(f"[state] preserved: "
+              f"{', '.join(r.get('type','?') for r in state_rows)}",
+              file=sys.stderr)
+
     live.parent.mkdir(parents=True, exist_ok=True)
 
     fd, tmp = tempfile.mkstemp(prefix=".compact_", suffix=".jsonl",

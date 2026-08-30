@@ -59,3 +59,15 @@ def claude_projects_dir() -> Path:
     if config_dir:
         return Path(config_dir) / "projects"
     return Path(os.path.expanduser("~/.claude/projects"))
+
+
+def codex_home() -> Path:
+    """Return Codex's data directory for this process.
+
+    Codex honors ``CODEX_HOME`` and otherwise stores sessions and the thread
+    name index under ``~/.codex``.
+    """
+    explicit = os.environ.get("CODEX_HOME")
+    if explicit:
+        return Path(explicit)
+    return Path(os.path.expanduser("~/.codex"))

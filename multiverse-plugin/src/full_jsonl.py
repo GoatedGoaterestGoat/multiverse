@@ -37,6 +37,11 @@ import re
 import sys
 from pathlib import Path
 
+from .atomic_files import (
+    atomic_write_bytes,
+    atomic_write_text,
+    exclusive_file_lock,
+)
 from .paths import claude_projects_dir, multiverse_dir
 
 # Make the vendored compaction package importable. The compaction widget
@@ -87,8 +92,7 @@ def read_marker(claude_uuid: str) -> str | None:
 
 def write_marker(claude_uuid: str, uuid: str) -> None:
     p = marker_path(claude_uuid)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(uuid)
+    atomic_write_text(p, uuid)
 
 
 def last_uuid_in(path: Path) -> str | None:
@@ -125,6 +129,12 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
 
     Returns the number of rows appended (0 means up-to-date or no live).
     """
+    lock = _full_dir() / f".{claude_uuid}.sync.lock"
+    with exclusive_file_lock(lock):
+        return _sync_full_unlocked(claude_uuid, cwd)
+
+
+def _sync_full_unlocked(claude_uuid: str, cwd: str) -> int:
     full_dir = _full_dir()
     full_dir.mkdir(parents=True, exist_ok=True)
 
@@ -136,7 +146,7 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
 
     if not full.exists():
         # Bootstrap: full is identical to live.
-        full.write_bytes(live.read_bytes())
+        atomic_write_bytes(full, live.read_bytes())
         last = _last_uuid_in(full)
         if last:
             write_marker(claude_uuid, last)
@@ -284,6 +294,235 @@ def live_stats_cached(claude_uuid: str, cwd: str) -> tuple[int, int]:
         return cached[1]
     result = live_stats(claude_uuid, cwd)
     _LIVE_STATS_CACHE[key] = (mtime, result)
+    return result
+
+
+def structural_tokens(claude_uuid: str, cwd: str) -> int:
+    """Return the derived "structural" token count for a live session —
+    everything the model sees each turn that ISN'T in the JSONL
+    transcript: system prompt template, tool schemas, memory files,
+    skills, agents, MCP server descriptions.
+
+    Derivation, not measurement. Claude records the exact API-billed
+    input token count (`input_tokens + cache_creation + cache_read`) on
+    every real assistant row's ``message.usage``. The parser gives the
+    transcript-only sum for the same file state. The difference is
+    everything the model saw that the parser can't:
+
+        structural = usage_total - parser_at_snapshot
+
+    THE SNAPSHOT CHOICE MATTERS. Claude's cached microcompaction evicts
+    old tool results from the actual API context via cache-editing —
+    with no marker in the JSONL (the full content stays on disk). Once
+    that kicks in on a long session, the parser (which counts all the
+    on-disk content) over-counts relative to the real context, so
+    ``usage_total - parser`` at post-eviction requests goes negative.
+    But BEFORE any eviction — while usage grows monotonically request
+    over request — the parser matches the real context and the
+    derivation is clean.
+
+    So we walk the samples and take the PEAK of the monotonically-non-
+    decreasing prefix — the last request before any significant usage
+    drop. Sessions that never hit eviction (short, or without enough
+    tool results) get the last sample, which reflects the CURRENT
+    structural (including any deferred tools / MCP that loaded over
+    the first few turns, and — critically — any structural growth
+    since the last compaction). Sessions that did hit eviction get the
+    peak-just-before-drop, which is the last measurement the parser
+    can still trust.
+
+    Returns 0 when no usable usage exists yet (freshly-compacted before
+    its first post-compaction API call, or a brand-new session).
+    """
+    live = live_jsonl_path(claude_uuid, cwd)
+    if not live.is_file():
+        return 0
+    # Collect real (non-msg_priv) usage snapshots in file order.
+    samples: list[tuple[dict, str, int]] = []  # (usage, uuid, total)
+    try:
+        with live.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                msg = row.get("message", {})
+                mid = msg.get("id", "")
+                if isinstance(mid, str) and mid.startswith("msg_priv"):
+                    continue
+                usage = msg.get("usage")
+                if not (isinstance(usage, dict)
+                        and isinstance(usage.get("input_tokens"), int)):
+                    continue
+                uuid = row.get("uuid")
+                if uuid is None:
+                    continue
+                total = (
+                    usage["input_tokens"]
+                    + (usage.get("cache_creation_input_tokens") or 0)
+                    + (usage.get("cache_read_input_tokens") or 0)
+                )
+                # Skip synthetic API-error rows (model=<synthetic>, "API Error: 500…")
+                # which carry an all-zero usage block. Treating that as a measurement
+                # would look like a full-total eviction drop to the peak scan below and
+                # freeze usage_total at a stale early snapshot — under-reporting the
+                # dashboard's Tokens column for the rest of the session (per SB's
+                # 2026-08-01 report). Absent measurement, not a zero one.
+                if total == 0:
+                    continue
+                samples.append((usage, uuid, total))
+    except OSError:
+        return 0
+
+    if not samples:
+        return 0
+
+    # Walk forward; peak = last index that hasn't yet been undercut by a
+    # significant drop. A "significant" drop is claude's microcompaction
+    # dropping tool_results (typically tens of thousands of tokens); noise
+    # from streaming/thinking round-trips within a turn is well under 5k.
+    _EVICTION_DROP = 5000
+    peak_i = 0
+    for i in range(1, len(samples)):
+        if samples[i][2] < samples[i - 1][2] - _EVICTION_DROP:
+            break
+        peak_i = i
+    snapshot_usage, snapshot_uuid, usage_total = samples[peak_i]
+    # Parser tokens for the same file state UP TO the snapshot's uuid —
+    # a leaf whose source_uuids contains snapshot_uuid marks the point;
+    # sum tokens for everything at-or-before it.
+    from compaction.parser import parse_session  # noqa: E402
+    forest = parse_session(str(live))
+    parser_at_snapshot = 0
+    found = False
+    for turn in forest:
+        if found:
+            break
+        if turn.user_prompt is not None:
+            parser_at_snapshot += turn.user_prompt.tokens
+            if snapshot_uuid in turn.user_prompt.source_uuids:
+                found = True
+                continue
+        for leaf in turn.leaves:
+            parser_at_snapshot += leaf.tokens
+            if snapshot_uuid in leaf.source_uuids:
+                found = True
+                break
+    if not found:
+        # Snapshot uuid isn't on the current chain (a revert-branch
+        # assistant row, or metadata that doesn't map to a leaf). Fall
+        # back to the full parser total — under-estimates structural if
+        # there was real content past the snapshot, never over-estimates.
+        parser_at_snapshot = 0
+        for turn in forest:
+            if turn.user_prompt is not None:
+                parser_at_snapshot += turn.user_prompt.tokens
+            for leaf in turn.leaves:
+                parser_at_snapshot += leaf.tokens
+    return max(0, usage_total - parser_at_snapshot)
+
+
+# mtime-keyed cache of structural_tokens results.
+_STRUCTURAL_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def structural_tokens_cached(claude_uuid: str, cwd: str) -> int:
+    """mtime-cached wrapper around ``structural_tokens``. Structural is
+    stable across turns for a session, but the file mtime changes on
+    every turn, so we recompute — cheap for the dashboard's 1s tick and
+    keeps the value fresh across compaction/resume boundaries."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    try:
+        mtime = live.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(live)
+    cached = _STRUCTURAL_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = structural_tokens(claude_uuid, cwd)
+    _STRUCTURAL_CACHE[key] = (mtime, result)
+    return result
+
+
+def last_real_usage_total(claude_uuid: str, cwd: str) -> int:
+    """Total input tokens claude billed on the most recent real (non-
+    ``msg_priv``) API request — literally what ``/context`` shows.
+
+    ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens``
+    from the last assistant row that recorded a usage object. Returns 0
+    when no real API call has landed yet (freshly-compacted before its
+    first turn, or a brand-new session).
+
+    Preferable to ``live_stats + structural_tokens`` as the dashboard's
+    displayed total, because it's a direct measurement of the current
+    context size — no derivation, no drift, no over-count when claude's
+    microcompaction evicts old tool results (which leaves the parser
+    counting on-disk content that's no longer in context).
+    """
+    live = live_jsonl_path(claude_uuid, cwd)
+    if not live.is_file():
+        return 0
+    last_total = 0
+    try:
+        with live.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if row.get("type") != "assistant":
+                    continue
+                msg = row.get("message", {})
+                mid = msg.get("id", "")
+                if isinstance(mid, str) and mid.startswith("msg_priv"):
+                    continue
+                usage = msg.get("usage")
+                if not (isinstance(usage, dict)
+                        and isinstance(usage.get("input_tokens"), int)):
+                    continue
+                candidate = (
+                    usage["input_tokens"]
+                    + (usage.get("cache_creation_input_tokens") or 0)
+                    + (usage.get("cache_read_input_tokens") or 0)
+                )
+                # Same synthetic-API-error guard as structural_tokens above:
+                # a zero usage total is an absent measurement, not a real "0". If we
+                # accepted it as last_total, a session that hit even one 500 error
+                # would keep reporting 0 tokens forever until it produced another
+                # real assistant response.
+                if candidate == 0:
+                    continue
+                last_total = candidate
+    except OSError:
+        return 0
+    return last_total
+
+
+_LAST_USAGE_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def last_real_usage_total_cached(claude_uuid: str, cwd: str) -> int:
+    """mtime-cached wrapper around ``last_real_usage_total``."""
+    live = live_jsonl_path(claude_uuid, cwd)
+    try:
+        mtime = live.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(live)
+    cached = _LAST_USAGE_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = last_real_usage_total(claude_uuid, cwd)
+    _LAST_USAGE_CACHE[key] = (mtime, result)
     return result
 
 

@@ -121,12 +121,24 @@ class CompactRunner:
         scheduler_name: str = "proportional",
         scheduler_params: Optional[dict] = None,
         image_mode: str = "budget_fit",
+        own_lock: bool = True,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.live_jsonl = live_jsonl
         self.total_budget = total_budget
         self.kill_session_fn = kill_session_fn
+        # Whether THIS runner owns the compacting lock.
+        #
+        # A compaction is not one runner, it is summarize -> user picks a
+        # scheduler + budget -> expand. When each runner took and dropped the
+        # lock itself, the session fell out of `compacting` during the picker
+        # step — harmless while a modal covered the dashboard, but visible the
+        # moment the user detached (`d`): the row went dormant mid-compaction
+        # and Enter on it offered to RESUME the session instead of returning
+        # to the picker. So CompactScreen takes the lock once for the whole
+        # flow and passes own_lock=False here.
+        self.own_lock = own_lock
         # Summarize-only mode: run every step through tree-build, then
         # STOP — do not expand + rewrite live. Useful for pre-warming
         # the tree cache before an eventual compaction. The compacting
@@ -182,18 +194,22 @@ class CompactRunner:
             on_done(False, f"unexpected error: {e}")
 
     def _run(self, on_log, on_progress, on_state, on_done) -> None:
-        on_state(State.LOCKING)
-        if not acquire_lock(self.claude_uuid):
-            on_state(State.FAILED)
-            on_done(False, "Another monitor is already compacting this session.")
-            return
+        if self.own_lock:
+            on_state(State.LOCKING)
+            if not acquire_lock(self.claude_uuid):
+                on_state(State.FAILED)
+                on_done(
+                    False,
+                    "Another monitor is already compacting this session.",
+                )
+                return
 
         # Ensure the per-session cache + log dir exists before any worker
         # tries to open files inside it.
         try:
             self.paths.cache_root.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            release_lock(self.claude_uuid)
+            self._release_lock_if_owned()
             on_state(State.FAILED)
             on_done(False, f"could not create cache dir: {e}")
             return
@@ -357,6 +373,13 @@ class CompactRunner:
                 f"{total_turns} turn(s); wrote {rendered} row(s) to live.",
             )
         finally:
+            self._release_lock_if_owned()
+
+    def _release_lock_if_owned(self) -> None:
+        """Drop the compacting lock only if this runner took it. When the
+        caller owns it (own_lock=False) the lock must outlive this runner —
+        see ``self.own_lock``."""
+        if self.own_lock:
             release_lock(self.claude_uuid)
 
     # ---------------------------------------------------------------- private
@@ -373,8 +396,12 @@ class CompactRunner:
 
     def _count_total_turns(self, full: Path) -> int:
         # Lazy import; vendor is on sys.path.
-        from compaction.parser import parse_session  # noqa: E402
-        forest = parse_session(str(full))
+        from compaction.parser import compaction_forest  # noqa: E402
+        # The canonical compaction view (command turns stripped,
+        # non-compactable leaves filtered, empty turns merged) so the
+        # turn count / turn_ids here match exactly what the tree builder
+        # and the main run() path operate on.
+        forest = compaction_forest(str(full))
         # Cache turn_ids for _count_cached_trees's chain filter.
         self._chain_turn_ids = {t.turn_id for t in forest}
         return len(forest)
@@ -580,15 +607,38 @@ class CompactRunner:
             allocate_budget,
             proportional,
         )
-        from compaction.parser import parse_session  # noqa: E402
+        from compaction.parser import (  # noqa: E402
+            filter_compactable,
+            parse_session,
+        )
         from compaction.priv_session import (  # noqa: E402
             compact_forest_to_session_jsonl,
         )
 
-        forest = parse_session(str(full))
+        # Two compaction-only filters applied BEFORE any downstream
+        # step sees the forest:
+        #   - strip_command_turns_ drops /context, /model, /effort
+        #     turns so they don't get summarized into tree nodes and
+        #     don't appear in the compacted output — those tokens are
+        #     transient display cost and shouldn't be reserved against
+        #     the budget's un-compactable input floor.
+        #   - filter_compactable strips display-only attachment leaves
+        #     (task reminders, skill listings, tool/agent/MCP deltas,
+        #     file-edit snapshots, misc hook context) so the pipeline
+        #     doesn't render them as user-role text blocks in the
+        #     output.
+        # Both categories' tokens are already booked into live_stats
+        # (unfiltered parser output) for accurate dashboard display;
+        # they get netted out of structural via the derivation delta.
+        forest = filter_compactable(
+            parse_session(str(full), strip_command_turns_=True)
+        )
         if not forest:
             raise RuntimeError("forest is empty after parse_session")
 
+        # _attach_trees_from_cache rejects any cached tree that references
+        # content no longer a leaf of its turn (filtered away, or merged
+        # into the user_prompt), so stale pre-fix trees self-heal.
         n_with, n_without = self._attach_trees_from_cache(forest)
         on_log(
             f"Loaded trees: {n_with} attached from cache, {n_without} "
@@ -665,8 +715,23 @@ class CompactRunner:
             keep_image_turn_ids=keep_image_turn_ids,
         )
 
-        # Atomic replace: temp file in the same directory, then os.replace.
+        # Carry session-state rows across the rewrite. The renderer only
+        # emits transcript rows, so without this every compaction erases
+        # the Remote Control reattach pointer, permission mode, agent
+        # name, and mode. Read from the OUTGOING live before we replace
+        # it.
         live = live_jsonl_path(self.claude_uuid, self.cwd)
+        state_rows = _collect_state_rows(
+            live, full_jsonl_path(self.claude_uuid)
+        )
+        if state_rows:
+            jsonl_text = splice_state_rows(jsonl_text, state_rows)
+            on_log(
+                "Preserved session-state row(s): "
+                + ", ".join(r.get("type", "?") for r in state_rows)
+            )
+
+        # Atomic replace: temp file in the same directory, then os.replace.
         live.parent.mkdir(parents=True, exist_ok=True)
         import tempfile  # local import; only used here
         fd, tmp = tempfile.mkstemp(
@@ -710,6 +775,23 @@ class CompactRunner:
         aborted-stub would render as an empty bullet because its
         placeholder summary is itself an angle-bracket-wrapped string
         that gets stripped by claude code's markdown renderer.
+
+        STALE-TREE REJECTION. A cached tree is built over exactly one
+        turn's leaves. If the tree references (via leaf source_uuids)
+        any uuid that is NOT a leaf in the CURRENT compaction-view turn,
+        the tree predates a parser change and would leak that content
+        into the compacted output. This catches every such drift with
+        one subset check:
+          - a leaf the whitelist filter now drops (edited_text_file,
+            task_reminder, …) — the tree still has it;
+          - an inter-agent-message hook that the parser now MERGES into
+            the user_prompt instead of leaving as a leaf — the tree
+            still has it as a leaf, so it renders both in the merged
+            prompt AND again as a stray user-role message.
+        Any tree whose leaf uuids aren't a subset of the current turn's
+        leaf uuids is deleted (forces a clean rebuild) and treated as
+        no-tree for this run; the turn falls back to
+        greedy-from-current-leaves, which is correct.
         """
         import json  # local import — only this method needs it
         n_with = n_without = 0
@@ -726,10 +808,24 @@ class CompactRunner:
                 n_without += 1
                 continue
             try:
-                turn.root = _reconstruct_tree(tree_data)
-                n_with += 1
+                root = _reconstruct_tree(tree_data)
             except (KeyError, TypeError):
                 n_without += 1
+                continue
+            # Reject a tree that references content no longer a leaf of
+            # this turn (filtered away, or merged into the user_prompt).
+            current_leaf_uuids = {
+                su for leaf in turn.leaves for su in leaf.source_uuids
+            }
+            if _tree_source_uuids(root) - current_leaf_uuids:
+                try:
+                    path.unlink()  # force a clean rebuild next time
+                except OSError:
+                    pass
+                n_without += 1
+                continue
+            turn.root = root
+            n_with += 1
         return n_with, n_without
 
     def _read_existing_title(self) -> Optional[str]:
@@ -768,6 +864,119 @@ class CompactRunner:
         return None
 
 
+# Row types that carry SESSION STATE rather than transcript content.
+# parse_session only yields turns, so compact_forest_to_session_jsonl
+# rebuilds a live JSONL containing nothing but custom-title / user /
+# assistant rows — every state row is silently erased on each
+# compaction. Consequences: Remote Control's reattach pointer
+# (bridge-session) is lost so `remoteControlAtStartup` can't reconnect
+# on resume, the session's permission mode resets, and its display
+# name drops.
+#
+# These four are safe to carry forward because they're last-wins
+# pointers with no ``uuid`` / ``parentUuid`` — splicing them can't
+# disturb the parent chain the compacted transcript depends on.
+#
+# Deliberately NOT carried: ``last-prompt`` references a ``leafUuid``
+# compaction may have just dropped, and ``file-history-snapshot`` /
+# ``file-history-delta`` / ``attachment`` / ``system`` are anchored to
+# turns that no longer exist. Carrying those manufactures dangling
+# references. Allowlist by design — a new state row type stays
+# unpreserved until we've checked it's chain-independent.
+_PRESERVED_STATE_TYPES = (
+    "bridge-session",
+    "permission-mode",
+    "agent-name",
+    "mode",
+)
+
+
+def _scan_state_rows(path: Path) -> dict[str, dict]:
+    """Map type -> LAST occurrence of that row in ``path``, for every
+    ``_PRESERVED_STATE_TYPES`` present.
+
+    Last-wins: Claude Code rewrites these rows whenever the value
+    changes, so the final occurrence is the current value.
+    """
+    import json  # local — narrow blast radius
+    latest: dict[str, dict] = {}
+    if not path.is_file():
+        return latest
+    try:
+        with path.open() as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                t = d.get("type")
+                if t in _PRESERVED_STATE_TYPES:
+                    latest[t] = d
+    except OSError:
+        return latest
+    return latest
+
+
+def _collect_state_rows(
+    live: Path, full: Optional[Path] = None
+) -> list[dict]:
+    """Return the current value of each ``_PRESERVED_STATE_TYPES`` row,
+    in allowlist order, preferring ``live`` and falling back to ``full``
+    for any type ``live`` lacks.
+
+    Why the fallback matters. The mirror appends every new live row to
+    full.jsonl without filtering by type, so full accumulates these
+    state rows too, and — being append-ordered — its last occurrence is
+    current as of the most recent sync. Two cases where that's the only
+    source:
+
+      - A session damaged by a pre-fix compaction. Its state rows were
+        erased from live and Claude Code may not have rewritten them
+        all yet. Pulling the missing ones from full lets the session
+        SELF-HEAL on its next compaction instead of staying broken.
+      - The restore path, where live doesn't exist at all and we're
+        re-materializing it from an orphaned full.
+
+    Live stays authoritative — full only fills gaps. The full copy can
+    be up to one turn stale (the mirror hook runs on UserPromptSubmit /
+    Stop / SessionEnd, so a state change inside the last partial turn
+    may not have been mirrored yet), which is why it never overrides a
+    value live still has.
+    """
+    latest = _scan_state_rows(live)
+    if full is not None:
+        for t, row in _scan_state_rows(full).items():
+            latest.setdefault(t, row)
+    return [latest[t] for t in _PRESERVED_STATE_TYPES if t in latest]
+
+
+def splice_state_rows(jsonl_text: str, state_rows: list[dict]) -> str:
+    """Insert ``state_rows`` into ``jsonl_text`` right after the leading
+    ``custom-title`` row (or at the very top if there isn't one).
+
+    Placement mirrors where Claude Code writes them in a fresh session —
+    ahead of the transcript — and keeps them clear of the parent chain.
+    """
+    import json  # local — narrow blast radius
+    if not state_rows:
+        return jsonl_text
+    lines = jsonl_text.splitlines()
+    insert_at = 0
+    for i, line in enumerate(lines):
+        try:
+            if json.loads(line).get("type") == "custom-title":
+                insert_at = i + 1
+                break
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    rendered = [json.dumps(r, ensure_ascii=False) for r in state_rows]
+    out = lines[:insert_at] + rendered + lines[insert_at:]
+    return "\n".join(out) + "\n"
+
+
 _ABORTED_STUB_SUMMARY = "<construction aborted; uncollapsed frontier>"
 
 
@@ -798,6 +1007,22 @@ def _is_aborted_stub(td: dict) -> bool:
         return False
     summary = td.get("summary", "")
     return summary == _ABORTED_STUB_SUMMARY
+
+
+def _tree_source_uuids(node) -> set:
+    """Collect every leaf source_uuid referenced anywhere in a
+    reconstructed tree (Leaf/Node). Used to detect stale trees that
+    still reference now-filtered leaves."""
+    out: set = set()
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        children = getattr(n, "children", None)
+        if children:
+            stack.extend(children)
+        else:  # leaf
+            out.update(getattr(n, "source_uuids", []) or [])
+    return out
 
 
 def _reconstruct_tree(d: dict):

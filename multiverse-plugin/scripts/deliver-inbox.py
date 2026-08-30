@@ -36,6 +36,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.inbox import (  # noqa: E402
     claim_pending_messages,
+    clear_wake_sent,
+    commit_claimed_messages,
     render_messages_as_system_reminder,
 )
 from src.interagent_log import log_inbox_delivered  # noqa: E402
@@ -65,10 +67,21 @@ def main() -> None:
     if not messages:
         return  # nothing to deliver (or someone else already claimed it)
 
+    # Claude consumes its inbox through this hook, not through check_inbox, so
+    # this is where a typed wake prompt gets retired for a Claude agent —
+    # senders may prompt it again from here on.
+    clear_wake_sent(cwd, name)
+
     hook_input = _read_input()
     event = hook_input.get("hook_event_name") or "UserPromptSubmit"
 
-    log_inbox_delivered(recipient=name, cwd=cwd, hook_event=event, messages=messages)
+    log_inbox_delivered(
+        recipient=name,
+        cwd=cwd,
+        hook_event=event,
+        messages=messages,
+        recipient_runtime=os.environ.get("MULTIVERSE_RUNTIME", "claude"),
+    )
 
     body = render_messages_as_system_reminder(messages)
 
@@ -83,6 +96,14 @@ def main() -> None:
         }
 
     print(json.dumps(out))
+    sys.stdout.flush()
+
+    # Hand-over is complete — only now is it safe to destroy the staged
+    # files. Everything above (reading stdin, logging, rendering) can
+    # throw, and the __main__ handler swallows exceptions with exit 0 so
+    # hooks never crash claude; committing earlier meant any of those
+    # failures silently ate the messages.
+    commit_claimed_messages(messages)
 
 
 if __name__ == "__main__":

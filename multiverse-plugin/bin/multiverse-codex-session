@@ -1,0 +1,304 @@
+#!/usr/bin/env bash
+# multiverse-codex-session — inner loop that wraps one Codex process.
+
+set -euo pipefail
+
+CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
+
+if ! command -v "$CODEX_BIN" &>/dev/null; then
+  echo "[multiverse-codex-session] '$CODEX_BIN' CLI not found in PATH" >&2
+  exit 1
+fi
+
+: "${MULTIVERSE_STATUS:?multiverse-codex-session must be launched by the monitor}"
+: "${MULTIVERSE_CODEX_PLUGIN_ROOT:?Codex plugin root is not configured}"
+
+HOOK_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/session-hook.py"
+MCP_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/mcp-server"
+if [ ! -x "$HOOK_SCRIPT" ] || [ ! -x "$MCP_SCRIPT" ]; then
+  echo "[multiverse-codex-session] incomplete Codex plugin at $MULTIVERSE_CODEX_PLUGIN_ROOT" >&2
+  exit 1
+fi
+
+# Codex does not expose a development-mode --plugin-dir flag. Inject the same
+# hook and MCP definitions bundled by the local plugin so wrapper sessions use
+# the checked-out implementation even before the plugin is installed.
+HOOK_COMMAND=$(printf '%s' "$HOOK_SCRIPT" | jq -Rs .)
+MCP_COMMAND=$(printf '%s' "$MCP_SCRIPT" | jq -Rs .)
+RUNTIME_PID_PATH="${MULTIVERSE_RUNTIME_PID_PATH:-$(dirname "$MULTIVERSE_STATUS")/runtime_pid}"
+export MULTIVERSE_RUNTIME_PID_PATH="$RUNTIME_PID_PATH"
+# Permission/sandbox flags for wrapped Codex sessions. Configurable so a
+# machine can choose its own level without editing this tracked file — set
+# MULTIVERSE_CODEX_PERMISSION_ARGS in bin/multiverse.local (space-separated,
+# word-split intentionally so multi-flag values like
+# "-s danger-full-access -a never" work). Defaults to --approve-for-me, the
+# historical behaviour. Only sensible on a host that is itself sandboxed.
+read -r -a CODEX_PERMISSION_ARGS \
+  <<< "${MULTIVERSE_CODEX_PERMISSION_ARGS:---approve-for-me}"
+CODEX_CONFIG_ARGS=(
+  ${CODEX_PERMISSION_ARGS[@]+"${CODEX_PERMISSION_ARGS[@]}"}
+  --dangerously-bypass-hook-trust
+  -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PermissionRequest=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PreToolUse=[{matcher=\".*\",hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.PostToolUse=[{matcher=\".*\",hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "hooks.Stop=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
+  -c "mcp_servers.multiverse.command=$MCP_COMMAND"
+)
+
+# Codex launches stdio MCP servers with a sanitized environment. Explicitly
+# pass the managed-session identity plus the runtime configuration needed by
+# tool paths that discover, resume, or spawn agents. JSON strings are valid
+# TOML values and avoid quoting/path issues in `-c key=value` overrides.
+add_mcp_env_override() {
+  local name="$1" value encoded
+  value="${!name-}"
+  [ -z "$value" ] && return 0
+  encoded=$(printf '%s' "$value" | jq -Rs .)
+  CODEX_CONFIG_ARGS+=(
+    -c "mcp_servers.multiverse.env.${name}=${encoded}"
+  )
+}
+
+for MCP_ENV_NAME in \
+  MULTIVERSE_ROOT \
+  MULTIVERSE_SESSION_ID \
+  MULTIVERSE_SESSION_CWD \
+  MULTIVERSE_SESSION_NAME \
+  MULTIVERSE_STATUS \
+  MULTIVERSE_RUNTIME \
+  MULTIVERSE_RUNTIME_PID_PATH \
+  MULTIVERSE_RUNTIME_SESSION_ID_PATH \
+  MULTIVERSE_PLUGIN_ROOT \
+  MULTIVERSE_CODEX_PLUGIN_ROOT \
+  MULTIVERSE_CLAUDE_BIN \
+  MULTIVERSE_CODEX_BIN \
+  MULTIVERSE_EXTRA_PLUGIN_DIRS \
+  CLAUDE_CONFIG_DIR \
+  CLAUDE_LOCAL_DATA_DIR \
+  CODEX_HOME \
+  PATH \
+  CLAUDE_CODE_MAX_RETRIES \
+  CLAUDE_CODE_UNATTENDED_RETRY
+do
+  add_mcp_env_override "$MCP_ENV_NAME"
+done
+unset MCP_ENV_NAME
+
+CODEX_ARGS=("$@")
+READY_WATCHER_PID=""
+STARTUP_INPUT_PID=""
+RUNTIME_PID=""
+
+write_status() {
+  local status="$1" ts tmp
+  if [ "$status" != "ending" ] \
+    && [ -e "$(dirname "$MULTIVERSE_STATUS")/ending" ]; then
+    return 0
+  fi
+  ts=$(date +%s)
+  tmp="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
+  if printf '{"status":"%s","ts":%d}\n' "$status" "$ts" > "$tmp"; then
+    mv -f "$tmp" "$MULTIVERSE_STATUS"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+}
+
+cleanup() {
+  if [ -n "$READY_WATCHER_PID" ]; then
+    kill "$READY_WATCHER_PID" 2>/dev/null || true
+    wait "$READY_WATCHER_PID" 2>/dev/null || true
+  fi
+  if [ -n "$STARTUP_INPUT_PID" ]; then
+    kill "$STARTUP_INPUT_PID" 2>/dev/null || true
+    wait "$STARTUP_INPUT_PID" 2>/dev/null || true
+  fi
+  write_status ended || true
+}
+
+terminate_runtime() {
+  local runtime_signal="$1" exit_code="$2" attempt=0
+  trap - HUP INT TERM
+  if [ -n "$RUNTIME_PID" ] && kill -0 "$RUNTIME_PID" 2>/dev/null; then
+    kill "-$runtime_signal" "$RUNTIME_PID" 2>/dev/null || true
+    while kill -0 "$RUNTIME_PID" 2>/dev/null && [ "$attempt" -lt 20 ]; do
+      attempt=$((attempt + 1))
+      sleep 0.1
+    done
+    if kill -0 "$RUNTIME_PID" 2>/dev/null; then
+      kill -KILL "$RUNTIME_PID" 2>/dev/null || true
+    fi
+    wait "$RUNTIME_PID" 2>/dev/null || true
+  fi
+  exit "$exit_code"
+}
+
+trap cleanup EXIT
+trap 'terminate_runtime HUP 129' HUP
+trap 'terminate_runtime INT 130' INT
+trap 'terminate_runtime TERM 143' TERM
+
+INITIAL_PROMPT=""
+INITIAL_PROMPT_FILE="${MULTIVERSE_INITIAL_PROMPT_FILE:-}"
+if [ -n "$INITIAL_PROMPT_FILE" ] && [ -f "$INITIAL_PROMPT_FILE" ]; then
+  INITIAL_PROMPT=$(< "$INITIAL_PROMPT_FILE")
+fi
+
+resolve_multiverse_root() {
+  if [ -n "${MULTIVERSE_ROOT:-}" ]; then
+    printf '%s' "$MULTIVERSE_ROOT"
+  else
+    printf '%s' "$(dirname "$(dirname "$(dirname "$MULTIVERSE_STATUS")")")"
+  fi
+}
+
+build_inbox_prompt() {
+  [ -z "${MULTIVERSE_SESSION_NAME:-}" ] && return 0
+  [ -z "${MULTIVERSE_SESSION_CWD:-}" ] && return 0
+
+  local mv_root inbox_dir enc count plural
+  mv_root=$(resolve_multiverse_root)
+  enc=$(printf '%s' "$MULTIVERSE_SESSION_CWD" | sed 's/[^a-zA-Z0-9]/-/g')
+  inbox_dir="$mv_root/inbox/$enc/$MULTIVERSE_SESSION_NAME"
+  [ -d "$inbox_dir" ] || return 0
+  count=$(find "$inbox_dir" -maxdepth 1 -name '*.json' 2>/dev/null | wc -l | tr -d '[:space:]')
+  [ "$count" = "0" ] && return 0
+
+  plural="messages"
+  [ "$count" = "1" ] && plural="message"
+  printf '%s' "You have $count pending inbox $plural from other agents in your workspace. Call the multiverse check_inbox tool to read and clear them, then respond or act as appropriate."
+}
+
+PROMPT="$INITIAL_PROMPT"
+INBOX_PROMPT=$(build_inbox_prompt)
+if [ -n "$INBOX_PROMPT" ]; then
+  if [ -n "$PROMPT" ]; then
+    PROMPT="$PROMPT"$'\n\n'"$INBOX_PROMPT"
+  else
+    PROMPT="$INBOX_PROMPT"
+  fi
+fi
+
+USE_STARTUP_INPUT=0
+if [ "${#CODEX_ARGS[@]}" -gt 0 ]; then
+  for arg in "${CODEX_ARGS[@]}"; do
+    if [ "$arg" = "resume" ]; then
+      USE_STARTUP_INPUT=-1
+      break
+    fi
+  done
+fi
+if [ "$USE_STARTUP_INPUT" = 0 ] \
+  && [ -n "${MULTIVERSE_SESSION_ID:-}" ] \
+  && [ -n "${MULTIVERSE_SESSION_NAME:-}" ] \
+  && [ -n "${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}" ]; then
+  USE_STARTUP_INPUT=1
+fi
+
+PROMPT_ARGS=()
+STARTUP_PROMPT_FILE=""
+if [ "$USE_STARTUP_INPUT" = 1 ]; then
+  if [ -n "$PROMPT" ]; then
+    STARTUP_PROMPT_FILE="${INITIAL_PROMPT_FILE:-$(dirname "$MULTIVERSE_STATUS")/startup_prompt.txt}"
+    prompt_tmp="${STARTUP_PROMPT_FILE}.$$.$RANDOM.tmp"
+    if printf '%s' "$PROMPT" > "$prompt_tmp"; then
+      mv -f "$prompt_tmp" "$STARTUP_PROMPT_FILE"
+    else
+      rm -f "$prompt_tmp" 2>/dev/null || true
+      STARTUP_PROMPT_FILE=""
+    fi
+  elif [ -n "$INITIAL_PROMPT_FILE" ]; then
+    rm -f "$INITIAL_PROMPT_FILE" 2>/dev/null || true
+  fi
+else
+  if [ -n "$PROMPT" ]; then
+    PROMPT_ARGS=("$PROMPT")
+  fi
+  if [ -n "$INITIAL_PROMPT_FILE" ]; then
+    rm -f "$INITIAL_PROMPT_FILE" 2>/dev/null || true
+  fi
+fi
+unset MULTIVERSE_INITIAL_PROMPT_FILE
+
+# Codex does not fire SessionStart for an interactive resume until the first
+# prompt is submitted. Watch both the native ID (the hook-backed fast path)
+# and the TUI's bottom-line `Ready` state so an untouched resumed session can
+# still leave `starting`. Never overwrite a hook-written busy/waiting state.
+mark_idle_when_codex_is_ready() {
+  local id_path="${MULTIVERSE_RUNTIME_SESSION_ID_PATH:-}"
+  local tmux_name="multiverse-${MULTIVERSE_SESSION_ID:-}"
+  local attempt=0 current footer
+  while [ "$attempt" -lt 2400 ]; do
+    attempt=$((attempt + 1))
+    current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
+    [ "$current" != "starting" ] && return 0
+    if [ -n "$id_path" ] && [ -s "$id_path" ]; then
+      write_status idle
+      return 0
+    fi
+    if [ "$tmux_name" != "multiverse-" ]; then
+      footer=$(
+        tmux capture-pane -p -t "$tmux_name" -S -5 2>/dev/null \
+          | awk 'NF { line=$0 } END { print line }' \
+          || true
+      )
+      case "$footer" in
+        *" · Ready · "*)
+          write_status idle
+          return 0
+          ;;
+      esac
+    fi
+    sleep 0.25
+  done
+}
+
+mark_idle_when_codex_is_ready &
+READY_WATCHER_PID=$!
+
+# An explicit stdin redirection prevents non-interactive Bash from replacing a
+# background command's stdin with /dev/null. Codex remains in the pane's
+# foreground process group, while the wrapper can now receive a signal during
+# wait, forward it to Codex, and reap the child before writing `ended`.
+"$CODEX_BIN" "${CODEX_CONFIG_ARGS[@]}" \
+  ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"} \
+  ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} <&0 &
+RUNTIME_PID=$!
+RUNTIME_PID_TMP="${RUNTIME_PID_PATH}.$$.$RANDOM.tmp"
+if printf '%s\n' "$RUNTIME_PID" > "$RUNTIME_PID_TMP"; then
+  mv -f "$RUNTIME_PID_TMP" "$RUNTIME_PID_PATH"
+else
+  rm -f "$RUNTIME_PID_TMP" 2>/dev/null || true
+fi
+
+# A separate app-server can persist a thread name, but it cannot update the live
+# TUI's in-memory title. For a fresh named thread, start Codex without the
+# positional prompt, submit Codex's own /rename command, wait for its
+# acknowledgement, and only then deliver the saved initial prompt. Resumes
+# already load their persisted name.
+if [ "$USE_STARTUP_INPUT" = 1 ]; then
+  STARTUP_PYTHON="${MULTIVERSE_CODEX_STARTUP_PYTHON:-$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python3}"
+  if [ ! -x "$STARTUP_PYTHON" ]; then
+    STARTUP_PYTHON=$(command -v python3)
+  fi
+  STARTUP_ERROR_FILE="$(dirname "$MULTIVERSE_STATUS")/startup_input_error"
+  STARTUP_ARGS=(
+    -m src.codex_startup_input
+    --tmux-name "multiverse-${MULTIVERSE_SESSION_ID}"
+    --name "$MULTIVERSE_SESSION_NAME"
+    --native-id-path "$MULTIVERSE_RUNTIME_SESSION_ID_PATH"
+    --codex-home "${CODEX_HOME:-$HOME/.codex}"
+    --error-file "$STARTUP_ERROR_FILE"
+  )
+  if [ -n "$STARTUP_PROMPT_FILE" ]; then
+    STARTUP_ARGS+=(--prompt-file "$STARTUP_PROMPT_FILE")
+  fi
+  PYTHONPATH="$MULTIVERSE_PLUGIN_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$STARTUP_PYTHON" "${STARTUP_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+  STARTUP_INPUT_PID=$!
+fi
+
+wait "$RUNTIME_PID" 2>/dev/null || true
+RUNTIME_PID=""

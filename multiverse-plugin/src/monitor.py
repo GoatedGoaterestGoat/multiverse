@@ -1,18 +1,19 @@
-"""Multiverse monitor — Textual TUI for orchestrating multiple claude sessions.
+"""Multiverse monitor — Textual TUI for orchestrating runtime sessions.
 
-Each claude process runs inside a detached tmux session. The monitor tracks
+Each runtime process runs inside a detached tmux session. The monitor tracks
 them via per-session files under ``~/.multiverse/sessions/<id>/``:
 
-  meta.json    — cwd, created_at, claude_args (written on spawn)
+  meta.json    — cwd, runtime, created_at, runtime args (written on spawn)
   status.json  — {"status": ..., "ts": ...} (written by hook scripts)
-  claude_uuid  — current claude session UUID (written by SessionStart hook)
+  claude_uuid / runtime_session_id — native runtime session identifier
 
-The dashboard also surfaces *dormant* claude sessions: claude JSONLs with a
-user-assigned ``custom-title`` that aren't currently wrapped by a multiverse
-session. These can be resumed directly with Enter.
+The dashboard also surfaces dormant, named Claude and Codex sessions that are
+not currently wrapped by a Multiverse session. These can be resumed directly
+with Enter.
 
-Attach = ``tmux attach-session`` run while the Textual app is suspended.
-Detach with normal ``Ctrl-b d`` and you land back in the monitor.
+Attach = ``tmux attach-session`` run through a local terminal-probe relay while
+the Textual app is suspended. Detach with normal ``Ctrl-b d`` and you land back
+in the monitor.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Optional
 
 from textual import events, on, work
@@ -47,41 +49,47 @@ from textual.widgets import (
 from .ask_agents import AskResult, AskTarget, ask_all
 from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
-from .harness import (
-    DEFAULT_HARNESS,
-    get_harness,
-    installed as installed_harnesses,
-    live_tokens as harness_live_tokens,
-)
+from .compact_state import acquire_lock, release_lock
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
     live_jsonl_path,
     live_stats,
+    last_real_usage_total_cached,
     live_stats_cached,
     minimum_compacted_tokens,
+    structural_tokens,
+    structural_tokens_cached,
     total_token_count,
     total_turn_count,
 )
 from .paths import multiverse_dir
+from .pi_transcript import delete_pi_session, list_pi_sessions_in
 from .inbox import list_pending_messages, pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
+    RUNTIME_CLAUDE,
+    RUNTIME_CODEX,
+    RUNTIME_PI,
     STATE_DIR,
     TMUX_PREFIX,
     DashboardRow,
     Session,
+    all_session_names_in_cwd,
     build_dashboard_rows,
     create_session,
     current_host,
+    delete_codex_thread,
     existing_names_in_cwd,
     foreign_host_still_reported_live,
     kill_session,
     list_claude_sessions_in,
+    list_codex_sessions_in,
     list_sessions,
+    mark_session_ending,
     strip_fold_suffix,
     tmux_session_exists,
-    wrapped_claude_uuids,
+    wrapped_runtime_session_ids,
 )
 from .spawn_requests import (
     list_pending_requests,
@@ -89,7 +97,9 @@ from .spawn_requests import (
     request_path,
     write_resolution,
 )
+from .tmux_attach import attach_tmux_session
 from . import web_share
+from . import sb_control
 
 
 STATUS_STYLES = {
@@ -98,6 +108,7 @@ STATUS_STYLES = {
     "waiting": "bold red",
     "listening": "bold cyan",
     "starting": "cyan",
+    "ending": "bold red",
     "ended": "dim strike",
     "dormant": "blue",
     "compacting": "bold magenta",
@@ -108,16 +119,22 @@ STATUS_STYLES = {
 # waiting/starting/compacting are excluded — the session is busy or
 # already locked.
 _COMPACTABLE_STATUSES = {"idle", "ended", "dormant"}
+_ENDING_MIN_VISIBLE_SECONDS = 0.25
 
 
 class _SpawnAttachGuard:
     """Background watcher while the user is attached to a tmux session.
 
-    Polls ``~/.multiverse/spawn_requests/`` every second for cwd-matching
-    pending requests. When one appears, runs ``tmux detach-client -s
-    <session>`` to force the user back into the monitor so they can see
-    the naming modal (Textual's event loop is suspended during attach, so
-    the normal tick can't fire).
+    Polls ``~/.multiverse/spawn_requests/`` every second for pending requests
+    created by the exact tmux session being guarded. When one appears, finds
+    the tmux client process launched by this monitor and detaches that exact
+    client to return the user to the naming modal (Textual's event loop is
+    suspended during attach, so the normal tick can't fire).
+
+    Filtering by ``caller_tmux_session`` is important when several monitors
+    are attached in one workspace. A request from one agent must not detach
+    unrelated clients, especially abandoned terminals whose output queues
+    can block the shared tmux server during detach.
 
     ``forced_detach`` is set to True when we issue the detach so the
     caller can schedule a reattach once the queue has fully drained.
@@ -130,7 +147,12 @@ class _SpawnAttachGuard:
         self.tmux_session = tmux_session
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        self._client_pid: Optional[int] = None
         self.forced_detach = False
+
+    def set_client_pid(self, pid: int) -> None:
+        """Identify the tmux attach client owned by this monitor."""
+        self._client_pid = pid
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -144,84 +166,101 @@ class _SpawnAttachGuard:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                pending = list_pending_requests(self.cwd)
+                pending = [
+                    request
+                    for request in list_pending_requests(self.cwd)
+                    if request.get("caller_tmux_session") == self.tmux_session
+                ]
             except Exception:
                 pending = []
-            if pending:
-                try:
-                    subprocess.run(
-                        ["tmux", "detach-client", "-s", self.tmux_session],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=3,
-                    )
-                    self.forced_detach = True
-                except (OSError, subprocess.SubprocessError):
-                    pass
+            if pending and self._detach_client():
+                self.forced_detach = True
                 return  # one detach is all we need
             if self._stop.wait(self._POLL_INTERVAL):
                 return
 
+    def _detach_client(self) -> bool:
+        """Detach this monitor's client, retrying later on races or tmux errors."""
+        if self._client_pid is None:
+            return False
+        try:
+            listed = subprocess.run(
+                [
+                    "tmux",
+                    "list-clients",
+                    "-F",
+                    "#{client_pid}\t#{client_name}\t#{session_name}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=True,
+            )
+            client_name = None
+            for line in listed.stdout.splitlines():
+                fields = line.split("\t", 2)
+                if len(fields) != 3:
+                    continue
+                pid, name, session = fields
+                if pid == str(self._client_pid) and session == self.tmux_session:
+                    client_name = name
+                    break
+            if client_name is None:
+                return False
+            subprocess.run(
+                ["tmux", "detach-client", "-t", client_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                check=True,
+            )
+            return True
+        except (OSError, subprocess.SubprocessError):
+            return False
+
 
 class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
-    """Prompt for a name — and a harness — for a new session in the cwd.
-
-    Returns ``(name, harness)``. Only harnesses whose CLI is actually on PATH
-    are offered, so a machine with just Claude Code installed sees the same
-    single-choice dialog it always did.
-    """
+    """Prompt for a session name for a new session in the monitor's cwd."""
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
-        Binding("ctrl+h", "cycle_harness", "Harness", show=False),
+        Binding("enter", "submit", "Create", show=False, priority=True),
     ]
 
-    def __init__(self, cwd: str, default_harness: Optional[str] = None) -> None:
+    def __init__(self, cwd: str) -> None:
         super().__init__()
         self.cwd = cwd
-        suggestion = pick_random_name(existing_names_in_cwd(cwd))
+        suggestion = pick_random_name(all_session_names_in_cwd(cwd))
         self.default_name = suggestion or ""
-        self.harnesses = installed_harnesses() or [DEFAULT_HARNESS]
-        want = default_harness or DEFAULT_HARNESS
-        self.harness_idx = (
-            self.harnesses.index(want) if want in self.harnesses else 0
-        )
-
-    @property
-    def harness(self) -> str:
-        return self.harnesses[self.harness_idx]
-
-    def _harness_line(self) -> str:
-        if len(self.harnesses) < 2:
-            return f"[dim]harness: {self.harness}[/]"
-        opts = " ".join(
-            f"[reverse] {h} [/]" if h == self.harness else f"[dim]{h}[/]"
-            for h in self.harnesses
-        )
-        return f"harness: {opts}   [dim](ctrl+h to switch)[/]"
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static("New session"),
             Static(f"[dim]cwd: {self.cwd}[/]"),
-            Static(self._harness_line(), id="new-harness"),
             Static("Session name:"),
             Input(value=self.default_name, id="new-name"),
+            Static("Runtime:"),
+            RadioSet(
+                RadioButton("Claude", value=True, id="new-runtime-claude"),
+                RadioButton("Codex", id="new-runtime-codex"),
+                RadioButton("pi", id="new-runtime-pi"),
+                id="new-runtime",
+            ),
             Static("", id="new-error"),
-            Static("Esc to go back", id="new-hint"),
+            Static(
+                "Tab to choose runtime · Enter to create · Esc to go back",
+                id="new-hint",
+            ),
             id="new-dialog",
         )
 
     def on_mount(self) -> None:
         self.query_one("#new-name", Input).focus()
 
-    def action_cycle_harness(self) -> None:
-        if len(self.harnesses) < 2:
-            return
-        self.harness_idx = (self.harness_idx + 1) % len(self.harnesses)
-        self.query_one("#new-harness", Static).update(self._harness_line())
-
     def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._try_submit()
+
+    def action_submit(self) -> None:
         self._try_submit()
 
     def _try_submit(self) -> None:
@@ -230,27 +269,55 @@ class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
             return
-        self.dismiss((name, self.harness))
+        if self.query_one("#new-runtime-pi", RadioButton).value:
+            runtime = RUNTIME_PI
+        elif self.query_one("#new-runtime-codex", RadioButton).value:
+            runtime = RUNTIME_CODEX
+        else:
+            runtime = RUNTIME_CLAUDE
+        self.dismiss((name, runtime))
 
     def action_cancel(self) -> None:
         self.dismiss(None)
 
 
-class SpawnRequestScreen(ModalScreen[Optional[str]]):
-    """Naming widget for an agent-initiated spawn request.
+@dataclass
+class SpawnDecision:
+    """What the user chose in :class:`SpawnRequestScreen`.
 
-    Returns the chosen name on accept, or ``None`` on Esc. The monitor's
-    watcher may also dismiss this externally (if another monitor resolved
-    the request first) — in that case the callback still sees ``None`` and
-    ``write_resolution`` no-ops via O_EXCL.
+    Distinct from a ``None`` dismissal, which means the modal was closed
+    externally (another monitor resolved the request first) rather than by a
+    person — only a real rejection can carry a reason to send back.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    accepted: bool
+    name: str = ""
+    runtime: str = ""
+    reason: str = ""
+
+
+class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
+    """Approval widget for an agent-initiated spawn request.
+
+    Returns a :class:`SpawnDecision` for either choice the user makes, or
+    ``None`` when dismissed externally (another monitor resolved the request
+    first) — in that case ``write_resolution`` no-ops via O_EXCL.
+
+    Rejecting can carry a short explanation, which is handed back to the
+    requesting agent as its tool result. Without it the agent only learns
+    "rejected", and its usual next move is to ask again — the reason is what
+    lets it adjust or drop the idea instead.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "submit", "Create", show=False, priority=True),
+    ]
 
     _PREVIEW_CHARS = 280
 
@@ -259,9 +326,16 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
         self.cwd = cwd
         self.request = request
         seeded = (request.get("default_name") or "").strip()
-        if not seeded or seeded in existing_names_in_cwd(cwd):
-            seeded = pick_random_name(existing_names_in_cwd(cwd)) or ""
+        names = all_session_names_in_cwd(cwd)
+        if not seeded or seeded in names:
+            seeded = pick_random_name(names) or ""
         self.default_name = seeded
+        requested_runtime = request.get("caller_runtime")
+        self.caller_runtime = (
+            requested_runtime
+            if requested_runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
+            else RUNTIME_CLAUDE
+        )
 
     def compose(self) -> ComposeResult:
         from_name = self.request.get("from", "?")
@@ -272,14 +346,43 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
 
         yield Vertical(
             Static(
-                f"[bold]'{from_name}'[/] wants to spawn a subagent:",
+                f"[bold]'{from_name}'[/] ({self.caller_runtime}) wants to "
+                "spawn a subagent:",
                 id="spawn-header",
             ),
             Static(f"[dim italic]{preview or '(empty instruction)'}[/]", id="spawn-preview"),
             Static("Name the new agent:", id="spawn-prompt"),
             Input(value=self.default_name, id="spawn-name"),
+            Static("Child runtime:", id="spawn-runtime-prompt"),
+            RadioSet(
+                RadioButton(
+                    "Claude",
+                    value=self.caller_runtime == RUNTIME_CLAUDE,
+                    id="spawn-runtime-claude",
+                ),
+                RadioButton(
+                    "Codex",
+                    value=self.caller_runtime == RUNTIME_CODEX,
+                    id="spawn-runtime-codex",
+                ),
+                RadioButton(
+                    "pi",
+                    value=self.caller_runtime == RUNTIME_PI,
+                    id="spawn-runtime-pi",
+                ),
+                id="spawn-runtime",
+            ),
+            Static("Reason, if rejecting (optional):", id="spawn-reject-prompt"),
+            Input(
+                placeholder="Sent back to the agent — e.g. why, or what to do instead",
+                id="spawn-reject-reason",
+            ),
             Static("", id="spawn-error"),
-            Static("Enter to accept · Esc to reject", id="spawn-hint"),
+            Static(
+                "Tab to move · Enter to accept · Esc to reject "
+                "(Enter in the reason box rejects too)",
+                id="spawn-hint",
+            ),
             id="spawn-dialog",
         )
 
@@ -292,20 +395,49 @@ class SpawnRequestScreen(ModalScreen[Optional[str]]):
             pass
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
-        name = event.value.strip()
+        if event.input.id == "spawn-reject-reason":
+            self.action_cancel()
+            return
+        self._try_submit()
+
+    def action_submit(self) -> None:
+        # Enter is bound at screen level with priority, so it fires even while
+        # the reason box has focus. Typing a rejection and pressing Enter must
+        # reject, not silently create the agent you were declining.
+        focused = self.focused
+        if focused is not None and getattr(focused, "id", None) == "spawn-reject-reason":
+            self.action_cancel()
+            return
+        self._try_submit()
+
+    def _reject_reason(self) -> str:
+        try:
+            return self.query_one("#spawn-reject-reason", Input).value.strip()
+        except Exception:
+            # Dismissed before compose finished (external resolve).
+            return ""
+
+    def _try_submit(self) -> None:
+        name = self.query_one("#spawn-name", Input).value.strip()
         err = self.query_one("#spawn-error", Static)
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace.[/]"
             )
             return
-        self.dismiss(name)
+        if self.query_one("#spawn-runtime-pi", RadioButton).value:
+            runtime = RUNTIME_PI
+        elif self.query_one("#spawn-runtime-codex", RadioButton).value:
+            runtime = RUNTIME_CODEX
+        else:
+            runtime = RUNTIME_CLAUDE
+        self.dismiss(SpawnDecision(accepted=True, name=name, runtime=runtime))
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self.dismiss(SpawnDecision(accepted=False, reason=self._reject_reason()))
 
 
 class NameInputScreen(ModalScreen[Optional[str]]):
@@ -346,7 +478,7 @@ class NameInputScreen(ModalScreen[Optional[str]]):
         if not name:
             err.update("[red]Name cannot be empty.[/]")
             return
-        if name in existing_names_in_cwd(self.cwd):
+        if name in all_session_names_in_cwd(self.cwd):
             err.update(
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
@@ -358,7 +490,7 @@ class NameInputScreen(ModalScreen[Optional[str]]):
 
 
 class ConfirmDeleteScreen(ModalScreen[bool]):
-    """Yes/no confirmation before deleting a dormant session's JSONL.
+    """Yes/no confirmation before deleting a dormant native session.
 
     Returns ``True`` on confirm (Enter), ``False`` on cancel (Esc).
     """
@@ -368,19 +500,24 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         Binding("enter", "confirm", "Confirm"),
     ]
 
-    def __init__(self, display_name: str) -> None:
+    def __init__(self, display_name: str, runtime: str = RUNTIME_CLAUDE) -> None:
         super().__init__()
         self.display_name = display_name
+        self.runtime = runtime
 
     def compose(self) -> ComposeResult:
+        description = (
+            "This permanently deletes its Codex conversation data. "
+            if self.runtime == RUNTIME_CODEX
+            else "This permanently deletes its JSONL from disk. "
+        )
         yield Vertical(
             Static(
                 f"Delete dormant session [bold]'{self.display_name}'[/]?",
                 id="confirm-delete-header",
             ),
             Static(
-                "This permanently deletes its JSONL from disk. "
-                "This cannot be undone.",
+                description + "This cannot be undone.",
                 id="confirm-delete-body",
             ),
             Static("Enter to confirm · Esc to cancel", id="confirm-delete-hint"),
@@ -394,14 +531,13 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
-class ConfirmForeignResumeScreen(ModalScreen[bool]):
-    """Yes/no confirmation before resuming a session whose tmux is gone
-    locally but whose (different) host still reports it non-ended.
+class ConfirmForceKillScreen(ModalScreen[bool]):
+    """Confirmation before force-killing a session created on a different
+    host. Used when the shared-storage host guard would normally block —
+    e.g. after a container/machine gets replaced and its sessions never
+    got a chance to write a clean ``ended`` status.
 
-    This is the ambiguous case: the owning host may have been recycled
-    (safe to reclaim) or may still be alive elsewhere sharing this
-    MULTIVERSE_ROOT (resuming would spawn a duplicate). Only the user
-    knows which, so ask. Returns ``True`` on confirm, ``False`` on cancel.
+    Returns ``True`` on confirm (Enter), ``False`` on cancel (Esc).
     """
 
     BINDINGS = [
@@ -409,27 +545,35 @@ class ConfirmForeignResumeScreen(ModalScreen[bool]):
         Binding("enter", "confirm", "Confirm"),
     ]
 
-    def __init__(self, display_name: str, host: str) -> None:
+    def __init__(
+        self, display_name: str, other_host: str, current: str
+    ) -> None:
         super().__init__()
         self.display_name = display_name
-        self.host = host
+        self.other_host = other_host
+        self.current = current
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(
-                f"Resume [bold]'{self.display_name}'[/] here?",
-                id="confirm-delete-header",
+                f"Force-kill session [bold]'{self.display_name}'[/]?",
+                id="confirm-force-header",
             ),
             Static(
-                f"It was created on host [bold]{self.host}[/], which this "
-                "host's tmux can't see, but its status there isn't 'ended'. "
-                "If that host is gone (e.g. a recycled pod), resume here. "
-                "If it's still alive elsewhere, resuming will create a "
-                "duplicate.",
-                id="confirm-delete-body",
+                f"Session was created on host [bold]{self.other_host}[/] and "
+                f"its durable status there is not [italic]ended[/]. "
+                f"You're on [bold]{self.current}[/].\n\n"
+                "Normal kill is blocked because the session might still be "
+                "alive on that other host — killing it from here would only "
+                "delete its bookkeeping (inviting a duplicate later) without "
+                "actually stopping the process there.\n\n"
+                "Confirm only if you're sure that host is gone (container "
+                "recycled, machine dead, etc.). This will remove the local "
+                "state files here.",
+                id="confirm-force-body",
             ),
-            Static("Enter to resume · Esc to cancel", id="confirm-delete-hint"),
-            id="confirm-delete-dialog",
+            Static("Enter to force-kill · Esc to cancel", id="confirm-force-hint"),
+            id="confirm-force-dialog",
         )
 
     def action_cancel(self) -> None:
@@ -439,8 +583,10 @@ class ConfirmForeignResumeScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
-class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
-    """Browse claude sessions in the monitor's cwd and pick one to resume.
+class ResumeSessionScreen(
+    ModalScreen[Optional[tuple[str, str, Optional[str]]]]
+):
+    """Browse runtime sessions in the monitor's cwd and pick one to resume.
 
     Hides sessions already wrapped by a live or ended multiverse session —
     those are surfaced on the dashboard itself.
@@ -448,15 +594,15 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
 
-    def __init__(self, cwd: str, hide_uuids: set[str]) -> None:
+    def __init__(self, cwd: str, hide_ids: set[tuple[str, str]]) -> None:
         super().__init__()
         self.cwd = cwd
-        self.hide_uuids = hide_uuids
+        self.hide_ids = hide_ids
         self.sessions_info: list[dict] = []
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Static("Resume claude session — pick one:"),
+            Static("Resume session — pick one:"),
             Static(f"[dim]cwd: {self.cwd}[/]"),
             DataTable(cursor_type="row", zebra_stripes=True, id="resume-table"),
             Static("Enter on a row to resume · Esc to go back", id="resume-hint"),
@@ -465,7 +611,7 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
 
     def on_mount(self) -> None:
         table = self.query_one("#resume-table", DataTable)
-        table.add_columns("UUID", "Name", "Preview", "Updated")
+        table.add_columns("Runtime", "ID", "Name", "Preview", "Updated")
         self._populate()
         table.focus()
         if self.sessions_info:
@@ -482,31 +628,68 @@ class ResumeSessionScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
         key = event.row_key.value if event.row_key is not None else None
         if not key:
             return
-        claude_name: Optional[str] = None
+        runtime: Optional[str] = None
+        session_id: Optional[str] = None
+        session_name: Optional[str] = None
         for info in self.sessions_info:
-            if info["uuid"] == key:
-                claude_name = info.get("name")
+            if info["row_key"] == key:
+                runtime = info["runtime"]
+                session_id = info["id"]
+                session_name = info.get("name")
                 break
-        self.dismiss((str(key), claude_name))
+        if runtime and session_id:
+            self.dismiss((runtime, session_id, session_name))
 
     def _populate(self) -> None:
-        all_sessions = list_claude_sessions_in(self.cwd)
+        all_sessions: list[dict] = []
+        for info in list_claude_sessions_in(self.cwd):
+            session_id = info["uuid"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_CLAUDE,
+                    "id": session_id,
+                    "row_key": f"{RUNTIME_CLAUDE}:{session_id}",
+                }
+            )
+        for info in list_codex_sessions_in(self.cwd, include_unnamed=True):
+            session_id = info["id"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_CODEX,
+                    "row_key": f"{RUNTIME_CODEX}:{session_id}",
+                }
+            )
+        for info in list_pi_sessions_in(self.cwd, include_unnamed=True):
+            session_id = info["id"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_PI,
+                    "row_key": f"{RUNTIME_PI}:{session_id}",
+                }
+            )
+        all_sessions.sort(key=lambda info: info["mtime"], reverse=True)
         self.sessions_info = [
-            info for info in all_sessions if info["uuid"] not in self.hide_uuids
+            info
+            for info in all_sessions
+            if (info["runtime"], info["id"]) not in self.hide_ids
         ]
         table = self.query_one("#resume-table", DataTable)
         table.clear()
         now = time.time()
         for info in self.sessions_info:
             preview = info["preview"] or "(empty)"
-            claude_name = info.get("name")
-            name_cell = claude_name if claude_name else "[dim](unnamed)[/]"
+            session_name = info.get("name")
+            name_cell = session_name if session_name else "[dim](unnamed)[/]"
             table.add_row(
-                info["uuid"][:8],
+                info["runtime"],
+                info["id"][:8],
                 name_cell,
                 preview,
                 _ago(now - info["mtime"]),
-                key=info["uuid"],
+                key=info["row_key"],
             )
 
     def action_cancel(self) -> None:
@@ -621,6 +804,10 @@ class InboxViewerScreen(ModalScreen[None]):
         ]
         for i, m in enumerate(self.messages, 1):
             from_name = m.get("from", "?")
+            # from_cwd is present only on cross-workspace messages; show the
+            # sender's workspace only in that case (same-workspace messages
+            # don't carry it, so nothing extra is rendered).
+            from_cwd = m.get("from_cwd")
             body = m.get("body", "")
             ts = m.get("ts", 0)
             ts_str = (
@@ -628,10 +815,13 @@ class InboxViewerScreen(ModalScreen[None]):
                 if ts
                 else "?"
             )
+            origin = f"from {escape(str(from_name))}"
+            if from_cwd:
+                origin += f" [dim](in workspace {escape(str(from_cwd))})[/]"
             blocks.append(
                 Static(
-                    f"\n[bold yellow]━━━ [{i}/{n}] from "
-                    f"{escape(str(from_name))}[/]  [dim]({ts_str})[/]"
+                    f"\n[bold yellow]━━━ [{i}/{n}] {origin}[/]  "
+                    f"[dim]({ts_str})[/]"
                 )
             )
             # CRITICAL: render body with markup=False. The message body is
@@ -805,6 +995,300 @@ class WebShareScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+class SecondBrainScreen(ModalScreen[None]):
+    """Enroll / connect / disconnect this device to the SecondBrain apprentice (the ``S`` key).
+
+    SecondBrain (SB) is a separate, locally-hosted apprentice that watches the user across
+    all their Multiverse workspaces and — within earned trust — acts on their behalf. This
+    device streams perception events to SB over one authenticated WebSocket, dialing *out*
+    (SB is behind NAT). The connector is device-level and host-aware singleton — it survives
+    this monitor quitting, so SB keeps perceiving.
+
+    One form serves both flows. Enrollment fields (pairing code + fingerprint) are needed
+    only the first time (or to re-enroll / re-grant); a plain reconnect ignores them.
+
+      Enter  — enroll+connect if this device isn't enrolled, else connect
+      e      — (re-)enroll using the form (needs pairing code + fingerprint)
+      d      — disconnect (stop the connector daemon)
+      Esc    — close (the daemon keeps running)
+    """
+
+    #: Open with nothing focused. Textual's default ("" inherits the app's "*") would
+    #: grab the first focusable widget — the endpoint URL box — which puts a cursor in
+    #: a field the user usually doesn't want to edit and swallows the single-key
+    #: bindings below until they escape out of it. Empty string disables auto-focus
+    #: outright (``None`` would inherit, not disable); the user clicks into a field
+    #: when they actually want one.
+    AUTO_FOCUS = ""
+
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("enter", "primary", "Enroll/Connect (this workspace)"),
+        Binding("e", "reenroll", "Re-enroll"),
+        Binding("d", "disconnect", "Disconnect (this workspace)"),
+        Binding("D", "stop_device", "Stop device daemon"),
+        Binding("u", "unenroll", "Un-enroll this workspace"),
+        Binding("r", "reload", "Reload daemon"),
+    ]
+
+    def __init__(self, cwd: str) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self._busy = False
+
+    def compose(self) -> ComposeResult:
+        import socket as _socket
+
+        st = sb_control.status()
+        yield Vertical(
+            Static("[bold]SecondBrain[/] — connect this device to your apprentice", id="sb-title"),
+            Static("", id="sb-status"),
+            VerticalScroll(
+                Static("[dim]Endpoint (SB base URL — wss:// through the tunnel, or "
+                       "ws://127.0.0.1:8765 same-box):[/]"),
+                Input(value=st.get("base_url", ""), id="sb-url"),
+                Static("[dim]— Enrollment only (first time / re-grant) —[/]"),
+                Static("[dim]Pairing code (from `sb-pair` on the SB host):[/]"),
+                Input(placeholder="XXXX-XXXX-XXXX-XXXX", id="sb-code"),
+                Static("[dim]SB server fingerprint (pin, from `sb-pair`):[/]"),
+                Input(placeholder="XXXX-XXXX-XXXX-XXXX", id="sb-fingerprint"),
+                Static("[dim]Device name:[/]"),
+                Input(value=(sb_control.get_device_name() or _socket.gethostname()), id="sb-name"),
+                Static("[dim]Workspaces to expose (comma-separated abs paths):[/]"),
+                # Prefill with the union of what's already granted + the current cwd.
+                # Otherwise a re-enroll from a not-yet-granted workspace would send
+                # want=[current_cwd] only — SB might respond by REPLACING the grants
+                # with just that one, silently dropping previously-granted workspaces
+                # like droid_pipeline. Users can still edit to remove any they don't
+                # want; but the default is additive, not destructive.
+                Input(
+                    value=", ".join(sorted(set(
+                        list(st.get("granted_workspaces") or []) + [self.cwd]
+                    ))),
+                    id="sb-workspaces",
+                ),
+                Static("[dim]— Cloudflare Access service token (wss:// only; blank = keep/none) —[/]"),
+                # Deliberately NOT prefilling client_id from storage: our validation
+                # is both-or-neither, so a prefilled id + empty secret would force
+                # the user to hand-delete the id every time they open the widget
+                # just to keep existing creds. Leave both blank to keep; fill both
+                # to rotate.
+                Input(placeholder="CF-Access-Client-Id (leave blank to keep stored)",
+                      id="sb-cf-id"),
+                Input(placeholder="CF-Access-Client-Secret (leave blank to keep stored)",
+                      password=True, id="sb-cf-secret"),
+                id="sb-form",
+            ),
+            Static("", id="sb-hint"),
+            id="sb-dialog",
+        )
+
+    def on_mount(self) -> None:
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        st = sb_control.status()
+        state = st.get("state", "stopped")
+        colors = {
+            "connected": "green", "connecting": "cyan", "reconnecting": "yellow",
+            "locked": "yellow", "stopped": "dim", "unenrolled": "red", "error": "red",
+        }
+        color = colors.get(state, "white")
+        lines = [f"Status: [{color}]{state}[/]"]
+        if st.get("detail"):
+            lines[0] += f"  [dim]({st['detail']})[/]"
+        if st.get("enrolled"):
+            granted = st.get("granted_workspaces", [])
+            exposed = st.get("exposed_workspaces", [])
+            # This workspace's state — the primary thing the user needs to see.
+            if self.cwd in exposed:
+                here = "[green]✓ granted + observed[/]"
+            elif self.cwd in granted:
+                here = "[yellow]granted but not observed[/] — press [b]Enter[/] to observe"
+            else:
+                here = "[red]not enrolled[/] — press [b]e[/] with pairing code + fingerprint"
+            lines.append(f"This workspace: {here}")
+            lines.append(
+                f"Device: [bold]{st.get('device_id', '?')}[/] · "
+                f"{len(granted)} granted · {len(exposed)} observed"
+            )
+            lines.append(
+                f"CF token: {'[green]stored[/]' if st.get('has_cf_creds') else '[dim]none[/]'}"
+            )
+            if st.get("code_stale"):
+                lines.append(
+                    "[yellow]⚠ On-disk code is newer than the running daemon "
+                    "— press [b]r[/b] to reload.[/]"
+                )
+        else:
+            lines.append("[dim]Not enrolled yet — fill the form and press Enter to enroll.[/]")
+        self.query_one("#sb-status", Static).update("\n".join(lines))
+
+        running = st.get("running")
+        granted = st.get("granted_workspaces", [])
+        exposed = st.get("exposed_workspaces", [])
+        this_exposed = self.cwd in exposed
+        this_granted = self.cwd in granted
+        if not st.get("enrolled"):
+            hint = "[b]Enter[/] enroll & observe this workspace · [b]Esc[/] cancel"
+        elif this_exposed:
+            hint = (
+                "[b]d[/] disconnect this workspace · [b]u[/] un-enroll this workspace · "
+                "[b]e[/] re-enroll · [b]D[/] (shift+d) stop entire daemon · "
+                "[b]r[/] reload · [b]Esc[/] close (daemon keeps running)"
+            )
+        elif this_granted:
+            hint = (
+                "[b]Enter[/] observe this workspace · [b]u[/] un-enroll · "
+                "[b]e[/] re-enroll · [b]r[/] reload · [b]Esc[/] close"
+            )
+        else:
+            hint = "[b]e[/] enroll this workspace · [b]Esc[/] close"
+        # If daemon isn't running for something, tighten the note
+        if not running and this_exposed:
+            hint = "[b]Enter[/] start daemon · " + hint
+        self.query_one("#sb-hint", Static).update(hint)
+
+    # ---- field helpers -------------------------------------------------------------
+
+    def _val(self, wid: str) -> str:
+        return self.query_one(f"#sb-{wid}", Input).value.strip()
+
+    def _cf_from_fields(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Return (client_id, client_secret, error). Both-or-neither; blank => keep existing."""
+        cid, csecret = self._val("cf-id"), self.query_one("#sb-cf-secret", Input).value
+        if not cid and not csecret:
+            return None, None, None
+        if cid and csecret:
+            return cid, csecret, None
+        return None, None, "Enter BOTH CF Access fields, or leave both blank."
+
+    # ---- actions -------------------------------------------------------------------
+
+    def action_primary(self) -> None:
+        if self._busy:
+            return
+        st = sb_control.status()
+        exposed = st.get("exposed_workspaces", [])
+        granted = st.get("granted_workspaces", [])
+        running = st.get("running")
+        if not st.get("enrolled"):
+            self._start_worker("enroll")
+            return
+        if self.cwd in exposed:
+            if running:
+                self.notify("This workspace is already observed — press d to disconnect it.")
+                return
+            # Exposed but daemon died — start it back up. This is the common case after
+            # a daemon crash / container restart / etc: state.json still lists us as
+            # exposed, but no live daemon is emitting events for us.
+            self._start_worker("expose")
+            return
+        if self.cwd in granted:
+            # Granted but not exposed → expose (per-workspace connect)
+            self._start_worker("expose")
+        else:
+            # Not granted → needs enroll to add this workspace
+            self._start_worker("enroll")
+
+    def action_reenroll(self) -> None:
+        if not self._busy:
+            self._start_worker("enroll")
+
+    def action_disconnect(self) -> None:
+        """Per-workspace: unexpose the current cwd. Daemon keeps running for other
+        exposed workspaces; stops entirely only if this was the last one."""
+        if not self._busy:
+            self._start_worker("unexpose")
+
+    def action_stop_device(self) -> None:
+        """Device-level: stop the whole daemon regardless of exposed set."""
+        if not self._busy:
+            self._start_worker("stop_device")
+
+    def action_unenroll(self) -> None:
+        """Remove the current cwd from the sidecar's granted_workspaces + exposed set."""
+        if not self._busy:
+            self._start_worker("unenroll")
+
+    def action_reload(self) -> None:
+        if not self._busy:
+            self._start_worker("reload")
+
+    def _start_worker(self, op: str) -> None:
+        url = self._val("url")
+        # URL only required for ops that dial out (enroll dial; start reads config)
+        if op in ("enroll",) and not url:
+            self._set_error("Endpoint URL is required.")
+            return
+        cid, csecret, cf_err = self._cf_from_fields()
+        if cf_err:
+            self._set_error(cf_err)
+            return
+        code = fingerprint = ""
+        name = self._val("name") or ""
+        workspaces: list[str] = []
+        if op == "enroll":
+            code, fingerprint = self._val("code"), self._val("fingerprint")
+            if not code or not fingerprint:
+                self._set_error("Pairing code and fingerprint are required to enroll.")
+                return
+            workspaces = [w.strip() for w in self._val("workspaces").replace(",", " ").split()]
+        self._busy = True
+        self.query_one("#sb-hint", Static).update("[cyan]working… (this can take a few seconds)[/]")
+        self._run(op, url, code, fingerprint, name, workspaces, cid, csecret)
+
+    @work(thread=True, group="secondbrain")
+    def _run(
+        self, op: str, url: str, code: str, fingerprint: str, name: str,
+        workspaces: list, cid: Optional[str], csecret: Optional[str],
+    ) -> None:
+        err: Optional[str] = None
+        try:
+            if cid and csecret:
+                sb_control.save_cf_creds(cid, csecret)
+            if op == "enroll":
+                # Additive on the client — sidecar merges with prior grants.
+                # After enroll, expose the CURRENT workspace so it starts being
+                # observed (without touching other workspaces' exposure state).
+                sb_control.enroll(
+                    base_url=url, code=code, fingerprint=fingerprint,
+                    name=name, want=workspaces,
+                )
+                sb_control.expose_workspace(self.cwd)
+            elif op == "expose":
+                if name:
+                    sb_control.save_device_name(name)
+                sb_control.expose_workspace(self.cwd)
+            elif op == "unexpose":
+                sb_control.unexpose_workspace(self.cwd)
+            elif op == "unenroll":
+                sb_control.unenroll_workspace(self.cwd)
+            elif op == "stop_device":
+                sb_control.stop()
+            elif op == "reload":
+                if name:
+                    sb_control.save_device_name(name)
+                sb_control.reload()
+        except Exception as exc:  # surface failures to the panel
+            err = str(exc)
+        self.app.call_from_thread(self._after, err)
+
+    def _after(self, err: Optional[str]) -> None:
+        self._busy = False
+        if err:
+            self._set_error(err)
+            return
+        self._refresh_status()
+
+    def _set_error(self, msg: str) -> None:
+        self.query_one("#sb-hint", Static).update(f"[red]{msg}[/]")
+
+    def action_close(self) -> None:
+        if not self._busy:
+            self.dismiss(None)
+
+
 _SPARK_LEVELS = "▁▂▃▄▅▆▇█"
 
 
@@ -885,19 +1369,24 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         claude_uuid: str,
         cwd: str,
         display_name: str,
-        forest_stats: list[tuple[str, int, int, int, int]],
+        forest_stats: list[tuple[str, int, int, int, int, int]],
         default_budget: int,
         full_tokens: int = 0,
         full_turns: int = 0,
         live_tokens: int = 0,
         live_turns: int = 0,
+        structural_tokens: int = 0,
     ) -> None:
         super().__init__()
         self.claude_uuid = claude_uuid
         self.cwd = cwd
         self.display_name = display_name
         # forest_stats: [(turn_id, leaves, prompt_text, prompt_image,
-        #                 min_tok), ...] in chain order.
+        #                 min_tok, alloc_weight), ...] in chain order.
+        # leaves = full raw leaf sum (bounds, verbatim last_k tail);
+        # alloc_weight = leaves minus evictable tool-result output (the
+        # scheduler's proportional weight, so verbose tool output doesn't
+        # command an outsized budget slice).
         self.forest_stats = forest_stats
         self.default_budget = max(1, default_budget)
         # Kept for the always-visible stats line above the picker so
@@ -906,6 +1395,14 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.full_turns = full_turns
         self.live_tokens = live_tokens
         self.live_turns = live_turns
+        # Structural tokens — system prompt, tool schemas, memory files,
+        # skills, agents, MCP server definitions. Derived from the last
+        # recorded API call's usage delta (see full_jsonl.structural_tokens).
+        # Session-wide fixed cost, non-compactable: rolls into
+        # ``input_floor`` alongside user-prompt text and images so the
+        # scheduler allocates the OUTPUT budget against a realistic
+        # ceiling.
+        self.structural_tokens = structural_tokens
         self._scheduler = "proportional"
         self._k = self._DEFAULT_K
         self._ratio = self._DEFAULT_RATIO
@@ -918,13 +1415,13 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
 
     def compose(self) -> ComposeResult:
         text_floor = sum(
-            text for _, _, text, _, _ in self.forest_stats
+            text for _, _, text, _, _, _ in self.forest_stats
         )
         image_floor = sum(
-            img for _, _, _, img, _ in self.forest_stats
+            img for _, _, _, img, _, _ in self.forest_stats
         )
         n_img_turns = sum(
-            1 for _, _, _, img, _ in self.forest_stats if img > 0
+            1 for _, _, _, img, _, _ in self.forest_stats if img > 0
         )
         marker_floor = n_img_turns * self._IMAGE_OMISSION_MARKER_TOKENS
 
@@ -940,17 +1437,34 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
                 f"\n[dim]Live pre-compaction: {self.live_tokens:,}t · "
                 f"{self.live_turns} turn(s){pct}[/]"
             )
-        prompt_line = (
-            f"\n[dim]Prompts (always kept): text {text_floor:,}t"
-        )
+        # Structural (system prompt + tool schemas + memory files + skills
+        # + agents + MCP definitions) leads the input-floor line since
+        # it's typically the dominant section by far and it's the piece
+        # the user has no direct control over. Then text (user prompts),
+        # then images. Only rendered when > 0 (freshly-compacted sessions
+        # can't derive structural until their first post-compact API
+        # call — display collapses to just text-and-images in that
+        # transient case).
+        prompt_line = "\n[dim]Prompts (always kept):"
+        parts: list[str] = []
+        if self.structural_tokens:
+            parts.append(f"system prompt ~{self.structural_tokens:,}t")
+        parts.append(f"text {text_floor:,}t")
         if image_floor:
-            prompt_line += (
-                f"  ·  images {image_floor:,}t across {n_img_turns} "
+            parts.append(
+                f"images {image_floor:,}t across {n_img_turns} "
                 f"turn(s) (or ~{marker_floor:,}t if dropped)"
             )
-        prompt_line += "[/]"
+        prompt_line += " " + "  ·  ".join(parts) + "[/]"
 
-        yield Vertical(
+        # VerticalScroll, not Vertical: this dialog stacks a multi-line
+        # header, the scheduler radio set, an image toggle, three
+        # labelled params each with a paragraph of help, the budget
+        # input, the per-turn preview and the hint. That comfortably
+        # exceeds a terminal's height, and a plain Vertical simply clips
+        # the overflow with no way to reach it — the budget input and
+        # preview became unreachable on shorter terminals.
+        yield VerticalScroll(
             Static(
                 f"Compact: [bold]{self.display_name}[/]\n"
                 f"[dim]Full (uncompacted): {self.full_tokens:,}t · "
@@ -1114,46 +1628,63 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         except (ValueError, AttributeError):
             return self._DEFAULT_RATIO
 
-    def _compute_input_floor(self) -> tuple[int, int, int]:
-        """Return ``(input_floor, text_floor, image_floor)``.
+    def _compute_input_floor(self) -> tuple[int, int, int, int]:
+        """Return ``(input_floor, text_floor, image_floor, structural_floor)``.
 
-        ``input_floor`` is the total non-compactable input cost — text
-        (always kept) plus either full image tokens (if the checkbox
-        is on) or one omission marker per image-bearing turn (if off).
-        The scheduler operates on ``total_budget − input_floor``.
+        ``input_floor`` is the total non-compactable input cost:
+        user-prompt text (always kept) + user-prompt images (verbatim
+        or one omission marker per image-bearing turn, depending on the
+        checkbox) + the session's structural tokens (system prompt,
+        tools, memory, skills, agents, MCP definitions — never in the
+        JSONL but always in every API request). The scheduler operates
+        on ``total_budget − input_floor``.
         """
         text_floor = sum(
-            text for _, _, text, _, _ in self.forest_stats
+            text for _, _, text, _, _, _ in self.forest_stats
         )
         if self._include_images:
             image_floor = sum(
-                img for _, _, _, img, _ in self.forest_stats
+                img for _, _, _, img, _, _ in self.forest_stats
             )
         else:
             image_floor = sum(
                 self._IMAGE_OMISSION_MARKER_TOKENS
-                for _, _, _, img, _ in self.forest_stats
+                for _, _, _, img, _, _ in self.forest_stats
                 if img > 0
             )
-        return text_floor + image_floor, text_floor, image_floor
+        structural_floor = self.structural_tokens
+        return (
+            text_floor + image_floor + structural_floor,
+            text_floor,
+            image_floor,
+            structural_floor,
+        )
 
     def _compute_allocation(self) -> list[int]:
         """Per-turn OUTPUT (assistant) allocation from the scheduler,
         in chain order. Budget the scheduler sees is
         ``total_budget − input_floor``.
         """
-        turn_ids = [tid for tid, _, _, _, _ in self.forest_stats]
-        leaves_by_id = {
-            tid: leaves for tid, leaves, _, _, _ in self.forest_stats
+        turn_ids = [tid for tid, _, _, _, _, _ in self.forest_stats]
+        # full_by_id: raw leaf sum (verbatim cost). weight_by_id:
+        # allocation weight, evictable tool output excluded. Mirrors
+        # compactor.py — proportional/recency split by weight; last_k_raw
+        # keeps its verbatim tail at full cost but splits the rest by
+        # weight.
+        full_by_id = {
+            tid: leaves for tid, leaves, _, _, _, _ in self.forest_stats
+        }
+        weight_by_id = {
+            tid: alloc for tid, _, _, _, _, alloc in self.forest_stats
         }
         total_budget = self._current_budget()
-        input_floor, _, _ = self._compute_input_floor()
+        input_floor, _, _, _ = self._compute_input_floor()
         budget = max(0, total_budget - input_floor)
 
         if self._scheduler == "proportional":
-            total = sum(max(1, s) for s in leaves_by_id.values()) or 1
+            total = sum(max(1, s) for s in weight_by_id.values()) or 1
             alloc = {
-                tid: int(budget * max(1, leaves_by_id[tid]) / total)
+                tid: int(budget * max(1, weight_by_id[tid]) / total)
                 for tid in turn_ids
             }
         elif self._scheduler == "recency_boosted":
@@ -1162,14 +1693,14 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             weights = {}
             for k, tid in enumerate(reversed(turn_ids)):
                 multiplier = 1.0 + (ratio - 1.0) / (1.0 + k / hl)
-                weights[tid] = max(1, leaves_by_id[tid]) * multiplier
+                weights[tid] = max(1, weight_by_id[tid]) * multiplier
             total_w = sum(weights.values()) or 1.0
             alloc = {
                 tid: int(budget * weights[tid] / total_w) for tid in turn_ids
             }
         elif self._scheduler == "last_k_raw":
             # Clamp k at the turn count. When k == n, the whole forest
-            # is "verbatim tail": each turn gets its leaves count as
+            # is "verbatim tail": each turn gets its full leaves count as
             # its allocation, bounded and budget-invariant. Without
             # this clamp, k > n fell through to plain proportional-of-
             # budget which grew unboundedly at high budgets and made
@@ -1177,20 +1708,20 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
             k = min(max(1, self._current_k()), len(turn_ids))
             last_ids = turn_ids[-k:]
             rest_ids = turn_ids[:-k]  # empty when k == n
-            raw_cost = sum(leaves_by_id[tid] for tid in last_ids)
+            raw_cost = sum(full_by_id[tid] for tid in last_ids)
             if raw_cost >= budget and rest_ids:
-                total = sum(max(1, s) for s in leaves_by_id.values()) or 1
+                total = sum(max(1, s) for s in weight_by_id.values()) or 1
                 alloc = {
-                    tid: int(budget * max(1, leaves_by_id[tid]) / total)
+                    tid: int(budget * max(1, weight_by_id[tid]) / total)
                     for tid in turn_ids
                 }
             else:
                 remaining = max(0, budget - raw_cost)
-                alloc = {tid: leaves_by_id[tid] for tid in last_ids}
+                alloc = {tid: full_by_id[tid] for tid in last_ids}
                 if rest_ids:
-                    rest_total = sum(max(1, leaves_by_id[tid]) for tid in rest_ids) or 1
+                    rest_total = sum(max(1, weight_by_id[tid]) for tid in rest_ids) or 1
                     for tid in rest_ids:
-                        alloc[tid] = int(remaining * max(1, leaves_by_id[tid]) / rest_total)
+                        alloc[tid] = int(remaining * max(1, weight_by_id[tid]) / rest_total)
         else:
             alloc = {tid: 0 for tid in turn_ids}
 
@@ -1211,12 +1742,12 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         n = len(self.forest_stats)
         if n == 0:
             return 0
-        input_floor, _, _ = self._compute_input_floor()
-        outputs = [min_tok for _, _, _, _, min_tok in self.forest_stats]
+        input_floor, _, _, _ = self._compute_input_floor()
+        outputs = [min_tok for _, _, _, _, min_tok, _ in self.forest_stats]
         if self._scheduler == "last_k_raw":
             k_eff = min(self._current_k(), n)
             for i in range(n - k_eff, n):
-                _, leaves, _, _, _ = self.forest_stats[i]
+                _, leaves, _, _, _, _ = self.forest_stats[i]
                 outputs[i] = leaves
         return input_floor + sum(outputs)
 
@@ -1228,7 +1759,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
 
         budget = self._current_budget()
         alloc = self._compute_allocation()  # per-turn OUTPUT allocation
-        input_floor, text_floor, image_floor = self._compute_input_floor()
+        input_floor, text_floor, image_floor, structural_floor = self._compute_input_floor()
 
         # Per-turn OUTPUT projection is bounded on both ends:
         # - lower bound: root.tokens (expand_to_budget always keeps
@@ -1240,7 +1771,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         output_per_turn: list[int] = []
         breakdowns: list[tuple[int, int, int]] = []  # (text, img_out, out)
         for i, a in enumerate(alloc):
-            tid, leaves, text, img_tok, min_tok = self.forest_stats[i]
+            tid, leaves, text, img_tok, min_tok, _ = self.forest_stats[i]
             if img_tok > 0 and not self._include_images:
                 img_out = self._IMAGE_OMISSION_MARKER_TOKENS
             elif img_tok > 0:
@@ -1272,7 +1803,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         # verbatim images would cost and what we're spending on
         # markers — not the marker cost itself.
         full_image_tokens = sum(
-            img for _, _, _, img, _ in self.forest_stats
+            img for _, _, _, img, _, _ in self.forest_stats
         )
         image_note = ""
         if full_image_tokens > 0 and self._include_images:
@@ -1390,6 +1921,15 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         self.dismiss(None)
 
 
+def _compact_screen_name(claude_uuid: str) -> str:
+    """Textual installed-screen name for a session's CompactScreen.
+
+    Keyed by claude_uuid so a detached compaction can be found again from
+    the dashboard row. See ``CompactScreen.action_detach``.
+    """
+    return f"compact-{claude_uuid}"
+
+
 class CompactScreen(ModalScreen[None]):
     """Drive a manual compaction for one session.
 
@@ -1405,6 +1945,12 @@ class CompactScreen(ModalScreen[None]):
         checkpoint (won't kill an in-flight build subprocess).
       - In ``done``: dismiss.
 
+    ``d`` detaches instead of aborting: the modal closes back to the
+    dashboard while the compaction keeps running and the lock stays held,
+    so the row still reads ``compacting`` and still refuses attach /
+    resume / kill. Enter or ``c`` on that row re-opens this same screen
+    with its log and progress intact — see ``action_detach``.
+
     The actual *expansion* step (rendering the compacted live JSONL from
     the per-turn budget) is intentionally not yet wired in — first version
     stops once every turn has a tree. The next iteration will plug in
@@ -1412,7 +1958,10 @@ class CompactScreen(ModalScreen[None]):
     rewrite the live JSONL.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("d", "detach", "Detach (keep running)"),
+    ]
 
     # Match the worker.log lines that report a single turn's build time:
     #   "[HH:MM:SS]   turn N done (X.Ys)"
@@ -1443,6 +1992,19 @@ class CompactScreen(ModalScreen[None]):
         # prompts to start summarization.
         self.phase = "input"  # input | summarizing | choosing | expanding | done | failed
         self._runner: Optional[CompactRunner] = None
+        # Detach state (``d``). ``_installed`` tracks whether this screen is
+        # registered with Textual under _compact_screen_name so it survives
+        # being popped; ``_pending_picker`` defers the scheduler picker when
+        # summarization finishes while the user is back on the dashboard.
+        self._detached = False
+        self._installed = False
+        # Whether this screen holds the compacting lock. Taken once when
+        # summarization starts and held for the WHOLE flow — including the
+        # scheduler/budget picker, which is a human-speed pause the session
+        # must stay `compacting` across — then dropped exactly once at
+        # teardown. See _acquire_compact_lock.
+        self._holds_lock = False
+        self._pending_picker = False
         # Per-turn build elapsed times collected from worker.log; powers
         # the ETA estimate. Bounded — only the most-recent N are used so
         # ETA tracks current rate, not a stale long-tail.
@@ -1541,8 +2103,11 @@ class CompactScreen(ModalScreen[None]):
         if not full.is_file():
             return []
         try:
-            from compaction.parser import parse_session  # noqa: E402
-            forest = parse_session(str(full))
+            from compaction.parser import compaction_forest  # noqa: E402
+            # canonical compaction view so the sparkline reflects exactly
+            # the turns/leaves the pipeline compacts (command turns
+            # stripped, non-compactable leaves filtered, empty turns merged).
+            forest = compaction_forest(str(full))
         except Exception:  # noqa: BLE001
             return []
         return [(t.turn_id, sum(l.tokens for l in t.leaves)) for t in forest]
@@ -1572,21 +2137,32 @@ class CompactScreen(ModalScreen[None]):
         if not full.is_file():
             return []
         try:
-            from compaction.parser import parse_session  # noqa: E402
+            from compaction.parser import compaction_forest  # noqa: E402
             from compaction.compactor import (  # noqa: E402
+                _alloc_weight,
                 _user_prompt_image_tokens,
                 _user_prompt_text_tokens,
             )
         except Exception:  # noqa: BLE001
             return []
         try:
-            forest = parse_session(str(full))
+            # canonical compaction view — ChooseSchedulerScreen sees
+            # exactly the turns/leaves the pipeline in compact_runner.py
+            # builds against (command turns stripped, non-compactable
+            # leaves filtered, empty turns merged).
+            forest = compaction_forest(str(full))
         except Exception:  # noqa: BLE001
             return []
         cache_root = multiverse_dir() / "trees" / self.claude_uuid
-        out: list[tuple[str, int, int, int, int]] = []
+        out: list[tuple[str, int, int, int, int, int]] = []
         for t in forest:
             leaves = sum(l.tokens for l in t.leaves)
+            # Allocation weight excludes evictable tool-result output so
+            # a turn full of long file reads / command output doesn't
+            # command an outsized budget slice (mirrors the scheduler in
+            # compactor.py). Kept as a 6th field; ``leaves`` (full) still
+            # drives display bounds and the verbatim last_k_raw tail.
+            alloc = _alloc_weight(t)
             prompt_text = _user_prompt_text_tokens(t)
             prompt_image = _user_prompt_image_tokens(t)
             min_tok = leaves  # fallback: whole raw leaf sum
@@ -1602,7 +2178,9 @@ class CompactScreen(ModalScreen[None]):
                             min_tok = tok
                 except (OSError, _json.JSONDecodeError):
                     pass
-            out.append((t.turn_id, leaves, prompt_text, prompt_image, min_tok))
+            out.append(
+                (t.turn_id, leaves, prompt_text, prompt_image, min_tok, alloc)
+            )
         return out
 
     def _audit_cache_against_chain(self) -> tuple[int, list[float]]:
@@ -1616,9 +2194,12 @@ class CompactScreen(ModalScreen[None]):
         if full.is_file():
             # Lazy import — the vendored package is added to sys.path by
             # full_jsonl on import, so this is cheap once warm.
-            from compaction.parser import parse_session  # noqa: E402
+            from compaction.parser import compaction_forest  # noqa: E402
             try:
-                forest = parse_session(str(full))
+                # canonical compaction view — command-turn / empty-turn
+                # tree files (harmless orphans) shouldn't count toward the
+                # "trees matching chain" figure the compact widget shows.
+                forest = compaction_forest(str(full))
                 chain_turns = {t.turn_id for t in forest}
             except Exception:  # noqa: BLE001
                 chain_turns = set()
@@ -1760,7 +2341,8 @@ class CompactScreen(ModalScreen[None]):
         log_widget = self.query_one("#compact-log", RichLog)
         log_widget.clear()
         self.query_one("#compact-hint", Static).update(
-            "[dim]Esc to abort (won't kill in-flight build subprocess)[/]"
+            "[dim]Esc to abort (won't kill in-flight build subprocess)  ·  "
+            "d to detach (keeps running)[/]"
         )
 
         # Ensure forest_sizes is populated even if the initial stats
@@ -1770,7 +2352,42 @@ class CompactScreen(ModalScreen[None]):
 
         self._start_summarize_runner()
 
+    def _acquire_compact_lock(self) -> bool:
+        """Take the compacting lock for the whole compaction.
+
+        Previously each CompactRunner took and released it around its own
+        run, so the session stopped being `compacting` between summarize
+        and expand — exactly the window where the picker waits on a human.
+        Invisible while a modal covered the dashboard; wrong as soon as the
+        user detached with `d`, since the row dropped to dormant and Enter
+        on it offered to resume the session rather than reopen the picker.
+        """
+        if self._holds_lock:
+            return True
+        if not acquire_lock(self.claude_uuid):
+            return False
+        self._holds_lock = True
+        return True
+
+    def _release_compact_lock(self) -> None:
+        """Drop the lock, once. Guarded by ``_holds_lock`` so a screen that
+        never acquired it (cancelled at the input phase) can't unlink a lock
+        belonging to another monitor."""
+        if not self._holds_lock:
+            return
+        self._holds_lock = False
+        release_lock(self.claude_uuid)
+
     def _start_summarize_runner(self) -> None:
+        if not self._acquire_compact_lock():
+            self.phase = "failed"
+            self._append_log(
+                "[FAIL] another monitor is already compacting this session."
+            )
+            self.query_one("#compact-hint", Static).update(
+                "[bold red]Already being compacted elsewhere. Esc to close.[/]"
+            )
+            return
         live = live_jsonl_path(self.claude_uuid, self.cwd)
         if self.mv_session is not None:
             kill_fn = self._make_kill_fn(self.mv_session)
@@ -1783,6 +2400,7 @@ class CompactScreen(ModalScreen[None]):
             total_budget=0,
             kill_session_fn=kill_fn,
             summarize_only=True,
+            own_lock=False,  # this screen holds it for the whole flow
         )
         self._run_in_thread()
 
@@ -1829,6 +2447,7 @@ class CompactScreen(ModalScreen[None]):
             scheduler_name=config["scheduler"],
             scheduler_params=params,
             image_mode=image_mode,
+            own_lock=False,  # this screen holds it for the whole flow
         )
         self._run_in_thread()
 
@@ -1878,7 +2497,16 @@ class CompactScreen(ModalScreen[None]):
 
     def _append_log(self, line: str) -> None:
         try:
-            self.query_one("#compact-log", RichLog).write(line)
+            log = self.query_one("#compact-log", RichLog)
+            # Follow the tail only while the view is already parked at the
+            # bottom. RichLog defaults to auto_scroll=True and its write()
+            # calls scroll_end() UNCONDITIONALLY — not "only if pinned" — so
+            # every streamed line yanked the user back down mid-scroll,
+            # making the build log effectively unscrollable while a build
+            # was running. Passing scroll_end explicitly gives the usual
+            # tail-follow behaviour: keep following at the bottom, hold
+            # position once the user scrolls up.
+            log.write(line, scroll_end=log.is_vertical_scroll_end)
         except Exception:  # noqa: BLE001
             pass
         # Pull per-turn build times out of the worker.log lines as they
@@ -1960,24 +2588,17 @@ class CompactScreen(ModalScreen[None]):
             self.query_one("#compact-hint", Static).update(
                 "[dim]Trees built. Choose scheduler + budget…[/]"
             )
-            # Rebuild the richer per-turn stats now that trees are
-            # freshly built — root.tokens for each turn is up-to-date.
-            # Live stats come along so the picker's header keeps the
-            # full / live context visible instead of dropping it when
-            # we transition from the input phase.
-            live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
-            picker = ChooseSchedulerScreen(
-                claude_uuid=self.claude_uuid,
-                cwd=self.cwd,
-                display_name=self.display_name,
-                forest_stats=self._per_turn_forest_stats(),
-                default_budget=max(1, self.total_tokens // 2),
-                full_tokens=self.total_tokens,
-                full_turns=self.total_turns,
-                live_tokens=live_toks,
-                live_turns=live_turns,
-            )
-            self.app.push_screen(picker, self._on_config_chosen)
+            if self._detached:
+                # Don't ambush the dashboard with a modal the user isn't
+                # looking at. Hold the picker until they re-attach;
+                # on_screen_resume pushes it then.
+                self._pending_picker = True
+                self.app.notify(
+                    f"'{self.display_name}': trees built — press Enter on "
+                    "its row to choose the budget."
+                )
+                return
+            self._push_picker()
             return
 
         # Terminal state — either summarize failed, or expansion done.
@@ -1990,6 +2611,41 @@ class CompactScreen(ModalScreen[None]):
         self.query_one("#compact-hint", Static).update(
             f"[bold {verdict_color}]{verdict}Esc to close.[/]"
         )
+        if self._detached:
+            # Finished while the user was on the dashboard. Report the
+            # verdict there and drop the registration, so a later `c` on
+            # that row starts a fresh compaction instead of re-opening this
+            # finished one.
+            self.app.notify(
+                f"'{self.display_name}': {verdict.strip()}"
+                + ("" if ok else f" {msg}"),
+                severity="information" if ok else "error",
+            )
+            self._teardown_detached()
+
+    def _push_picker(self) -> None:
+        """Hand off to ChooseSchedulerScreen.
+
+        Rebuilds the richer per-turn stats now that trees are freshly
+        built — root.tokens for each turn is up-to-date. Live stats come
+        along so the picker's header keeps the full / live context visible
+        instead of dropping it on the way out of the input phase.
+        """
+        live_toks, live_turns = live_stats(self.claude_uuid, self.cwd)
+        struct_toks = structural_tokens(self.claude_uuid, self.cwd)
+        picker = ChooseSchedulerScreen(
+            claude_uuid=self.claude_uuid,
+            cwd=self.cwd,
+            display_name=self.display_name,
+            forest_stats=self._per_turn_forest_stats(),
+            default_budget=max(1, self.total_tokens // 2),
+            full_tokens=self.total_tokens,
+            full_turns=self.total_turns,
+            live_tokens=live_toks,
+            live_turns=live_turns,
+            structural_tokens=struct_toks,
+        )
+        self.app.push_screen(picker, self._on_config_chosen)
 
     def _on_config_chosen(self, config: Optional[dict]) -> None:
         """Callback from ChooseSchedulerScreen. None → user exited to
@@ -2005,6 +2661,70 @@ class CompactScreen(ModalScreen[None]):
             return
         self._enter_expanding_phase(config)
 
+    # ----- Detach / re-attach ---------------------------------------------
+
+    def action_detach(self) -> None:
+        """Close back to the dashboard WITHOUT stopping the compaction.
+
+        Esc aborts the run; this deliberately does not. The runner thread
+        keeps going, the compaction lock stays held (so every monitor keeps
+        rendering the row as ``compacting`` and keeps refusing attach /
+        resume / kill), and the user gets the dashboard back.
+
+        The screen instance is kept alive with ``install_screen``. That is
+        load-bearing, not incidental: Textual removes a popped screen's
+        widgets, so a plain pop-and-re-push would come back with an empty
+        log and a reset progress bar. An installed screen stays mounted,
+        keeps accepting the runner's writes while off-stack, and re-pushes
+        as the same instance.
+        """
+        if self.phase not in ("summarizing", "choosing", "expanding"):
+            self.notify(
+                "Nothing is running — Esc closes this screen.",
+                severity="warning",
+            )
+            return
+        app = self.app
+        if not self._installed:
+            try:
+                app.install_screen(self, name=_compact_screen_name(self.claude_uuid))
+                self._installed = True
+            except Exception:  # noqa: BLE001
+                self.notify(
+                    "Could not detach — leaving this screen open.",
+                    severity="error",
+                )
+                return
+        app._detached_compactions[self.claude_uuid] = self
+        self._detached = True
+        app.pop_screen()
+        app.notify(
+            f"'{self.display_name}' is still compacting in the background — "
+            "press Enter on its row to come back."
+        )
+
+    def on_screen_resume(self) -> None:
+        """Re-attached (or shown for the first time)."""
+        self._detached = False
+        if self._pending_picker:
+            self._pending_picker = False
+            self._push_picker()
+
+    def _teardown_detached(self) -> None:
+        """Drop the detach registration once the run has finished while the
+        user was away. Safe to uninstall here — a detached screen is by
+        definition off the stack, which is the one case Textual refuses."""
+        self._release_compact_lock()
+        app = self.app
+        app._detached_compactions.pop(self.claude_uuid, None)
+        if self._installed:
+            try:
+                app.uninstall_screen(_compact_screen_name(self.claude_uuid))
+            except Exception:  # noqa: BLE001
+                pass
+            self._installed = False
+        app.refresh_sessions()
+
     # ----- Cancel / dismiss -----------------------------------------------
 
     def action_cancel(self) -> None:
@@ -2018,6 +2738,7 @@ class CompactScreen(ModalScreen[None]):
                 self._append_log("[user] cancel requested — will abort soon")
                 return
             # Second Esc while still running: force-dismiss.
+        self._release_compact_lock()
         self.dismiss(None)
 
 
@@ -2209,6 +2930,10 @@ class MonitorApp(App):
         height: auto;
         padding-top: 1;
     }
+    #new-runtime {
+        height: auto;
+        padding-bottom: 1;
+    }
     #new-hint {
         color: $text-muted;
         padding-top: 1;
@@ -2251,6 +2976,26 @@ class MonitorApp(App):
         padding-bottom: 1;
     }
     #confirm-delete-hint {
+        color: $text-muted;
+        height: auto;
+    }
+    #confirm-force-dialog {
+        width: 100;
+        height: auto;
+        padding: 1 2;
+        border: round $error;
+        background: $surface;
+    }
+    #confirm-force-header {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-force-body {
+        color: $text-muted;
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-force-hint {
         color: $text-muted;
         height: auto;
     }
@@ -2337,6 +3082,29 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #sb-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #sb-title {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #sb-status {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #sb-form {
+        height: 1fr;
+    }
+    #sb-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
     #spawn-dialog {
         width: 100%;
         height: 100%;
@@ -2353,6 +3121,15 @@ class MonitorApp(App):
         padding-bottom: 1;
     }
     #spawn-prompt {
+        padding-top: 1;
+        height: auto;
+    }
+    #spawn-runtime {
+        height: auto;
+        padding-bottom: 1;
+    }
+    #spawn-reject-prompt {
+        color: $text-muted;
         padding-top: 1;
         height: auto;
     }
@@ -2465,6 +3242,7 @@ class MonitorApp(App):
         Binding("a", "ask_all", "Ask all"),
         Binding("i", "view_inbox", "View inbox"),
         Binding("w", "share_web", "Web share"),
+        Binding("S", "secondbrain", "SecondBrain"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
         Binding("r", "refresh", "Refresh"),
@@ -2488,6 +3266,10 @@ class MonitorApp(App):
         self._spawn_queue: list[dict] = []
         self._active_spawn_id: Optional[str] = None
         self._active_spawn_modal: Optional[SpawnRequestScreen] = None
+        # CompactScreens detached with ``d``: still running, off-stack, kept
+        # alive via install_screen. Keyed by claude_uuid so Enter / ``c`` on
+        # the (still ``compacting``) row can re-open the same instance.
+        self._detached_compactions: dict[str, CompactScreen] = {}
         # When the attach sidecar forcibly detaches the user to deal with a
         # spawn request, we remember the tmux session here so we can
         # reattach once the queue fully drains (set by ``_attach_to``;
@@ -2498,7 +3280,7 @@ class MonitorApp(App):
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
         table.add_columns(
-            "ID", "Name", "Agent", "Inbox", "Build", "Status", "Tokens",
+            "ID", "Name", "Runtime", "Inbox", "Build", "Status", "Tokens",
             "Updated", "Preview",
         )
         yield table
@@ -2519,20 +3301,6 @@ class MonitorApp(App):
         # Scope to the monitor's cwd — other multiverse instances own sessions
         # in other cwds.
         self.sessions = [s for s in all_sessions if s.cwd == self.monitor_cwd]
-        for s in self.sessions:
-            # Only trust "local tmux doesn't have it" as proof of death
-            # for sessions THIS host created. A session created on a
-            # different host (shared MULTIVERSE_ROOT deployments) is
-            # invisible to our local tmux by construction — showing it
-            # as "ended" here would be wrong, and would invite an Enter
-            # press that reaps a session that's still very much alive
-            # elsewhere. See foreign_host_still_reported_live.
-            if (
-                s.status not in ("ended",)
-                and (not s.host or s.host == current_host())
-                and not tmux_session_exists(s.tmux_name)
-            ):
-                s.status = "ended"
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
         self.entries = build_dashboard_rows(
@@ -2573,7 +3341,13 @@ class MonitorApp(App):
             self._spawn_queue.append(req)
 
         if self._active_spawn_id is not None:
-            if read_resolution(self._active_spawn_id) is not None:
+            # Dismiss the open modal if the request was resolved externally
+            # (another monitor got there first) OR the request file vanished
+            # (the caller cleaned up — it finished, was rejected elsewhere,
+            # or the caller interrupted/cancelled the wait).
+            resolved = read_resolution(self._active_spawn_id) is not None
+            gone = not request_path(self._active_spawn_id).is_file()
+            if resolved or gone:
                 modal = self._active_spawn_modal
                 if modal is not None:
                     try:
@@ -2592,15 +3366,14 @@ class MonitorApp(App):
                 req = self._spawn_queue.pop(0)
                 rid = req.get("id") or ""
                 # The request may have been resolved by another monitor, or
-                # cleaned up by the tool (timeout/rejection path) during the
-                # interval between enqueue and push. Drop silently.
+                # cleaned up by the tool (rejection / caller-cancel path)
+                # during the interval between enqueue and push. Drop
+                # silently. (No timeout check — spawn requests never expire;
+                # orphaned ones are filtered by list_pending_requests'
+                # caller-liveness check instead.)
                 if read_resolution(rid) is not None:
                     continue
                 if not request_path(rid).is_file():
-                    continue
-                timeout = int(req.get("timeout_seconds") or 300)
-                ts = float(req.get("ts") or 0)
-                if time.time() - ts > timeout:
                     continue
                 self._show_spawn_modal(req)
                 break
@@ -2630,31 +3403,53 @@ class MonitorApp(App):
         rid = req.get("id") or ""
         self._active_spawn_id = rid
 
-        def on_close(chosen_name: Optional[str]) -> None:
+        def on_close(decision: Optional[SpawnDecision]) -> None:
             self._active_spawn_id = None
             self._active_spawn_modal = None
-            if chosen_name:
-                won = write_resolution(rid, status="accepted", name=chosen_name)
-                if won:
-                    self.notify(
-                        f"Approved spawn from '{req.get('from', '?')}' "
-                        f"as '{chosen_name}'"
-                    )
-                else:
-                    # Another monitor beat us to the resolution. Show what
-                    # actually won, if anything meaningful.
-                    actual = read_resolution(rid)
-                    if actual and actual.get("status") == "accepted":
-                        won_name = actual.get("name") or "?"
-                        self.notify(
-                            f"Another monitor already accepted this "
-                            f"spawn as '{won_name}'",
-                            severity="warning",
-                        )
-            else:
-                # Could be user Esc OR external dismiss. O_EXCL makes the
-                # second case a no-op.
+            if decision is None:
+                # External dismiss: another monitor resolved this first, so
+                # there's no person here to explain anything. O_EXCL makes the
+                # write a no-op against the winner.
                 write_resolution(rid, status="rejected", reason="cancelled")
+                return
+            if not decision.accepted:
+                # "cancelled" stays the default so an unexplained Esc reads the
+                # same as it always did to the requesting agent.
+                write_resolution(
+                    rid,
+                    status="rejected",
+                    reason=decision.reason or "cancelled",
+                )
+                who = req.get("from", "?")
+                if decision.reason:
+                    self.notify(f"Rejected spawn from '{who}': {decision.reason}")
+                else:
+                    self.notify(f"Rejected spawn from '{who}'")
+                return
+            chosen_name, chosen_runtime = decision.name, decision.runtime
+            won = write_resolution(
+                rid,
+                status="accepted",
+                name=chosen_name,
+                runtime=chosen_runtime,
+            )
+            if won:
+                self.notify(
+                    f"Approved spawn from '{req.get('from', '?')}' "
+                    f"as '{chosen_name}' ({chosen_runtime})"
+                )
+            else:
+                # Another monitor beat us to the resolution. Show what
+                # actually won, if anything meaningful.
+                actual = read_resolution(rid)
+                if actual and actual.get("status") == "accepted":
+                    won_name = actual.get("name") or "?"
+                    won_runtime = actual.get("runtime") or RUNTIME_CLAUDE
+                    self.notify(
+                        f"Another monitor already accepted this "
+                        f"spawn as '{won_name}' ({won_runtime})",
+                        severity="warning",
+                    )
 
         modal = SpawnRequestScreen(self.monitor_cwd, req)
         self._active_spawn_modal = modal
@@ -2672,37 +3467,46 @@ class MonitorApp(App):
             if e.session is not None:
                 id_cell = e.session.id
             else:
-                uuid = e.claude_uuid or ""
-                id_cell = f"[dim]{uuid[:8]}[/]"
+                session_id = e.session_id or ""
+                id_cell = f"[dim]{session_id[:8]}[/]"
             pending = pending_inbox_count(e.cwd, e.name)
             inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
-            if e.claude_uuid and auto_build_enabled(e.claude_uuid):
+            if e.runtime != RUNTIME_CLAUDE:
+                build_cell = "[dim]-[/]"
+            elif e.claude_uuid and auto_build_enabled(e.claude_uuid):
                 build_cell = "[bold green]on[/]"
             else:
                 build_cell = "[dim]off[/]"
-            harness_cell = (
-                "[dim]claude[/]" if e.harness == DEFAULT_HARNESS
-                else f"[cyan]{e.harness}[/]"
-            )
-            # The token column reads the live transcript, which is a
-            # per-harness format. Only Claude Code has the cached counter;
-            # other harnesses report what their own usage records say, and
-            # fall back to "-" when there is nothing to read yet.
-            tokens_cell = "[dim]-[/]"
             if e.claude_uuid:
-                if e.harness == DEFAULT_HARNESS:
-                    live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
-                    tokens_cell = f"{live_toks:,}"
+                # Displayed = transcript tokens + structural (derived
+                # from the last recorded API call's usage). Matches
+                # claude's own /clear / /context total to a few tokens.
+                # Falls back to just the transcript number when
+                # structural isn't measurable yet (freshly-compacted
+                # session before its first API call).
+                # Prefer the direct measurement — the last real (non-
+                # msg_priv) API request's usage total is literally what
+                # /context shows. It stays correct even when claude's
+                # microcompaction has evicted content the parser still
+                # sees on disk (parser + structural would over-count in
+                # that case). Fall back to parser + structural only for
+                # sessions with no recorded API call yet (freshly-
+                # compacted before first turn, brand-new session).
+                last_usage = last_real_usage_total_cached(e.claude_uuid, e.cwd)
+                if last_usage:
+                    tokens_cell = f"{last_usage:,}"
                 else:
-                    live_toks = harness_live_tokens(e.harness, e.claude_uuid, e.cwd)
-                    if live_toks:
-                        tokens_cell = f"{live_toks:,}"
+                    live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
+                    struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
+                    tokens_cell = f"{live_toks + struct_toks:,}"
+            else:
+                tokens_cell = "[dim]-[/]"
             preview = e.preview or "[dim](empty)[/]"
             if len(preview) > 60:
                 preview = preview[:59] + "…"
             table.add_row(
-                id_cell, e.name, harness_cell, inbox_cell, build_cell,
-                status_cell, tokens_cell, updated, preview,
+                id_cell, e.name, e.runtime, inbox_cell, build_cell, status_cell,
+                tokens_cell, updated, preview,
                 key=e.row_key,
             )
         if self.entries:
@@ -2725,45 +3529,49 @@ class MonitorApp(App):
         def cb(result: Optional[tuple[str, str]]) -> None:
             if not result:
                 return
-            name, harness = result
-            # Default claude args come from `multiverse <args>` and are
-            # written for Claude Code; forwarding them to a different CLI
-            # would just make it reject its own argv.
-            args = self.claude_args if harness == DEFAULT_HARNESS else []
+            name, runtime = result
+            runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
             try:
-                create_session(self.monitor_cwd, args, name=name, harness=harness)
+                create_session(
+                    self.monitor_cwd,
+                    runtime_args,
+                    name=name,
+                    runtime=runtime,
+                )
             except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
                 self.notify(f"Spawn failed: {e}", severity="error")
                 return
             self.refresh_sessions()
-            self.notify(f"Spawned {name} ({harness})")
+            self.notify(f"Spawned {name} with {runtime}")
 
         self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
 
     def action_resume_session(self) -> None:
-        hide = wrapped_claude_uuids(self.sessions)
+        hide = wrapped_runtime_session_ids(self.sessions)
         with self._fork_lock:
-            hide = hide | self._active_fork_uuids
+            hide |= {(RUNTIME_CLAUDE, uuid) for uuid in self._active_fork_uuids}
 
-        def on_picked(result: Optional[tuple[str, Optional[str]]]) -> None:
+        def on_picked(result: Optional[tuple[str, str, Optional[str]]]) -> None:
             if not result:
                 return
-            uuid, claude_name = result
+            runtime, session_id, session_name = result
 
             existing = existing_names_in_cwd(self.monitor_cwd)
-            if claude_name and claude_name not in existing:
-                self._spawn_resumed(self.monitor_cwd, uuid, claude_name)
+            if session_name and session_name not in existing:
+                self._spawn_resumed(
+                    self.monitor_cwd, runtime, session_id, session_name
+                )
                 return
 
-            if claude_name:
+            if session_name:
                 reason = (
-                    f"'{claude_name}' is already used in this workspace. "
+                    f"'{session_name}' is already used in this workspace. "
                     "Pick a different name for this session:"
                 )
-                default_name = claude_name
+                default_name = session_name
             else:
                 reason = (
-                    "This claude session has no name yet. "
+                    f"This {runtime} session has no name yet. "
                     "Assign a name for the multiverse session:"
                 )
                 default_name = pick_random_name(existing) or ""
@@ -2771,7 +3579,9 @@ class MonitorApp(App):
             def on_name(name: Optional[str]) -> None:
                 if not name:
                     return
-                self._spawn_resumed(self.monitor_cwd, uuid, name)
+                self._spawn_resumed(
+                    self.monitor_cwd, runtime, session_id, name
+                )
 
             self.push_screen(
                 NameInputScreen(self.monitor_cwd, default_name, reason), on_name
@@ -2785,11 +3595,27 @@ class MonitorApp(App):
         arrives while they're inside. On forced detach, queues a reattach
         that will fire once the spawn queue fully drains.
         """
+        session = next(
+            (item for item in self.sessions if item.tmux_name == tmux_session),
+            None,
+        )
+        if session is not None and (
+            session.status == "ending" or session.ending_marker_path.is_file()
+        ):
+            self.notify(
+                "Session is ending — attach is disabled until teardown finishes",
+                severity="warning",
+            )
+            return
+
         guard = _SpawnAttachGuard(cwd=self.monitor_cwd, tmux_session=tmux_session)
         guard.start()
         try:
             with self.suspend():
-                subprocess.run(["tmux", "attach-session", "-t", tmux_session])
+                attach_tmux_session(
+                    tmux_session,
+                    on_client_started=guard.set_client_pid,
+                )
         finally:
             guard.stop()
 
@@ -2801,47 +3627,32 @@ class MonitorApp(App):
             )
 
     def _spawn_resumed(
-        self, cwd: str, uuid: str, name: str, harness: str = DEFAULT_HARNESS
+        self, cwd: str, runtime: str, session_id: str, name: str
     ) -> None:
         # Strip ghost-row display suffixes — passing the literal "step2b
         # (folded 02:33)" as `--name` would write that into the new
         # session's custom-title and the dashboard would re-suffix it on
         # the next refresh, accumulating ad infinitum.
-        name = strip_fold_suffix(name) or name
-        # Resume spelling differs per harness (`--resume <id>` for Claude
-        # Code, `--session <id>` for pi), so ask the adapter.
-        resume_args = get_harness(harness).launch_argv(
-            session_id=uuid, resume=True, name=None,
-            plugin_root=None, extra_args=[], prompt=None,
-        )[1:]
+        if runtime == RUNTIME_CLAUDE:
+            name = strip_fold_suffix(name) or name
+            runtime_args = ["--resume", session_id]
+        elif runtime == RUNTIME_CODEX:
+            runtime_args = ["resume", session_id]
+        else:
+            runtime_args = ["--session", session_id]
         try:
             create_session(
-                cwd, resume_args, resumed_from=uuid, name=name, harness=harness
+                cwd,
+                runtime_args,
+                resumed_from=session_id,
+                name=name,
+                runtime=runtime,
             )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
             self.notify(f"Resume failed: {e}", severity="error")
             return
         self.refresh_sessions()
-        self.notify(f"Resumed {uuid[:8]} as {name} ({harness})")
-
-    def _reap_and_resume(self, session: Session, cwd: str, name: str) -> None:
-        """Reap a session whose tmux is gone on this host, then resume its
-        underlying claude JSONL as a fresh multiverse session here.
-
-        Mirrors the ended-row resume path (kill_session → _spawn_resumed):
-        the stale state dir is removed to free the name, and the transcript
-        is re-wrapped under a new tmux on the current host.
-        """
-        uuid = session.effective_claude_uuid
-        if not uuid:
-            self.notify(
-                f"Session {session.id} has no local tmux and no tracked "
-                "claude UUID — cannot resume",
-                severity="warning",
-            )
-            return
-        kill_session(session)
-        self._spawn_resumed(cwd, uuid, name, session.harness)
+        self.notify(f"Resumed {runtime} {session_id[:8]} as {name}")
 
     def action_primary(self) -> None:
         """Enter: attach for live sessions, resume for dormant/ended ones."""
@@ -2850,8 +3661,19 @@ class MonitorApp(App):
             return
 
         if e.status == "compacting":
+            # Ours, detached with `d`? Re-open it rather than refuse.
+            if e.claude_uuid and self._reattach_compaction(e.claude_uuid):
+                return
             self.notify(
-                "Session is compacting — wait until it finishes",
+                "Session is compacting in another monitor — wait until it "
+                "finishes",
+                severity="warning",
+            )
+            return
+
+        if e.status == "ending":
+            self.notify(
+                "Session is ending — attach is disabled until teardown finishes",
                 severity="warning",
             )
             return
@@ -2859,45 +3681,54 @@ class MonitorApp(App):
         # Live multiverse → attach.
         if e.is_live and e.session is not None:
             if not tmux_session_exists(e.session.tmux_name):
-                # status.json says live, but this host has no tmux session
-                # for it. Either it died without a SessionEnd hook (its
-                # host/pod was recycled or SIGKILLed, freezing status at its
-                # last value instead of "ended"), or it's genuinely alive on
-                # another host's tmux server sharing this MULTIVERSE_ROOT.
-                # The old behavior dead-ended with "not running" even though
-                # the underlying claude JSONL is perfectly resumable — the
-                # exact case where the user falls back to `claude --resume`.
-                # Reap the stale session and resume it here. If a *different*
-                # host still reports it non-ended, confirm first so we don't
-                # duplicate a session that's actually live elsewhere.
-                if foreign_host_still_reported_live(e.session):
-                    def _on_confirm(
-                        ok: bool,
-                        session: Session = e.session,
-                        cwd: str = e.cwd,
-                        name: str = e.name,
-                    ) -> None:
-                        if ok:
-                            self._reap_and_resume(session, cwd, name)
-
-                    self.push_screen(
-                        ConfirmForeignResumeScreen(e.name, e.session.host or "?"),
-                        _on_confirm,
-                    )
-                    return
-                self._reap_and_resume(e.session, e.cwd, e.name)
+                self.notify(f"Session {e.session.id} is not running", severity="warning")
                 return
             self._attach_to(e.session.tmux_name)
             self.refresh_sessions()
             return
 
-        # Dormant or ended — resume the underlying claude session.
-        uuid = e.claude_uuid
-        if not uuid:
+        # Dormant or ended — resume the underlying runtime session.
+        session_id = e.session_id
+        if not session_id:
             self.notify(
-                "No claude UUID tracked for this row — cannot resume", severity="warning"
+                f"No {e.runtime} session ID tracked for this row — cannot resume",
+                severity="warning",
             )
             return
+
+        # Claude's own reaper (`cleanupPeriodDays`, default 30) deletes
+        # dormant live JSONLs, while our state dir and the full.jsonl
+        # mirror both survive it. The row therefore keeps rendering as
+        # normal, but `claude --resume <uuid>` exits 1 with "No
+        # conversation found" — and because claude IS the tmux session's
+        # command, that exit takes the tmux session down with it, so the
+        # resume looks like it silently did nothing at all.
+        #
+        # The session is fully recoverable the whole time: its full.jsonl
+        # is intact and RestoreScreen would list it. Detect the reaped
+        # shape here and point at the path that works instead of spawning
+        # a doomed session.
+        #
+        # Ordering matters: this must run BEFORE the kill_session() below,
+        # which rmtree's the multiverse state dir. Failing after that
+        # point would destroy the row's identity on behalf of a resume
+        # that was never going to succeed.
+        if e.runtime == RUNTIME_CLAUDE:
+            if not live_jsonl_path(session_id, e.cwd).is_file():
+                if full_jsonl_path(session_id).is_file():
+                    self.notify(
+                        f"'{e.name}' has no live transcript — claude's "
+                        f"cleanupPeriodDays reaper likely deleted it. The "
+                        f"full mirror is intact: press x to restore it.",
+                        severity="warning",
+                    )
+                else:
+                    self.notify(
+                        f"'{e.name}' has no live transcript and no full "
+                        f"mirror — nothing to resume.",
+                        severity="error",
+                    )
+                return
 
         # Ended multiverse row: free the name by reaping its meta dir before
         # spawning the replacement (otherwise existing_names_in_cwd blocks it).
@@ -2912,9 +3743,13 @@ class MonitorApp(App):
                     severity="error",
                 )
                 return
-            kill_session(e.session)
+            try:
+                kill_session(e.session)
+            except RuntimeError as exc:
+                self.notify(f"Could not stop runtime: {exc}", severity="error")
+                return
 
-        self._spawn_resumed(e.cwd, uuid, e.name, e.harness)
+        self._spawn_resumed(e.cwd, e.runtime, session_id, e.name)
 
     def _register_fork(self, fork_uuid: str, active: bool) -> None:
         with self._fork_lock:
@@ -2926,11 +3761,14 @@ class MonitorApp(App):
     def action_ask_all(self) -> None:
         targets: list[AskTarget] = []
         for e in self.entries:
-            if e.claude_uuid:
+            if e.session_id or e.claude_uuid:
                 targets.append(
                     AskTarget(
-                        name=e.name, cwd=e.cwd, claude_uuid=e.claude_uuid,
-                        harness=e.harness,
+                        name=e.name,
+                        cwd=e.cwd,
+                        claude_uuid=e.claude_uuid,
+                        runtime=e.runtime,
+                        session_id=e.session_id,
                     )
                 )
         if not targets:
@@ -2990,6 +3828,19 @@ class MonitorApp(App):
 
         self.push_screen(WebShareScreen(self.monitor_cwd), _on_close)
 
+    def action_secondbrain(self) -> None:
+        """Enroll / connect / disconnect this device to SecondBrain (the `S` key).
+
+        Opens a panel to authenticate this device to the SecondBrain apprentice and
+        bring up (or tear down) the connector daemon that streams perception events to
+        it. Device-level (not row-level), so selection doesn't matter.
+        """
+
+        def _on_close(_: None) -> None:
+            self.refresh_sessions()
+
+        self.push_screen(SecondBrainScreen(self.monitor_cwd), _on_close)
+
     def action_kill(self) -> None:
         e = self._current_entry()
         if e is None:
@@ -3000,48 +3851,120 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
+        if e.status == "ending":
+            self.notify("Session is already ending", severity="warning")
+            return
         if e.session is None:
-            claude_uuid = e.claude_uuid
+            native_session_id = e.session_id
             cwd = e.cwd
             display_name = e.name
+            runtime = e.runtime
 
             def _on_close(confirmed: Optional[bool]) -> None:
                 if not confirmed:
                     return
-                if not claude_uuid:
+                if not native_session_id:
                     self.notify(
-                        "No claude UUID tracked for this row — cannot delete",
+                        f"No {runtime} session ID tracked for this row — cannot delete",
                         severity="error",
                     )
                     return
-                jsonl = live_jsonl_path(claude_uuid, cwd)
-                if not jsonl.is_file():
-                    self.notify("JSONL already gone", severity="warning")
-                    self.refresh_sessions()
-                    return
                 try:
-                    jsonl.unlink()
-                except OSError as exc:
+                    if runtime == RUNTIME_CODEX:
+                        delete_codex_thread(native_session_id)
+                    elif runtime == RUNTIME_PI:
+                        delete_pi_session(native_session_id, cwd)
+                    else:
+                        jsonl = live_jsonl_path(native_session_id, cwd)
+                        if not jsonl.is_file():
+                            self.notify("JSONL already gone", severity="warning")
+                            self.refresh_sessions()
+                            return
+                        jsonl.unlink()
+                except (OSError, RuntimeError, ValueError) as exc:
                     self.notify(f"Failed to delete: {exc}", severity="error")
                     return
                 self.notify(f"Deleted dormant session '{display_name}'")
                 self.refresh_sessions()
 
-            self.push_screen(ConfirmDeleteScreen(display_name), _on_close)
-            return
-        if foreign_host_still_reported_live(e.session):
-            self.notify(
-                f"'{e.name}' was created on host '{e.session.host}' and "
-                "its status there still says it's active — refusing to "
-                "kill it from here. Local tmux can't reach that host's "
-                "session, so this would only delete its bookkeeping "
-                "(inviting a duplicate later) without actually stopping "
-                "it. Kill it from its own host.",
-                severity="error",
+            self.push_screen(
+                ConfirmDeleteScreen(display_name, runtime), _on_close
             )
             return
-        kill_session(e.session)
-        self.notify(f"Killed {e.session.id}")
+        if foreign_host_still_reported_live(e.session):
+            # Session was created on a different host and never wrote
+            # `ended` there. Normally we refuse (avoids duplicate-session
+            # bookkeeping issues while the original process is still
+            # running elsewhere). But when a whole container/machine dies
+            # without a clean shutdown — recycled Beaker container, dead
+            # remote — every session it owned is stuck this way, with no
+            # way for the user to clear them from any other host. Offer
+            # a confirm-and-force-kill path here, keyed on the user's
+            # first-hand knowledge that the foreign host is gone.
+            session = e.session
+            display_name = e.name
+
+            def _on_force_close(confirmed: Optional[bool]) -> None:
+                if not confirmed:
+                    return
+                self._begin_session_kill(
+                    session,
+                    f"Force-killed '{display_name}' "
+                    f"(was on host {session.host})",
+                )
+
+            self.push_screen(
+                ConfirmForceKillScreen(
+                    display_name=display_name,
+                    other_host=e.session.host or "(unknown)",
+                    current=current_host(),
+                ),
+                _on_force_close,
+            )
+            return
+
+        self._begin_session_kill(e.session, f"Killed {e.session.id}")
+
+    def _begin_session_kill(self, session: Session, success_message: str) -> None:
+        """Render ``ending`` before starting runtime teardown in a worker."""
+        try:
+            mark_session_ending(session)
+        except OSError as exc:
+            self.notify(f"Could not mark session as ending: {exc}", severity="error")
+            return
+
+        # Rebuild from the durable status so this monitor and every other
+        # monitor agree before teardown starts. The blocking signals/waits run
+        # in a worker so Textual can actually present and maintain this state.
+        self.refresh_sessions()
+        self.call_after_refresh(
+            self._kill_session_worker, session, success_message
+        )
+
+    @work(thread=True, group="session_kill")
+    def _kill_session_worker(
+        self, session: Session, success_message: str
+    ) -> None:
+        # A fast-exiting runtime can otherwise transition from idle to dormant
+        # between terminal frames. Keep the explicit transition visible long
+        # enough to be useful without materially delaying teardown.
+        time.sleep(_ENDING_MIN_VISIBLE_SECONDS)
+        error: Optional[str] = None
+        try:
+            kill_session(session)
+        except RuntimeError as exc:
+            error = str(exc)
+        self.call_from_thread(
+            self._finish_session_kill, success_message, error
+        )
+
+    def _finish_session_kill(
+        self, success_message: str, error: Optional[str]
+    ) -> None:
+        if error is not None:
+            self.notify(f"Could not stop runtime: {error}", severity="error")
+        else:
+            self.notify(success_message)
         self.refresh_sessions()
 
     def action_compact(self) -> None:
@@ -3051,27 +3974,24 @@ class MonitorApp(App):
         if e.is_ghost:
             self.notify("Cannot compact a folded ghost row", severity="warning")
             return
-        if not e.claude_uuid:
+        if e.runtime != RUNTIME_CLAUDE:
             self.notify(
-                "No session id tracked for this row — cannot compact",
+                f"Multiverse compaction is Claude-only; {e.runtime} uses its native compaction",
                 severity="warning",
             )
             return
-        if e.harness != DEFAULT_HARNESS:
-            # The Compact widget drives the Claude-Code-specific pipeline:
-            # two-JSONL mirror, tree-build worker, atomic live-JSONL replace.
-            # pi does not need any of it — its extension answers pi's own
-            # compaction request with a frontier-expanded summary, so
-            # compaction happens in-session on pi's schedule or on /compact.
+        if not e.claude_uuid:
             self.notify(
-                f"{e.harness} sessions compact in-session: run /compact "
-                f"inside the session, or let it trigger at pi's threshold. "
-                f"For a whole-session pass use "
-                f"`mvctl compact-apply --session <transcript> --budget N`.",
-                severity="information",
-                timeout=12,
+                "No claude UUID tracked for this row — cannot compact",
+                severity="warning",
             )
             return
+        # A compaction of this row detached with `d` is still running —
+        # re-open it. Checked before the status guard, since such a row is
+        # by definition `compacting` and would be refused below.
+        if self._reattach_compaction(e.claude_uuid):
+            return
+
         if e.status not in _COMPACTABLE_STATUSES:
             self.notify(
                 f"Compaction only allowed for idle/ended/dormant sessions "
@@ -3080,18 +4000,48 @@ class MonitorApp(App):
             )
             return
 
-        def _on_close(_: None) -> None:
-            self.refresh_sessions()
-
+        uuid = e.claude_uuid
         self.push_screen(
             CompactScreen(
-                claude_uuid=e.claude_uuid,
+                claude_uuid=uuid,
                 cwd=e.cwd,
                 display_name=e.name,
                 mv_session=e.session,
             ),
-            _on_close,
+            lambda _=None: self._compact_closed(uuid),
         )
+
+    def _reattach_compaction(self, claude_uuid: str) -> bool:
+        """Re-open the CompactScreen detached for ``claude_uuid``, if any.
+
+        Returns True if one existed and was pushed. The instance was kept
+        alive by ``install_screen`` while off-stack, so its log, progress
+        bar and runner come back exactly as they were.
+        """
+        if claude_uuid not in self._detached_compactions:
+            return False
+        try:
+            self.push_screen(
+                _compact_screen_name(claude_uuid),
+                lambda _=None: self._compact_closed(claude_uuid),
+            )
+        except Exception:  # noqa: BLE001
+            # Registration outlived the installed screen somehow — drop it
+            # rather than wedge the row into permanently refusing.
+            self._detached_compactions.pop(claude_uuid, None)
+            return False
+        return True
+
+    def _compact_closed(self, claude_uuid: str) -> None:
+        """A CompactScreen dismissed for good. Runs after the pop, which is
+        the only point ``uninstall_screen`` accepts (it refuses a screen
+        still on the stack)."""
+        self._detached_compactions.pop(claude_uuid, None)
+        try:
+            self.uninstall_screen(_compact_screen_name(claude_uuid))
+        except Exception:  # noqa: BLE001
+            pass
+        self.refresh_sessions()
 
     def action_restore(self) -> None:
         """Restore a lost session from an orphan full JSONL.
@@ -3166,6 +4116,9 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
+        if e.runtime != RUNTIME_CLAUDE:
+            self.notify("Auto tree-build is Claude-only", severity="warning")
+            return
         if not e.claude_uuid:
             self.notify(
                 "No claude UUID tracked for this row — cannot toggle",
@@ -3193,6 +4146,9 @@ class MonitorApp(App):
             return
         if e.is_ghost:
             self.notify("Cannot visualize a folded ghost row", severity="warning")
+            return
+        if e.runtime != RUNTIME_CLAUDE:
+            self.notify("Compaction visualization is Claude-only", severity="warning")
             return
         if not e.claude_uuid:
             self.notify(

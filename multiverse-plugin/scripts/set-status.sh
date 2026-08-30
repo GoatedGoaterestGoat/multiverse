@@ -11,7 +11,17 @@
 STATUS="${1:-unknown}"
 TS=$(date +%s)
 
+# A dashboard kill owns the lifecycle state until runtime and tmux teardown
+# finish. Hooks may still fire while the runtime handles SIGTERM; do not let
+# those late writes replace the visible `ending` state.
+[ -e "$(dirname "$MULTIVERSE_STATUS")/ending" ] && exit 0
+
 mkdir -p "$(dirname "$MULTIVERSE_STATUS")"
-printf '{"status":"%s","ts":%d}\n' "$STATUS" "$TS" > "$MULTIVERSE_STATUS"
+TMP="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
+if printf '{"status":"%s","ts":%d}\n' "$STATUS" "$TS" > "$TMP"; then
+  mv -f "$TMP" "$MULTIVERSE_STATUS"
+else
+  rm -f "$TMP" 2>/dev/null || true
+fi
 
 exit 0

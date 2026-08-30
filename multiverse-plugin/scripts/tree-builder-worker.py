@@ -52,7 +52,7 @@ _PLUGIN = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_PLUGIN / "vendor"))
 sys.path.insert(0, str(_PLUGIN))
 
-from compaction.parser import parse_session  # noqa: E402
+from compaction.parser import compaction_forest  # noqa: E402
 from src.full_jsonl import (  # noqa: E402
     full_jsonl_path,
     sync_full,
@@ -172,9 +172,14 @@ def _run(live: Path, session_id: str, cwd: str, cache_root: Path,
         return 1
 
     try:
-        forest = parse_session(str(full))
+        # Canonical compaction view: command turns stripped (/context,
+        # /model, /effort — building trees for them wastes API calls and
+        # leaks their summaries), non-compactable leaves filtered, empty
+        # turns merged. Must match compact_runner + build_tree_priv_cli
+        # exactly so turn_idx / turn_ids align across them.
+        forest = compaction_forest(str(full))
     except (OSError, ValueError) as e:
-        _log(log, f"parse_session failed: {e}")
+        _log(log, f"compaction_forest failed: {e}")
         return 1
 
     if not forest:
@@ -218,13 +223,18 @@ def _run(live: Path, session_id: str, cwd: str, cache_root: Path,
 
         _log(log, f"turn {turn_idx} ({pid[:8]}) — building...")
         t0 = time.time()
+        # Model for the privileged merge agent. Configurable so a machine
+        # can tune cost/quality by setting MULTIVERSE_TREE_BUILD_MODEL
+        # (typically in bin/multiverse.local). Default is "sonnet" — the
+        # historical hardcode.
+        model = os.environ.get("MULTIVERSE_TREE_BUILD_MODEL") or "sonnet"
         try:
             proc = subprocess.run(
                 [
                     sys.executable, str(builder),
                     str(full), str(turn_idx),
                     "--out", str(out_file),
-                    "--model", "sonnet",
+                    "--model", model,
                 ],
                 env=env,
                 capture_output=True, text=True,

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WRAPPER_ROOT="${MULTIVERSE_PLUGIN_ROOT:-$PLUGIN_ROOT/../../multiverse-plugin}"
+
+if [ ! -f "$WRAPPER_ROOT/pyproject.toml" ]; then
+  echo "[multiverse-codex] MULTIVERSE_PLUGIN_ROOT does not point to the Multiverse wrapper" >&2
+  exit 1
+fi
+
+exec uv --directory "$WRAPPER_ROOT" run --no-sync multiverse-mcp

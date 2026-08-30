@@ -5,13 +5,12 @@ reconstruct the sequence of events from memory or SSH into a remote to
 read raw JSONLs. Three event kinds, matching the three places delivery
 can silently go wrong:
 
-  message_sent       — message_agent was called (with or without
-                       push_notification). Logged once per call,
-                       regardless of what happens next.
-  notification_routed — the push_notification routing OUTCOME: which
-                       path was taken (auto-resume, tmux wake, fallback
-                       to passive, already-listening) and whether it
-                       succeeded. Logged only when push_notification=True.
+  message_sent       — message_agent was called. Logged once per call,
+                       regardless of what happens next. Its legacy
+                       push_notification field is always true.
+  notification_routed — the active-delivery routing OUTCOME: which path
+                       was taken (auto-resume, tmux wake, queued fallback,
+                       already-listening) and whether it succeeded.
   inbox_delivered    — messages were actually claimed and handed to an
                        agent's context — via a hook (SessionStart /
                        UserPromptSubmit / Stop) or the check_inbox tool.
@@ -34,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from .atomic_files import append_text_locked
 from .paths import multiverse_dir
 
 RETENTION_DAYS = 7
@@ -91,8 +91,7 @@ def _append(event: dict[str, Any]) -> None:
         _prune_old(now)
         record = {"ts": now, "host": _host(), **event}
         path = d / f"{_day_str(now)}.jsonl"
-        with path.open("a") as f:
-            f.write(json.dumps(record) + "\n")
+        append_text_locked(path, json.dumps(record) + "\n")
     except OSError:
         pass
 
@@ -105,20 +104,25 @@ def log_message_sent(
     push_notification: bool,
     message_id: str,
     message: str,
+    sender_runtime: Optional[str] = None,
+    recipient_runtime: Optional[str] = None,
 ) -> None:
     """A message_agent call happened — logged unconditionally, before
     any routing/delivery is attempted."""
-    _append(
-        {
-            "event": "message_sent",
-            "from": sender,
-            "to": recipient,
-            "cwd": cwd,
-            "push_notification": push_notification,
-            "message_id": message_id,
-            "message_preview": _preview(message),
-        }
-    )
+    event: dict[str, Any] = {
+        "event": "message_sent",
+        "from": sender,
+        "to": recipient,
+        "cwd": cwd,
+        "push_notification": push_notification,
+        "message_id": message_id,
+        "message_preview": _preview(message),
+    }
+    if sender_runtime:
+        event["from_runtime"] = sender_runtime
+    if recipient_runtime:
+        event["to_runtime"] = recipient_runtime
+    _append(event)
 
 
 def log_notification_routed(
@@ -128,12 +132,14 @@ def log_notification_routed(
     cwd: str,
     route: str,
     success: Optional[bool] = None,
+    sender_runtime: Optional[str] = None,
+    recipient_runtime: Optional[str] = None,
 ) -> None:
-    """The push_notification routing outcome for one message_agent call.
+    """The active-delivery routing outcome for one message_agent call.
 
-    ``route`` is one of: "auto_resume", "wake_tmux", "already_listening",
-    "passive_fallback_client_attached", "auto_resume_failed". ``success``
-    is only meaningful for routes that can fail (tmux wake, auto-resume).
+    ``route`` records the selected auto-resume, tmux wake, already-listening,
+    or passive-fallback path. ``success`` is only meaningful for routes that
+    can fail (tmux wake and auto-resume).
     """
     event: dict[str, Any] = {
         "event": "notification_routed",
@@ -144,6 +150,10 @@ def log_notification_routed(
     }
     if success is not None:
         event["success"] = success
+    if sender_runtime:
+        event["from_runtime"] = sender_runtime
+    if recipient_runtime:
+        event["to_runtime"] = recipient_runtime
     _append(event)
 
 
@@ -153,25 +163,27 @@ def log_inbox_delivered(
     cwd: str,
     hook_event: str,
     messages: list[dict],
+    recipient_runtime: Optional[str] = None,
 ) -> None:
     """Messages were actually claimed and handed to an agent — via a
     delivery hook (SessionStart/UserPromptSubmit/Stop) or the
     check_inbox tool. ``messages`` is whatever claim_pending_messages
     returned (plain message dicts: from, message_id, body, ts)."""
-    _append(
-        {
-            "event": "inbox_delivered",
-            "to": recipient,
-            "cwd": cwd,
-            "hook_event": hook_event,
-            "count": len(messages),
-            "messages": [
-                {
-                    "from": m.get("from"),
-                    "message_id": m.get("message_id"),
-                    "preview": _preview(m.get("body", "")),
-                }
-                for m in messages
-            ],
-        }
-    )
+    event: dict[str, Any] = {
+        "event": "inbox_delivered",
+        "to": recipient,
+        "cwd": cwd,
+        "hook_event": hook_event,
+        "count": len(messages),
+        "messages": [
+            {
+                "from": m.get("from"),
+                "message_id": m.get("message_id"),
+                "preview": _preview(m.get("body", "")),
+            }
+            for m in messages
+        ],
+    }
+    if recipient_runtime:
+        event["to_runtime"] = recipient_runtime
+    _append(event)

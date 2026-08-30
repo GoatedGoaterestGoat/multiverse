@@ -7,9 +7,9 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase | Status | Notes |
 |:------|:-------|:------|
 | Phase 0: Foundation | 🟡 In progress | Repo set up, plugin scaffolding done |
-| Harness abstraction | 🟢 Substantial | `src/harness/` adapters; Claude Code + pi, mixed in one dashboard. Ask / message / inbox / spawn / compaction all work on both |
+| Mixed runtimes | 🟢 Substantial | Claude Code, Codex, and pi share one dashboard, agent registry, inbox, side-question path, and spawn broker; Codex and pi use native compaction |
 | Phase 1: Branching conversations | ⚪ Not started | |
-| Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle; on pi, compaction is an appended entry with no mirror needed. Cost survey + measurements in [`compaction-research.md`](compaction-research.md) |
+| Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
 | Phase 4: Inter-agent communication | 🟡 Active | User→agents ask-all + agent-callable `list_agents` / `message_agent` / `ask_agent` / `spawn_agent` with file-based inbox delivery and monitor-brokered spawn approval |
 | Phase 5: UI | 🟡 Partial | Monitor TUI as the first UI surface; remote browser access via the `w` web share (ttyd-over-monitor + outbound tunnel) |
@@ -204,24 +204,33 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 **Flow:**
 
 1. Agent calls `spawn_agent(instruction, name="<preferred>")`.
-2. MCP tool writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name, and the caller's tmux session name.
+2. MCP tool writes `~/.multiverse/spawn_requests/<req-id>.json` (atomic tmp+rename) with the instruction, preferred default name, caller runtime, and caller's tmux session name.
 3. Tool fires `tmux display-message` on the caller's pane so a user attached to the caller's tmux session sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve in the monitor." — best-effort status-line notification.
-4. Tool polls `<req-id>.resolved.json` every 250ms (timeout: 300s).
+4. Tool polls `<req-id>.resolved.json` every 250ms indefinitely, with periodic MCP progress notifications. Cancelling the tool call cleans up the request.
 5. Monitor scans `spawn_requests/` on each 1s tick. Enqueues new cwd-matching, unresolved requests into a per-monitor queue. Only one modal at a time; if multiple requests arrive concurrently they queue behind the active modal. Modal only opens when no other modal is already open.
-6. Modal shows `'<from>' wants to spawn a subagent:` + truncated instruction preview + name input seeded with the caller's preferred name (or a random one if that's taken). User hits Enter to accept, Esc to reject.
-7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
-8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[instruction], name=chosen)` — the instruction becomes a positional arg to `claude`, which auto-submits it as the first user message (verified via `claude-code-src/screens/REPL.tsx`'s `initialMessage` effect). Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject/timeout, returns an error string.
+6. Modal shows the caller runtime, truncated instruction preview, name input seeded with the caller's preferred name (or a random one if that's taken), and a Claude/Codex selector defaulted to the caller's runtime. User hits Enter to accept or Esc to reject.
+7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>", runtime: "<chosen-runtime>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
+8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[], name=chosen, runtime=chosen_runtime, initial_prompt=instruction)`. The instruction is carried in a state-dir file and auto-submitted as the first Claude or Codex user message without appearing on the shell command line. Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject, returns an error string.
 9. Tool cleans up both files on exit.
 
 **Summarization is deliberately out of scope for v1.** Claude-code's `/compact` is in-process (hot-swaps `messagesRef`) and can't be triggered externally. Instead, the tool's docstring tells the agent to include a targeted summary in the instruction itself if prior context matters — the caller knows its own context best.
 
 **Multi-monitor coordination:** all cwd-matching monitors enqueue the same request and all pop their own modal when their queue is empty. First monitor to write the resolution file wins via `O_EXCL`; losers detect the external resolution on their next tick and dismiss their modal. A monitor whose modal is dismissed before its user has typed anything writes a `rejected` resolution that `O_EXCL`-no-ops. On concurrent acceptance, the losing monitor's user sees a "another monitor already accepted this spawn as 'X'" notification.
 
-**Stale request handling:** the MCP tool writes a timeout resolution on its way out, so any monitor with the modal still open dismisses cleanly. Stale request files (tool crashed before cleanup) are skipped by `list_pending_requests` via the `timeout_seconds` field vs `ts` comparison.
+**Orphan request handling:** requests remain pending until resolved. If the caller is hard-killed before its `finally` cleanup runs, `list_pending_requests` filters the orphan once the caller's tmux session no longer exists.
+
+**SecondBrain spawning:** approving an agent-originated spawn through SecondBrain writes
+the caller's runtime into the same resolution file, so a Codex request creates a Codex
+child without changing the SecondBrain action schema. SecondBrain's direct
+`spawn_agent` action has no caller and retains its `{name, instruction?}` payload; its
+runtime is therefore a local device policy selected by
+`MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME` (`claude` by default). Put an override such as
+`export MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME=codex` in `bin/multiverse.local`, then
+reload the device-level SecondBrain connector for the new value to take effect.
 
 **Context assembly note:** the subagent has zero memory of the caller's conversation. If it needs context, the caller must put it in the `instruction`. This is a hard boundary — principled, not a limitation — and it means spawned subagents start from a clean prompt cache rather than a forked one.
 
-**Auto-detach while attached to tmux** (`_SpawnAttachGuard` in `monitor.py`): Textual's `App.suspend()` pauses the event loop during a tmux attach, so the normal 1s tick can't detect incoming spawn requests while the user is watching an agent work. The fix is a background thread started alongside each `tmux attach-session` — it polls `spawn_requests/` every second and runs `tmux detach-client -s <session>` when one arrives, force-booting the user back to the monitor. When `_attach_to` sees `guard.forced_detach = True`, it sets `_pending_reattach = <tmux-session>`; the next `_tick_spawn_requests` call with an empty queue + no open modal automatically reattaches the user. The reattach re-enters `_attach_to` with a fresh guard, so consecutive spawn bursts keep cycling detach → modal → reattach without duplicating state. `tmux_session_exists` guards against reattaching to a session the user killed from the dashboard meanwhile.
+**Auto-detach while attached to tmux** (`_SpawnAttachGuard` in `monitor.py`): Textual's `App.suspend()` pauses the event loop during a tmux attach, so the normal 1s tick can't detect incoming spawn requests while the user is watching an agent work. The background guard polls `spawn_requests/` every second. The attach relay reports the PID of the tmux client it launched; when a matching request arrives, the guard resolves that PID through `tmux list-clients`, detaches that exact client, and retries on client-registration races or transient tmux failures. This returns the user to the monitor without detaching other terminals on the same tmux server. When `_attach_to` sees `guard.forced_detach = True`, it sets `_pending_reattach = <tmux-session>`; the next `_tick_spawn_requests` call with an empty queue + no open modal automatically reattaches the user. The reattach re-enters `_attach_to` with a fresh guard, so consecutive spawn bursts keep cycling detach → modal → reattach without duplicating state. `tmux_session_exists` guards against reattaching to a session the user killed from the dashboard meanwhile.
 
 ### Frontier-coherent compaction
 
@@ -608,8 +617,7 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 - [ ] Multi-turn asker/responder protocol — `ask_agent` is currently one-shot per ask_id; threading subsequent follow-ups into the same conversation isn't supported
 - [ ] Persistent thread mailbox (`agentA-agentB.jsonl`) for ongoing relationships, distinct from the per-message inbox files we have now
 - [x] **Resume-without-engagement blind spot**: SessionStart's `additionalContext` is buffered in claude's REPL but doesn't autonomously trigger an API call, so a dormant recipient that gets `message_agent`'d (or any agent the user resumes via Enter) would have inbox messages sitting in memory with no model engagement until a human attached and typed. Fixed by `bin/multiverse-session::prime_inbox_if_needed`: at the top of each loop iteration, if inbox is non-empty AND `--resume <uuid>` is in CLAUDE_ARGS, run a print-mode `claude -p "You have N pending messages…" --resume <uuid>` first. SessionStart fires there too, delivers the inbox as `additionalContext`, and the synthetic prompt forces a model turn that processes both. Response lands in the JSONL; the interactive claude that follows resumes the same UUID and surfaces it to whoever attaches.
-- [ ] **Idle-live blind spot** (still open on Claude Code): if recipient B is *live and idle* (not dormant, just waiting), no hook fires until something else triggers one — `message_agent` writes to inbox but B's interactive claude doesn't pick it up until UserPromptSubmit or Stop fires. Workaround: dashboard's `📩 N` indicator, the `push_notification=True` tmux `send-keys` ping (refused when a user is attached, since it would clobber their input), and the resume prime above. A real fix needs a way to nudge a live-idle claude; none exists in the public hook API today.
-  - **Solved on pi.** `pi.sendMessage(..., { triggerTurn: true })` delivers into a live session and starts a turn, so the extension just polls the inbox while idle and delivers directly — no terminal manipulation, and it works the same whether or not a user is attached. This is the single clearest case where the harness API, not the design, was the constraint.
+- [ ] **Idle-live blind spot** (still open): if recipient B is *live and idle* (not dormant, just waiting), no hook fires until something else triggers one — `message_agent` writes to inbox but B's interactive claude doesn't pick it up until UserPromptSubmit or Stop fires. Workaround: dashboard's `📩 N` indicator, plus the next-time-they-resume the prime above will catch it. Real fix would need a way to nudge a live-idle claude (none exists in the public hook API today).
 - [ ] Context assembly logic per the rules in the root README
 - [ ] Garbage-collect orphan asks (timed-out, unanswered) — currently `~/.multiverse/asks/<id>.json` lingers if respond is never called
 
@@ -625,16 +633,6 @@ Fix: tail loop also checks `lockfile.is_file()`. The worker unlinks its lockfile
 - [ ] Plugin marketplace setup
 - [ ] CHANGELOG, semver discipline
 - [ ] User-facing installation docs
-
-### Harness abstraction
-
-- [x] **`src/harness/` adapter interface** — transcript discovery, launch argv, ephemeral-fork argv, compaction I/O. Claude Code adapter verified to produce listings identical to the legacy path.
-- [x] **pi harness**: `pi-extension/index.ts` (six tools, status, inbox delivery, `session_before_compact`), `vendor/compaction/pi_parser.py` / `pi_render.py` / `pi_constructor.py`, `src/mvctl.py` bridge, harness column + picker in the monitor.
-- [x] **End-to-end test** against a scriptable mock provider (`tests/test_pi_extension.sh`) — no network, no credentials.
-- [ ] **pi in the monitor's Compact widget.** The `c` action is the Claude-Code pipeline (mirror, tree worker, atomic replace); pi rows are refused with a pointer to `mvctl compact-apply`. Worth folding into the widget once the pipeline is harness-parameterized.
-- [ ] **Tree-build worker for pi.** `pi_constructor.py` exists but nothing schedules it; pi compaction currently falls back to greedy leaf-prefix expansion for turns without a cached tree.
-- [ ] **Repeated pi compaction via the extension path** appends a new compaction entry each time, and pi renders the superseded one inside the new keep range. The CLI path replaces in place and does not have this; the extension path cannot, since pi owns the append.
-- [ ] **A third harness** would be the real test of the abstraction. OpenCode is the obvious candidate.
 
 ## Open questions
 

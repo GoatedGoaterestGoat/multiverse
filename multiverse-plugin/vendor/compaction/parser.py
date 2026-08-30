@@ -15,6 +15,7 @@ them as distinct leaves with linkage info preserved on `Leaf.content`.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Iterator
 
 from .tokenize import count_image_tokens, count_tokens
@@ -39,6 +40,164 @@ SKIP_TYPES = frozenset({
     "queue-operation",
     "system",
 })
+
+
+# Pure-display slash commands whose entire "turn" is dropped from the
+# parse output. These consume tokens on every subsequent API call (the
+# command output + the meta transcript representation stay on the
+# chain) but contribute nothing to the conversation. Excluding them
+# means:
+#   - live_stats / dashboard / compaction-widget stats don't count them
+#     against the parser total. Their tokens still show up in the
+#     derived structural overhead via full_jsonl.structural_tokens
+#     (structural absorbs any delta the parser doesn't see), so the
+#     dashboard's grand total continues to match /clear / /context.
+#   - compaction never sees them, so they don't get summarized into
+#     tree nodes AND don't appear in the compacted JSONL. On resume
+#     from the compacted state, they're gone from the transcript.
+#
+# Commands NOT in this list (e.g. /rename — its meta message tells the
+# model what the session was renamed to, real information) pass through
+# unchanged.
+_SKIP_COMMAND_TURNS = frozenset({
+    "/context",
+    "/model",
+    "/effort",
+})
+
+_COMMAND_NAME_RE = re.compile(r"<command-name>(/[\w-]+)</command-name>")
+
+
+def _row_text_blob(row: dict[str, Any]) -> str:
+    """Best-effort text of a row — top-level ``content`` (string) plus any
+    string / text-block ``message.content``. Used to sniff command
+    markers regardless of whether a command row is stored as a bare
+    ``content`` string or a user ``message``."""
+    parts: list[str] = []
+    c = row.get("content")
+    if isinstance(c, str):
+        parts.append(c)
+    msg = row.get("message")
+    if isinstance(msg, dict):
+        mc = msg.get("content")
+        if isinstance(mc, str):
+            parts.append(mc)
+        elif isinstance(mc, list):
+            for b in mc:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    parts.append(b.get("text", "") or "")
+    return "\n".join(parts)
+
+
+def _command_name_in_skip(text: str, skip: frozenset[str]) -> bool:
+    m = _COMMAND_NAME_RE.search(text)
+    return bool(m and m.group(1) in skip)
+
+
+def strip_command_turns(
+    rows: list[dict[str, Any]],
+    skip: frozenset[str] = _SKIP_COMMAND_TURNS,
+) -> list[dict[str, Any]]:
+    """Drop the rows that make up a display-only slash command turn
+    (``/context``, ``/model``, ``/effort`` by default) from a chain-walk
+    row list, and rewire ``parentUuid`` on the next real row so the
+    chain stays continuous.
+
+    Claude stores slash commands in TWO shapes, depending on version /
+    command:
+
+    STRUCTURE 1 — ``type=system, subtype=local_command`` rows:
+      1. content wraps ``<command-name>/X</command-name>``,
+      2. content wraps ``<local-command-stdout>...</local-command-stdout>``,
+      3. optional ``type=user, isMeta=true`` transcript rows.
+    These carry no ``promptId``; handled by the streaming state machine
+    below (start on the marker, keep dropping system/meta rows until a
+    real row).
+
+    STRUCTURE 2 — ``type=user`` rows sharing one ``promptId``:
+      a ``<local-command-caveat>`` meta row, a ``<command-name>/X`` row,
+      and a ``<local-command-stdout>`` row, all under the same promptId.
+      These parse as a REAL turn (the command-name row has promptId +
+      text), get a summary tree built ("The user ran the /effort
+      command…"), and leak into the compacted output. Handled by a
+      pre-scan that collects every promptId whose turn contains a
+      skip-command marker, then drops all rows under those promptIds.
+    """
+    # Pre-scan: promptIds of structure-2 command turns.
+    skip_pids: set[str] = set()
+    for row in rows:
+        if row.get("type") != "user":
+            continue
+        pid = row.get("promptId")
+        if not pid:
+            continue
+        if _command_name_in_skip(_row_text_blob(row), skip):
+            skip_pids.add(pid)
+
+    out: list[dict[str, Any]] = []
+    in_skip_turn = False
+    bypass_target: str | None = None
+
+    def _rewire(row: dict[str, Any]) -> dict[str, Any]:
+        nonlocal bypass_target
+        if bypass_target is not None and row.get("uuid"):
+            row = {**row, "parentUuid": bypass_target}
+            bypass_target = None
+        return row
+
+    for row in rows:
+        t = row.get("type")
+        subtype = row.get("subtype")
+        pid = row.get("promptId")
+
+        # STRUCTURE 2: any row belonging to a command-turn promptId.
+        if pid and pid in skip_pids:
+            if not in_skip_turn:
+                bypass_target = row.get("parentUuid")
+                in_skip_turn = True
+            continue
+
+        if t == "system" and subtype == "local_command":
+            content = row.get("content") or ""
+            if isinstance(content, str):
+                m = _COMMAND_NAME_RE.search(content)
+                if m:
+                    cmd = m.group(1)
+                    if cmd in skip:
+                        if not in_skip_turn:
+                            bypass_target = row.get("parentUuid")
+                            in_skip_turn = True
+                        continue
+                    # A command NOT in the skip list — end any active
+                    # skip turn cleanly; rewire applies to THIS row.
+                    if in_skip_turn:
+                        in_skip_turn = False
+                        row = _rewire(row)
+                # stdout / arg continuation row of a command in progress.
+                elif in_skip_turn:
+                    continue
+            elif in_skip_turn:
+                continue
+        elif in_skip_turn:
+            # Meta user rows (isMeta=True) are the transcript display
+            # for the command output — part of the same command turn.
+            if t == "user" and row.get("isMeta"):
+                continue
+            # Rows with no uuid don't participate in the parentUuid chain
+            # — file-history-snapshot, mode, etc. can sit between the
+            # command turn and the next real row; pass them through
+            # without ending the skip so we can still rewire the next
+            # real row.
+            if not row.get("uuid"):
+                out.append(row)
+                continue
+            # A real chain row — end the skip turn and rewire.
+            in_skip_turn = False
+            row = _rewire(row)
+
+        out.append(row)
+
+    return out
 
 
 def _iter_jsonl(path: str) -> Iterator[dict[str, Any]]:
@@ -160,6 +319,191 @@ def _build_usage_index(path: str) -> tuple[dict[str, int], dict[str, int]]:
     return out_tok, visible_tok
 
 
+def _render_content_attachment(att: dict[str, Any]) -> tuple[str, bool] | None:
+    """For any non-empty attachment, return ``(rendered_text, compactable)``.
+    Returns None only when the attachment has no meaningful content on
+    this row (e.g. an empty task_reminder or a hook_additional_context
+    whose ``content`` array is empty).
+
+    ``compactable=True`` means the leaf goes through the compaction
+    pipeline normally — considered for merging, and preserved (or
+    summarized) in the compacted JSONL as a user-role text block. Only
+    the WHITELIST kinds get this: a ``queued_command`` (a prompt the
+    user actually typed), and an inter-agent-message
+    ``hook_additional_context`` (a message from another agent —
+    semantically user-role to the recipient, and the sole surviving
+    copy once the inbox file is unlinked).
+
+    ``compactable=False`` is the default for everything else. Those
+    leaves are counted for display / total accounting but filtered out
+    before tree building. This is a whitelist by design: if claude
+    later adds a new attachment kind, it'll be counted (via the generic
+    fallback below) and stay out of the compaction pipeline until we
+    explicitly decide it belongs on the whitelist.
+
+    Rendering: known kinds mirror ``utils/messages.ts`` in claude's
+    source (case dispatch on ``attachment.type``), so ``count_tokens``
+    lands close to what claude actually sends. Unknown kinds fall back
+    to a JSON serialization of the attachment's non-type fields — an
+    approximation, but non-zero, and correct-signed.
+    """
+    att_type = att.get("type")
+
+    # ------------------------------------------------------------------
+    # WHITELIST: kinds that ride the user-role text path through
+    # compaction because they ARE user-role speech.
+    # ------------------------------------------------------------------
+
+    if att_type == "queued_command":
+        prompt = att.get("prompt", "") or ""
+        return (prompt, True) if prompt else None
+
+    if att_type == "hook_additional_context":
+        content = att.get("content")
+        if isinstance(content, list):
+            joined = "\n".join(
+                c if isinstance(c, str) else str(c) for c in content
+            )
+        elif isinstance(content, str):
+            joined = content
+        else:
+            return None
+        if not joined:
+            return None
+        hook_name = att.get("hookName", "?")
+        rendered = f"{hook_name} hook additional context: {joined}"
+        # IAM messages ARE user-role (from a peer agent, sole copy).
+        # Anything else in hook_additional_context is misc hook context
+        # — counted but not compacted.
+        is_iam = "[Multiverse Inter-Agent]" in joined
+        return (rendered, is_iam)
+
+    # ------------------------------------------------------------------
+    # NON-COMPACTABLE, known kinds. Each mirrors claude's own render
+    # template from utils/messages.ts for accuracy.
+    # ------------------------------------------------------------------
+
+    if att_type == "edited_text_file":
+        filename = att.get("filename", "") or ""
+        snippet = att.get("snippet", "") or ""
+        return (
+            f"Note: {filename} was modified, either by the user or by "
+            "a linter. This change was intentional, so make sure to "
+            "take it into account as you proceed (ie. don't revert it "
+            "unless the user asks you to). Don't tell the user this, "
+            "since they are already aware. Here are the relevant "
+            f"changes (shown with line numbers):\n{snippet}",
+            False,
+        )
+
+    if att_type == "task_reminder":
+        content = att.get("content") or []
+        if not isinstance(content, list) or not content:
+            return None
+        items = "\n".join(
+            f"#{t.get('id','?')}. [{t.get('status','?')}] {t.get('subject','')}"
+            for t in content if isinstance(t, dict)
+        )
+        return (
+            "The task tools haven't been used recently. If you're "
+            "working on tasks that would benefit from tracking "
+            "progress, consider using TaskCreate to add new tasks and "
+            "TaskUpdate to update task status (set to in_progress when "
+            "starting, completed when done). Also consider cleaning up "
+            "the task list if it has become stale. Only use these if "
+            "relevant to the current work. This is just a gentle "
+            "reminder - ignore if not applicable. Make sure that you "
+            "NEVER mention this reminder to the user\n\nHere are the "
+            f"existing tasks:\n\n{items}",
+            False,
+        )
+
+    if att_type == "skill_listing":
+        content = att.get("content")
+        if not isinstance(content, str) or not content:
+            return None
+        return (
+            "The following skills are available for use with the Skill "
+            f"tool:\n\n{content}",
+            False,
+        )
+
+    if att_type == "deferred_tools_delta":
+        added = att.get("addedLines") or []
+        removed = att.get("removedNames") or []
+        parts: list[str] = []
+        if added:
+            parts.append(
+                "The following deferred tools are now available via "
+                "ToolSearch:\n" + "\n".join(str(x) for x in added)
+            )
+        if removed:
+            parts.append(
+                "The following deferred tools are no longer available "
+                "(their MCP server disconnected). Do not search for "
+                "them — ToolSearch will return no match:\n"
+                + "\n".join(str(x) for x in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    if att_type == "agent_listing_delta":
+        added = att.get("addedLines") or []
+        removed = att.get("removedTypes") or []
+        parts = []
+        if added:
+            header = (
+                "Available agent types for the Agent tool:"
+                if att.get("isInitial")
+                else "New agent types are now available for the Agent tool:"
+            )
+            parts.append(f"{header}\n" + "\n".join(str(x) for x in added))
+        if removed:
+            parts.append(
+                "The following agent types are no longer available:\n"
+                + "\n".join(f"- {t}" for t in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    if att_type == "mcp_instructions_delta":
+        added = att.get("addedBlocks") or []
+        removed = att.get("removedNames") or []
+        parts = []
+        if added:
+            parts.append(
+                "# MCP Server Instructions\n\nThe following MCP "
+                "servers have provided instructions for how to use "
+                "their tools and resources:\n\n"
+                + "\n\n".join(str(x) for x in added)
+            )
+        if removed:
+            parts.append(
+                "The following MCP servers have disconnected. Their "
+                "instructions above no longer apply:\n"
+                + "\n".join(str(x) for x in removed)
+            )
+        return ("\n\n".join(parts), False) if parts else None
+
+    # ------------------------------------------------------------------
+    # FALLBACK: unknown attachment.type — new kinds claude-code added
+    # since we last synced with its source. Render the non-``type`` fields
+    # as JSON so we count SOME tokens rather than silently dropping the
+    # payload, and mark non-compactable so it never surprises anyone by
+    # showing up as user speech in the compacted output. When a new kind
+    # deserves a proper rendering (or a whitelist entry for compaction),
+    # add it explicitly above.
+    # ------------------------------------------------------------------
+    payload = {k: v for k, v in att.items() if k != "type"}
+    if not payload:
+        return None
+    try:
+        rendered = json.dumps(payload, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    if not rendered or rendered == "{}":
+        return None
+    return (rendered, False)
+
+
 def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """Turn one JSONL row into a Leaf, or None if the row is metadata.
 
@@ -169,63 +513,29 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
     """
     t = row.get("type")
 
-    # Special cases BEFORE the SKIP_TYPES check for attachment rows
-    # that DO carry primary content (as opposed to the many transient
-    # attachment kinds that don't — deferred_tools, skill_listing,
-    # task_reminder, IDE state, etc.).
+    # Attachment rows that carry real model-visible content. Rendered
+    # here using the same template strings claude uses in
+    # utils/messages.ts (case dispatch on attachment.type), so
+    # count_tokens reflects roughly what the model actually sees rather
+    # than the compact JSON we happen to store on disk. Attachment kinds
+    # not returned by _render_content_attachment fall through to the
+    # SKIP_TYPES filter below and are dropped (transient markers like
+    # plan_mode_exit, file-history-snapshot, IDE-state pings, etc.).
     if t == "attachment":
         att = row.get("attachment")
         if isinstance(att, dict):
-            att_type = att.get("type")
-
-            # queued_command: a prompt the user typed while the agent
-            # was mid-turn. Takes the queue path instead of the
-            # fresh-prompt path, so it lands as an attachment row
-            # rather than a normal user-role row. Structurally mid-turn
-            # content (shares prior turn's promptId), so no new turn
-            # boundary — Leaf appended to current turn's leaves.
-            if att_type == "queued_command":
-                prompt = att.get("prompt", "") or ""
+            rendered = _render_content_attachment(att)
+            if rendered is not None:
+                text, compactable = rendered
                 uuid = row.get("uuid", "")
                 return Leaf(
                     kind="user_text",
-                    content={"text": prompt},
-                    tokens=count_tokens(prompt),
-                    preview=_preview(prompt, "user"),
+                    content={"text": text},
+                    tokens=count_tokens(text),
+                    preview=_preview(text, "user"),
                     source_uuids=[uuid],
+                    compactable=compactable,
                 )
-
-            # hook_additional_context is a broad container — most
-            # occurrences are transient system context (skill listings,
-            # deferred-tools updates, task reminders, etc. injected via
-            # hooks). But when it carries an inter-agent message (the
-            # multiverse deliver-inbox hook injects a
-            # `<system-reminder>[Multiverse Inter-Agent] …</system-reminder>`
-            # payload), that's the SOLE surviving copy — the inbox file
-            # gets unlinked after successful delivery, so losing this
-            # row means the inter-agent message is gone from history
-            # entirely. Sniff content for the marker; other
-            # hook_additional_context payloads keep going through
-            # SKIP_TYPES below.
-            if att_type == "hook_additional_context":
-                content = att.get("content")
-                if isinstance(content, list):
-                    joined = "\n".join(
-                        c if isinstance(c, str) else str(c) for c in content
-                    )
-                elif isinstance(content, str):
-                    joined = content
-                else:
-                    joined = ""
-                if "[Multiverse Inter-Agent]" in joined:
-                    uuid = row.get("uuid", "")
-                    return Leaf(
-                        kind="user_text",
-                        content={"text": joined},
-                        tokens=count_tokens(joined),
-                        preview=_preview(joined, "user"),
-                        source_uuids=[uuid],
-                    )
 
     if t in SKIP_TYPES or t is None:
         return None
@@ -280,13 +590,31 @@ def _classify_and_extract(row: dict[str, Any]) -> Leaf | None:
                 else:
                     text = str(result_content) if result_content is not None else ""
                 images = top_images + result_images
+                # Claude Code keeps the RICH tool output in a top-level
+                # ``toolUseResult`` row field, not in message.content.
+                # For an Edit that's structuredPatch / originalFile /
+                # old+newString — and structuredPatch is the only thing
+                # that renders the diff in the transcript UI, since the
+                # content block itself is just a short confirmation
+                # string. Carry it on the leaf so a tool_result that
+                # SURVIVES expansion can be re-emitted with its diff
+                # intact; without it the UI shows "Updated <file>" and
+                # then nothing.
+                #
+                # Costs no tokens: row-level fields aren't part of the
+                # API request, so this is UI fidelity only and must not
+                # enter the `tokens` math below.
+                tool_use_result = row.get("toolUseResult")
+                content: dict[str, Any] = {
+                    "tool_use_id": block.get("tool_use_id"),
+                    "text": text,
+                    "is_error": block.get("is_error", False),
+                }
+                if tool_use_result is not None:
+                    content["tool_use_result"] = tool_use_result
                 return Leaf(
                     kind="tool_result",
-                    content={
-                        "tool_use_id": block.get("tool_use_id"),
-                        "text": text,
-                        "is_error": block.get("is_error", False),
-                    },
+                    content=content,
                     tokens=count_tokens(text)
                     + img_tokens
                     + sum(count_image_tokens(b) for b in result_images),
@@ -420,20 +748,146 @@ def _is_user_prompt_row(row: dict[str, Any], last_pid: str | None) -> bool:
     return False
 
 
-def parse_session(path: str) -> Forest:
+def _is_start_hook_iam(row: dict[str, Any]) -> bool:
+    """True if this row is an inter-agent-message hook_additional_context
+    delivered on a start-of-turn hook (``UserPromptSubmit`` or
+    ``SessionStart``).
+
+    Those payloads are structurally injected ALONGSIDE the associated
+    user prompt — UserPromptSubmit fires as the user submits, SessionStart
+    fires as the session resumes right before the next prompt lands.
+    Semantically they belong ON the user_prompt (a verbatim, non-compactable
+    turn separator) rather than as mid-turn assistant-side leaves. We
+    detect them here so ``parse_session`` can merge instead of append.
+
+    ``Stop``-hook IAMs (delivered while the assistant is winding down its
+    response, not tied to a fresh user prompt) and ``queued_command``
+    attachments (mid-turn interjections during an ongoing assistant
+    response) keep their existing behaviour: a fresh mid-turn leaf.
+    """
+    if row.get("type") != "attachment":
+        return False
+    att = row.get("attachment")
+    if not isinstance(att, dict):
+        return False
+    if att.get("type") != "hook_additional_context":
+        return False
+    if att.get("hookEvent") not in ("UserPromptSubmit", "SessionStart"):
+        return False
+    content = att.get("content")
+    if isinstance(content, list):
+        joined = "\n".join(
+            c if isinstance(c, str) else str(c) for c in content
+        )
+    elif isinstance(content, str):
+        joined = content
+    else:
+        return False
+    return "[Multiverse Inter-Agent]" in joined
+
+
+def _merge_iam_into_prompt(prompt: Leaf | None, extra: Leaf) -> Leaf | None:
+    """Mutate ``prompt`` in place to absorb ``extra``'s text + tokens.
+
+    Prepends the IAM content with a blank-line separator ahead of the
+    user's actual prompt text — matches how the model originally saw it
+    (system-reminder injected as additional context BEFORE the user's
+    message reached the model). ``source_uuids`` gains the IAM row's
+    uuid so downstream consumers that key by source uuid still find
+    the IAM content.
+
+    Returns the (possibly-new) prompt. Falls back to just returning
+    ``extra`` if ``prompt`` is None — a session that resumes with only
+    an IAM and no subsequent user prompt shouldn't lose the IAM.
+    """
+    if prompt is None:
+        return extra
+    old_text = prompt.content.get("text", "") or ""
+    new_text = extra.content.get("text", "") or ""
+    prompt.content["text"] = (
+        f"{new_text}\n\n{old_text}" if old_text else new_text
+    )
+    prompt.tokens += extra.tokens
+    if extra.source_uuids:
+        prompt.source_uuids.extend(extra.source_uuids)
+    return prompt
+
+
+def filter_compactable(forest: Forest) -> Forest:
+    """Return ``forest`` with non-compactable leaves stripped out of every
+    turn — for consumers on the compaction pipeline that must not surface
+    display-only attachment content as user speech in the compacted
+    output.
+
+    ``parse_session`` returns a forest that includes every leaf the model
+    could see, so ``live_stats``/total-token consumers get accurate
+    dashboard numbers. But some of those leaves — non-IAM
+    ``hook_additional_context``, ``task_reminder``, ``skill_listing``,
+    ``deferred_tools_delta``, ``agent_listing_delta``,
+    ``mcp_instructions_delta``, ``edited_text_file``, and any future
+    attachment kinds we don't explicitly whitelist — are structural
+    context, not user speech. Feeding them into ``render_frontier_as_messages``
+    would render them as user-role text blocks in the compacted JSONL,
+    corrupting the transcript with fake user messages.
+
+    So the compaction pipeline calls this first, and everything
+    downstream (tree building, budget allocation, rendering) operates on
+    the filtered view. Turn structure (user_prompt, turn_id, ordering)
+    is preserved; only ``turn.leaves`` shrinks. Mutates in place and
+    returns the same forest for chainability.
+    """
+    for turn in forest:
+        turn.leaves = [l for l in turn.leaves if l.compactable]
+    return forest
+
+
+def compaction_forest(path: str) -> Forest:
+    """The canonical forest the compaction pipeline operates on: command
+    turns stripped, non-compactable attachment leaves filtered. EVERY
+    compaction call site (tree builder worker + CLI, scheduler-preview
+    stats, the compaction runner) must build the forest this way so the
+    turn list / turn_idx / turn_ids stay identical across them.
+
+    (Inter-agent-message hooks are folded into the user_prompt inside
+    ``parse_session`` itself — see ``_merge_iam_into_prompt`` — so no
+    separate empty-turn merge is needed or wanted here.)
+    """
+    return filter_compactable(parse_session(path, strip_command_turns_=True))
+
+
+def parse_session(
+    path: str,
+    strip_command_turns_: bool = False,
+) -> Forest:
     """Parse a Claude Code JSONL session log into a Forest of Turns.
 
     Only rows on the **live conversation chain** are processed.
     Abandoned branches from "restore conversation" stay in the file
     but are skipped here — see ``_live_chain_rows`` for the tip-
     selection rule and rationale.
+
+    ``strip_command_turns_=True`` additionally drops the display-only
+    slash-command turns (``/context``, ``/model``, ``/effort``) from
+    the chain before turn construction — used by the compaction
+    pipeline so these turns aren't summarized into tree nodes and
+    don't appear in the compacted output. Default is False so callers
+    like ``live_stats`` and ``structural_tokens`` see the raw
+    transcript (structural derivation needs command tokens present
+    on the parser side to net them out of the usage-vs-parser delta
+    correctly).
     """
     out_tok, visible_tok = _build_usage_index(path)
     chain_rows = _live_chain_rows(path)
+    if strip_command_turns_:
+        chain_rows = strip_command_turns(chain_rows)
 
     turns: Forest = []
     current: Turn | None = None
     pending_orphans: list[Leaf] = []
+    # SessionStart-hook IAMs arrive in the file BEFORE the next user
+    # prompt row, so we can't merge in-place at scan time — stash and
+    # drain into the next Turn's user_prompt when it's created.
+    pending_start_iams: list[Leaf] = []
     last_pid: str | None = None
 
     for row in chain_rows:
@@ -459,6 +913,14 @@ def parse_session(path: str) -> Forest:
             # The user prompt is hoisted out of `leaves` — it acts as a
             # verbatim separator and never enters the compactable region.
             current = Turn(turn_id=turn_id, user_prompt=leaf, leaves=[])
+            # Drain any SessionStart-hook IAMs that arrived before this
+            # prompt — they were injected as additional context WITH the
+            # user's next prompt, so they belong ON this prompt.
+            for iam in pending_start_iams:
+                current.user_prompt = _merge_iam_into_prompt(
+                    current.user_prompt, iam
+                )
+            pending_start_iams = []
             # Drain any pre-first-prompt orphans into this turn's leaves
             if pending_orphans:
                 current.leaves.extend(pending_orphans)
@@ -468,6 +930,25 @@ def parse_session(path: str) -> Forest:
         # Non-prompt row
         if leaf is None:
             continue
+
+        # Start-of-turn IAM merges into the user_prompt rather than
+        # landing as a mid-turn leaf. UserPromptSubmit fires AFTER its
+        # prompt row (current.user_prompt is set) — merge now.
+        # SessionStart fires BEFORE the next prompt row (current is
+        # either None or the previous turn) — stash for the next
+        # user_prompt drain above.
+        if _is_start_hook_iam(row):
+            hook_event = row["attachment"].get("hookEvent")
+            if (
+                hook_event == "UserPromptSubmit"
+                and current is not None
+                and current.user_prompt is not None
+            ):
+                _merge_iam_into_prompt(current.user_prompt, leaf)
+            else:
+                pending_start_iams.append(leaf)
+            continue
+
         if current is None:
             # Content before any user prompt; stash and attach to first turn
             pending_orphans.append(leaf)

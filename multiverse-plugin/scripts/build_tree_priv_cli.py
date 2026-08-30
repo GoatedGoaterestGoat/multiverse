@@ -15,14 +15,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "vendor"))
 
 from compaction.constructor import ConstructorConfig, construct_turn_priv_cli
-from compaction.parser import parse_session
+from compaction.parser import compaction_forest
 from compaction.preprocess import PreprocessConfig, preprocess_forest
 from compaction.types import Leaf, Node
 
@@ -58,7 +60,14 @@ def main():
     p.add_argument("--model", default="sonnet")
     args = p.parse_args()
 
-    forest = preprocess_forest(parse_session(args.session), PreprocessConfig())
+    # Canonical compaction view (command turns stripped, non-compactable
+    # leaves filtered, empty turns merged) — the tree must be built over
+    # exactly the turns/leaves that end up in the compacted output.
+    # turn_idx is relative to this same view the worker enumerates.
+    forest = preprocess_forest(
+        compaction_forest(args.session),
+        PreprocessConfig(),
+    )
     if args.turn_idx >= len(forest):
         print(f"only {len(forest)} turns; index {args.turn_idx} out of range",
               file=sys.stderr)
@@ -117,8 +126,40 @@ def main():
         "tree": serialize(turn.root) if turn.root is not None else None,
         "history": trace.merges,
     }
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, default=str)
+    # tmp + atomic replace, not open(out, "w").
+    #
+    # The hazard is a torn file if we die mid-dump. Readers tolerate one
+    # (_is_valid_cached_tree here, _attach_trees_from_cache in the
+    # runner, both catching JSONDecodeError and treating it as no-tree),
+    # so it costs a rebuild rather than corruption — but a rebuild is
+    # tens of seconds of model calls, and hours across a whole session.
+    # Cheap to remove entirely.
+    #
+    # Note on a hazard this does NOT face, since an earlier version of
+    # this comment claimed it did: truncating would also destroy an
+    # existing good tree before writing its replacement. That window
+    # isn't reachable from the worker, which skips any turn whose cache
+    # is already valid (tree-builder-worker.py, _is_valid_cached_tree →
+    # continue), so the destination here is always absent, empty, or
+    # already invalid. It remains reachable by invoking this script
+    # directly with --out pointed at a good tree, which is a documented
+    # usage, so the protection is still worth having — just not the
+    # reason the automated path needs it.
+    out_path = Path(out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        prefix=".tree_", suffix=".json", dir=str(out_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, default=str)
+        os.replace(tmp, out_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
     print(f"Saved tree to {out}", file=sys.stderr)
     return 0

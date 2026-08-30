@@ -202,7 +202,7 @@ def recency_boosted(
     hl = max(1e-6, recency_half_life)
     weights: dict[str, float] = {}
     for k, t in enumerate(reversed(forest)):
-        leaves = max(1, _full_tokens(t))
+        leaves = max(1, _alloc_weight(t))
         multiplier = 1.0 + (ratio - 1.0) / (1.0 + k / hl)
         weights[t.turn_id] = leaves * multiplier
     total_w = sum(weights.values()) or 1.0
@@ -213,7 +213,7 @@ def proportional(forest: Forest, budget: int) -> dict[str, int]:
     """Budget proportional to the turn's full token count."""
     if not forest:
         return {}
-    sizes = {t.turn_id: max(1, _full_tokens(t)) for t in forest}
+    sizes = {t.turn_id: max(1, _alloc_weight(t)) for t in forest}
     total = sum(sizes.values())
     return {tid: int(budget * s / total) for tid, s in sizes.items()}
 
@@ -244,9 +244,12 @@ def last_k_raw(forest: Forest, budget: int, k: int = 3) -> dict[str, int]:
     if raw_cost >= budget and rest:
         return proportional(forest, budget)
     remaining = max(0, budget - raw_cost)
+    # Tail turns are kept verbatim, so they cost their FULL raw tokens
+    # (tool results included). The earlier turns get the remaining budget
+    # split by allocation weight (evictable tool output excluded).
     out: dict[str, int] = {t.turn_id: _full_tokens(t) for t in last}
     if rest:
-        rest_sizes = {t.turn_id: max(1, _full_tokens(t)) for t in rest}
+        rest_sizes = {t.turn_id: max(1, _alloc_weight(t)) for t in rest}
         rest_total = sum(rest_sizes.values())
         for tid, size in rest_sizes.items():
             out[tid] = int(remaining * size / rest_total)
@@ -363,3 +366,44 @@ def allocate_budget(
 def _full_tokens(turn: Turn) -> int:
     """Token count if the entire turn were rendered raw (all leaves)."""
     return sum(l.tokens for l in turn.leaves)
+
+
+# Tools whose results claude's own microcompaction evicts under context
+# pressure (see COMPACTABLE_TOOLS in claude-code's microCompact.ts). Their
+# tool_result content is often long, low-signal, and may be dropped from the
+# live context entirely — so it shouldn't inflate a turn's share of the
+# compaction budget. Excluded from the scheduler ALLOCATION WEIGHT only; the
+# results are still summarized into the turn's tree like any other content.
+_EVICTABLE_TOOL_NAMES = frozenset({
+    "Read", "Bash", "Grep", "Glob", "WebSearch", "WebFetch",
+    "Edit", "Write", "MultiEdit", "NotebookEdit", "BashOutput",
+})
+
+
+def _alloc_weight(turn: Turn) -> int:
+    """Per-turn weight for scheduler budget allocation.
+
+    Same as ``_full_tokens`` but EXCLUDES tool_result content from
+    evictable tools (Read/Bash/Grep/…). A turn full of large file reads
+    or command output shouldn't command a large slice of the compaction
+    budget just because that output is verbose — especially since claude
+    may evict it from the live context anyway. Tool CALLS (the command /
+    args) still count; only their RESULTS are excluded.
+    """
+    # Map tool_use_id -> tool name within this turn (tool_result blocks
+    # carry only the id, not the name).
+    id_to_name: dict[str, str] = {}
+    for leaf in turn.leaves:
+        if leaf.kind in ("tool_use", "tool_exchange"):
+            tid = leaf.content.get("tool_use_id")
+            nm = leaf.content.get("name")
+            if tid and nm:
+                id_to_name[tid] = nm
+    total = 0
+    for leaf in turn.leaves:
+        if leaf.kind == "tool_result":
+            nm = id_to_name.get(leaf.content.get("tool_use_id"))
+            if nm in _EVICTABLE_TOOL_NAMES:
+                continue  # skip evictable tool output from the weight
+        total += leaf.tokens
+    return total

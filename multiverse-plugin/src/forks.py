@@ -1,9 +1,9 @@
 """On-disk registry of ask-fork session UUIDs.
 
-``ask_agent`` / ``ask_all`` spawn an ephemeral forked subprocess per target
-to answer side-questions (``claude --fork-session`` / ``pi --fork``). A
-fork's transcript inherits the origin session's display name, so a leftover
-would masquerade as a dormant agent on the dashboard and in ``list_agents``.
+``ask_agent`` / ``ask_all`` spawn ephemeral ``claude --fork-session``
+subprocesses to answer side-questions. Each fork's JSONL inherits the
+origin session's ``custom-title``, so a leftover fork would masquerade as
+a dormant agent on the dashboard and in ``list_agents``.
 
 The monitor has an in-memory ``_active_fork_uuids`` set, but it only ever
 covered the TUI ask-all path — the only one that runs inside the monitor
@@ -23,10 +23,10 @@ a fork killed mid-ask doesn't linger forever.
 
 from __future__ import annotations
 
-import shutil
 import time
 from pathlib import Path
 
+from .atomic_files import atomic_write_text
 from .paths import multiverse_dir
 
 
@@ -44,7 +44,7 @@ def mark_active(fork_uuid: str, jsonl_path: Path) -> None:
     d = _forks_dir()
     try:
         d.mkdir(parents=True, exist_ok=True)
-        (d / fork_uuid).write_text(f"{time.time()}\n{jsonl_path}\n")
+        atomic_write_text(d / fork_uuid, f"{time.time()}\n{jsonl_path}\n")
     except OSError:
         pass
 
@@ -102,14 +102,8 @@ def gc(max_age_seconds: float = 3600.0) -> None:
         if now - ts < max_age_seconds:
             continue
         if len(lines) >= 2 and lines[1].strip():
-            # Claude Code forks record a single JSONL; pi forks record the
-            # scratch session DIRECTORY they were pointed at, so handle both.
-            orphan = Path(lines[1].strip())
             try:
-                if orphan.is_dir():
-                    shutil.rmtree(orphan, ignore_errors=True)
-                else:
-                    orphan.unlink(missing_ok=True)
+                Path(lines[1].strip()).unlink(missing_ok=True)
             except OSError:
                 pass
         try:

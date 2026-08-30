@@ -1,11 +1,14 @@
 [project]
 name = "multiverse-plugin"
 version = "0.3.0"
-description = "Multiverse plugin for Claude Code: context folding + multi-session monitor"
+description = "Multiverse multi-runtime agent orchestration for Claude Code, Codex, and pi"
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
     "textual>=0.80",
+    "websockets>=13",
+    "cryptography>=42",
+    "certifi>=2024.7.4",
 ]
 
 [project.scripts]

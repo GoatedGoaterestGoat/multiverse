@@ -66,6 +66,7 @@ from hashlib import blake2b
 from pathlib import Path
 from typing import Optional, Protocol
 
+from .atomic_files import atomic_write_json
 from .paths import multiverse_dir
 
 # tmux session name prefix for the dedicated web monitor.
@@ -357,8 +358,8 @@ def _active_cloudflare_slot_labels() -> set[str]:
             rec is not None
             and rec.provider == "cloudflare"
             and rec.path
-            and _pid_alive(rec.ttyd_pid)
-            and _pid_alive(rec.tunnel_pid)
+            and _pid_is(rec.ttyd_pid, "ttyd")
+            and _pid_is(rec.tunnel_pid, "cloudflared")
         ):
             used.add(rec.path.strip("/"))
     return used
@@ -379,7 +380,8 @@ def status(cwd: str) -> Optional[WebShare]:
     rec = _read_record(share_id_for(cwd))
     if rec is None:
         return None
-    if not (_pid_alive(rec.ttyd_pid) and _pid_alive(rec.tunnel_pid)):
+    if not (_pid_is(rec.ttyd_pid, "ttyd")
+            and _pid_is(rec.tunnel_pid, "cloudflared")):
         # A leg died — clean up so the dashboard doesn't show a dead share.
         stop(cwd)
         return None
@@ -530,7 +532,7 @@ def start(
     try:
         tunnel_pid, url = tun.start(port, sdir / "tunnel.log")
     except Exception:
-        _kill(ttyd_proc.pid)
+        _kill(ttyd_proc.pid, "ttyd")
         _kill_tmux(web_tmux)
         raise
 
@@ -564,8 +566,8 @@ def stop(cwd: str) -> None:
     sid = share_id_for(cwd)
     rec = _read_record(sid)
     if rec is not None:
-        _kill(rec.tunnel_pid)
-        _kill(rec.ttyd_pid)
+        _kill(rec.tunnel_pid, "cloudflared")
+        _kill(rec.ttyd_pid, "ttyd")
         _kill_tmux(rec.web_tmux)
     else:
         # No record but be defensive: kill a possibly-orphaned web tmux.
@@ -595,10 +597,7 @@ def _read_record(share_id: str) -> Optional[WebShare]:
 
 def _write_record(rec: WebShare) -> None:
     p = _record_path(rec.share_id)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(asdict(rec), indent=2))
-    os.replace(tmp, p)  # atomic
+    atomic_write_json(p, asdict(rec), mode=0o600, indent=2)
 
 
 def _free_loopback_port() -> int:
@@ -630,7 +629,7 @@ def _scrape_url(
         if m:
             return m.group(0)
         time.sleep(0.25)
-    _kill(proc.pid)
+    _kill(proc.pid, "cloudflared")
     raise WebShareError(
         f"tunnel did not report a URL within {timeout:.0f}s (see {log_path})."
     )
@@ -656,7 +655,7 @@ def _wait_ready(
         except OSError:
             pass
         time.sleep(0.25)
-    _kill(proc.pid)
+    _kill(proc.pid, "cloudflared")
     raise WebShareError(
         f"tunnel was not ready within {timeout:.0f}s (see {log_path})."
     )
@@ -674,8 +673,63 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _kill(pid: int) -> None:
+def _proc_cmdline(pid: int) -> Optional[str]:
+    """Command line of ``pid``, or None if it can't be determined."""
     if pid <= 0:
+        return None
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() or None
+
+
+def _pid_is(pid: int, expect: str) -> bool:
+    """True only if ``pid`` is alive AND its command line names ``expect``.
+
+    Liveness alone is not enough here. These pids are persisted into the
+    share record and read back arbitrarily later — across monitor
+    restarts and reboots — by which point the OS may well have recycled
+    them. A bare ``os.kill(pid, 0)`` then reports a long-dead share as
+    running, and, far worse, lets ``_kill`` signal whatever inherited
+    the number.
+
+    Unverifiable means False, the opposite of the equivalent check in
+    spawn-tree-builder. The failure directions are not symmetric: there,
+    wrongly declaring a lock stale spawns a duplicate worker, so
+    "assume held" is the safe guess. Here, wrongly declaring a pid ours
+    signals an innocent process, so the safe guess is "not ours".
+    """
+    if not _pid_alive(pid):
+        return False
+    cmd = _proc_cmdline(pid)
+    if cmd is None:
+        return False
+    return expect in cmd
+
+
+def _kill(pid: int, expect: str) -> None:
+    """SIGTERM ``pid``'s process group — but only if it is still ours.
+
+    ``expect`` is a substring the target's command line must contain
+    ("ttyd", "cloudflared"). Every caller states what it believes it is
+    stopping; a mismatch means the pid was recycled and we must not
+    signal it.
+
+    This is the sharpest edge in the module. Share records persist pids
+    to disk, ``stop()`` reads one back potentially days and a reboot
+    later, and ``killpg`` signals the whole process GROUP — so on a
+    recycled pid this would not merely kill one innocent process, it
+    would take down its entire job.
+    """
+    if pid <= 0:
+        return
+    if not _pid_is(pid, expect):
         return
     try:
         os.killpg(os.getpgid(pid), signal.SIGTERM)

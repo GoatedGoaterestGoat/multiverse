@@ -1,9 +1,9 @@
 """A scriptable OpenAI-compatible endpoint, for testing the pi extension.
 
-The pi integration has three fragile seams that only show up with a live
-model in the loop: the typebox tool schemas pi hands the provider, the
-tool-execute wiring, and the ``session_before_compact`` round-trip. None of
-them can be exercised by importing Python.
+The pi integration has fragile seams that only show up with a live model in
+the loop: the typebox tool schemas pi hands the provider, tool-execute wiring,
+and lifecycle/inbox behavior. None of them can be exercised by importing
+Python alone.
 
 This serves just enough of ``/v1/chat/completions`` (streaming, tool calls) to
 drive pi through those paths deterministically. Responses come from a JSON
