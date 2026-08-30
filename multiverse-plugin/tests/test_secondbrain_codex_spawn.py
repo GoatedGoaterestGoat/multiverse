@@ -470,7 +470,11 @@ class CodexSpawnEventOrderingTests(unittest.IsolatedAsyncioTestCase):
                     instruction="Investigate the failure.", name="requested-child"
                 )
 
-            self.assertEqual(result, "Spawned agent with name 'renamed-child'.")
+            self.assertEqual(
+                result,
+                "Spawned agent with name 'renamed-child' in folder "
+                "'codex-caller'.",
+            )
             self.assertEqual(
                 published,
                 [

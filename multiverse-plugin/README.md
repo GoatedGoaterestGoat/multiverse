@@ -122,12 +122,52 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `x` | Restore a lost session from an orphan full JSONL — one whose live counterpart Claude Code has reaped (`cleanupPeriodDays`) but whose mirror survived. Picks from orphans in this workspace and feeds the choice through the normal compaction flow, rendering a fresh live JSONL at the chosen budget. |
 | `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
-| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
+| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder (agents are kept). Refused while the row is `compacting` |
+| `g` | New folder. On a folder header it becomes a subfolder; on an agent the folder is created at the top level with that agent inside |
+| `m` | Move the highlighted agent — or folder — into another folder, the top level, or a folder you create from the picker |
+| `e` | Rename the folder under the cursor (works from a member row too) |
+| `u` | Lift the highlighted agent or folder one level out of its folder |
+| `space` | Fold/unfold. On a member row it folds the folder around it and rides the cursor up to the header |
+| `z` | Fold every folder — or unfold them all if they're already folded |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
 
 **Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
+
+#### Folders
+
+A busy workspace turns the dashboard into a wall of names. Folders give it a
+shape: a folder holds agents and other folders, it folds away, and it survives
+monitor restarts. Nesting is drawn with tree connectors, and top-level rows stay
+flush left — a workspace with no folders looks exactly like it always did.
+
+```
+▼ merge-review (3)    📩 3   1 waiting  551,127
+├─ ▶ runtime-work (2) 📩 1   2 working  139,124  swift-otter, brave-mole
+└─ merge-captain      📩 2   waiting    412,003  Review the pi runtime diff…
+quiet-fox                    idle         4,310  Investigate flaky attach test
+```
+
+A folded folder answers, on its own line, what its hidden rows would have: it
+rolls up the pending-inbox count, the status that most wants attention, the
+token total, the freshest timestamp, and the names inside.
+
+**Folders form themselves.** When an agent uses `spawn_agent`, the new agent is
+filed next to whoever spawned it: into the spawner's folder if it has one, and
+otherwise into a new folder named after the spawner, which both of them move
+into. So a delegation lineage becomes a folder the first time it branches,
+without anyone having to anticipate it. Everything it does is undoable by hand
+(`e` rename, `m` move, `u` lift out, `k` remove the folder), and removing a
+folder never touches a session — it only undoes the grouping.
+
+Membership is keyed by agent *name*, which is the identifier that survives a
+resume, a compaction, and a context fold — so agents stay in their folder
+across all three, and a `(folded …)` ghost row files itself next to the live
+agent it came from. State lives in `~/.multiverse/groups/<encoded-cwd>.json`,
+per workspace, written under a lock so two monitors on one workspace don't
+clobber each other. `list_agents` shows each agent's folder in brackets, so
+agents can see who they're teamed with.
 
 The monitor attaches through a local PTY relay that answers tmux's DA1, DA2, and
 XTVERSION capability probes before they reach the outer terminal. This prevents
@@ -350,6 +390,12 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │   └── <message-id>.json.claim-<id>   — staged during delivery; deleted on
 │                     commit, renamed back on an explicit release, and
 │                     re-adopted after 60s if the deliverer died
+├── groups/
+│   ├── <encoded-cwd>.json      — dashboard folders for one workspace: the
+│   │                             folder tree plus agent-name → folder map
+│   └── <encoded-cwd>.lock      — flock target; every mutation is a locked
+│                                 read-modify-write so two monitors on the
+│                                 same workspace can't clobber each other
 ├── spawn_requests/
 │   ├── <req-id>.json           — agent-initiated subagent spawn request
 │   └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
@@ -657,6 +703,9 @@ multiverse-plugin/
 │   ├── sessions.py             # Session data layer + status writer (flock'd,
 │   │                           #  terminal `ended`) + runtime launch
 │   ├── inbox.py                # Inter-agent inbox: claim / commit / release
+│   ├── groups.py               # Dashboard folders: per-workspace group store
+│   │                           #  (locked read-modify-write), name-keyed
+│   │                           #  membership, auto-grouping on spawn, tree layout
 │   ├── ask_agents.py           # Forked side-question machinery, per runtime
 │   ├── forks.py                # Registry of in-flight ask-fork UUIDs
 │   ├── spawn_requests.py       # Filesystem protocol for spawn_agent

@@ -132,7 +132,12 @@ class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 name="codex-child",
             )
 
-        self.assertEqual(result, "Spawned agent with name 'codex-child'.")
+        # The child is auto-filed alongside its spawner, and the result
+        # says where — see groups.auto_group_spawn.
+        self.assertEqual(
+            result,
+            "Spawned agent with name 'codex-child' in folder 'claude-caller'.",
+        )
         write_request.assert_called_once_with(
             req_id="request-id",
             from_name="claude-caller",
@@ -181,7 +186,10 @@ class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 name="claude-child",
             )
 
-        self.assertEqual(result, "Spawned agent with name 'claude-child'.")
+        self.assertEqual(
+            result,
+            "Spawned agent with name 'claude-child' in folder 'codex-caller'.",
+        )
         create.assert_called_once_with(
             cwd="/workspace",
             claude_args=[],

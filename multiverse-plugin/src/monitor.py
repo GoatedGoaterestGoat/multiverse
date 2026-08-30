@@ -26,7 +26,7 @@ import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -101,6 +101,7 @@ from .spawn_requests import (
     write_resolution,
 )
 from .tmux_attach import attach_tmux_session
+from . import groups
 from . import web_share
 from . import sb_control
 
@@ -117,6 +118,21 @@ STATUS_STYLES = {
     "dormant": "blue",
     "compacting": "bold magenta",
     "unknown": "dim",
+}
+
+# Which status a folder header reports when its members disagree: the one
+# most likely to need the user. Lower rank wins.
+_GROUP_STATUS_RANK = {
+    "waiting": 0,
+    "compacting": 1,
+    "working": 2,
+    "listening": 3,
+    "starting": 4,
+    "ending": 5,
+    "idle": 6,
+    "dormant": 7,
+    "ended": 8,
+    "unknown": 9,
 }
 
 # Statuses where the user is allowed to launch a compaction. Working/
@@ -2951,6 +2967,203 @@ def _read_title_from_full(claude_uuid: str) -> Optional[str]:
     return title
 
 
+class GroupNameScreen(ModalScreen[Optional[str]]):
+    """Name prompt for a folder — shared by create and rename.
+
+    Deliberately not reusing ``NameInputScreen``: that one validates against
+    the workspace's *agent* names, and a folder is allowed to share a name
+    with the agent it was created around (which is exactly what
+    ``auto_group_spawn`` does).
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, heading: str, default: str = "", hint: str = "") -> None:
+        super().__init__()
+        self.heading = heading
+        self.default = default
+        self.hint = hint or "Enter to save · Esc to cancel"
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(self.heading, id="group-name-heading"),
+            Input(
+                value=self.default,
+                placeholder="Folder name",
+                id="group-name-input",
+            ),
+            Static("", id="group-name-error"),
+            Static(self.hint, id="group-name-hint"),
+            id="group-name-dialog",
+        )
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#group-name-input", Input)
+        inp.focus()
+        try:
+            inp.cursor_position = len(inp.value)
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        name = event.value.strip()
+        if not name:
+            self.query_one("#group-name-error", Static).update(
+                "[red]Folder name cannot be empty.[/]"
+            )
+            return
+        self.dismiss(name)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class GroupPickerScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
+    """Destination picker for "move into…".
+
+    Dismisses with ``("root", None)`` for the top level, ``("group", id)``
+    for an existing folder, ``("new", None)`` to create one first, or
+    ``None`` if cancelled.
+
+    ``exclude`` must contain a whole subtree when it contains anything —
+    the caller moving a folder passes the folder plus its descendants, so
+    the listing can't offer a destination inside the thing being moved.
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(
+        self,
+        heading: str,
+        state: groups.GroupState,
+        *,
+        exclude: Optional[set[str]] = None,
+        current: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        self.heading = heading
+        self.state = state
+        self.exclude = exclude or set()
+        self.current = current
+        self._choices: list[tuple[str, Optional[str]]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(self.heading, id="group-pick-heading"),
+            DataTable(cursor_type="row", id="group-pick-table"),
+            Static("Enter to choose · Esc to cancel", id="group-pick-hint"),
+            id="group-pick-dialog",
+        )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#group-pick-table", DataTable)
+        table.add_columns("Destination")
+        here = "  [dim]← where it is now[/]"
+
+        self._choices = [("root", None)]
+        table.add_row(
+            "[dim]▸[/] (top level — no folder)"
+            + (here if self.current is None else "")
+        )
+        for group, depth in groups.iter_groups_depth_first(self.state):
+            if group.id in self.exclude:
+                continue
+            self._choices.append(("group", group.id))
+            table.add_row(
+                "   " * depth
+                + f"{groups.CHEVRON_OPEN} {group.name}"
+                + (here if group.id == self.current else "")
+            )
+        self._choices.append(("new", None))
+        table.add_row("[bold]+ New folder…[/]")
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Fired when Enter picks a destination.
+
+        Must call ``event.stop()``: the event bubbles otherwise, and
+        MonitorApp's own ``on_data_table_row_selected`` calls
+        ``action_primary()`` on whatever the dashboard cursor is sitting
+        on — so choosing a folder here would also attach (or resume) an
+        agent behind the modal.
+        """
+        event.stop()
+        idx = event.cursor_row
+        if 0 <= idx < len(self._choices):
+            self.dismiss(self._choices[idx])
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class ConfirmGroupDeleteScreen(ModalScreen[bool]):
+    """Confirmation before removing a folder.
+
+    Worth confirming even though nothing is destroyed: on a collapsed
+    folder the user can't see how much is about to be tipped back out.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "confirm", "Confirm"),
+    ]
+
+    def __init__(
+        self,
+        name: str,
+        agent_count: int,
+        subgroup_count: int,
+        parent_name: Optional[str],
+    ) -> None:
+        super().__init__()
+        self.group_name = name
+        self.agent_count = agent_count
+        self.subgroup_count = subgroup_count
+        self.parent_name = parent_name
+
+    def compose(self) -> ComposeResult:
+        held = []
+        if self.agent_count:
+            held.append(
+                f"{self.agent_count} agent"
+                + ("s" if self.agent_count != 1 else "")
+            )
+        if self.subgroup_count:
+            held.append(
+                f"{self.subgroup_count} subfolder"
+                + ("s" if self.subgroup_count != 1 else "")
+            )
+        where = (
+            f"into '{self.parent_name}'"
+            if self.parent_name
+            else "back to the top level"
+        )
+        body = (
+            f"{' and '.join(held)} move {where}."
+            if held
+            else "The folder is empty."
+        )
+        yield Vertical(
+            Static(
+                f"Remove folder [bold]'{self.group_name}'[/]?",
+                id="confirm-group-header",
+            ),
+            Static(
+                body + " No sessions are killed and no transcripts are "
+                "deleted — this only undoes the grouping.",
+                id="confirm-group-body",
+            ),
+            Static("Enter to confirm · Esc to cancel", id="confirm-group-hint"),
+            id="confirm-group-dialog",
+        )
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_confirm(self) -> None:
+        self.dismiss(True)
+
+
 class MonitorApp(App):
     CSS = """
     Screen {
@@ -3271,6 +3484,52 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
+    #group-name-dialog {
+        width: 70;
+        height: auto;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #group-name-heading { height: auto; padding-bottom: 1; }
+    #group-name-error {
+        color: $error;
+        height: auto;
+        padding-top: 1;
+    }
+    #group-name-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
+    #group-pick-dialog {
+        width: 70;
+        height: 80%;
+        padding: 1 2;
+        border: round $primary;
+        background: $surface;
+    }
+    #group-pick-heading { height: auto; padding-bottom: 1; }
+    #group-pick-table { height: 1fr; }
+    #group-pick-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
+    #confirm-group-dialog {
+        width: 100;
+        height: auto;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #confirm-group-header { height: auto; padding-bottom: 1; }
+    #confirm-group-body {
+        color: $text-muted;
+        height: auto;
+        padding-bottom: 1;
+    }
+    #confirm-group-hint { color: $text-muted; height: auto; }
     """
 
     BINDINGS = [
@@ -3287,6 +3546,12 @@ class MonitorApp(App):
         Binding("S", "secondbrain", "SecondBrain"),
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
+        Binding("g", "new_group", "New folder"),
+        Binding("m", "move_to_group", "Move to folder"),
+        Binding("e", "rename_group", "Rename folder"),
+        Binding("u", "ungroup", "Out of folder"),
+        Binding("space", "toggle_collapse", "Fold/unfold"),
+        Binding("z", "toggle_collapse_all", "Fold all"),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -3298,6 +3563,11 @@ class MonitorApp(App):
         self.monitor_cwd = str(Path(raw_cwd).expanduser().resolve())
         self.sessions: list[Session] = []
         self.entries: list[DashboardRow] = []
+        # Folder tree for this workspace, reloaded each tick so a second
+        # monitor's edits show up here, and the flattened display order
+        # (folder headers interleaved with agents) the table renders from.
+        self.group_state: groups.GroupState = groups.GroupState()
+        self.display_rows: list[groups.DisplayRow] = []
         # Fork JSONLs created by in-flight ask-all subprocesses. Hidden from
         # the dashboard + resume widget for their brief lifetime.
         self._active_fork_uuids: set[str] = set()
@@ -3322,8 +3592,10 @@ class MonitorApp(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         table = DataTable(cursor_type="row", zebra_stripes=True)
+        # Name leads so the folder tree's connectors sit flush against the
+        # left edge of the dashboard, where a tree reads.
         table.add_columns(
-            "ID", "Name", "Runtime", "Inbox", "Build", "Status", "Tokens",
+            "Name", "ID", "Runtime", "Inbox", "Build", "Status", "Tokens",
             "Updated", "Preview",
         )
         yield table
@@ -3367,6 +3639,7 @@ class MonitorApp(App):
             cwd=self.monitor_cwd,
             hide_uuids=hide,
         )
+        self.group_state = groups.load(self.monitor_cwd)
         self._redraw_table()
         self._tick_spawn_requests()
         self._update_web_indicator()
@@ -3514,77 +3787,506 @@ class MonitorApp(App):
         self._active_spawn_modal = modal
         self.push_screen(modal, on_close)
 
+    def _agent_tokens(self, e: DashboardRow) -> Optional[int]:
+        """Token total shown for one agent, or ``None`` when unmeasurable.
+
+        Displayed = transcript tokens + structural (derived from the last
+        recorded API call's usage). Matches claude's own /clear / /context
+        total to a few tokens. Falls back to just the transcript number
+        when structural isn't measurable yet (freshly-compacted session
+        before its first API call).
+
+        Prefer the direct measurement — the last real (non-msg_priv) API
+        request's usage total is literally what /context shows. It stays
+        correct even when claude's microcompaction has evicted content the
+        parser still sees on disk (parser + structural would over-count in
+        that case). Fall back to parser + structural only for sessions with
+        no recorded API call yet (freshly-compacted before first turn,
+        brand-new session).
+        """
+        if not e.claude_uuid:
+            return None
+        last_usage = last_real_usage_total_cached(e.claude_uuid, e.cwd)
+        if last_usage:
+            return last_usage
+        live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
+        struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
+        return live_toks + struct_toks
+
+    def _agent_cells(self, row: groups.DisplayRow, now: float) -> tuple:
+        e = row.entry
+        style = STATUS_STYLES.get(e.status, "dim")
+        status_cell = f"[{style}]{e.status}[/]"
+        updated = _ago(now - e.status_ts) if e.status_ts else "-"
+        if e.session is not None:
+            id_cell = e.session.id
+        else:
+            session_id = e.session_id or ""
+            id_cell = f"[dim]{session_id[:8]}[/]"
+        pending = pending_inbox_count(e.cwd, e.name)
+        inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
+        if e.runtime != RUNTIME_CLAUDE:
+            build_cell = "[dim]-[/]"
+        elif e.claude_uuid and auto_build_enabled(e.claude_uuid):
+            build_cell = "[bold green]on[/]"
+        else:
+            build_cell = "[dim]off[/]"
+        tokens = self._agent_tokens(e)
+        tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
+        preview = e.preview or "[dim](empty)[/]"
+        if len(preview) > 60:
+            preview = preview[:59] + "…"
+        name_cell = f"[dim]{row.prefix}[/]{e.name}" if row.prefix else e.name
+        return (
+            name_cell, id_cell, e.runtime, inbox_cell, build_cell,
+            status_cell, tokens_cell, updated, preview,
+        )
+
+    def _group_cells(self, row: groups.DisplayRow, now: float) -> tuple:
+        """Render a folder header.
+
+        A collapsed folder has to answer, on its own line, the question its
+        hidden rows would have answered: is anything in there waiting on
+        me? So the header rolls up the inbox count, the most
+        attention-worthy status, the token total and the freshest
+        timestamp of everything beneath it — at any depth.
+        """
+        group = row.group
+        chevron = (
+            groups.CHEVRON_CLOSED if group.collapsed else groups.CHEVRON_OPEN
+        )
+        count = row.agent_count
+        name_cell = (
+            f"[dim]{row.prefix}[/][bold]{chevron} {group.name}[/]"
+            f"[dim] ({count})[/]"
+        )
+
+        agents = row.agents
+        pending = sum(pending_inbox_count(a.cwd, a.name) for a in agents)
+        inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
+
+        if agents:
+            counts: dict[str, int] = {}
+            for a in agents:
+                counts[a.status] = counts.get(a.status, 0) + 1
+            top = min(
+                counts,
+                key=lambda st: (_GROUP_STATUS_RANK.get(st, 99), st),
+            )
+            style = STATUS_STYLES.get(top, "dim")
+            status_cell = f"[{style}]{counts[top]} {top}[/]"
+        else:
+            status_cell = "[dim]empty[/]"
+
+        token_total = sum(
+            t for t in (self._agent_tokens(a) for a in agents) if t is not None
+        )
+        tokens_cell = f"[dim]{token_total:,}[/]" if token_total else "[dim]-[/]"
+
+        latest = max((a.status_ts or 0 for a in agents), default=0)
+        updated = _ago(now - latest) if latest else "-"
+
+        # Expanded, the agents speak for themselves right below; collapsed,
+        # the header is all the user has, so name who is in there.
+        if group.collapsed and agents:
+            shown = [a.name for a in agents[:3]]
+            rest = len(agents) - len(shown)
+            preview = ", ".join(shown) + (f", +{rest}" if rest > 0 else "")
+            if len(preview) > 60:
+                preview = preview[:59] + "…"
+            preview_cell = f"[dim]{preview}[/]"
+        else:
+            preview_cell = ""
+
+        return (
+            name_cell, "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
+            status_cell, tokens_cell, updated, preview_cell,
+        )
+
     def _redraw_table(self) -> None:
         table = self.query_one(DataTable)
+        prev_key = self._cursor_row_key()
         prev_cursor = table.cursor_row
         table.clear()
         now = time.time()
-        for e in self.entries:
-            style = STATUS_STYLES.get(e.status, "dim")
-            status_cell = f"[{style}]{e.status}[/]"
-            updated = _ago(now - e.status_ts) if e.status_ts else "-"
-            if e.session is not None:
-                id_cell = e.session.id
-            else:
-                session_id = e.session_id or ""
-                id_cell = f"[dim]{session_id[:8]}[/]"
-            pending = pending_inbox_count(e.cwd, e.name)
-            inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
-            if e.runtime != RUNTIME_CLAUDE:
-                build_cell = "[dim]-[/]"
-            elif e.claude_uuid and auto_build_enabled(e.claude_uuid):
-                build_cell = "[bold green]on[/]"
-            else:
-                build_cell = "[dim]off[/]"
-            if e.claude_uuid:
-                # Displayed = transcript tokens + structural (derived
-                # from the last recorded API call's usage). Matches
-                # claude's own /clear / /context total to a few tokens.
-                # Falls back to just the transcript number when
-                # structural isn't measurable yet (freshly-compacted
-                # session before its first API call).
-                # Prefer the direct measurement — the last real (non-
-                # msg_priv) API request's usage total is literally what
-                # /context shows. It stays correct even when claude's
-                # microcompaction has evicted content the parser still
-                # sees on disk (parser + structural would over-count in
-                # that case). Fall back to parser + structural only for
-                # sessions with no recorded API call yet (freshly-
-                # compacted before first turn, brand-new session).
-                last_usage = last_real_usage_total_cached(e.claude_uuid, e.cwd)
-                if last_usage:
-                    tokens_cell = f"{last_usage:,}"
-                else:
-                    live_toks, _ = live_stats_cached(e.claude_uuid, e.cwd)
-                    struct_toks = structural_tokens_cached(e.claude_uuid, e.cwd)
-                    tokens_cell = f"{live_toks + struct_toks:,}"
-            else:
-                tokens_cell = "[dim]-[/]"
-            preview = e.preview or "[dim](empty)[/]"
-            if len(preview) > 60:
-                preview = preview[:59] + "…"
-            table.add_row(
-                id_cell, e.name, e.runtime, inbox_cell, build_cell, status_cell,
-                tokens_cell, updated, preview,
-                key=e.row_key,
+        self.display_rows = groups.build_display_rows(
+            self.entries, self.group_state
+        )
+        for row in self.display_rows:
+            cells = (
+                self._group_cells(row, now)
+                if row.is_group
+                else self._agent_cells(row, now)
             )
-        if self.entries:
-            row = max(0, min(prev_cursor or 0, len(self.entries) - 1))
-            try:
-                table.move_cursor(row=row)
-            except Exception:
-                pass
+            table.add_row(*cells, key=row.key)
+        self._restore_cursor(table, prev_key, prev_cursor)
 
-    def _current_entry(self) -> Optional[DashboardRow]:
-        if not self.entries:
+    def _cursor_row_key(self) -> Optional[str]:
+        """Row key currently under the cursor, from the previous draw."""
+        if not self.display_rows:
+            return None
+        try:
+            idx = self.query_one(DataTable).cursor_row
+        except Exception:
+            return None
+        if isinstance(idx, int) and 0 <= idx < len(self.display_rows):
+            return self.display_rows[idx].key
+        return None
+
+    def _restore_cursor(
+        self, table: DataTable, prev_key: Optional[str], prev_cursor: Any
+    ) -> None:
+        """Keep the cursor on the same thing across a redraw.
+
+        Index alone isn't enough once folders can collapse: folding a
+        folder above the cursor shifts every row below it, and the cursor
+        would silently land on a different agent. Follow the row key when
+        it survives, and fall back to the old index only when it doesn't
+        (the row was killed, or filtered away).
+        """
+        if not self.display_rows:
+            return
+        target: Optional[int] = None
+        if prev_key is not None:
+            for i, row in enumerate(self.display_rows):
+                if row.key == prev_key:
+                    target = i
+                    break
+        if target is None:
+            fallback = prev_cursor if isinstance(prev_cursor, int) else 0
+            target = max(0, min(fallback, len(self.display_rows) - 1))
+        try:
+            table.move_cursor(row=target)
+        except Exception:
+            pass
+
+    def _current_display(self) -> Optional[groups.DisplayRow]:
+        """The display row under the cursor — folder header or agent."""
+        if not self.display_rows:
             return None
         table = self.query_one(DataTable)
         idx = table.cursor_row or 0
-        if 0 <= idx < len(self.entries):
-            return self.entries[idx]
+        if 0 <= idx < len(self.display_rows):
+            return self.display_rows[idx]
         return None
 
+    def _current_entry(self) -> Optional[DashboardRow]:
+        """The agent under the cursor.
+
+        ``None`` on a folder header, which is what every session action
+        wants: they already return early on ``None``, so a folder row is
+        inert for attach/kill/compact rather than acting on some arbitrary
+        member.
+        """
+        row = self._current_display()
+        if row is None or row.is_group:
+            return None
+        return row.entry
+
+    # ------------------------------------------------------------------
+    # Folders
+    # ------------------------------------------------------------------
+
+    def _current_group(self) -> Optional[groups.Group]:
+        row = self._current_display()
+        if row is not None and row.is_group:
+            return row.group
+        return None
+
+    def _cursor_folder_id(self) -> Optional[str]:
+        """The folder the cursor is *in*: the highlighted folder itself, or
+        the one holding the highlighted agent."""
+        row = self._current_display()
+        if row is None:
+            return None
+        if row.is_group and row.group is not None:
+            return row.group.id
+        if row.entry is not None:
+            return self.group_state.group_of(row.entry.name)
+        return None
+
+    def _move_cursor_to_key(self, key: str) -> None:
+        for i, row in enumerate(self.display_rows):
+            if row.key == key:
+                try:
+                    self.query_one(DataTable).move_cursor(row=i)
+                except Exception:
+                    pass
+                return
+
+    def action_new_group(self) -> None:
+        """``g`` — create a folder.
+
+        Where it lands follows the cursor, because that is where the user
+        is already looking: on a folder header it becomes a subfolder; on
+        an agent the folder is created at the top level with that agent
+        already inside (the common case — you notice a cluster forming and
+        want to file it); on nothing, an empty top-level folder.
+        """
+        row = self._current_display()
+        parent_id: Optional[str] = None
+        parent_name: Optional[str] = None
+        agent: Optional[DashboardRow] = None
+        if row is not None and row.is_group and row.group is not None:
+            parent_id = row.group.id
+            parent_name = row.group.name
+        elif row is not None and row.entry is not None:
+            agent = row.entry
+
+        if parent_name:
+            heading = f"New folder inside [bold]{parent_name}[/]"
+        elif agent is not None:
+            heading = f"New folder — [bold]{agent.name}[/] moves into it"
+        else:
+            heading = "New top-level folder"
+
+        def on_name(name: Optional[str]) -> None:
+            if not name:
+                return
+            try:
+                group = groups.create_group(self.monitor_cwd, name, parent_id)
+                if agent is not None:
+                    groups.assign_agent(self.monitor_cwd, agent.name, group.id)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.refresh_sessions()
+            self._move_cursor_to_key(groups.group_row_key(group.id))
+            if agent is not None:
+                self.notify(
+                    f"Created folder '{group.name}' with '{agent.name}' inside"
+                )
+            else:
+                self.notify(f"Created folder '{group.name}'")
+
+        self.push_screen(GroupNameScreen(heading), on_name)
+
+    def action_move_to_group(self) -> None:
+        """``m`` — move the highlighted agent or folder somewhere else."""
+        row = self._current_display()
+        if row is None:
+            return
+        state = self.group_state
+
+        if row.is_group and row.group is not None:
+            group = row.group
+            # A folder can't be moved inside itself, so its whole subtree
+            # is off the menu.
+            exclude = {group.id} | set(state.descendants_of(group.id))
+            heading = f"Move folder [bold]{group.name}[/] into…"
+            current = group.parent
+            label = f"folder '{group.name}'"
+            focus_key = groups.group_row_key(group.id)
+
+            def apply(target: Optional[str]) -> None:
+                groups.move_group(self.monitor_cwd, group.id, target)
+
+        elif row.entry is not None:
+            entry = row.entry
+            exclude = set()
+            heading = f"Move [bold]{entry.name}[/] into…"
+            current = state.group_of(entry.name)
+            label = f"'{entry.name}'"
+            focus_key = entry.row_key
+
+            def apply(target: Optional[str]) -> None:
+                groups.assign_agent(self.monitor_cwd, entry.name, target)
+
+        else:
+            return
+
+        def commit(target: Optional[str]) -> None:
+            try:
+                apply(target)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.refresh_sessions()
+            self._move_cursor_to_key(focus_key)
+            dest = self.group_state.get(target)
+            where = (
+                f"into '{dest.name}'" if dest is not None else "to the top level"
+            )
+            self.notify(f"Moved {label} {where}")
+
+        def on_pick(result: Optional[tuple[str, Optional[str]]]) -> None:
+            if result is None:
+                return
+            kind, gid = result
+            if kind == "root":
+                commit(None)
+            elif kind == "group":
+                commit(gid)
+            elif kind == "new":
+
+                def on_name(name: Optional[str]) -> None:
+                    if not name:
+                        return
+                    try:
+                        created = groups.create_group(
+                            self.monitor_cwd, name, None
+                        )
+                    except (ValueError, OSError) as exc:
+                        self.notify(str(exc), severity="error")
+                        return
+                    commit(created.id)
+
+                self.push_screen(
+                    GroupNameScreen("New top-level folder"), on_name
+                )
+
+        self.push_screen(
+            GroupPickerScreen(heading, state, exclude=exclude, current=current),
+            on_pick,
+        )
+
+    def action_rename_group(self) -> None:
+        """``e`` — rename the folder under (or around) the cursor."""
+        group = self.group_state.get(self._cursor_folder_id())
+        if group is None:
+            self.notify(
+                "Highlight a folder — or an agent inside one — to rename it",
+                severity="warning",
+            )
+            return
+
+        def on_name(name: Optional[str]) -> None:
+            if not name or name == group.name:
+                return
+            try:
+                groups.rename_group(self.monitor_cwd, group.id, name)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.refresh_sessions()
+            self.notify(f"Renamed folder to '{name}'")
+
+        self.push_screen(
+            GroupNameScreen(
+                f"Rename folder [bold]{group.name}[/]", group.name
+            ),
+            on_name,
+        )
+
+    def action_ungroup(self) -> None:
+        """``u`` — lift the highlighted row one level out of its folder."""
+        row = self._current_display()
+        if row is None:
+            return
+
+        if row.is_group and row.group is not None:
+            group = row.group
+            if group.parent is None:
+                self.notify(
+                    f"Folder '{group.name}' is already at the top level",
+                    severity="warning",
+                )
+                return
+            grandparent = self.group_state.get(group.parent)
+            target = grandparent.parent if grandparent is not None else None
+            try:
+                groups.move_group(self.monitor_cwd, group.id, target)
+            except (ValueError, OSError) as exc:
+                self.notify(str(exc), severity="error")
+                return
+            self.refresh_sessions()
+            self._move_cursor_to_key(groups.group_row_key(group.id))
+            dest = self.group_state.get(target)
+            where = f"into '{dest.name}'" if dest is not None else "to the top level"
+            self.notify(f"Moved folder '{group.name}' {where}")
+            return
+
+        entry = row.entry
+        if entry is None:
+            return
+        gid = self.group_state.group_of(entry.name)
+        if gid is None:
+            self.notify(f"'{entry.name}' isn't in a folder", severity="warning")
+            return
+        group = self.group_state.get(gid)
+        target = group.parent if group is not None else None
+        try:
+            groups.assign_agent(self.monitor_cwd, entry.name, target)
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self.refresh_sessions()
+        self._move_cursor_to_key(entry.row_key)
+        dest = self.group_state.get(target)
+        where = f"into '{dest.name}'" if dest is not None else "out to the top level"
+        self.notify(f"Moved '{entry.name}' {where}")
+
+    def action_toggle_collapse(self) -> None:
+        """``space`` — fold or unfold a folder."""
+        row = self._current_display()
+        if row is None:
+            return
+        if row.is_group and row.group is not None:
+            groups.toggle_collapsed(self.monitor_cwd, row.group.id)
+            self.refresh_sessions()
+            self._move_cursor_to_key(row.key)
+            return
+        # On an agent, fold the folder it lives in — and ride the cursor up
+        # to that header, since the row it was on is about to disappear.
+        gid = (
+            self.group_state.group_of(row.entry.name)
+            if row.entry is not None
+            else None
+        )
+        if gid is None:
+            self.notify("Not in a folder — nothing to fold", severity="warning")
+            return
+        groups.set_collapsed(self.monitor_cwd, gid, True)
+        self.refresh_sessions()
+        self._move_cursor_to_key(groups.group_row_key(gid))
+
+    def action_toggle_collapse_all(self) -> None:
+        """``z`` — fold everything, or unfold everything if already folded."""
+        if not self.group_state.groups:
+            self.notify("No folders yet — press g to make one", severity="warning")
+            return
+        collapse = any(
+            not g.collapsed for g in self.group_state.groups.values()
+        )
+        groups.set_all_collapsed(self.monitor_cwd, collapse)
+        self.refresh_sessions()
+        self.notify("Folded every folder" if collapse else "Unfolded every folder")
+
+    def _delete_group_flow(self, group: groups.Group) -> None:
+        """``k`` on a folder header: remove the folder, keep the agents."""
+        state = self.group_state
+        agent_count = len(state.members_of(group.id, recursive=True))
+        subgroup_count = len(state.descendants_of(group.id))
+        parent = state.get(group.parent)
+
+        def on_close(confirmed: Optional[bool]) -> None:
+            if not confirmed:
+                return
+            try:
+                groups.delete_group(self.monitor_cwd, group.id)
+            except OSError as exc:
+                self.notify(f"Failed to remove folder: {exc}", severity="error")
+                return
+            self.refresh_sessions()
+            self.notify(f"Removed folder '{group.name}'")
+
+        self.push_screen(
+            ConfirmGroupDeleteScreen(
+                group.name,
+                agent_count,
+                subgroup_count,
+                parent.name if parent is not None else None,
+            ),
+            on_close,
+        )
+
     def action_new_session(self) -> None:
+        # Starting a session with a folder header highlighted files it in
+        # that folder. Only a folder header counts — highlighting an agent
+        # is too weak a signal to move a brand-new session somewhere the
+        # user didn't ask for.
+        folder = self._current_group()
+
         def cb(result: Optional[tuple[str, str]]) -> None:
             if not result:
                 return
@@ -3600,8 +4302,18 @@ class MonitorApp(App):
             except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
                 self.notify(f"Spawn failed: {e}", severity="error")
                 return
+            if folder is not None:
+                try:
+                    groups.assign_agent(self.monitor_cwd, name, folder.id)
+                except (ValueError, OSError):
+                    pass  # the session exists; filing it is a nicety
             self.refresh_sessions()
-            self.notify(f"Spawned {name} with {runtime}")
+            if folder is not None:
+                self.notify(
+                    f"Spawned {name} with {runtime} in '{folder.name}'"
+                )
+            else:
+                self.notify(f"Spawned {name} with {runtime}")
 
         self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
 
@@ -3842,7 +4554,17 @@ class MonitorApp(App):
         self.notify(f"Resumed {runtime} {session_id[:8]} as {name}")
 
     def action_primary(self) -> None:
-        """Enter: attach for live sessions, resume for dormant/ended ones."""
+        """Enter: attach for live sessions, resume for dormant/ended ones.
+
+        On a folder header there is nothing to attach to, so Enter does the
+        folder-ish thing and folds it.
+        """
+        row = self._current_display()
+        if row is not None and row.is_group and row.group is not None:
+            groups.toggle_collapsed(self.monitor_cwd, row.group.id)
+            self.refresh_sessions()
+            self._move_cursor_to_key(row.key)
+            return
         e = self._current_entry()
         if e is None:
             return
@@ -4038,6 +4760,10 @@ class MonitorApp(App):
         self.push_screen(SecondBrainScreen(self.monitor_cwd), _on_close)
 
     def action_kill(self) -> None:
+        row = self._current_display()
+        if row is not None and row.is_group and row.group is not None:
+            self._delete_group_flow(row.group)
+            return
         e = self._current_entry()
         if e is None:
             return

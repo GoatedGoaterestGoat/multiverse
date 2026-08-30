@@ -65,6 +65,7 @@ from src.interagent_log import (
     log_notification_routed,
 )
 from src.compact_state import is_locked
+from src import groups
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
 from src.spawn_requests import (
@@ -584,6 +585,11 @@ def list_agents(
       - dormant  — never wrapped by multiverse this run, but the underlying
                    transcript exists and is named
 
+    Agents the user has filed into a monitor folder show it in square
+    brackets (nested folders as ``parent/child``). Agents you spawn are
+    filed alongside you automatically, so a shared folder is a good hint
+    that you are working the same problem.
+
     Your own entry is marked with ``← this is you`` (only when listing your
     own workspace). The list is sorted with you first, then live agents,
     then ended/retired/dormant. Claude and Codex agents share this registry, but the
@@ -675,11 +681,25 @@ def list_agents(
             f"{total} agent(s) in workspace '{cwd}' ({live_count} live)"
         )
 
+    # Folder membership from the monitor's grouping, shown so an agent can
+    # see who it is teamed with — a spawner and its subagents share one.
+    try:
+        group_state = groups.load(cwd)
+    except OSError:
+        group_state = groups.GroupState()
+
     lines = [summary, ""]
     name_width = max(len(a.name) for a in visible)
+    status_width = max(len(a.status) for a in visible)
     for a in visible:
         marker = "  ← this is you" if a.name == self_name_for_marker else ""
-        lines.append(f"- {a.name.ljust(name_width)}  {a.status}{marker}")
+        gid = group_state.group_of(a.name)
+        folder = "/".join(group_state.path_names(gid)) if gid else ""
+        folder_cell = f"  [{folder}]" if folder else ""
+        status = a.status.ljust(status_width) if folder_cell else a.status
+        lines.append(
+            f"- {a.name.ljust(name_width)}  {status}{folder_cell}{marker}"
+        )
     if hidden:
         lines.append(
             f"  … and {hidden} more not shown "
@@ -1501,7 +1521,21 @@ async def spawn_agent(
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
             return f"Error: failed to create session: {e}"
 
-        return f"Spawned agent with name '{chosen}'."
+        # File the new agent in the monitor's folder tree next to whoever
+        # spawned it, so a delegation lineage shows up as a folder instead
+        # of scattering across a flat list. Purely cosmetic bookkeeping —
+        # the session is already running, so a failure here must not turn
+        # a successful spawn into an error.
+        folder_note = ""
+        try:
+            gid = groups.auto_group_spawn(cwd, self_name, chosen)
+            group = groups.load(cwd).get(gid)
+            if group is not None:
+                folder_note = f" in folder '{group.name}'"
+        except (OSError, ValueError):
+            pass
+
+        return f"Spawned agent with name '{chosen}'{folder_note}."
     finally:
         cleanup_request(req_id)
 

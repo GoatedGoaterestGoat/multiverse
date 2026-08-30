@@ -86,6 +86,7 @@ The wrapper script was rewritten from "single claude in a loop" into a **multi-s
 | `bin/multiverse` | Launches the Textual monitor (forwards args as default claude args) |
 | `bin/multiverse-session` | Per-session inner loop: runs one claude, dispatches `resume_folded`, passes `--plugin-dir` for dev mode |
 | `src/monitor.py` | Textual `App` with a `DataTable` of sessions, modals for new/resume, keybindings |
+| `src/groups.py` | Dashboard folders: the per-workspace group store and the tree layout the table renders (no Textual dependency, so both are unit-testable) |
 | `scripts/set-status.sh` | One-liner called by status hooks with `idle`/`working`/`waiting`/`ended` |
 | `hooks/hooks.json` | Added `SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse` (`.*`), `Stop`, `SessionEnd` handlers alongside the existing `context_fold` hook |
 
@@ -105,6 +106,10 @@ inbox/<encoded-cwd>/<recipient-name>/<ask-id>.json
                    — pending message file (question or response). Written atomically
                      by ask_agent / respond_to_agent. Consumed (deleted) by the
                      deliver-inbox hook on first delivery.
+
+groups/<encoded-cwd>.json — dashboard folders for one workspace: {groups, members}.
+groups/<encoded-cwd>.lock — flock target; mutations are locked read-modify-write
+                            so two monitors on one workspace can't lose an edit.
 
 spawn_requests/<req-id>.json           — agent-initiated subagent spawn request.
 spawn_requests/<req-id>.resolved.json — user's naming decision (O_EXCL-atomic so
