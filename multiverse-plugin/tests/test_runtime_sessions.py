@@ -789,7 +789,12 @@ class RuntimeLaunchTests(unittest.TestCase):
 
 
 class RuntimeKillTests(unittest.TestCase):
-    def _session(self, state_dir: Path, session_id: str) -> sessions.Session:
+    def _session(
+        self,
+        state_dir: Path,
+        session_id: str,
+        runtime: str = sessions.RUNTIME_CODEX,
+    ) -> sessions.Session:
         session_dir = state_dir / session_id
         session_dir.mkdir()
         (session_dir / "meta.json").write_text(
@@ -798,7 +803,7 @@ class RuntimeKillTests(unittest.TestCase):
                     "cwd": str(state_dir),
                     "created_at": 1,
                     "name": "owned-agent",
-                    "runtime": sessions.RUNTIME_CODEX,
+                    "runtime": runtime,
                     "host": sessions.current_host(),
                 }
             )
@@ -813,9 +818,81 @@ class RuntimeKillTests(unittest.TestCase):
             created_at=1,
             status="idle",
             name="owned-agent",
-            runtime=sessions.RUNTIME_CODEX,
+            runtime=runtime,
             codex_session_id="native-thread",
             host=sessions.current_host(),
+        )
+
+    def test_live_runtime_is_terminated_before_tmux_for_both_runtimes(
+        self,
+    ) -> None:
+        for runtime in (sessions.RUNTIME_CLAUDE, sessions.RUNTIME_CODEX):
+            with self.subTest(runtime=runtime), tempfile.TemporaryDirectory() as raw:
+                state_dir = Path(raw) / "sessions"
+                state_dir.mkdir()
+                wrapped = self._session(state_dir, f"{runtime}-wrapper", runtime)
+                calls: list[str] = []
+
+                def terminate(*_args):
+                    calls.append("runtime")
+
+                def run(cmd, **_kwargs):
+                    self.assertEqual(
+                        cmd,
+                        ["tmux", "kill-session", "-t", wrapped.tmux_name],
+                    )
+                    calls.append("tmux")
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+
+                with (
+                    patch.object(sessions, "STATE_DIR", state_dir),
+                    patch.object(
+                        sessions, "tmux_session_exists", return_value=True
+                    ),
+                    patch.object(
+                        sessions,
+                        "_tmux_pane_runtime_group",
+                        return_value=(1234, 1234),
+                    ),
+                    patch.object(
+                        sessions,
+                        "_terminate_tmux_pane_runtime",
+                        side_effect=terminate,
+                    ),
+                    patch.object(sessions.subprocess, "run", side_effect=run),
+                ):
+                    sessions.kill_session(wrapped)
+
+                self.assertEqual(calls, ["runtime", "tmux"])
+                self.assertFalse((state_dir / wrapped.id).exists())
+
+    def test_live_pane_group_is_derived_from_tmux_owned_pid(self) -> None:
+        wrapped = sessions.Session(
+            id="owned-pane",
+            cwd="/workspace",
+            created_at=1,
+            runtime=sessions.RUNTIME_CLAUDE,
+        )
+        display = subprocess.CompletedProcess([], 0, "4321\n", "")
+        with (
+            patch.object(sessions.subprocess, "run", return_value=display) as run,
+            patch.object(sessions.os, "getpgid", return_value=8765),
+            patch.object(sessions.os, "getpgrp", return_value=9999),
+        ):
+            self.assertEqual(
+                sessions._tmux_pane_runtime_group(wrapped), (4321, 8765)
+            )
+
+        self.assertEqual(
+            run.call_args.args[0],
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                wrapped.tmux_name,
+                "#{pane_pid}",
+            ],
         )
 
     def test_kill_terminates_owned_process_group_before_releasing_state(

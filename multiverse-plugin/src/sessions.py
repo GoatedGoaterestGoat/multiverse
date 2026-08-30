@@ -49,6 +49,8 @@ RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX)
 _STARTING_LIVENESS_GRACE_SECONDS = 10.0
 _CODEX_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
+_PANE_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
+_PANE_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _CLAIM_DIR_NAME = "session_claims"
 
 # Custom-title stamped on the throwaway transcripts our OWN compaction
@@ -749,6 +751,101 @@ def _terminate_codex_runtime(s: Session, pid: int, pgid: int) -> None:
         return
     raise RuntimeError(
         f"Codex runtime PID {pid} is still alive; retained session state"
+    )
+
+
+def _tmux_pane_runtime_group(s: Session) -> tuple[int, int] | None:
+    """Return the live pane PID and its foreground runtime process group.
+
+    The wrapper command is tmux's pane process and both runtime launchers keep
+    Claude/Codex in that same foreground process group. Resolving the group from
+    tmux avoids trusting a stale PID file and gives Claude, which historically did
+    not persist its child PID, the same explicit teardown as Codex.
+    """
+    try:
+        result = subprocess.run(
+            [
+                "tmux",
+                "display-message",
+                "-p",
+                "-t",
+                s.tmux_name,
+                "#{pane_pid}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        pane_pid = int(result.stdout.strip())
+        pane_pgid = os.getpgid(pane_pid)
+    except (OSError, TypeError, ValueError):
+        return None
+    if pane_pid <= 1 or pane_pgid <= 1 or pane_pgid == os.getpgrp():
+        return None
+    return pane_pid, pane_pgid
+
+
+def _process_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _wait_for_process_group_exit(pgid: int, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_group_alive(pgid):
+            return True
+        time.sleep(0.05)
+    return not _process_group_alive(pgid)
+
+
+def _terminate_tmux_pane_runtime(
+    s: Session, pane_pid: int, pane_pgid: int
+) -> None:
+    """Terminate a tmux-owned Claude/Codex group before destroying its pane."""
+    # Re-read tmux immediately before signaling. If the pane was replaced or exited
+    # after discovery, do not risk signaling a recycled process group.
+    if _tmux_pane_runtime_group(s) != (pane_pid, pane_pgid):
+        return
+    try:
+        os.killpg(pane_pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to signal {s.runtime} runtime process group {pane_pgid}: {exc}"
+        ) from exc
+    if _wait_for_process_group_exit(pane_pgid, _PANE_RUNTIME_TERM_TIMEOUT_SECONDS):
+        return
+
+    # The group is still alive, so its identity cannot have been recycled. Escalate
+    # before tmux is killed to preserve the runtime-first ordering requested by `k`.
+    try:
+        os.killpg(pane_pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        return
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to kill {s.runtime} runtime process group {pane_pgid}: {exc}"
+        ) from exc
+    if _wait_for_process_group_exit(pane_pgid, _PANE_RUNTIME_KILL_TIMEOUT_SECONDS):
+        return
+    raise RuntimeError(
+        f"{s.runtime.capitalize()} runtime process group {pane_pgid} is still alive; "
+        "retained session state"
     )
 
 
@@ -1781,7 +1878,9 @@ def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
 
 
 def kill_session(s: Session) -> None:
-    """Tear down a wrapper and its owned runtime before releasing state."""
+    """Tear down the owned runtime first, then tmux, then release state."""
+    tmux_exists = tmux_session_exists(s.tmux_name)
+    pane_runtime = _tmux_pane_runtime_group(s) if tmux_exists else None
     runtime_pid: Optional[int] = None
     runtime_pgid: Optional[int] = None
     candidate_pid = _runtime_pid(s) if s.runtime == RUNTIME_CODEX else None
@@ -1798,13 +1897,21 @@ def kill_session(s: Session) -> None:
             runtime_pid = candidate_pid
             runtime_pgid = candidate_pgid
 
-    if tmux_session_exists(s.tmux_name):
-        subprocess.run(
-            ["tmux", "kill-session", "-t", s.tmux_name],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    if runtime_pid is not None and runtime_pgid is not None:
-        _terminate_codex_runtime(s, runtime_pid, runtime_pgid)
+    try:
+        if runtime_pid is not None and runtime_pgid is not None:
+            # Prefer Codex's recorded child identity when available. Unlike the pane
+            # fallback, this also handles an orphaned Codex writer after tmux vanished.
+            _terminate_codex_runtime(s, runtime_pid, runtime_pgid)
+        elif pane_runtime is not None:
+            _terminate_tmux_pane_runtime(s, *pane_runtime)
+    finally:
+        # Always make the second teardown attempt, even if runtime termination raised.
+        # In that case state remains intact and the caller still receives the error.
+        if tmux_exists:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", s.tmux_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
     shutil.rmtree(s.dir, ignore_errors=True)
     _release_session_claims(s)
