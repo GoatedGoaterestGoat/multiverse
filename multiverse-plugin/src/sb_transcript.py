@@ -8,17 +8,16 @@ makes it incremental.
 The moving parts:
 
 * **Delivery marker** — per agent, the point up to which we last delivered a transcript.
-  Keyed on a **stable identity** ``(resolved cwd, agent_name)`` — NOT the claude_uuid,
-  which changes on resume/compaction/fold. Stored one file per agent under
+  Keyed on a **stable identity** ``(resolved cwd, agent_name)`` — NOT the native session
+  id, which can change on resume/compaction/fold. Stored one file per agent under
   ``~/.multiverse/secondbrain/transcript_markers/`` and written atomically (tmp+rename).
-  Claude markers record ``{claude_uuid, turn_id, row_uuid, updated_at}``. Codex markers
-  record ``{runtime, thread_id, record_offset, record_hash, turn_id, item_id,
-  updated_at}`` and reconstruct canonical history by replaying rollback records.
+  Claude, Codex, and pi each persist runtime-specific cursors.
 
 * **Transcript source** — Claude uses the append-only FULL mirror at
-  ``~/.multiverse/full_jsonls/<claude_uuid>.jsonl`` (survives compaction). Codex uses
-  its native rollout JSONL directly through :mod:`.codex_transcript`; no second mirror
-  is written. The agent's current runtime session is resolved fresh each call.
+  ``~/.multiverse/full_jsonls/<claude_uuid>.jsonl`` (survives compaction). Codex and pi
+  use their native append-only JSONLs through :mod:`.codex_transcript` and
+  :mod:`.pi_secondbrain_transcript`; no second mirror is written. The agent's current
+  runtime session is resolved fresh each call.
 
 Semantics:
 
@@ -114,8 +113,8 @@ def _marker_path(cwd: str, agent_name: str) -> Path:
 def read_marker(cwd: str, agent_name: str) -> dict | None:
     """The stored delivery marker for an agent, or ``None`` if never initialized.
 
-    Claude and Codex use runtime-specific cursor fields while sharing the stable
-    ``(cwd, agent_name)`` marker identity.
+    Claude, Codex, and pi use runtime-specific cursor fields while sharing the
+    stable ``(cwd, agent_name)`` marker identity.
     """
     try:
         return json.loads(_marker_path(cwd, agent_name).read_text(encoding="utf-8"))
@@ -160,6 +159,20 @@ def _write_codex_marker(cwd: str, agent_name: str, cursor: dict) -> dict:
     return marker
 
 
+def _write_pi_marker(cwd: str, agent_name: str, cursor: dict) -> dict:
+    marker = {
+        "cwd": _resolve_cwd(cwd),
+        "agent_name": agent_name,
+        "runtime": "pi",
+        "session_id": cursor.get("session_id"),
+        "entry_id": cursor.get("entry_id"),
+        "updated_at": _now_iso(),
+    }
+    path = _marker_path(cwd, agent_name)
+    atomic_write_json(path, marker)
+    return marker
+
+
 def _now_iso() -> str:
     # UTC, no microseconds — matches the connector's ``_now_iso`` style.
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -174,11 +187,12 @@ def _resolve_agent_row(cwd: str, agent_name: str):  # noqa: ANN202
     from .sessions import (  # lazy: heavy deps, avoid cycle
         RUNTIME_CLAUDE,
         RUNTIME_CODEX,
+        RUNTIME_PI,
         find_agent_by_name,
     )
 
     row = find_agent_by_name(cwd, agent_name)
-    if row is None or row.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
+    if row is None or row.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI):
         return None
     return row
 
@@ -457,6 +471,23 @@ def initialize_marker(cwd: str, agent_name: str) -> bool:
             return False
         _write_codex_marker(cwd, agent_name, cursor)
         return True
+    if row.runtime == "pi":
+        from . import pi_secondbrain_transcript
+        from .pi_transcript import pi_session_path
+
+        session_id = row.session_id
+        if not session_id and row.session is not None:
+            session_id = row.session.runtime_session_id
+        if not session_id:
+            return False
+        path = pi_session_path(session_id, cwd)
+        if path is None:
+            return False
+        cursor = pi_secondbrain_transcript.initialize_cursor(path, session_id)
+        if cursor is None:
+            return False
+        _write_pi_marker(cwd, agent_name, cursor)
+        return True
     claude_uuid = row.claude_uuid
     if not claude_uuid:
         return False
@@ -496,6 +527,21 @@ def peek_partial_transcript(cwd: str, agent_name: str) -> tuple[str, dict] | Non
         if not thread_id:
             return None
         return codex_transcript.peek_partial_transcript(CODEX_HOME, thread_id, marker)
+    if row.runtime == "pi":
+        from . import pi_secondbrain_transcript
+        from .pi_transcript import pi_session_path
+
+        session_id = row.session_id
+        if not session_id and row.session is not None:
+            session_id = row.session.runtime_session_id
+        if not session_id:
+            return None
+        path = pi_session_path(session_id, cwd)
+        if path is None:
+            return None
+        return pi_secondbrain_transcript.peek_partial_transcript(
+            path, session_id, marker
+        )
 
     claude_uuid = row.claude_uuid
     if not claude_uuid:
@@ -608,6 +654,9 @@ def commit_marker(cwd: str, agent_name: str, cursor: dict) -> None:
         return
     if cursor.get("runtime") == "codex":
         _write_codex_marker(cwd, agent_name, cursor)
+        return
+    if cursor.get("runtime") == "pi":
+        _write_pi_marker(cwd, agent_name, cursor)
         return
     _write_marker(
         cwd,

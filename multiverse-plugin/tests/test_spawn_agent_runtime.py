@@ -48,7 +48,7 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
                 sessions.RUNTIME_CODEX,
             )
 
-    def test_pi_spawn_activity_does_not_emit_secondbrain_events(self) -> None:
+    def test_pi_spawn_activity_emits_secondbrain_events(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch.object(
             spawn_requests, "SPAWN_REQUESTS_DIR", Path(raw)
         ), patch.object(
@@ -72,8 +72,8 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
                 )
             )
 
-        record_request.assert_not_called()
-        record_decision.assert_not_called()
+        record_request.assert_called_once()
+        record_decision.assert_called_once()
 
     def test_dead_caller_request_is_deleted_as_an_orphan(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch.object(

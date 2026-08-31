@@ -191,7 +191,7 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
         for row in wire.result["sessions"]:
             self.assertNotIn("runtime", row)
 
-    async def test_pi_rows_are_not_exposed_through_secondbrain(self) -> None:
+    async def test_pi_rows_are_exposed_through_secondbrain(self) -> None:
         pi_row = sessions.DashboardRow(
             name="pi-agent",
             cwd=self.cwd,
@@ -214,13 +214,21 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
             rows=rows,
         )
 
-        self.assertNotIn(
-            "pi-agent", [row["name"] for row in dashboard.result["sessions"]]
+        pi_dashboard = next(
+            row for row in dashboard.result["sessions"] if row["name"] == "pi-agent"
         )
-        self.assertNotIn(
-            "pi-agent", [row["name"] for row in agents.result["agents"]]
+        self.assertEqual(pi_dashboard["tokens"], "-")
+        self.assertEqual(pi_dashboard["build"], "off")
+        self.assertIn("pi-agent", [row["name"] for row in agents.result["agents"]])
+        self.assertEqual(
+            status.result,
+            {
+                "status": "idle",
+                "inbox": 0,
+                "tokens": "-",
+                "last_updated": "2024-07-17T16:42:51Z",
+            },
         )
-        self.assertEqual(status.result, {"status": None})
 
     async def test_list_agents_preserves_existing_fields_for_codex(self) -> None:
         wire = await self._run_query(self._query(sb_protocol.QueryKind.LIST_AGENTS))

@@ -96,13 +96,8 @@ _WORKSPACE_MAX_PARALLEL = 5
 
 
 def _supports_secondbrain_runtime(runtime: str) -> bool:
-    """SecondBrain is intentionally limited to Claude and Codex.
-
-    Pi participates in Multiverse's own dashboard and inter-agent protocol,
-    but this PR does not add Pi transcript, prompt, permission, or event
-    support to the separate SecondBrain seam.
-    """
-    return runtime in ("claude", "codex")
+    """Whether a Multiverse runtime participates in the SecondBrain seam."""
+    return runtime in ("claude", "codex", "pi")
 
 
 def _ssl_for(url: str) -> "ssl.SSLContext | None":
@@ -2160,8 +2155,24 @@ class SBConnector:
                 "",
             )
 
-        # Live path — need the tmux name. Guard: if the session is alive on ANOTHER host
-        # in a shared MULTIVERSE_ROOT, we can't reach its tmux from here.
+        # Pi's extension can accept a real user message without touching the terminal.
+        # Queue durably rather than using Claude/Codex's composer parser: this preserves
+        # any user draft, works while pi is busy, and also crosses hosts when the
+        # Multiverse root is shared. The extension commits only after sendUserMessage
+        # accepts the hand-off.
+        if target.runtime == "pi":
+            from .pi_prompt_queue import write_prompt
+
+            write_prompt(cwd_abs, agent_name, text)
+            return (
+                "ok",
+                f"Prompt queued for '{agent_name}' and will be delivered by its pi "
+                "extension as a user message.",
+                "",
+            )
+
+        # Claude/Codex live path — need the tmux name. Guard: if the session is alive on
+        # ANOTHER host in a shared MULTIVERSE_ROOT, we can't reach its tmux from here.
         if session.host and session.host != current_host():
             return (
                 "deliver_failed", "",
@@ -2232,6 +2243,7 @@ class SBConnector:
         the message_agent auto_resume flow, but hands ``initial_prompt`` to create_session
         so the SB prompt becomes the runtime's first user turn."""
         from .sessions import (
+            RUNTIME_CLAUDE,
             RUNTIME_CODEX,
             create_session,
             foreign_host_still_reported_live,
@@ -2256,11 +2268,12 @@ class SBConnector:
                     "as a new session here"
                 )
             kill_session(target.session)
-        runtime_args = (
-            ["resume", native_session_id]
-            if target.runtime == RUNTIME_CODEX
-            else ["--resume", native_session_id]
-        )
+        if target.runtime == RUNTIME_CLAUDE:
+            runtime_args = ["--resume", native_session_id]
+        elif target.runtime == RUNTIME_CODEX:
+            runtime_args = ["resume", native_session_id]
+        else:
+            runtime_args = ["--session", native_session_id]
         create_session(
             cwd=cwd,
             claude_args=runtime_args,
@@ -2366,11 +2379,22 @@ class SBConnector:
         at a time — the tool blocks its turn). Toolsmith's design improvement, 2026-07-13.
         """
         from . import sb_actions, sb_notify
-        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+        from .sessions import (
+            RUNTIME_PI,
+            current_host,
+            find_agent_by_name,
+            tmux_session_exists,
+        )
 
         target = find_agent_by_name(cwd_abs, agent_name)
         if target is None or not _supports_secondbrain_runtime(target.runtime):
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
+        if target.runtime == RUNTIME_PI:
+            return (
+                "no_pending_question",
+                "",
+                "pi has no AskUserQuestion bridge for SecondBrain to answer",
+            )
 
         # Locate the pending AskUserQuestion for this agent. Two paths:
         #  (a) explicit question_id from SB → look up pending_tools/<id>.json + verify
@@ -2760,7 +2784,7 @@ class SBConnector:
         if not _supports_secondbrain_runtime(runtime):
             return (
                 "err", "", "", "deliver_failed",
-                "MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME must be 'claude' or 'codex'",
+                "MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME must be 'claude', 'codex', or 'pi'",
             )
 
         try:
@@ -2892,11 +2916,22 @@ class SBConnector:
         """
         from . import sb_actions, sb_notify
         from .compact_state import is_locked
-        from .sessions import RUNTIME_CODEX, find_agent_by_name, tmux_session_exists
+        from .sessions import (
+            RUNTIME_CODEX,
+            RUNTIME_PI,
+            find_agent_by_name,
+            tmux_session_exists,
+        )
 
         target = find_agent_by_name(cwd, agent_name)
         if target is None or not _supports_secondbrain_runtime(target.runtime):
             return "not_found", "", f"no agent named '{agent_name}' in this workspace"
+        if target.runtime == RUNTIME_PI:
+            return (
+                "no_pending_permission",
+                "",
+                "pi has no permission prompt bridge for SecondBrain to answer",
+            )
         if target.claude_uuid and is_locked(target.claude_uuid):
             return "locked", "", f"'{agent_name}' is compacting; cannot answer right now"
         tmux_name = target.session.tmux_name if target.session else None

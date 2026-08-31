@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import json
 import os
 import sys
@@ -216,6 +217,78 @@ def cmd_release_inbox(args) -> int:
     return _emit(str(release_claimed_messages(cwd, name, list(args.claim))), args.json)
 
 
+def cmd_claim_pi_prompts(args) -> int:
+    """Stage SecondBrain prompts for injection through pi.sendUserMessage."""
+    from src.pi_prompt_queue import claim_prompts
+
+    name, cwd = _identity(args)
+    prompts = claim_prompts(cwd, name) if name and cwd else []
+    payload = {
+        "count": len(prompts),
+        "items": [
+            {
+                "text": str(prompt.get("text") or ""),
+                "claim": Path(str(prompt["__claim_path"])).name,
+            }
+            for prompt in prompts
+            if prompt.get("__claim_path")
+        ],
+    }
+    json.dump(payload, sys.stdout, ensure_ascii=False)
+    sys.stdout.write("\n")
+    return 0
+
+
+def cmd_commit_pi_prompts(args) -> int:
+    from src.pi_prompt_queue import commit_prompts, prompt_dir
+
+    name, cwd = _identity(args)
+    if not name or not cwd:
+        return _emit("0", args.json)
+    directory = prompt_dir(cwd, name)
+    prompts: list[dict] = []
+    for basename in args.claim:
+        if (
+            not basename
+            or Path(basename).name != basename
+            or ".json.claim-" not in basename
+        ):
+            continue
+        path = directory / basename
+        if path.is_file():
+            prompts.append({"__claim_path": str(path)})
+    return _emit(str(commit_prompts(prompts)), args.json)
+
+
+def cmd_release_pi_prompts(args) -> int:
+    from src.pi_prompt_queue import release_prompts
+
+    name, cwd = _identity(args)
+    if not name or not cwd:
+        return _emit("0", args.json)
+    return _emit(str(release_prompts(cwd, name, list(args.claim))), args.json)
+
+
+def cmd_secondbrain_user_prompt(args) -> int:
+    from src.sb_notify import record_user_prompt_signal
+
+    name, cwd = _identity(args)
+    if not name or not cwd:
+        return _emit("", args.json)
+    text = base64.b64decode(args.text_base64.encode(), validate=True).decode("utf-8")
+    record_user_prompt_signal(cwd, name, text)
+    return _emit("", args.json)
+
+
+def cmd_secondbrain_response(args) -> int:
+    from src.sb_notify import record_response_signal
+
+    name, cwd = _identity(args)
+    if name and cwd:
+        record_response_signal(cwd, name)
+    return _emit("", args.json)
+
+
 def cmd_status(args) -> int:
     from src.sessions import write_status_path
 
@@ -290,12 +363,30 @@ def build_parser() -> argparse.ArgumentParser:
     for command, fn in (
         ("commit-inbox", cmd_commit_inbox),
         ("release-inbox", cmd_release_inbox),
+        ("commit-pi-prompts", cmd_commit_pi_prompts),
+        ("release-pi-prompts", cmd_release_pi_prompts),
     ):
         p = sub.add_parser(command)
         p.set_defaults(fn=fn)
         p.add_argument("--claim", action="append", default=[])
         p.add_argument("--name", default="")
         p.add_argument("--cwd", default="")
+
+    p = sub.add_parser("claim-pi-prompts")
+    p.set_defaults(fn=cmd_claim_pi_prompts)
+    p.add_argument("--name", default="")
+    p.add_argument("--cwd", default="")
+
+    p = sub.add_parser("secondbrain-user-prompt")
+    p.set_defaults(fn=cmd_secondbrain_user_prompt)
+    p.add_argument("--text-base64", required=True)
+    p.add_argument("--name", default="")
+    p.add_argument("--cwd", default="")
+
+    p = sub.add_parser("secondbrain-response")
+    p.set_defaults(fn=cmd_secondbrain_response)
+    p.add_argument("--name", default="")
+    p.add_argument("--cwd", default="")
 
     p = sub.add_parser("status")
     p.set_defaults(fn=cmd_status)

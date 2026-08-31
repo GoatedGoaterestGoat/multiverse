@@ -1,9 +1,8 @@
 """Read-only backfill queries served to SecondBrain (INFRA §10.4).
 
 The connector answers SB's pull queries from Multiverse's file substrate, reusing the
-**same session/inbox data layer** the monitor and inter-agent tools use. The
-SecondBrain-facing roster is then restricted to its supported Claude/Codex
-runtimes; Pi remains Multiverse-only.
+**same session/inbox data layer** the monitor and inter-agent tools use, so Claude,
+Codex, and pi agents share one SecondBrain-facing roster.
 
 Phase-2 step 1 implements the workspace-status queries:
 
@@ -26,6 +25,7 @@ from .inbox import pending_inbox_count
 from .sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
+    RUNTIME_PI,
     current_host,
     list_named_agents_in_cwd,
     tmux_session_exists,
@@ -33,10 +33,10 @@ from .sessions import (
 
 
 def _supported_rows(cwd: str) -> list:
-    """Rows exposed through SecondBrain (Pi is intentionally unsupported)."""
+    """Named rows exposed through SecondBrain."""
     return [
         row for row in list_named_agents_in_cwd(cwd)
-        if row.runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX)
+        if row.runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
     ]
 
 
@@ -118,11 +118,10 @@ def _dashboard_row(row) -> dict:  # noqa: ANN001 - DashboardRow
 def dashboard(cwd: str) -> list[dict]:
     """The full monitor dashboard for a workspace (SB ``get_dashboard``, DESIGN §4d).
 
-    Claude and Codex rows from the agent registry (ghost/folded rows excluded),
-    with the monitor's per-row status corrections applied. Pi is deliberately
-    absent because it has no SecondBrain integration. Reads the file substrate
-    directly, so it works whether or not a monitor TUI is live; an empty
-    workspace yields ``[]``.
+    Claude, Codex, and pi rows from the agent registry (ghost/folded rows
+    excluded), with the monitor's per-row status corrections applied. Reads the
+    file substrate directly, so it works whether or not a monitor TUI is live;
+    an empty workspace yields ``[]``.
     """
     cwd_abs = str(Path(cwd).expanduser().resolve())
     return [_dashboard_row(r) for r in _supported_rows(cwd_abs)]
@@ -176,7 +175,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
     from .sessions import find_agent_by_name
 
     target = find_agent_by_name(cwd, agent_name)
-    if target is None or target.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
+    if target is None or target.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI):
         return "not_found", {"message": f"no agent named '{agent_name}' in this workspace"}
 
     status = _corrected_status(target)

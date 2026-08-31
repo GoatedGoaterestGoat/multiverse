@@ -20,6 +20,7 @@ when testing outside the monitor.
 | **Status** | Writes `status.json` from pi's lifecycle events, so pi sessions appear in the monitor dashboard alongside Claude and Codex ones |
 | **Session id** | Records pi's native session id so the monitor can resume it |
 | **Inbox** | Delivers inter-agent messages into the conversation, including into a session that is idle at the prompt |
+| **SecondBrain** | Exposes pi agents, native incremental transcripts, prompt/response events, safe live prompts through `sendUserMessage`, dormant resume, and spawn flows |
 | **Commands** | `/mv-inbox`, `/mv-agents` |
 
 ## Compaction is pi's
@@ -52,6 +53,10 @@ typing. Here it is a poll plus a direct send: no terminal manipulation, and it
 behaves the same whether or not someone is attached.
 
 ## Delivery is claim → send → commit
+
+The same durable hand-off is used for both inbound paths. Inter-agent messages
+become custom context through `pi.sendMessage`; SecondBrain prompts become real
+user turns through `pi.sendUserMessage` and never touch the tmux pane.
 
 `mvctl claim-inbox` *stages* pending messages and returns their claim names;
 only `mvctl commit-inbox --claim <name>` removes them after `pi.sendMessage`
@@ -103,9 +108,10 @@ for the model to call. Status writing and session-id recording still run.
 `tests/test_pi_extension.py` drives the extension end-to-end against a
 scriptable mock provider — no network, no credentials, no model. It checks
 that pi accepts the tool schemas, that a tool call round-trips through
-`mvctl`, that lifecycle events write `status.json` and the native session id,
-and that a queued inter-agent message reaches the conversation and is
-committed out of the inbox. It skips itself when `pi` is not on PATH.
+`mvctl`, that lifecycle events write `status.json` and the native session id, that
+SecondBrain prompt/response signals are recorded, and that queued inter-agent
+and SecondBrain messages reach the conversation and are committed out of their
+durable queues. It skips itself when `pi` is not on PATH.
 
 ```bash
 python tests/test_pi_extension.py

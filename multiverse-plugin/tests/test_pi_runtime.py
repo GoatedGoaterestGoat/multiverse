@@ -238,18 +238,30 @@ class PiAskTests(unittest.TestCase):
 
 
 class PiMessageRoutingTests(unittest.TestCase):
-    def test_secondbrain_prompt_path_does_not_target_pi(self) -> None:
+    def test_secondbrain_live_prompt_uses_pi_user_message_queue(self) -> None:
+        wrapped = sessions.Session(
+            id="pi-wrapper",
+            cwd="/tmp/pi-message-workspace",
+            created_at=1,
+            status="idle",
+            status_ts=1,
+            name="pi-agent",
+            runtime=sessions.RUNTIME_PI,
+            pi_session_id="native-pi",
+        )
         target = sessions.DashboardRow(
             name="pi-agent",
-            cwd="/tmp/pi-message-workspace",
+            cwd=wrapped.cwd,
             status="idle",
             status_ts=1,
             runtime=sessions.RUNTIME_PI,
+            session=wrapped,
             session_id="native-pi",
         )
         connector = object.__new__(sb_connector.SBConnector)
         with (
             patch("src.sessions.find_agent_by_name", return_value=target),
+            patch("src.pi_prompt_queue.write_prompt") as queue,
             patch(
                 "src.sb_actions.send_prompt_via_tmux",
                 side_effect=AssertionError("tmux used"),
@@ -259,7 +271,39 @@ class PiMessageRoutingTests(unittest.TestCase):
                 target.cwd, target.name, "hello"
             )
 
-        self.assertEqual(result[0], "not_found")
+        self.assertEqual(result[0], "ok")
+        queue.assert_called_once_with(target.cwd, target.name, "hello")
+
+    def test_secondbrain_question_and_permission_actions_never_type_into_pi(self) -> None:
+        target = sessions.DashboardRow(
+            name="pi-agent",
+            cwd="/tmp/pi-message-workspace",
+            status="waiting",
+            status_ts=1,
+            runtime=sessions.RUNTIME_PI,
+            session_id="native-pi",
+        )
+        connector = object.__new__(sb_connector.SBConnector)
+        with (
+            patch("src.sessions.find_agent_by_name", return_value=target),
+            patch(
+                "src.sb_actions.answer_askuserquestion_via_tmux",
+                side_effect=AssertionError("question typed into pi"),
+            ),
+            patch(
+                "src.sb_actions.answer_permission_via_tmux",
+                side_effect=AssertionError("permission typed into pi"),
+            ),
+        ):
+            question = connector._deliver_answer_blocking(
+                target.cwd, target.name, "question-id", ["answer"]
+            )
+            permission = connector._deliver_permission_blocking(
+                target.cwd, target.name, "tool-id", "allow", ""
+            )
+
+        self.assertEqual(question[0], "no_pending_question")
+        self.assertEqual(permission[0], "no_pending_permission")
 
     def test_live_pi_delivery_never_types_into_tmux(self) -> None:
         cwd = "/tmp/pi-message-workspace"
@@ -675,8 +719,8 @@ class MvctlExitCodeTests(unittest.TestCase):
 
 
 class SBConnectorResumeContractTests(unittest.TestCase):
-    def test_dormant_pi_agent_is_rejected_as_unsupported(self) -> None:
-        """Pi remains outside the SecondBrain prompt/resume seam."""
+    def test_dormant_pi_agent_resumes_with_the_session_flag(self) -> None:
+        """SecondBrain resumes pi with its native --session flag."""
         target = SimpleNamespace(
             name="pi-agent",
             runtime=sessions.RUNTIME_PI,
@@ -685,11 +729,14 @@ class SBConnectorResumeContractTests(unittest.TestCase):
             status="dormant",
         )
         with patch("src.sessions.create_session") as create:
-            with self.assertRaisesRegex(RuntimeError, "not supported by SecondBrain"):
-                sb_connector.SBConnector._auto_resume_with_prompt(
-                    None, target, "/tmp/work", "do the thing"
-                )
-        create.assert_not_called()
+            sb_connector.SBConnector._auto_resume_with_prompt(
+                None, target, "/tmp/work", "do the thing"
+            )
+        self.assertEqual(
+            create.call_args.kwargs["claude_args"], ["--session", "native-pi"]
+        )
+        self.assertEqual(create.call_args.kwargs["runtime"], sessions.RUNTIME_PI)
+        self.assertEqual(create.call_args.kwargs["initial_prompt"], "do the thing")
 
     def test_claude_and_codex_dispatch_is_unchanged(self) -> None:
         for runtime, expected in (

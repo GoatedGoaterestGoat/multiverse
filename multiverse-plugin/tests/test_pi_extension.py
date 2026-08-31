@@ -66,6 +66,11 @@ def _inbox_dir(root: Path, cwd: Path, name: str) -> Path:
     return root / "inbox" / encoded / name
 
 
+def _pi_prompt_dir(root: Path, cwd: Path, name: str) -> Path:
+    encoded = re.sub(r"[^a-zA-Z0-9]", "-", str(cwd.resolve()))
+    return root / "secondbrain" / "pi_prompts" / encoded / name
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -239,6 +244,112 @@ class PiExtensionEndToEndTests(unittest.TestCase):
     def _pending(self) -> int:
         d = _inbox_dir(self.state, self.ws, self.name)
         return len(list(d.glob("*.json"))) if d.is_dir() else 0
+
+    def _queue_secondbrain_prompt(self, body: str) -> None:
+        subprocess.run(
+            [str(VENV_PYTHON), "-c",
+             "import sys;sys.path.insert(0,'.');"
+             "from src.pi_prompt_queue import write_prompt as w;"
+             f"w({str(self.ws)!r}, {self.name!r}, {body!r})"],
+            cwd=str(PLUGIN_ROOT), env=self.env, check=True,
+            capture_output=True, text=True, timeout=60,
+        )
+
+    def _enable_secondbrain(self) -> None:
+        directory = self.state / "secondbrain"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "device.key.json").write_text(
+            json.dumps(
+                {"device_id": "device-id", "granted_workspaces": [str(self.ws)]}
+            )
+        )
+        (directory / "state.json").write_text(
+            json.dumps(
+                {
+                    "seeded": [f"device-id:{self.ws}"],
+                    "exposed": [str(self.ws)],
+                }
+            )
+        )
+
+    def test_secondbrain_lifecycle_records_pi_prompt_and_response_signals(self) -> None:
+        self._enable_secondbrain()
+        self._run_pi([{"text": "Pi response."}], "Pi user prompt")
+
+        prompt_files = list(
+            (self.state / "secondbrain" / "user_prompt_signals").glob("*.json")
+        )
+        response_files = list(
+            (self.state / "secondbrain" / "response_signals").glob("*.json")
+        )
+        self.assertEqual(len(prompt_files), 1, self._diagnostics())
+        self.assertEqual(len(response_files), 1, self._diagnostics())
+        self.assertEqual(
+            json.loads(prompt_files[0].read_text())["text"], "Pi user prompt"
+        )
+
+    def test_idle_rpc_delivers_secondbrain_prompt_as_user_message(self) -> None:
+        self._queue_secondbrain_prompt("MARKER-SECONDBRAIN-USER-PROMPT")
+        script_path = self.work / "sb-rpc-script.json"
+        script_path.write_text(json.dumps([{"text": "Prompt handled."}]))
+        requests_path = script_path.with_suffix(".requests.jsonl")
+
+        server = subprocess.Popen(
+            [sys.executable, str(MOCK_SERVER), "--port", str(self.port),
+             "--script", str(script_path)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(server.kill)
+        self._await_server()
+
+        rpc_log_path = self.work / "sb-rpc.log"
+        with rpc_log_path.open("w") as rpc_log:
+            rpc = subprocess.Popen(
+                ["pi",
+                 "-e", str(MOCK_PROVIDER),
+                 "-e", str(EXTENSION),
+                 "--provider", "mock", "--model", "mock-model",
+                 "--no-extensions", "--no-skills", "--no-context-files",
+                 "--mode", "rpc"],
+                cwd=str(self.ws), env=self.env, stdin=subprocess.PIPE,
+                stdout=rpc_log, stderr=subprocess.STDOUT, text=True,
+            )
+            self.addCleanup(rpc.kill)
+            delivered = False
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                if rpc.poll() is not None:
+                    break
+                if (
+                    requests_path.is_file()
+                    and "MARKER-SECONDBRAIN-USER-PROMPT"
+                    in requests_path.read_text(encoding="utf-8")
+                ):
+                    delivered = True
+                    break
+                time.sleep(0.1)
+            rpc.terminate()
+            rpc.wait(timeout=10)
+            if rpc.stdin is not None:
+                rpc.stdin.close()
+
+        server.terminate()
+        server.wait(timeout=10)
+        diagnostics = (
+            rpc_log_path.read_text(encoding="utf-8")
+            if rpc_log_path.is_file()
+            else ""
+        )
+        self.assertTrue(
+            delivered,
+            "pi did not receive the SecondBrain prompt as a user turn\n" + diagnostics,
+        )
+        prompt_dir = _pi_prompt_dir(self.state, self.ws, self.name)
+        self.assertEqual(
+            list(prompt_dir.iterdir()) if prompt_dir.is_dir() else [],
+            [],
+            "SecondBrain prompt claim was not committed",
+        )
 
     def test_idle_rpc_delivery_commit_and_internal_session_switch(self) -> None:
         """Exercise the live watcher and `/new` lifecycle through RPC mode."""

@@ -70,9 +70,17 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
                 runtime=sessions.RUNTIME_CODEX,
                 session_id="codex-thread-id",
             ),
+            sessions.DashboardRow(
+                name="pi-agent",
+                cwd=self.cwd,
+                status="idle",
+                status_ts=3,
+                runtime=sessions.RUNTIME_PI,
+                session_id="pi-session-id",
+            ),
         ]
 
-    async def test_first_connect_asks_both_runtimes_and_emits_one_event(
+    async def test_first_connect_asks_all_runtimes_and_emits_one_event(
         self,
     ) -> None:
         rows = self._rows()
@@ -94,6 +102,7 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
             response = {
                 "claude-agent": "Claude completed the data model.",
                 "codex-agent": "Codex completed the transcript adapter.",
+                "pi-agent": "Pi completed the live prompt bridge.",
             }[target.name]
             return ask_agents.AskResult(
                 name=target.name,
@@ -141,12 +150,13 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
                 "workspace_summary": {
                     "claude-agent": "Claude completed the data model.",
                     "codex-agent": "Codex completed the transcript adapter.",
+                    "pi-agent": "Pi completed the live prompt bridge.",
                 },
             },
         )
         self.assertNotIn("runtime", json.dumps(event.to_json()))
 
-        self.assertEqual(set(targets), {"claude-agent", "codex-agent"})
+        self.assertEqual(set(targets), {"claude-agent", "codex-agent", "pi-agent"})
         self.assertEqual(targets["claude-agent"].runtime, sessions.RUNTIME_CLAUDE)
         self.assertEqual(
             targets["claude-agent"].native_session_id, "claude-thread-id"
@@ -155,15 +165,23 @@ class SecondBrainCodexFirstConnectTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             targets["codex-agent"].native_session_id, "codex-thread-id"
         )
-        self.assertEqual(questions, [SUMMARY_QUESTION, SUMMARY_QUESTION])
+        self.assertEqual(targets["pi-agent"].runtime, sessions.RUNTIME_PI)
+        self.assertEqual(targets["pi-agent"].native_session_id, "pi-session-id")
+        self.assertEqual(
+            questions, [SUMMARY_QUESTION, SUMMARY_QUESTION, SUMMARY_QUESTION]
+        )
 
         first_ask = next(index for index, item in enumerate(timeline) if item[0] == "ask")
         self.assertEqual(
             set(timeline[:first_ask]),
-            {("marker", "claude-agent"), ("marker", "codex-agent")},
+            {
+                ("marker", "claude-agent"),
+                ("marker", "codex-agent"),
+                ("marker", "pi-agent"),
+            },
         )
-        self.assertEqual(init_marker.call_count, 2)
-        self.assertEqual(ask.call_count, 2)
+        self.assertEqual(init_marker.call_count, 3)
+        self.assertEqual(ask.call_count, 3)
         self.assertEqual(list_agents.call_count, 2)
 
         self.assertEqual(self.connector._seeded, {self.workspace_id})

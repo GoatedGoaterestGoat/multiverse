@@ -3,7 +3,8 @@
  *
  * pi's counterpart to the Claude Code plugin and the Codex plugin: it exposes
  * the inter-agent tools, writes the session status the monitor dashboard
- * reads, records the native session id, and delivers inbox messages.
+ * reads, records the native session id, delivers inbox messages, and connects
+ * pi's prompt/response lifecycle to SecondBrain.
  *
  * ## How it talks to Multiverse
  *
@@ -199,19 +200,42 @@ export default function multiverse(pi: ExtensionAPI) {
 		if (WRAPPED && isLongLived(ctx)) startInboxWatcher(pi, ctx);
 	});
 
+	// SecondBrain observes real pi user turns through the same durable signal
+	// queue as the Claude/Codex hooks. This includes prompts injected by the
+	// SecondBrain queue below: sendUserMessage emits input with source=extension.
+	pi.on("input", async (event) => {
+		if (!WRAPPED || !event.text) return;
+		await mvctl(
+			exec,
+			[
+				"secondbrain-user-prompt",
+				"--text-base64",
+				Buffer.from(event.text, "utf8").toString("base64"),
+			],
+			{ timeout: 15_000 },
+		);
+	});
+
 	pi.on("before_agent_start", async () => setStatus("working"));
 	pi.on("agent_start", async () => setStatus("working"));
 	pi.on("tool_execution_start", async () => setStatus("working"));
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		setStatus("idle");
+		if (WRAPPED) {
+			// Record the completed response before starting any queued continuation,
+			// so SecondBrain's transcript cursor cannot fold two turns together.
+			await mvctl(exec, ["secondbrain-response"], { timeout: 15_000 });
+		}
 		// End-of-turn is the natural delivery point: anything that arrived
 		// while we were working gets picked up without interrupting the run.
-		// Swallow send failures exactly as the watcher does — a throw out of a
-		// lifecycle handler buys nothing, and the claim is recovered by main's
-		// stale-claim sweep either way.
+		// A SecondBrain prompt is a real user turn and takes priority over inbox
+		// context; the latter will be delivered when that turn settles.
 		if (WRAPPED && isLongLived(ctx)) {
-			await deliverInbox(pi, ctx, { trigger: true }).catch(() => undefined);
+			const prompted = await deliverSecondBrainPrompts(pi, ctx).catch(() => false);
+			if (!prompted) {
+				await deliverInbox(pi, ctx, { trigger: true }).catch(() => undefined);
+			}
 		}
 	});
 
@@ -440,6 +464,75 @@ export default function multiverse(pi: ExtensionAPI) {
 }
 
 // ---------------------------------------------------------------------------
+// SecondBrain prompt delivery
+// ---------------------------------------------------------------------------
+
+/**
+ * Deliver claimed SecondBrain actions as actual pi user messages.
+ *
+ * This is deliberately separate from the inter-agent inbox: SecondBrain acts
+ * on the user's behalf, so its prompt must have role=user. Claims are committed
+ * only after sendUserMessage accepts them, with immediate release on failure.
+ */
+async function deliverSecondBrainPrompts(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+): Promise<boolean> {
+	const exec = pi.exec.bind(pi);
+	const claimed = await mvctl(exec, ["claim-pi-prompts"], { timeout: 30_000 });
+	if (!claimed.ok || !claimed.text) return false;
+
+	let pending: { count: number; items: Array<{ text: string; claim: string }> };
+	try {
+		pending = JSON.parse(claimed.text);
+	} catch {
+		return false;
+	}
+	if (!pending.count || !pending.items.length) return false;
+
+	const committed: string[] = [];
+	let failedAt = pending.items.length;
+	try {
+		for (let index = 0; index < pending.items.length; index += 1) {
+			const item = pending.items[index];
+			if (index === 0 && ctx.isIdle()) {
+				pi.sendUserMessage(item.text);
+			} else {
+				pi.sendUserMessage(item.text, { deliverAs: "followUp" });
+			}
+			committed.push(item.claim);
+		}
+	} catch (err) {
+		failedAt = committed.length;
+		if (ctx.hasUI) {
+			ctx.ui.notify(
+				`multiverse: could not deliver a SecondBrain prompt (${String(err)})`,
+				"warning",
+			);
+		}
+	}
+
+	if (committed.length) {
+		const args = ["commit-pi-prompts"];
+		for (const claim of committed) args.push("--claim", claim);
+		await mvctl(exec, args, { timeout: 15_000 });
+	}
+	const remaining = pending.items.slice(failedAt).map((item) => item.claim);
+	if (remaining.length) {
+		const args = ["release-pi-prompts"];
+		for (const claim of remaining) args.push("--claim", claim);
+		await mvctl(exec, args, { timeout: 15_000 });
+	}
+	if (committed.length && ctx.hasUI) {
+		ctx.ui.notify(
+			`multiverse: delivered ${committed.length} SecondBrain prompt(s)`,
+			"info",
+		);
+	}
+	return committed.length > 0;
+}
+
+// ---------------------------------------------------------------------------
 // Inbox delivery
 // ---------------------------------------------------------------------------
 
@@ -558,11 +651,14 @@ function startInboxWatcher(pi: ExtensionAPI, ctx: ExtensionContext): void {
 		// results the model is still reasoning about.
 		if (watchSuspended || watchInFlight || !ctx.isIdle()) return;
 		watchInFlight = true;
-		void deliverInbox(pi, ctx, { trigger: true })
-			.catch(() => undefined)
-			.finally(() => {
-				watchInFlight = false;
-			});
+		void (async () => {
+			const prompted = await deliverSecondBrainPrompts(pi, ctx).catch(() => false);
+			if (!prompted) {
+				await deliverInbox(pi, ctx, { trigger: true }).catch(() => undefined);
+			}
+		})().finally(() => {
+			watchInFlight = false;
+		});
 	}, WATCH_INTERVAL_MS);
 	// Never hold the process open on account of the poll.
 	(watchTimer as unknown as { unref?: () => void }).unref?.();

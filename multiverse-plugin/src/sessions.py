@@ -1880,10 +1880,8 @@ def create_session(
     # for genuinely new agents (resumed_from is None); resume flows — from the dashboard,
     # from SB's own auto-resume-with-prompt, from any programmatic resume — are NOT
     # creation events and skip this. No-op unless the workspace has connected to SB before
-    # (seeded gate applied in the recorder). Pi intentionally has no SecondBrain
-    # integration; its extension is limited to Multiverse tools/status/inbox.
-    # Never breaks the spawn flow.
-    if runtime != RUNTIME_PI and resumed_from is None and name:
+    # (seeded gate applied in the recorder). Never breaks the spawn flow.
+    if resumed_from is None and name:
         try:
             from . import sb_notify
             sb_notify.record_agent_created(cwd_abs, name, initial_prompt, sid)
