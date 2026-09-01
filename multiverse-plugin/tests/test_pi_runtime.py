@@ -261,6 +261,10 @@ class PiMessageRoutingTests(unittest.TestCase):
         connector = object.__new__(sb_connector.SBConnector)
         with (
             patch("src.sessions.find_agent_by_name", return_value=target),
+            patch(
+                "src.pi_prompt_queue.has_prompt_consumer_capability",
+                return_value=True,
+            ),
             patch("src.pi_prompt_queue.write_prompt") as queue,
             patch(
                 "src.sb_actions.send_prompt_via_tmux",
@@ -273,6 +277,43 @@ class PiMessageRoutingTests(unittest.TestCase):
 
         self.assertEqual(result[0], "ok")
         queue.assert_called_once_with(target.cwd, target.name, "hello")
+
+    def test_secondbrain_live_prompt_rejects_old_pi_extension_without_queue(self) -> None:
+        wrapped = sessions.Session(
+            id="pi-wrapper",
+            cwd="/tmp/pi-message-workspace",
+            created_at=1,
+            status="idle",
+            status_ts=1,
+            name="pi-agent",
+            runtime=sessions.RUNTIME_PI,
+            pi_session_id="native-pi",
+        )
+        target = sessions.DashboardRow(
+            name="pi-agent",
+            cwd=wrapped.cwd,
+            status="idle",
+            status_ts=1,
+            runtime=sessions.RUNTIME_PI,
+            session=wrapped,
+            session_id="native-pi",
+        )
+        connector = object.__new__(sb_connector.SBConnector)
+        with (
+            patch("src.sessions.find_agent_by_name", return_value=target),
+            patch(
+                "src.pi_prompt_queue.has_prompt_consumer_capability",
+                return_value=False,
+            ),
+            patch("src.pi_prompt_queue.write_prompt") as queue,
+        ):
+            result = connector._deliver_prompt_blocking(
+                target.cwd, target.name, "do not strand this"
+            )
+
+        self.assertEqual(result[0], "deliver_failed")
+        self.assertIn("restart", result[2])
+        queue.assert_not_called()
 
     def test_secondbrain_question_and_permission_actions_never_type_into_pi(self) -> None:
         target = sessions.DashboardRow(
@@ -414,8 +455,9 @@ class PiRunnerFallbackTests(unittest.TestCase):
             shim.write_text(
                 "#!/usr/bin/env python3\n"
                 "import json, os, sys\n"
-                "json.dump({'cwd': os.getcwd(), 'argv': sys.argv[1:]},"
-                " open(os.environ['PI_FALLBACK_LOG'], 'w'))\n"
+                "with open(os.environ['PI_FALLBACK_LOG'], 'a') as f:\n"
+                " json.dump({'cwd': os.getcwd(), 'argv': sys.argv[1:]}, f)\n"
+                " f.write('\\n')\n"
             )
             shim.chmod(0o755)
 
@@ -447,12 +489,20 @@ class PiRunnerFallbackTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(log.is_file(), "the ended fallback never ran")
-            recorded = json.loads(log.read_text())
+            recorded = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual(len(recorded), 2)
+            for call in recorded:
+                self.assertEqual(
+                    Path(call["cwd"]).resolve(), plugin_root.resolve(),
+                    "fallback must run from the plugin root or `-m src.mvctl` cannot import",
+                )
             self.assertEqual(
-                Path(recorded["cwd"]).resolve(), plugin_root.resolve(),
-                "fallback must run from the plugin root or `-m src.mvctl` cannot import",
+                [call["argv"] for call in recorded],
+                [
+                    ["-m", "src.mvctl", "clear-pi-prompt-consumer"],
+                    ["-m", "src.mvctl", "status", "ended"],
+                ],
             )
-            self.assertEqual(recorded["argv"], ["-m", "src.mvctl", "status", "ended"])
 
 
 class PiStatusOrderingTests(unittest.TestCase):

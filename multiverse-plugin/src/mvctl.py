@@ -269,6 +269,24 @@ def cmd_release_pi_prompts(args) -> int:
     return _emit(str(release_prompts(cwd, name, list(args.claim))), args.json)
 
 
+def cmd_record_pi_prompt_consumer(args) -> int:
+    from src.pi_prompt_queue import record_prompt_consumer_capability
+
+    raw = os.environ.get("MULTIVERSE_STATUS")
+    if raw:
+        record_prompt_consumer_capability(Path(raw).parent)
+    return _emit("", args.json)
+
+
+def cmd_clear_pi_prompt_consumer(args) -> int:
+    from src.pi_prompt_queue import clear_prompt_consumer_capability
+
+    raw = os.environ.get("MULTIVERSE_STATUS")
+    if raw:
+        clear_prompt_consumer_capability(Path(raw).parent)
+    return _emit("", args.json)
+
+
 def cmd_secondbrain_user_prompt(args) -> int:
     from src.sb_notify import record_user_prompt_signal
 
@@ -376,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(fn=cmd_claim_pi_prompts)
     p.add_argument("--name", default="")
     p.add_argument("--cwd", default="")
+
+    p = sub.add_parser("record-pi-prompt-consumer")
+    p.set_defaults(fn=cmd_record_pi_prompt_consumer)
+
+    p = sub.add_parser("clear-pi-prompt-consumer")
+    p.set_defaults(fn=cmd_clear_pi_prompt_consumer)
 
     p = sub.add_parser("secondbrain-user-prompt")
     p.set_defaults(fn=cmd_secondbrain_user_prompt)

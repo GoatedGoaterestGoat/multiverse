@@ -2161,8 +2161,20 @@ class SBConnector:
         # Multiverse root is shared. The extension commits only after sendUserMessage
         # accepts the hand-off.
         if target.runtime == "pi":
-            from .pi_prompt_queue import write_prompt
+            from .pi_prompt_queue import (
+                PROMPT_CONSUMER_VERSION,
+                has_prompt_consumer_capability,
+                write_prompt,
+            )
 
+            if not has_prompt_consumer_capability(session.dir):
+                return (
+                    "deliver_failed",
+                    "",
+                    f"'{agent_name}' does not advertise the pi SecondBrain prompt "
+                    f"consumer v{PROMPT_CONSUMER_VERSION}; restart its live pi "
+                    "session before prompting it through SecondBrain",
+                )
             write_prompt(cwd_abs, agent_name, text)
             return (
                 "ok",

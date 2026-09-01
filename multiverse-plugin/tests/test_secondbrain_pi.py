@@ -255,6 +255,34 @@ class PiSecondBrainEventTests(unittest.TestCase):
 
 
 class PiPromptQueueTests(unittest.TestCase):
+    def test_prompt_consumer_capability_is_versioned_and_clearable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            session_dir = Path(raw)
+            self.assertFalse(
+                pi_prompt_queue.has_prompt_consumer_capability(session_dir)
+            )
+
+            pi_prompt_queue.record_prompt_consumer_capability(session_dir)
+            self.assertTrue(
+                pi_prompt_queue.has_prompt_consumer_capability(session_dir)
+            )
+            marker = pi_prompt_queue.capability_path(session_dir)
+            marker.write_text(
+                json.dumps(
+                    {
+                        "secondbrain_prompt_consumer": (
+                            pi_prompt_queue.PROMPT_CONSUMER_VERSION + 1
+                        )
+                    }
+                )
+            )
+            self.assertFalse(
+                pi_prompt_queue.has_prompt_consumer_capability(session_dir)
+            )
+
+            pi_prompt_queue.clear_prompt_consumer_capability(session_dir)
+            self.assertFalse(marker.exists())
+
     def test_claim_release_and_commit_preserve_delivery(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch.dict(
             os.environ, {"MULTIVERSE_ROOT": raw}

@@ -189,6 +189,20 @@ export default function multiverse(pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		const id = ctx.sessionManager.getSessionId();
 		if (id) mvctlDetached(exec, ["record-session", id]);
+		if (WRAPPED) {
+			// Versioned proof for the connector's live prompt path. Await before
+			// advertising idle: an older already-running extension never calls this
+			// command, so the connector can reject instead of queueing forever.
+			const capability = await mvctl(exec, ["record-pi-prompt-consumer"], {
+				timeout: 15_000,
+			});
+			if (!capability.ok && ctx.hasUI) {
+				ctx.ui.notify(
+					`multiverse: could not advertise SecondBrain prompt delivery (${capability.text})`,
+					"warning",
+				);
+			}
+		}
 		setStatus("idle");
 		// Deliberately NOT delivering here. A session started with an initial
 		// prompt (`pi "task"`, which is how spawn_agent hands a subagent its
@@ -241,6 +255,12 @@ export default function multiverse(pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async (event) => {
 		stopInboxWatcher();
+		// Clear for every replacement flow, not only quit. The replacement
+		// extension instance writes a fresh marker from its own session_start;
+		// if it fails to load, no stale capability survives to accept prompts.
+		if (WRAPPED) {
+			await mvctl(exec, ["clear-pi-prompt-consumer"], { timeout: 15_000 });
+		}
 		if (event.reason === "quit") {
 			// Awaited: the runner's fallback also writes `ended`, but this is the
 			// path that runs while pi is still alive to be waited on.

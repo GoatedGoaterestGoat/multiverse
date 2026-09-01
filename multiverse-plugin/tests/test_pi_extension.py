@@ -316,6 +316,7 @@ class PiExtensionEndToEndTests(unittest.TestCase):
             )
             self.addCleanup(rpc.kill)
             delivered = False
+            capability_ready = False
             deadline = time.monotonic() + 20
             while time.monotonic() < deadline:
                 if rpc.poll() is not None:
@@ -326,6 +327,14 @@ class PiExtensionEndToEndTests(unittest.TestCase):
                     in requests_path.read_text(encoding="utf-8")
                 ):
                     delivered = True
+                    capability_path = self.session_dir / "pi_capabilities.json"
+                    if capability_path.is_file():
+                        capability_ready = (
+                            json.loads(capability_path.read_text()).get(
+                                "secondbrain_prompt_consumer"
+                            )
+                            == 1
+                        )
                     break
                 time.sleep(0.1)
             rpc.terminate()
@@ -343,6 +352,14 @@ class PiExtensionEndToEndTests(unittest.TestCase):
         self.assertTrue(
             delivered,
             "pi did not receive the SecondBrain prompt as a user turn\n" + diagnostics,
+        )
+        self.assertTrue(
+            capability_ready,
+            "the live pi extension did not advertise prompt-consumer v1\n" + diagnostics,
+        )
+        self.assertFalse(
+            (self.session_dir / "pi_capabilities.json").exists(),
+            "pi shutdown left a stale live prompt-consumer capability",
         )
         prompt_dir = _pi_prompt_dir(self.state, self.ws, self.name)
         self.assertEqual(

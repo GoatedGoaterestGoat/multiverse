@@ -20,6 +20,43 @@ from .atomic_files import atomic_write_json
 from .paths import multiverse_dir
 
 _STALE_CLAIM_SECONDS = 60.0
+PROMPT_CONSUMER_VERSION = 1
+_CAPABILITY_FILE = "pi_capabilities.json"
+_CAPABILITY_KEY = "secondbrain_prompt_consumer"
+
+
+def capability_path(session_dir: Path) -> Path:
+    return session_dir / _CAPABILITY_FILE
+
+
+def record_prompt_consumer_capability(session_dir: Path) -> None:
+    """Advertise that this wrapper's loaded extension can drain pi prompts."""
+    atomic_write_json(
+        capability_path(session_dir),
+        {_CAPABILITY_KEY: PROMPT_CONSUMER_VERSION},
+    )
+
+
+def clear_prompt_consumer_capability(session_dir: Path) -> None:
+    """Remove the live-extension advertisement during session replacement/exit."""
+    try:
+        capability_path(session_dir).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def has_prompt_consumer_capability(session_dir: Path) -> bool:
+    """Whether the current wrapper advertises the exact consumer version we need."""
+    try:
+        data = json.loads(capability_path(session_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    version = data.get(_CAPABILITY_KEY) if isinstance(data, dict) else None
+    return (
+        isinstance(version, int)
+        and not isinstance(version, bool)
+        and version == PROMPT_CONSUMER_VERSION
+    )
 
 
 def _encode_cwd(cwd: str) -> str:

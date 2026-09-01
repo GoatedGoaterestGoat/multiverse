@@ -58,6 +58,12 @@ The same durable hand-off is used for both inbound paths. Inter-agent messages
 become custom context through `pi.sendMessage`; SecondBrain prompts become real
 user turns through `pi.sendUserMessage` and never touch the tmux pane.
 
+On `session_start`, the extension writes a versioned prompt-consumer capability
+into the wrapper's session directory and clears it on replacement or shutdown.
+The connector requires the current version before enqueueing a live prompt. An
+older already-running extension therefore gets an explicit “restart the pi
+session” failure instead of an `ok` result for a prompt it cannot consume.
+
 `mvctl claim-inbox` *stages* pending messages and returns their claim names;
 only `mvctl commit-inbox --claim <name>` removes them after `pi.sendMessage`
 accepts the injection call. A synchronous injection failure releases this

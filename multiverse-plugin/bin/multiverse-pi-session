@@ -36,16 +36,21 @@ fi
 
 "$PI_BIN" "${PI_ARGS[@]}" || true
 
-# session_shutdown normally writes this through the extension. Keep a runner
-# fallback for crashes or extension API changes, using the same atomic writer.
-# tmux starts this runner with -c <workspace>, so both branches must run from
-# the plugin root: `-m src.mvctl` resolves `src` off cwd, and the workspace may
-# well have a `src/` package of its own that we must never import.
+# session_shutdown normally clears the live-consumer capability and writes
+# ended through the extension. Keep runner fallbacks for crashes or extension
+# API changes. tmux starts this runner with -c <workspace>, so both branches
+# must run from the plugin root: `-m src.mvctl` resolves `src` off cwd, and the
+# workspace may well have a `src/` package of its own that we must never import.
 if [ -x "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" ]; then
-  (cd "$MULTIVERSE_PLUGIN_ROOT" \
-    && "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" -m src.mvctl status ended) \
-    >/dev/null 2>&1 || true
+  (
+    cd "$MULTIVERSE_PLUGIN_ROOT"
+    "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" -m src.mvctl \
+      clear-pi-prompt-consumer || true
+    "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" -m src.mvctl status ended
+  ) >/dev/null 2>&1 || true
 elif command -v uv >/dev/null 2>&1; then
+  uv --directory "$MULTIVERSE_PLUGIN_ROOT" run --no-sync python -m src.mvctl \
+    clear-pi-prompt-consumer >/dev/null 2>&1 || true
   uv --directory "$MULTIVERSE_PLUGIN_ROOT" run --no-sync python -m src.mvctl \
     status ended >/dev/null 2>&1 || true
 fi
