@@ -303,7 +303,7 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
                 "E2E_WORKSPACE": str(workspace),
                 "E2E_RESULT_PATH": str(result_path),
                 "TMUX_E2E_LOG": str(tmux_log),
-                "UV_CACHE_DIR": "/private/tmp/multiverse-uv-cache",
+                "UV_CACHE_DIR": "/tmp/multiverse-uv-cache",
             }
 
             approval: list[dict] = []

@@ -3,7 +3,7 @@
 #
 # Subcommands:
 #   setup       Install system dependencies, sync Python deps, and report
-#               Codex runtime availability.
+#               Claude, Codex, and pi runtime availability.
 #   update      Pull the latest changes from origin (dev-mode install only).
 #   (default)   Launch the monitor TUI. Extra args forward to claude when the
 #               user spawns a new session from the monitor.
@@ -19,7 +19,8 @@ PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Machine-local overrides (gitignored, never pushed). Lets a single checkout
 # adapt to this host — e.g. a company-packaged claude binary and extra local
 # dev plugin dirs — without editing tracked files. See bin/multiverse.local.
-if [ -f "$PLUGIN_ROOT/bin/multiverse.local" ]; then
+if [ "${MULTIVERSE_SKIP_LOCAL_CONFIG:-0}" != "1" ] \
+   && [ -f "$PLUGIN_ROOT/bin/multiverse.local" ]; then
   # shellcheck disable=SC1090,SC1091
   . "$PLUGIN_ROOT/bin/multiverse.local"
 fi
@@ -39,6 +40,14 @@ if [ -n "${MULTIVERSE_CODEX_BIN:-}" ]; then
 fi
 export MULTIVERSE_CODEX_BIN="${MULTIVERSE_CODEX_BIN:-codex}"
 export MULTIVERSE_CODEX_PLUGIN_ROOT="${MULTIVERSE_CODEX_PLUGIN_ROOT:-$(cd "$PLUGIN_ROOT/../plugins/multiverse-codex" 2>/dev/null && pwd || true)}"
+
+# pi is an externally installed runtime, like Claude and Codex. Multiverse
+# supplies the extension but never installs or authenticates the agent CLI.
+_MULTIVERSE_PI_BIN_WAS_SET=0
+if [ -n "${MULTIVERSE_PI_BIN:-}" ]; then
+  _MULTIVERSE_PI_BIN_WAS_SET=1
+fi
+export MULTIVERSE_PI_BIN="${MULTIVERSE_PI_BIN:-pi}"
 
 # SecondBrain's direct spawn_agent action intentionally keeps its established
 # {name, instruction?} wire payload, so runtime selection is a local wrapper policy.
@@ -205,6 +214,42 @@ if [ -n "${CODEX_HOME:-}" ] \
 fi
 unset _MULTIVERSE_CODEX_BIN_WAS_SET
 
+# Snapshot/restore pi's CLI and optional config/session roots. This mirrors
+# the Codex behavior so dormant pi sessions remain discoverable when the
+# monitor is launched from a differently configured terminal.
+MULTIVERSE_PI_ENV_FILE="${MULTIVERSE_ROOT}/pi-env.sh"
+if [ -f "$MULTIVERSE_PI_ENV_FILE" ] \
+   && [ -z "${PI_CODING_AGENT_DIR:-}" ] \
+   && [ -z "${PI_CODING_AGENT_SESSION_DIR:-}" ] \
+   && [ "$_MULTIVERSE_PI_BIN_WAS_SET" -eq 0 ]; then
+  # shellcheck disable=SC1090
+  . "$MULTIVERSE_PI_ENV_FILE"
+fi
+if [ -n "${PI_CODING_AGENT_DIR:-}" ] \
+   || [ -n "${PI_CODING_AGENT_SESSION_DIR:-}" ] \
+   || command -v "$MULTIVERSE_PI_BIN" >/dev/null 2>&1; then
+  mkdir -p "$MULTIVERSE_ROOT"
+  MULTIVERSE_PI_ENV_TMP="${MULTIVERSE_PI_ENV_FILE}.$$.$RANDOM.tmp"
+  if {
+    echo "# Auto-saved by bin/multiverse for cross-terminal pi resume"
+    [ -n "${PI_CODING_AGENT_DIR:-}" ] \
+      && printf 'export PI_CODING_AGENT_DIR=%q\n' "$PI_CODING_AGENT_DIR"
+    [ -n "${PI_CODING_AGENT_SESSION_DIR:-}" ] \
+      && printf 'export PI_CODING_AGENT_SESSION_DIR=%q\n' "$PI_CODING_AGENT_SESSION_DIR"
+    printf 'export MULTIVERSE_PI_BIN=%q\n' "$MULTIVERSE_PI_BIN"
+    if command -v "$MULTIVERSE_PI_BIN" >/dev/null 2>&1; then
+      printf 'export PATH=%q:"${PATH-}"\n' \
+        "$(dirname "$(command -v "$MULTIVERSE_PI_BIN")")"
+    fi
+  } > "$MULTIVERSE_PI_ENV_TMP"; then
+    mv -f "$MULTIVERSE_PI_ENV_TMP" "$MULTIVERSE_PI_ENV_FILE"
+  else
+    rm -f "$MULTIVERSE_PI_ENV_TMP"
+  fi
+  unset MULTIVERSE_PI_ENV_TMP
+fi
+unset _MULTIVERSE_PI_BIN_WAS_SET
+
 # Optional: remote web-share config (the `w` action in the monitor). If
 # present, source it so the monitor — and the ttyd / cloudflared it spawns,
 # and the dedicated web monitor inside them — all inherit the backbone
@@ -258,7 +303,7 @@ report_codex_setup() {
     fi
   else
     echo "[multiverse setup] Codex CLI not found: '$MULTIVERSE_CODEX_BIN'." >&2
-    echo "[multiverse setup]   Claude sessions remain available; install Codex or set MULTIVERSE_CODEX_BIN to enable Codex sessions." >&2
+    echo "[multiverse setup]   Other installed runtimes remain available; install Codex or set MULTIVERSE_CODEX_BIN to enable Codex sessions." >&2
   fi
   echo "[multiverse setup] Codex home: $effective_home"
 
@@ -282,7 +327,33 @@ report_codex_setup() {
   else
     echo "[multiverse setup] Codex plugin bundle incomplete: $MULTIVERSE_CODEX_PLUGIN_ROOT" >&2
     printf '[multiverse setup]   Missing: %s\n' "${missing[@]}" >&2
-    echo "[multiverse setup]   Claude sessions remain available; Codex sessions will fail until the bundle is repaired." >&2
+    echo "[multiverse setup]   Other installed runtimes remain available; Codex sessions will fail until the bundle is repaired." >&2
+  fi
+}
+
+report_agent_cli_setup() {
+  local label="$1" bin="$2" install_hint="$3" path version
+  if path=$(command -v "$bin" 2>/dev/null); then
+    version=$("$bin" --version 2>&1 || true)
+    version=${version%%$'\n'*}
+    if [ -n "$version" ]; then
+      echo "[multiverse setup] $label CLI OK: $path ($version)"
+    else
+      echo "[multiverse setup] $label CLI OK: $path"
+    fi
+  else
+    echo "[multiverse setup] $label CLI not found: '$bin'." >&2
+    echo "[multiverse setup]   Install/authenticate it before selecting $label in the monitor: $install_hint" >&2
+  fi
+}
+
+report_pi_setup() {
+  report_agent_cli_setup "pi" "$MULTIVERSE_PI_BIN" \
+    "npm i -g @earendil-works/pi-coding-agent"
+  if [ -r "$PLUGIN_ROOT/pi-extension/index.ts" ]; then
+    echo "[multiverse setup] pi extension OK: $PLUGIN_ROOT/pi-extension/index.ts"
+  else
+    echo "[multiverse setup] pi extension missing: $PLUGIN_ROOT/pi-extension/index.ts" >&2
   fi
 }
 
@@ -333,7 +404,10 @@ run_setup() {
   echo "[multiverse setup] Running 'uv sync' in $PLUGIN_ROOT..."
   (cd "$PLUGIN_ROOT" && uv sync)
 
+  report_agent_cli_setup "Claude" "$MULTIVERSE_CLAUDE_BIN" \
+    "install Claude Code using Anthropic's supported installer"
   report_codex_setup
+  report_pi_setup
 
   # Optional deps for remote web sharing (the `w` action). Not required for
   # core monitor use, so advise rather than fail.

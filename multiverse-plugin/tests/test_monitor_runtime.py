@@ -329,6 +329,24 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
             results, [("codex-agent", monitor.RUNTIME_CODEX)]
         )
 
+    async def test_new_session_modal_returns_pi_selection(self) -> None:
+        results: list[tuple[str, str] | None] = []
+        with tempfile.TemporaryDirectory() as cwd, patch.object(
+            monitor, "all_session_names_in_cwd", return_value=set()
+        ):
+            app = App()
+            async with app.run_test() as pilot:
+                screen = monitor.NewSessionScreen(cwd)
+                app.push_screen(screen, results.append)
+                await pilot.pause()
+
+                screen.query_one("#new-name", Input).value = "pi-agent"
+                screen.query_one("#new-runtime-pi", RadioButton).value = True
+                await pilot.press("enter")
+                await pilot.pause()
+
+        self.assertEqual(results, [("pi-agent", monitor.RUNTIME_PI)])
+
     async def test_spawn_modal_shows_caller_runtime_and_returns_codex(self) -> None:
         results: list[tuple[str, str] | None] = []
         request = {
@@ -434,6 +452,7 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 monitor, "list_codex_sessions_in", return_value=[codex_info]
             ),
+            patch.object(monitor, "list_pi_sessions_in", return_value=[]),
         ):
             app = App()
             async with app.run_test() as pilot:
@@ -455,6 +474,30 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
             results,
             [(monitor.RUNTIME_CODEX, "codex-thread", "codex-agent")],
         )
+
+    async def test_resume_modal_includes_pi_sessions(self) -> None:
+        results: list[tuple[str, str, str | None] | None] = []
+        pi_info = {
+            "id": "pi-thread",
+            "name": "pi-agent",
+            "preview": "pi prompt",
+            "mtime": 3,
+            "size": 10,
+        }
+        with (
+            patch.object(monitor, "list_claude_sessions_in", return_value=[]),
+            patch.object(monitor, "list_codex_sessions_in", return_value=[]),
+            patch.object(monitor, "list_pi_sessions_in", return_value=[pi_info]),
+        ):
+            app = App()
+            async with app.run_test() as pilot:
+                screen = monitor.ResumeSessionScreen("/workspace", set())
+                app.push_screen(screen, results.append)
+                await pilot.pause()
+                await pilot.press("enter")
+                await pilot.pause()
+
+        self.assertEqual(results, [(monitor.RUNTIME_PI, "pi-thread", "pi-agent")])
 
     async def test_k_confirms_and_deletes_dormant_codex_thread(self) -> None:
         row = monitor.DashboardRow(

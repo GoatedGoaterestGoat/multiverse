@@ -7,6 +7,7 @@ Tracking what's been built, what we've learned, and what's next.
 | Phase | Status | Notes |
 |:------|:-------|:------|
 | Phase 0: Foundation | 🟡 In progress | Repo set up, plugin scaffolding done |
+| Mixed runtimes | 🟢 Substantial | Claude Code, Codex, and pi share one dashboard, agent registry, inbox, side-question path, and spawn broker; Codex and pi use native compaction |
 | Phase 1: Branching conversations | ⚪ Not started | |
 | Phase 2: Context management | 🟢 Substantial | Context folding (legacy) + frontier-coherent compaction with cached privileged tree-build, two-JSONL mirror, monitor-driven Compact + Visualize widgets, per-session auto-build toggle |
 | Phase 3: Parallel agents | 🟡 Partial | Multi-session monitor + per-cwd dashboard + dormant session tracking |
@@ -207,9 +208,9 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 3. Tool fires `tmux display-message` on the caller's pane so a user attached to the caller's tmux session sees "'<caller>' wants to spawn a subagent — detach (Ctrl-b d) to approve in the monitor." — best-effort status-line notification.
 4. Tool polls `<req-id>.resolved.json` every 250ms indefinitely, with periodic MCP progress notifications. Cancelling the tool call cleans up the request.
 5. Monitor scans `spawn_requests/` on each 1s tick. Enqueues new cwd-matching, unresolved requests into a per-monitor queue. Only one modal at a time; if multiple requests arrive concurrently they queue behind the active modal. Modal only opens when no other modal is already open.
-6. Modal shows the caller runtime, truncated instruction preview, name input seeded with the caller's preferred name (or a random one if that's taken), and a Claude/Codex selector defaulted to the caller's runtime. User hits Enter to accept or Esc to reject.
+6. Modal shows the caller runtime, truncated instruction preview, name input seeded with the caller's preferred name (or a random one if that's taken), and a Claude/Codex/pi selector defaulted to the caller's runtime. User hits Enter to accept or Esc to reject.
 7. On accept → monitor writes `<req-id>.resolved.json` with `{status: "accepted", name: "<chosen>", runtime: "<chosen-runtime>"}` (`O_EXCL`-atomic — first writer wins across monitors). On Esc/cancel → `{status: "rejected", reason: "cancelled"}`.
-8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[], name=chosen, runtime=chosen_runtime, initial_prompt=instruction)`. The instruction is carried in a state-dir file and auto-submitted as the first Claude or Codex user message without appearing on the shell command line. Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject, returns an error string.
+8. Tool reads the resolution. If accepted, calls `create_session(cwd, claude_args=[], name=chosen, runtime=chosen_runtime, initial_prompt=instruction)`. The instruction is carried in a state-dir file and auto-submitted as the first Claude, Codex, or pi user message without appearing on the shell command line. Returns `"Spawned agent with name '<chosen>'"` to the calling agent. On reject, returns an error string.
 9. Tool cleans up both files on exit.
 
 **Summarization is deliberately out of scope for v1.** Claude-code's `/compact` is in-process (hot-swaps `messagesRef`) and can't be triggered externally. Instead, the tool's docstring tells the agent to include a targeted summary in the instruction itself if prior context matters — the caller knows its own context best.
@@ -219,13 +220,14 @@ The fourth inter-agent tool. An agent calls `spawn_agent(instruction, name="")` 
 **Orphan request handling:** requests remain pending until resolved. If the caller is hard-killed before its `finally` cleanup runs, `list_pending_requests` filters the orphan once the caller's tmux session no longer exists.
 
 **SecondBrain spawning:** approving an agent-originated spawn through SecondBrain writes
-the caller's runtime into the same resolution file, so a Codex request creates a Codex
-child without changing the SecondBrain action schema. SecondBrain's direct
-`spawn_agent` action has no caller and retains its `{name, instruction?}` payload; its
-runtime is therefore a local device policy selected by
-`MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME` (`claude` by default). Put an override such as
-`export MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME=codex` in `bin/multiverse.local`, then
-reload the device-level SecondBrain connector for the new value to take effect.
+the caller's runtime into the same resolution file, so Codex and pi requests create
+children on their respective runtimes without changing the SecondBrain action schema.
+SecondBrain's direct `spawn_agent` action has no caller and retains its
+`{name, instruction?}` payload; its runtime is therefore a local device policy selected
+by `MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME` (`claude` by default). Put an override such as
+`export MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME=codex` or `...=pi` in
+`bin/multiverse.local`, then reload the device-level SecondBrain connector for the new
+value to take effect.
 
 **Context assembly note:** the subagent has zero memory of the caller's conversation. If it needs context, the caller must put it in the `instruction`. This is a hard boundary — principled, not a limitation — and it means spawned subagents start from a clean prompt cache rather than a forked one.
 

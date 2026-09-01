@@ -64,11 +64,13 @@ from .full_jsonl import (
     total_turn_count,
 )
 from .paths import multiverse_dir
+from .pi_transcript import delete_pi_session, list_pi_sessions_in
 from .inbox import list_pending_messages, pending_inbox_count
 from .names import pick_random_name
 from .sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
+    RUNTIME_PI,
     STATE_DIR,
     TMUX_PREFIX,
     DashboardRow,
@@ -241,6 +243,7 @@ class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
             RadioSet(
                 RadioButton("Claude", value=True, id="new-runtime-claude"),
                 RadioButton("Codex", id="new-runtime-codex"),
+                RadioButton("pi", id="new-runtime-pi"),
                 id="new-runtime",
             ),
             Static("", id="new-error"),
@@ -271,11 +274,12 @@ class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
                 f"[red]'{name}' is already used in this workspace. Choose another.[/]"
             )
             return
-        runtime = (
-            RUNTIME_CODEX
-            if self.query_one("#new-runtime-codex", RadioButton).value
-            else RUNTIME_CLAUDE
-        )
+        if self.query_one("#new-runtime-pi", RadioButton).value:
+            runtime = RUNTIME_PI
+        elif self.query_one("#new-runtime-codex", RadioButton).value:
+            runtime = RUNTIME_CODEX
+        else:
+            runtime = RUNTIME_CLAUDE
         self.dismiss((name, runtime))
 
     def action_cancel(self) -> None:
@@ -326,9 +330,10 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
         if not seeded or seeded in names:
             seeded = pick_random_name(names) or ""
         self.default_name = seeded
+        requested_runtime = request.get("caller_runtime")
         self.caller_runtime = (
-            RUNTIME_CODEX
-            if request.get("caller_runtime") == RUNTIME_CODEX
+            requested_runtime
+            if requested_runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
             else RUNTIME_CLAUDE
         )
 
@@ -359,6 +364,11 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
                     "Codex",
                     value=self.caller_runtime == RUNTIME_CODEX,
                     id="spawn-runtime-codex",
+                ),
+                RadioButton(
+                    "pi",
+                    value=self.caller_runtime == RUNTIME_PI,
+                    id="spawn-runtime-pi",
                 ),
                 id="spawn-runtime",
             ),
@@ -418,11 +428,12 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
                 f"[red]'{name}' is already used in this workspace.[/]"
             )
             return
-        runtime = (
-            RUNTIME_CODEX
-            if self.query_one("#spawn-runtime-codex", RadioButton).value
-            else RUNTIME_CLAUDE
-        )
+        if self.query_one("#spawn-runtime-pi", RadioButton).value:
+            runtime = RUNTIME_PI
+        elif self.query_one("#spawn-runtime-codex", RadioButton).value:
+            runtime = RUNTIME_CODEX
+        else:
+            runtime = RUNTIME_CLAUDE
         self.dismiss(SpawnDecision(accepted=True, name=name, runtime=runtime))
 
     def action_cancel(self) -> None:
@@ -648,6 +659,15 @@ class ResumeSessionScreen(
                     **info,
                     "runtime": RUNTIME_CODEX,
                     "row_key": f"{RUNTIME_CODEX}:{session_id}",
+                }
+            )
+        for info in list_pi_sessions_in(self.cwd, include_unnamed=True):
+            session_id = info["id"]
+            all_sessions.append(
+                {
+                    **info,
+                    "runtime": RUNTIME_PI,
+                    "row_key": f"{RUNTIME_PI}:{session_id}",
                 }
             )
         all_sessions.sort(key=lambda info: info["mtime"], reverse=True)
@@ -3451,7 +3471,7 @@ class MonitorApp(App):
                 id_cell = f"[dim]{session_id[:8]}[/]"
             pending = pending_inbox_count(e.cwd, e.name)
             inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
-            if e.runtime == RUNTIME_CODEX:
+            if e.runtime != RUNTIME_CLAUDE:
                 build_cell = "[dim]-[/]"
             elif e.claude_uuid and auto_build_enabled(e.claude_uuid):
                 build_cell = "[bold green]on[/]"
@@ -3616,8 +3636,10 @@ class MonitorApp(App):
         if runtime == RUNTIME_CLAUDE:
             name = strip_fold_suffix(name) or name
             runtime_args = ["--resume", session_id]
-        else:
+        elif runtime == RUNTIME_CODEX:
             runtime_args = ["resume", session_id]
+        else:
+            runtime_args = ["--session", session_id]
         try:
             create_session(
                 cwd,
@@ -3850,6 +3872,8 @@ class MonitorApp(App):
                 try:
                     if runtime == RUNTIME_CODEX:
                         delete_codex_thread(native_session_id)
+                    elif runtime == RUNTIME_PI:
+                        delete_pi_session(native_session_id, cwd)
                     else:
                         jsonl = live_jsonl_path(native_session_id, cwd)
                         if not jsonl.is_file():
@@ -3949,6 +3973,12 @@ class MonitorApp(App):
             return
         if e.is_ghost:
             self.notify("Cannot compact a folded ghost row", severity="warning")
+            return
+        if e.runtime != RUNTIME_CLAUDE:
+            self.notify(
+                f"Multiverse compaction is Claude-only; {e.runtime} uses its native compaction",
+                severity="warning",
+            )
             return
         if not e.claude_uuid:
             self.notify(
@@ -4086,6 +4116,9 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
+        if e.runtime != RUNTIME_CLAUDE:
+            self.notify("Auto tree-build is Claude-only", severity="warning")
+            return
         if not e.claude_uuid:
             self.notify(
                 "No claude UUID tracked for this row — cannot toggle",
@@ -4113,6 +4146,9 @@ class MonitorApp(App):
             return
         if e.is_ghost:
             self.notify("Cannot visualize a folded ghost row", severity="warning")
+            return
+        if e.runtime != RUNTIME_CLAUDE:
+            self.notify("Compaction visualization is Claude-only", severity="warning")
             return
         if not e.claude_uuid:
             self.notify(

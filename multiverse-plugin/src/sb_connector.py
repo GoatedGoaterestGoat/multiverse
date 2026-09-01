@@ -95,6 +95,11 @@ _WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
 _WORKSPACE_MAX_PARALLEL = 5
 
 
+def _supports_secondbrain_runtime(runtime: str) -> bool:
+    """Whether a Multiverse runtime participates in the SecondBrain seam."""
+    return runtime in ("claude", "codex", "pi")
+
+
 def _ssl_for(url: str) -> "ssl.SSLContext | None":
     """Build an SSL context for a ``wss://`` URL using certifi's CA bundle.
 
@@ -1301,7 +1306,10 @@ class SBConnector:
         from . import sb_transcript
         from .sessions import list_named_agents_in_cwd
         try:
-            agents = list_named_agents_in_cwd(cwd)
+            agents = [
+                row for row in list_named_agents_in_cwd(cwd)
+                if _supports_secondbrain_runtime(row.runtime)
+            ]
         except Exception:  # noqa: BLE001
             log.debug("list_named_agents failed for %s", cwd, exc_info=True)
             return
@@ -1345,7 +1353,10 @@ class SBConnector:
 
         def _blocking() -> dict[str, str]:
             try:
-                agents = list_named_agents_in_cwd(cwd)
+                agents = [
+                    row for row in list_named_agents_in_cwd(cwd)
+                    if _supports_secondbrain_runtime(row.runtime)
+                ]
             except Exception as exc:  # noqa: BLE001
                 log.info("workspace summary: agent enumeration failed for %s: %s", cwd, exc)
                 return {}
@@ -1509,6 +1520,8 @@ class SBConnector:
             _, _, cwd = workspace_id.partition(":")
             try:
                 for row in list_named_agents_in_cwd(cwd):
+                    if not _supports_secondbrain_runtime(row.runtime):
+                        continue
                     sb_transcript.initialize_marker(cwd, row.name)
             except Exception:  # noqa: BLE001
                 log.debug("marker init failed for %s", cwd, exc_info=True)
@@ -2091,7 +2104,7 @@ class SBConnector:
         from .sessions import find_agent_by_name, current_host, tmux_session_exists
 
         target = find_agent_by_name(cwd_abs, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
 
         native_session_id = target.session_id
@@ -2142,8 +2155,36 @@ class SBConnector:
                 "",
             )
 
-        # Live path — need the tmux name. Guard: if the session is alive on ANOTHER host
-        # in a shared MULTIVERSE_ROOT, we can't reach its tmux from here.
+        # Pi's extension can accept a real user message without touching the terminal.
+        # Queue durably rather than using Claude/Codex's composer parser: this preserves
+        # any user draft, works while pi is busy, and also crosses hosts when the
+        # Multiverse root is shared. The extension commits only after sendUserMessage
+        # accepts the hand-off.
+        if target.runtime == "pi":
+            from .pi_prompt_queue import (
+                PROMPT_CONSUMER_VERSION,
+                has_prompt_consumer_capability,
+                write_prompt,
+            )
+
+            if not has_prompt_consumer_capability(session.dir):
+                return (
+                    "deliver_failed",
+                    "",
+                    f"'{agent_name}' does not advertise the pi SecondBrain prompt "
+                    f"consumer v{PROMPT_CONSUMER_VERSION}; restart its live pi "
+                    "session before prompting it through SecondBrain",
+                )
+            write_prompt(cwd_abs, agent_name, text)
+            return (
+                "ok",
+                f"Prompt queued for '{agent_name}' and will be delivered by its pi "
+                "extension as a user message.",
+                "",
+            )
+
+        # Claude/Codex live path — need the tmux name. Guard: if the session is alive on
+        # ANOTHER host in a shared MULTIVERSE_ROOT, we can't reach its tmux from here.
         if session.host and session.host != current_host():
             return (
                 "deliver_failed", "",
@@ -2214,11 +2255,16 @@ class SBConnector:
         the message_agent auto_resume flow, but hands ``initial_prompt`` to create_session
         so the SB prompt becomes the runtime's first user turn."""
         from .sessions import (
+            RUNTIME_CLAUDE,
             RUNTIME_CODEX,
             create_session,
             foreign_host_still_reported_live,
             kill_session,
         )
+        if not _supports_secondbrain_runtime(target.runtime):
+            raise RuntimeError(
+                f"runtime '{target.runtime}' is not supported by SecondBrain"
+            )
         native_session_id = target.session_id
         if not native_session_id and target.session is not None:
             native_session_id = target.session.runtime_session_id
@@ -2234,11 +2280,12 @@ class SBConnector:
                     "as a new session here"
                 )
             kill_session(target.session)
-        runtime_args = (
-            ["resume", native_session_id]
-            if target.runtime == RUNTIME_CODEX
-            else ["--resume", native_session_id]
-        )
+        if target.runtime == RUNTIME_CLAUDE:
+            runtime_args = ["--resume", native_session_id]
+        elif target.runtime == RUNTIME_CODEX:
+            runtime_args = ["resume", native_session_id]
+        else:
+            runtime_args = ["--session", native_session_id]
         create_session(
             cwd=cwd,
             claude_args=runtime_args,
@@ -2344,11 +2391,22 @@ class SBConnector:
         at a time — the tool blocks its turn). Toolsmith's design improvement, 2026-07-13.
         """
         from . import sb_actions, sb_notify
-        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+        from .sessions import (
+            RUNTIME_PI,
+            current_host,
+            find_agent_by_name,
+            tmux_session_exists,
+        )
 
         target = find_agent_by_name(cwd_abs, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return ("not_found", "", f"no agent '{agent_name}' in this workspace")
+        if target.runtime == RUNTIME_PI:
+            return (
+                "no_pending_question",
+                "",
+                "pi has no AskUserQuestion bridge for SecondBrain to answer",
+            )
 
         # Locate the pending AskUserQuestion for this agent. Two paths:
         #  (a) explicit question_id from SB → look up pending_tools/<id>.json + verify
@@ -2587,6 +2645,12 @@ class SBConnector:
             except ValueError as exc:
                 return ("err", "", "deliver_failed",
                         f"spawn request '{request_id}' has an invalid caller runtime: {exc}")
+            if not _supports_secondbrain_runtime(child_runtime):
+                return (
+                    "err", "", "deliver_failed",
+                    f"spawn request '{request_id}' uses runtime '{child_runtime}', "
+                    "which is not supported by SecondBrain",
+                )
             final_name = name if name else default_name
             wrote = sr.write_resolution(
                 request_id, "accepted", final_name, runtime=child_runtime
@@ -2729,6 +2793,11 @@ class SBConnector:
                 "err", "", "", "deliver_failed",
                 "invalid MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME: " + str(exc),
             )
+        if not _supports_secondbrain_runtime(runtime):
+            return (
+                "err", "", "", "deliver_failed",
+                "MULTIVERSE_SECONDBRAIN_SPAWN_RUNTIME must be 'claude', 'codex', or 'pi'",
+            )
 
         try:
             sessions.create_session(
@@ -2859,11 +2928,22 @@ class SBConnector:
         """
         from . import sb_actions, sb_notify
         from .compact_state import is_locked
-        from .sessions import RUNTIME_CODEX, find_agent_by_name, tmux_session_exists
+        from .sessions import (
+            RUNTIME_CODEX,
+            RUNTIME_PI,
+            find_agent_by_name,
+            tmux_session_exists,
+        )
 
         target = find_agent_by_name(cwd, agent_name)
-        if target is None:
+        if target is None or not _supports_secondbrain_runtime(target.runtime):
             return "not_found", "", f"no agent named '{agent_name}' in this workspace"
+        if target.runtime == RUNTIME_PI:
+            return (
+                "no_pending_permission",
+                "",
+                "pi has no permission prompt bridge for SecondBrain to answer",
+            )
         if target.claude_uuid and is_locked(target.claude_uuid):
             return "locked", "", f"'{agent_name}' is compacting; cannot answer right now"
         tmux_name = target.session.tmux_name if target.session else None
@@ -3006,7 +3086,7 @@ class SBConnector:
             """Return (status, answer_or_none, error_message_or_none) where status is
             one of "ok"/"not_found"/"timeout"/"ask_failed"."""
             target = find_agent_by_name(cwd, agent_name)
-            if target is None:
+            if target is None or not _supports_secondbrain_runtime(target.runtime):
                 return ("not_found", None, f"no agent '{agent_name}' in this workspace")
             if not target.session_id and not target.claude_uuid:
                 return (

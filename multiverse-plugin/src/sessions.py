@@ -12,6 +12,7 @@ The data sources are:
   ~/.codex/sessions/**/rollout-<timestamp>-<codex-id>.jsonl
                                    — codex's own session transcripts
   ~/.codex/session_index.jsonl    — codex's user-assigned thread names
+  ~/.pi/agent/sessions/**.jsonl   — pi's native session transcripts
 """
 
 from __future__ import annotations
@@ -27,15 +28,17 @@ import signal
 import socket
 import subprocess
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
 from . import forks
-from .atomic_files import atomic_write_json
+from .atomic_files import atomic_write_json, exclusive_file_lock
 from .compact_state import list_locked
 from .paths import claude_projects_dir, codex_home, multiverse_dir
+from .pi_transcript import list_pi_sessions_in
 
 
 MULTIVERSE_DIR = multiverse_dir()
@@ -45,7 +48,8 @@ CODEX_HOME = codex_home()
 TMUX_PREFIX = "multiverse-"
 RUNTIME_CLAUDE = "claude"
 RUNTIME_CODEX = "codex"
-RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX)
+RUNTIME_PI = "pi"
+RUNTIMES = (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
 _STARTING_LIVENESS_GRACE_SECONDS = 10.0
 _CODEX_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
@@ -447,7 +451,7 @@ def existing_names_in_cwd(cwd: str) -> set[str]:
 def all_session_names_in_cwd(cwd: str) -> set[str]:
     """Return wrapped and dormant native session names in ``cwd``.
 
-    Fresh name assignment uses this broader set so Claude and Codex share one
+    Fresh name assignment uses this broader set so all runtimes share one
     namespace. Resume flows use ``existing_names_in_cwd`` instead because the
     dormant session being resumed is allowed to reclaim its own native name.
     """
@@ -460,6 +464,11 @@ def all_session_names_in_cwd(cwd: str) -> set[str]:
     names.update(
         str(info["name"])
         for info in list_codex_sessions_in(cwd)
+        if info.get("name")
+    )
+    names.update(
+        str(info["name"])
+        for info in list_pi_sessions_in(cwd)
         if info.get("name")
     )
     return names
@@ -477,6 +486,7 @@ class Session:
     runtime: str = RUNTIME_CLAUDE
     claude_uuid: Optional[str] = None
     codex_session_id: Optional[str] = None
+    pi_session_id: Optional[str] = None
     # claude UUIDs that this multiverse session has superseded via
     # context_fold. Each entry: {"uuid": str, "folded_at": float}.
     superseded_uuids: list[dict] = field(default_factory=list)
@@ -576,6 +586,8 @@ class Session:
         """Best-effort native session/thread id for this runtime."""
         if self.runtime == RUNTIME_CODEX:
             return self.codex_session_id or self.resumed_from
+        if self.runtime == RUNTIME_PI:
+            return self.pi_session_id or self.resumed_from
         return self.effective_claude_uuid
 
 
@@ -633,18 +645,59 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
+_TERMINAL_STATUSES = ("ended", "ending")
+
+
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
-    """Atomically persist the common Multiverse status shape."""
-    # Dashboard-initiated teardown owns the status until tmux is gone. Runtime
-    # hooks can still fire while SIGTERM is being handled; without this marker a
-    # Stop/SessionEnd hook could replace ``ending`` with idle/ended before the
-    # teardown operation has actually finished.
-    if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
-        return
-    atomic_write_json(
-        path,
-        {"status": status, "ts": time.time() if ts is None else ts},
-    )
+    """Atomically persist the common Multiverse status shape.
+
+    The guards below are read-then-write, so they are only sound while a
+    cross-process lock is held. Each status write is its own short-lived
+    process — six Claude hooks, or one detached ``mvctl status`` per pi
+    lifecycle event — and unlocked they interleave as
+    ``idle: read (not ended) → ended: write → idle: write``, which is exactly
+    the stale-``idle``-over-``ended`` outcome the ended guard exists to stop.
+    ``atomic_write_json`` makes each write indivisible; it does not order two
+    of them against each other.
+
+    Best-effort, matching ``inbox.wake_delivery_lock``: if the lock cannot be
+    taken (odd filesystem, no fcntl) the body still runs, degrading to the
+    unordered behaviour rather than to no status at all. Only ACQUISITION
+    failure is swallowed — see that function for why the ExitStack shape
+    matters rather than a ``try`` around the protected body.
+    """
+    with ExitStack() as stack:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            stack.enter_context(
+                exclusive_file_lock(path.with_name(path.name + ".lock"))
+            )
+        except OSError:
+            pass  # unlocked fallback — see above
+        # Dashboard-initiated teardown owns the status until tmux is gone.
+        # Runtime hooks can still fire while SIGTERM is being handled; without
+        # this marker a Stop/SessionEnd hook could replace ``ending`` with
+        # idle/ended before the teardown operation has actually finished.
+        if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
+            return
+        # ``ended`` is terminal. A session whose status.json says ended never
+        # goes live again — resuming builds a new session dir — so a live
+        # status arriving afterwards is always the stale one, whichever
+        # process emitted it.
+        if status not in _TERMINAL_STATUSES and _status_is_ended(path):
+            return
+        atomic_write_json(
+            path,
+            {"status": status, "ts": time.time() if ts is None else ts},
+        )
+
+
+def _status_is_ended(path: Path) -> bool:
+    try:
+        with path.open(encoding="utf-8") as fh:
+            return json.load(fh).get("status") == "ended"
+    except (OSError, ValueError, AttributeError):
+        return False
 
 
 def _pid_alive(pid: int) -> bool:
@@ -953,9 +1006,14 @@ def load_session(session_id: str) -> Optional[Session]:
     raw_superseded = meta.get("superseded_uuids") or []
     superseded = [e for e in raw_superseded if isinstance(e, dict) and e.get("uuid")]
     try:
-        runtime = normalize_runtime(meta.get("runtime"))
+        # ``feat/pi-harness`` persisted this choice as ``harness`` and wrote
+        # pi's native id to ``claude_uuid``. Accept both legacy locations so
+        # sessions created while developing the feature survive the merge.
+        runtime = normalize_runtime(meta.get("runtime") or meta.get("harness"))
     except ValueError:
         return None
+    legacy_session_id = _read_text_stripped(d / "claude_uuid")
+    runtime_session_id = _read_text_stripped(d / "runtime_session_id")
     s = Session(
         id=session_id,
         cwd=meta.get("cwd", "?"),
@@ -963,8 +1021,13 @@ def load_session(session_id: str) -> Optional[Session]:
         resumed_from=meta.get("resumed_from"),
         name=meta.get("name"),
         runtime=runtime,
-        claude_uuid=_read_text_stripped(d / "claude_uuid"),
-        codex_session_id=_read_text_stripped(d / "runtime_session_id"),
+        claude_uuid=(legacy_session_id if runtime == RUNTIME_CLAUDE else None),
+        codex_session_id=(runtime_session_id if runtime == RUNTIME_CODEX else None),
+        pi_session_id=(
+            runtime_session_id or legacy_session_id
+            if runtime == RUNTIME_PI
+            else None
+        ),
         superseded_uuids=superseded,
         host=meta.get("host"),
     )
@@ -1055,6 +1118,7 @@ def build_dashboard_rows(
 
     wrapped_uuids: set[str] = set(hide_uuids or ())
     wrapped_codex_ids: set[str] = set()
+    wrapped_pi_ids: set[str] = set()
     # Ask-fork JSONLs inherit the origin's custom-title, so without this
     # they'd surface as phantom dormant agents. The on-disk fork registry
     # covers forks spawned by ANY process (TUI ask-all AND agent-initiated
@@ -1069,6 +1133,11 @@ def build_dashboard_rows(
                 wrapped_codex_ids.add(s.runtime_session_id)
             if s.resumed_from:
                 wrapped_codex_ids.add(s.resumed_from)
+        elif s.runtime == RUNTIME_PI:
+            if s.runtime_session_id:
+                wrapped_pi_ids.add(s.runtime_session_id)
+            if s.resumed_from:
+                wrapped_pi_ids.add(s.resumed_from)
 
     # Map each superseded claude UUID to its fold timestamp. Used to render
     # those JSONLs as `Name (folded HH:MM)` ghost rows instead of plain
@@ -1104,6 +1173,8 @@ def build_dashboard_rows(
         include_ancestors=True,
     )
     codex_by_id = {info["id"]: info for info in codex_sessions}
+    pi_sessions = list_pi_sessions_in(cwd, include_unnamed=True)
+    pi_by_id = {info["id"]: info for info in pi_sessions}
     superseded_codex_ids = {
         ancestor_id
         for info in codex_sessions
@@ -1158,6 +1229,10 @@ def build_dashboard_rows(
                 ancestor = codex_by_id.get(ancestor_id)
                 if ancestor:
                     preview = ancestor.get("preview") or preview
+        elif s.runtime == RUNTIME_PI and s.runtime_session_id:
+            info = pi_by_id.get(s.runtime_session_id)
+            if info:
+                preview = info.get("preview") or ""
         rows.append(
             DashboardRow(
                 name=s.name,
@@ -1276,6 +1351,23 @@ def build_dashboard_rows(
             )
         )
 
+    for info in pi_sessions:
+        session_id = info["id"]
+        if session_id in wrapped_pi_ids or not info.get("name"):
+            continue
+        rows.append(
+            DashboardRow(
+                name=info["name"],
+                cwd=info.get("cwd") or cwd,
+                status="dormant",
+                status_ts=info["mtime"],
+                runtime=RUNTIME_PI,
+                session=None,
+                session_id=session_id,
+                preview=info.get("preview") or "",
+            )
+        )
+
     # Override status to "compacting" for any row whose claude_uuid holds
     # an active compaction lock. Cross-monitor: every monitor reads from
     # ~/.multiverse/compacting/ on each refresh, so the locked rows render
@@ -1321,7 +1413,7 @@ def wrapped_runtime_session_ids(sessions: list[Session]) -> set[tuple[str, str]]
         if session_id:
             out.add((session.runtime, session_id))
         if (
-            session.runtime == RUNTIME_CODEX
+            session.runtime in (RUNTIME_CODEX, RUNTIME_PI)
             and session.resumed_from
             and session.resumed_from != session_id
         ):
@@ -1512,12 +1604,16 @@ def _assert_no_existing_wrapper_claim(
         if not native_session_id:
             continue
         try:
-            existing_runtime = normalize_runtime(meta.get("runtime"))
+            existing_runtime = normalize_runtime(
+                meta.get("runtime") or meta.get("harness")
+            )
         except ValueError:
             continue
         if existing_runtime != runtime:
             continue
         existing_native_id = _read_text_stripped(entry / "runtime_session_id")
+        if not existing_native_id and existing_runtime == RUNTIME_PI:
+            existing_native_id = _read_text_stripped(entry / "claude_uuid")
         if not existing_native_id:
             existing_native_id = meta.get("resumed_from")
         if existing_native_id == native_session_id:
@@ -1660,11 +1756,11 @@ def create_session(
             shutil.rmtree(d, ignore_errors=True)
             raise
 
-    runner_name = (
-        "multiverse-codex-session"
-        if runtime == RUNTIME_CODEX
-        else "multiverse-session"
-    )
+    runner_name = {
+        RUNTIME_CLAUDE: "multiverse-session",
+        RUNTIME_CODEX: "multiverse-codex-session",
+        RUNTIME_PI: "multiverse-pi-session",
+    }[runtime]
     inner = str(Path(plugin_root) / "bin" / runner_name)
 
     inner_cmd = shlex.join([inner, *claude_args])
@@ -1687,10 +1783,13 @@ def create_session(
         codex_plugin_root = str(
             Path(plugin_root).parent / "plugins" / "multiverse-codex"
         )
+    if runtime in (RUNTIME_CODEX, RUNTIME_PI):
+        cmd += [
+            "-e", f"MULTIVERSE_RUNTIME_SESSION_ID_PATH={d / 'runtime_session_id'}",
+        ]
     if runtime == RUNTIME_CODEX:
         cmd += [
             "-e", f"MULTIVERSE_CODEX_PLUGIN_ROOT={codex_plugin_root}",
-            "-e", f"MULTIVERSE_RUNTIME_SESSION_ID_PATH={d / 'runtime_session_id'}",
             "-e", f"MULTIVERSE_RUNTIME_PID_PATH={d / 'runtime_pid'}",
         ]
 
@@ -1712,7 +1811,8 @@ def create_session(
     base_env_keys = (
         "CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
         "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
-        "MULTIVERSE_CODEX_BIN",
+        "MULTIVERSE_CODEX_BIN", "MULTIVERSE_PI_BIN",
+        "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR",
         # Rate-limit retry tuning — see bin/multiverse for defaults +
         # rationale. Propagated so interactive claude sessions inside tmux
         # honor them, not just subprocess-inherited workers.

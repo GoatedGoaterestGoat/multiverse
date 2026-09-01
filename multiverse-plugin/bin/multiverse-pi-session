@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# multiverse-pi-session — inner runner for one managed pi session.
+
+set -euo pipefail
+
+PI_BIN="${MULTIVERSE_PI_BIN:-pi}"
+: "${MULTIVERSE_STATUS:?multiverse-pi-session must be launched by the monitor}"
+: "${MULTIVERSE_PLUGIN_ROOT:?MULTIVERSE_PLUGIN_ROOT is required}"
+
+if ! command -v "$PI_BIN" >/dev/null 2>&1; then
+  echo "[multiverse-pi-session] '$PI_BIN' CLI not found in PATH" >&2
+  exit 1
+fi
+
+EXTENSION="$MULTIVERSE_PLUGIN_ROOT/pi-extension/index.ts"
+if [ ! -r "$EXTENSION" ]; then
+  echo "[multiverse-pi-session] pi extension not found: $EXTENSION" >&2
+  exit 1
+fi
+
+PI_ARGS=(--extension "$EXTENSION")
+if [ -n "${MULTIVERSE_SESSION_NAME:-}" ]; then
+  PI_ARGS+=(--name "$MULTIVERSE_SESSION_NAME")
+fi
+PI_ARGS+=("$@")
+
+# spawn_agent hands the initial instruction through a file so long/multiline
+# prompts never cross a shell re-parse boundary. pi accepts it as the final
+# positional argument and submits it after session_start.
+if [ -n "${MULTIVERSE_INITIAL_PROMPT_FILE:-}" ] \
+   && [ -f "$MULTIVERSE_INITIAL_PROMPT_FILE" ]; then
+  PI_ARGS+=("$(< "$MULTIVERSE_INITIAL_PROMPT_FILE")")
+  rm -f "$MULTIVERSE_INITIAL_PROMPT_FILE" 2>/dev/null || true
+  unset MULTIVERSE_INITIAL_PROMPT_FILE
+fi
+
+"$PI_BIN" "${PI_ARGS[@]}" || true
+
+# session_shutdown normally clears the live-consumer capability and writes
+# ended through the extension. Keep runner fallbacks for crashes or extension
+# API changes. tmux starts this runner with -c <workspace>, so both branches
+# must run from the plugin root: `-m src.mvctl` resolves `src` off cwd, and the
+# workspace may well have a `src/` package of its own that we must never import.
+if [ -x "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" ]; then
+  (
+    cd "$MULTIVERSE_PLUGIN_ROOT"
+    "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" -m src.mvctl \
+      clear-pi-prompt-consumer || true
+    "$MULTIVERSE_PLUGIN_ROOT/.venv/bin/python" -m src.mvctl status ended
+  ) >/dev/null 2>&1 || true
+elif command -v uv >/dev/null 2>&1; then
+  uv --directory "$MULTIVERSE_PLUGIN_ROOT" run --no-sync python -m src.mvctl \
+    clear-pi-prompt-consumer >/dev/null 2>&1 || true
+  uv --directory "$MULTIVERSE_PLUGIN_ROOT" run --no-sync python -m src.mvctl \
+    status ended >/dev/null 2>&1 || true
+fi

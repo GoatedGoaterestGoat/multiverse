@@ -2,7 +2,9 @@
 
 > *What if agent conversations were a tree instead of a line?*
 
-Multiverse is a multi-agent orchestration layer built on top of [Claude Code](https://docs.anthropic.com/en/docs/claude-code) that introduces **branching conversations**, **parallel agents on git worktrees**, **intelligent context management**, and **inter-agent communication** -- inspired by [5D Chess with Multiverse Time Travel](https://store.steampowered.com/app/1349230/5D_Chess_With_Multiverse_Time_Travel/).
+Multiverse is a **runtime-agnostic** multi-agent orchestration layer that introduces **branching conversations**, **parallel agents on git worktrees**, **intelligent context management**, and **inter-agent communication** -- inspired by [5D Chess with Multiverse Time Travel](https://store.steampowered.com/app/1349230/5D_Chess_With_Multiverse_Time_Travel/).
+
+It runs on top of resumable CLI coding-agent runtimes. [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, and [pi](https://pi.dev) sessions share one dashboard, agent registry, inbox, and spawn broker. Frontier-coherent Multiverse compaction remains Claude-specific; Codex and pi retain their native compaction behavior.
 
 ---
 
@@ -117,9 +119,9 @@ The key asymmetry: an agent always sees responses it *received* from others but 
 
 ## Architecture
 
-### Building on Claude Code
+### Building on a runtime
 
-Claude Code provides extensive extension points that Multiverse can leverage:
+Multiverse needs a handful of things from every CLI it drives: resumable on-disk sessions, a way to inject context, tools, and lifecycle events. Claude Code supplies plugin/MCP/hooks, Codex uses its plugin bundle, and `multiverse-plugin/pi-extension/` provides the equivalent integration for pi.
 
 | Claude Code Feature | Multiverse Use |
 |---|---|
@@ -227,6 +229,8 @@ Claude Code provides extensive extension points that Multiverse can leverage:
 - [ ] "5D Chess" style multi-timeline view
 
 ### Phase 6: Polish & Distribution
+- [x] Mixed runtime orchestration — Claude Code, Codex, and [pi](https://pi.dev) share one dashboard and agent registry
+- [x] pi runtime — inter-agent tools, inbox delivery, native session discovery/resume, and native compaction
 - [ ] Package as a Claude Code plugin
 - [ ] Configuration system (which model for context manager, parallelism limits, etc.)
 - [ ] Error recovery (agent crashes, worktree corruption, merge failures)
@@ -257,6 +261,12 @@ Claude Code provides extensive extension points that Multiverse can leverage:
    - Have agents negotiate?
 
 ---
+
+## Design Notes
+
+- [`docs/compaction-algorithm.md`](docs/compaction-algorithm.md) — frontier-coherent tree compaction: the design
+- [`docs/PROGRESS.md`](docs/PROGRESS.md) — what is built, what was learned, what is next
+- [`multiverse-plugin/README.md`](multiverse-plugin/README.md) — the implementation
 
 ## Prior Art & Inspiration
 

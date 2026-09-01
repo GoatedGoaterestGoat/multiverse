@@ -1,8 +1,8 @@
 """Read-only backfill queries served to SecondBrain (INFRA §10.4).
 
 The connector answers SB's pull queries from Multiverse's file substrate, reusing the
-**same session/inbox data layer** the monitor and the inter-agent tools use — so SB sees
-the same roster (and the same statuses) that agents see via ``list_agents``.
+**same session/inbox data layer** the monitor and inter-agent tools use, so Claude,
+Codex, and pi agents share one SecondBrain-facing roster.
 
 Phase-2 step 1 implements the workspace-status queries:
 
@@ -24,10 +24,20 @@ from .full_jsonl import live_stats_cached, structural_tokens_cached
 from .inbox import pending_inbox_count
 from .sessions import (
     RUNTIME_CLAUDE,
+    RUNTIME_CODEX,
+    RUNTIME_PI,
     current_host,
     list_named_agents_in_cwd,
     tmux_session_exists,
 )
+
+
+def _supported_rows(cwd: str) -> list:
+    """Named rows exposed through SecondBrain."""
+    return [
+        row for row in list_named_agents_in_cwd(cwd)
+        if row.runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
+    ]
 
 
 def _iso(ts: float) -> str:
@@ -108,24 +118,25 @@ def _dashboard_row(row) -> dict:  # noqa: ANN001 - DashboardRow
 def dashboard(cwd: str) -> list[dict]:
     """The full monitor dashboard for a workspace (SB ``get_dashboard``, DESIGN §4d).
 
-    Same roster as the agent registry (ghost/folded rows excluded), with the monitor's
-    per-row status corrections applied. Reads the file substrate directly, so it works
-    whether or not a monitor TUI is live; an empty workspace yields ``[]``.
+    Claude, Codex, and pi rows from the agent registry (ghost/folded rows
+    excluded), with the monitor's per-row status corrections applied. Reads the
+    file substrate directly, so it works whether or not a monitor TUI is live;
+    an empty workspace yields ``[]``.
     """
     cwd_abs = str(Path(cwd).expanduser().resolve())
-    return [_dashboard_row(r) for r in list_named_agents_in_cwd(cwd_abs)]
+    return [_dashboard_row(r) for r in _supported_rows(cwd_abs)]
 
 
 def list_agents(cwd: str) -> list[dict]:
     """The workspace's per-agent dashboard (ghosts/forks excluded, like the agent registry)."""
     cwd_abs = str(Path(cwd).expanduser().resolve())
-    return [_agent_row(r) for r in list_named_agents_in_cwd(cwd_abs)]
+    return [_agent_row(r) for r in _supported_rows(cwd_abs)]
 
 
 def get_status(cwd: str, agent: str) -> dict | None:
     """One agent's row (``status`` / ``inbox`` / ``last_updated``), or None if not found."""
     cwd_abs = str(Path(cwd).expanduser().resolve())
-    for r in list_named_agents_in_cwd(cwd_abs):
+    for r in _supported_rows(cwd_abs):
         if r.name == agent:
             return {k: v for k, v in _agent_row(r).items() if k != "name"}
     return None
@@ -164,7 +175,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
     from .sessions import find_agent_by_name
 
     target = find_agent_by_name(cwd, agent_name)
-    if target is None:
+    if target is None or target.runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI):
         return "not_found", {"message": f"no agent named '{agent_name}' in this workspace"}
 
     status = _corrected_status(target)

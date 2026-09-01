@@ -94,8 +94,8 @@ def write_spawn_request(
         "ts": time.time(),
     }
     atomic_write_json(path, data)
-    # Firsthand: record an agent.spawn_request for the SecondBrain connector at creation
-    # (no-op unless this workspace has connected to SB before). Never breaks the spawn flow.
+    # Firsthand: record the request for the SecondBrain connector (no-op unless
+    # this workspace connected before). Never break the spawn flow.
     sb_notify.record_spawn_request(data)
     return path
 

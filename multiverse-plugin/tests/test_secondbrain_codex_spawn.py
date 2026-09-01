@@ -166,6 +166,18 @@ class SecondBrainSpawnDecisionRuntimeTests(unittest.TestCase):
         )
         recorder.assert_not_called()
 
+    def test_pi_spawn_request_can_be_approved_through_secondbrain(self) -> None:
+        request = self._write_request(runtime=sessions.RUNTIME_PI)
+
+        result, recorder = self._resolve("approve")
+
+        self.assertEqual(result[0], "ok")
+        resolution = json.loads(
+            (self.request_dir / "request-id.resolved.json").read_text()
+        )
+        self.assertEqual(resolution["runtime"], sessions.RUNTIME_PI)
+        recorder.assert_called_once_with(request, "accepted", "test-agent")
+
     def test_codex_spawn_events_do_not_add_runtime_to_wire_payloads(self) -> None:
         request = self._write_request()
 
@@ -253,6 +265,18 @@ class SecondBrainDirectSpawnRuntimeTests(unittest.TestCase):
             name="new-agent",
             runtime=sessions.RUNTIME_CLAUDE,
             initial_prompt=None,
+        )
+
+    def test_pi_policy_starts_named_prompted_pi_agent(self) -> None:
+        result, create = self._deliver(runtime=sessions.RUNTIME_PI)
+
+        self.assertEqual(result[0], "ok")
+        create.assert_called_once_with(
+            cwd=self.cwd,
+            claude_args=[],
+            name="new-agent",
+            runtime=sessions.RUNTIME_PI,
+            initial_prompt="Do the work.",
         )
 
     def test_duplicate_name_and_invalid_policy_do_not_create(self) -> None:

@@ -1,22 +1,21 @@
-# Multiverse Plugin for Claude Code
+# Multiverse Runtime Orchestrator
 
-Multi-agent orchestration for Claude Code: parallel sessions, inter-agent messaging, and frontier-coherent context compaction.
+Multi-agent orchestration for Claude Code, Codex, and pi: parallel sessions, inter-agent messaging, and Claude-specific frontier-coherent context compaction.
 
 ## What it does
 
-Three things, all designed to scale past the limits of a single `claude` process:
+Three things, all designed to scale past the limits of a single agent process:
 
-**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks every claude session in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, detach back with `Ctrl-b d`, spawn new ones with a name, resume dormant ones from disk, kill ones you're done with. Status (`idle` / `working` / `waiting` / `listening` / `dormant` / `ended` / `compacting`) is driven by hooks, the MCP server, and cross-monitor lock files. Each multiverse instance is scoped to one workspace (cwd).
+**1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks Claude Code, Codex, and pi sessions in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, spawn new ones with a name, resume dormant native sessions, or kill sessions you're done with. Each multiverse instance is scoped to one workspace (cwd).
 
-**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Claude receives queued messages through hooks; Codex explicitly claims them with `check_inbox`, prompted by push notifications and wrapper resumes when necessary. Ephemeral questions use native Claude or Codex forks that don't disturb the target's main session; spawns pop a naming modal in the monitor before the new session is created.
+**2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Claude receives queued messages through hooks, Codex explicitly claims them with `check_inbox`, and pi's extension injects them through its in-process messaging API. Ephemeral questions use each runtime's native fork mechanism without disturbing the target's main session; spawns pop a naming and runtime-selection modal in the monitor.
 
-**3. Frontier-coherent compaction.** A bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
+**3. Frontier-coherent compaction for Claude.** Codex and pi retain their native compaction. For Claude, a bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
 
 ## Prerequisites
 
-- [Claude Code](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated
-- Codex installed and authenticated if you plan to run Codex sessions; Claude-only
-  operation does not require it
+- At least one runtime installed and authenticated: [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, or [pi](https://pi.dev) (`npm i -g @earendil-works/pi-coding-agent`)
+- Agent runtimes are external prerequisites; `multiverse setup` does not install or authenticate them
 - Python 3.11+
 - A system package manager for `multiverse setup` to install the rest: Homebrew (macOS), `apt`/`dnf`/`pacman` (Linux). If you'd rather install manually, the deps are [uv](https://docs.astral.sh/uv/), [jq](https://jqlang.github.io/jq/), and [tmux](https://github.com/tmux/tmux) ≥ 3.2.
 
@@ -46,7 +45,7 @@ git clone https://github.com/Silicon23/Multiverse.git
 export PATH="/path/to/Multiverse/multiverse-plugin/bin:$PATH"
 
 # 3. One-time setup: installs tmux, jq, uv (prompting before each),
-#    runs `uv sync`, and reports Codex CLI/plugin readiness.
+#    runs `uv sync`, and reports Claude/Codex/pi CLI and integration readiness.
 multiverse setup
 
 # 4. Launch the monitor in a workspace
@@ -55,8 +54,7 @@ multiverse
 ```
 
 `multiverse setup` is idempotent — re-run it anytime to sync Python deps after a
-pull. A missing Codex CLI or plugin bundle is reported without failing setup, so a
-Claude-only installation remains usable.
+pull. Missing agent CLIs are reported without failing setup, so any installed runtime remains usable.
 
 **Updating.** The plugin is under active development; to pull the latest changes from origin:
 
@@ -77,18 +75,21 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 | `MULTIVERSE_CODEX_BIN` | `codex` | The Codex binary used for interactive sessions, native naming, and ephemeral `ask_agent` app-server forks. |
 | `CODEX_HOME` | *(unset → `~/.codex`)* | Standard Codex configuration and session root. Set it when Codex uses a non-default home so discovery and resume target the same native sessions. |
 | `MULTIVERSE_CODEX_PLUGIN_ROOT` | sibling `plugins/multiverse-codex` | Codex plugin bundle injected into wrapped sessions. Override it for packaged installs or a separate development checkout. |
+| `MULTIVERSE_PI_BIN` | `pi` | The external pi CLI used for interactive sessions and ephemeral `ask_agent` forks. |
+| `PI_CODING_AGENT_DIR` | `~/.pi/agent` | pi configuration root. Set it when pi uses a non-default location. |
+| `PI_CODING_AGENT_SESSION_DIR` | *(unset)* | Optional flat pi session directory override; used consistently for discovery, resume, and spawned sessions. |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS` | *(empty)* | Colon-separated extra plugin dirs loaded into **interactive sessions** (each becomes its own repeated `--plugin-dir`), on top of the multiverse plugin itself. The fork/compaction calls deny all tools, so extra plugins are not loaded there. |
 | `CLAUDE_CONFIG_DIR` | *(unset → `~/.claude`)* | Standard Claude Code config dir. The plugin reads transcripts from `$CLAUDE_CONFIG_DIR/projects`. Set it here if your `claude` build uses a non-default config dir and doesn't export this variable itself, so the monitor lists the right sessions. |
 | `CLAUDE_CODE_MAX_RETRIES` | `30` | Rate-limit / transient-error retry count for the underlying claude CLI (its own default is 10). Multiverse tends to saturate rate limits — many active agents plus a background tree-build worker per session, all hitting one account — so claude's 10-retry / ~8-min ceiling burns through fast under a real traffic wave. This raises the ceiling. Set to `10` to restore claude's default; only takes effect on rate-limit / 5xx / connection failures, so a healthy request never touches it. |
 | `CLAUDE_CODE_UNATTENDED_RETRY` | `1` | Enables claude's persistent-retry mode: backoff caps at 5min per attempt, total wait at 6 hours, with a heartbeat yield every 30s so the session isn't declared idle mid-wait. Ideal for background tree-build workers and long-running agents where waiting through a traffic wave beats failing outright. Feature-gated inside the claude CLI itself — harmless no-op on builds that don't have it compiled in. Set to `0` to opt out. |
 
-Example — use alternate Claude and Codex installations and load an extra local
-Claude plugin:
+Example — use alternate Claude, Codex, and pi installations and load an extra local Claude plugin:
 
 ```bash
 # multiverse-plugin/bin/multiverse.local — gitignored, per-machine.
 export MULTIVERSE_CLAUDE_BIN="my-claude-build"
 export MULTIVERSE_CODEX_BIN="my-codex-build"
+export MULTIVERSE_PI_BIN="my-pi-build"
 export MULTIVERSE_EXTRA_PLUGIN_DIRS="/path/to/another-plugin"
 export CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.my-claude}"
 export CODEX_HOME="${CODEX_HOME:-$HOME/.my-codex}"
@@ -96,27 +97,24 @@ export CODEX_HOME="${CODEX_HOME:-$HOME/.my-codex}"
 
 These values are exported by `bin/multiverse` and propagated into every spawned session (the monitor adds them to each `tmux new-session -e` env), so a single edit reaches the monitor, interactive sessions, the inter-agent fork path, and compaction.
 
-The launcher also atomically snapshots effective Codex configuration to
-`$MULTIVERSE_ROOT/codex-env.sh`. From a later terminal with neither `CODEX_HOME`
-nor `MULTIVERSE_CODEX_BIN` configured, it restores the saved home, binary, and
-binary PATH before discovering or resuming sessions. Explicit environment values
-or `bin/multiverse.local` settings take precedence and refresh the snapshot.
+The launcher atomically snapshots effective Codex and pi configuration to
+`$MULTIVERSE_ROOT/codex-env.sh` and `pi-env.sh`. From a later unconfigured terminal it restores the saved session roots, binaries, and binary PATH before discovery or resume. Explicit environment values or `bin/multiverse.local` settings take precedence and refresh the snapshots.
 
 ## Usage
 
 ### Monitor TUI
 
-Run `multiverse` in your project directory. The TUI lists every multiverse session in this workspace, plus dormant (named-but-not-running) claude sessions you could resume.
+Run `multiverse` in your project directory. The TUI lists every managed session in this workspace, plus dormant named native sessions you can resume.
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — name-only prompt; cwd is fixed at the workspace where you launched `multiverse`. Claude starts in auto permission mode; Codex starts with automatic approval review (see below). |
+| `n` | New session — name and runtime prompt; choose Claude, Codex, or pi. Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
 | `R` | Resume — pick from runtime sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Uses the same runtime-specific permission default as a new session. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
 | `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
-| `i` | View the highlighted agent's pending inbox — a read-only peek at queued `message_agent` messages. Does **not** consume them; Claude hooks or Codex's `check_inbox` still own delivery. |
+| `i` | View the highlighted agent's pending inbox without consuming it; the selected runtime's integration still owns delivery. |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
 | `r` | Manual refresh |
@@ -136,13 +134,13 @@ unless the caller supplied an explicit Claude permission mode. Every equivalent 
 launch goes through `multiverse-codex-session` with `--approve-for-me`, which routes
 approval requests through Codex's automatic reviewer using its `workspace-write`
 sandbox. Codex rejects combining that preset with `--sandbox danger-full-access`, so
-Multiverse does not pass the former full-access sandbox flag.
+Multiverse does not pass the former full-access sandbox flag. pi sessions use pi's native behavior and extension API; Multiverse does not add a permission gate.
 
-**Dashboard columns**: `ID · Name · Inbox · Build · Status · Tokens · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages — press `i` to peek at them without consuming them. For Claude sessions, the Build column shows `on` (green) / `off` for the per-session auto tree-build toggle; Codex sessions show `-` because they do not build compaction trees — see [Frontier-coherent compaction](#frontier-coherent-compaction). The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
+**Dashboard columns**: `ID · Name · Inbox · Build · Status · Tokens · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages — press `i` to peek at them without consuming them. For Claude sessions, the Build column shows `on` (green) / `off` for the per-session auto tree-build toggle; Codex and pi show `-` because they use native compaction. The Tokens column shows the current LIVE jsonl's token count (`full_jsonl.live_stats`, mtime-cached) — what the session would actually cost to resume right now, reflecting any past compaction; it's not the FULL/uncompacted total shown in the Compact widget. The Preview column shows the first user message from each session's transcript.
 
 The scroll wheel works natively inside attached sessions — the monitor sets per-session `tmux mouse on`, so you scroll the pane's history without entering tmux copy-mode (`Ctrl-b [`). To select text, hold Shift while dragging (terminal-native selection).
 
-**Workspace scope**: each `multiverse` instance is bound to the cwd it was launched from. Sessions in other workspaces are managed by other monitor instances independently. The dashboard surfaces both **multiverse-wrapped** sessions (live or ended) and **dormant named claude sessions** in this cwd that aren't currently wrapped.
+**Workspace scope**: each `multiverse` instance is bound to the cwd it was launched from. Sessions in other workspaces are managed by other monitor instances independently. The dashboard surfaces both **multiverse-wrapped** sessions (live or ended) and **dormant named native sessions** in this cwd that aren't currently wrapped.
 
 **Sessions survive the monitor**. State lives under `~/.multiverse/sessions/<mv-id>/`. If you `q`uit the monitor, sessions keep running in their tmux sessions; the next `multiverse` launch picks them back up.
 
@@ -154,7 +152,7 @@ Several MCP tools are available to any agent running under the wrapper. They def
 
 **`message_agent(target_name, message, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
-- Claude recipients get hook-injected reminders; Codex recipients call `check_inbox`
+- Claude recipients get hook-injected reminders; Codex recipients call `check_inbox`; pi's extension injects messages directly
 - Recipient has full tool access (Read, Bash, Grep, etc.) and can take their time
 - Persists in the recipient's conversation history
 - Fire-and-forget — the tool returns as soon as the message is queued; you don't block on a reply
@@ -170,17 +168,19 @@ Several MCP tools are available to any agent running under the wrapper. They def
 | idle / working — **Claude**, composer not on screen | Remains queued. No composer means a permission prompt or question modal is up, and keystrokes would answer the modal instead of typing a prompt. |
 | idle / working — **Codex**, composer focused | Recipient is **pinged via its terminal** (bracketed paste + Enter) to check its inbox immediately, whether or not a user is attached. During a working turn this steers the agent at its next tool boundary. Any typed-but-unsent draft is saved, cleared, and restored around the send. |
 | idle / working — **Codex**, composer not focused | Remains queued. No keystrokes are sent to a picker, approval dialog, or other active terminal surface. |
+| idle — **pi** | The extension polls the durable inbox and injects the message with pi's `sendMessage` API, without terminal keystrokes. |
+| working — **pi** | The extension delivers the queued message when the current turn settles. |
 | listening (in `monitor_inbox`) | No wake needed — it's already watching its inbox and picks the message up within ~1s. |
 | starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
 | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
 | compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
 
-The states that can't be woken still receive the message through their normal delivery path (Claude's inbox hooks; Codex's `check_inbox`). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
+The states that can't be woken still receive the message through their normal delivery path (Claude hooks, Codex `check_inbox`, or the pi extension). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
 
 **At most one outstanding prompt.** Reading an inbox drains *all* of it, so a second "check your inbox" prompt sent before the agent acted on the first is wasted — it burns a turn to arrive at an empty inbox. A marker under `~/.multiverse/wake_pending/<encoded-cwd>/<name>` records that a prompt was accepted by the target's composer and not yet acted on; while it's set, further messages are queued without typing anything (route `skipped_wake_outstanding`).
 
 - **Set only on a confirmed submit**, never on "we ran some tmux commands". The marker is a promise to stop pinging, so a wake still sitting unsent in the composer would stop delivery to that agent permanently — and the self-heal below can't rescue that, since nothing is being delivered and so the inbox never empties. Codex confirms its own submit (it waits for the prompt to leave the composer). Claude does not: `send_prompt_via_tmux` returns once its tmux commands succeed, so `message_agent` adds the postcondition itself — re-capture the pane and require the composer to hold exactly the restored draft (empty if there was none), polled briefly for TUI render latency. Unconfirmed, or a failed ping, leaves the marker unset and the next message pings again.
-- **Cleared on real consumption only.** `deliver-inbox.py` for Claude (its hook path), `check_inbox` for either runtime — Codex's only path. Deliberately *not* `monitor_inbox`, which detects without consuming: clearing there would let a redundant prompt through in the window between "agent told a message exists" and "agent reads it".
+- **Cleared on real consumption only.** `deliver-inbox.py` for Claude (its hook path), `check_inbox` for any runtime — Codex's only path. Deliberately *not* `monitor_inbox`, which detects without consuming: clearing there would let a redundant prompt through in the window between "agent told a message exists" and "agent reads it".
 - **Self-heals.** A marker with an empty inbox behind it is stale and gets retired, so an agent killed after being pinged doesn't go permanently unpingable.
 - **Serialized per recipient.** The check, the ping, and the mark run under an `flock` on the recipient (`wake_delivery_lock`), because every sender is a separate MCP process. Without it two concurrent senders both read "nothing outstanding" and both ping. The lock spans the terminal I/O rather than reserving the marker up front: if a winner's ping fails, the loser re-checks after that outcome is known and pings for real, instead of skipping behind a prompt that never landed.
 
@@ -203,7 +203,7 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 
 - `instruction` becomes the subagent's first user message, auto-submitted on startup
 - The subagent has **no memory of your conversation** — include any relevant context directly in `instruction` if it matters
-- User brokers the creation: the monitor pops a widget showing the caller runtime, your instruction, a suggested name (your `name` arg, or random if unset/taken), and a Claude/Codex selector defaulted to the caller's runtime. User accepts, edits, chooses the child runtime, or rejects
+- User brokers the creation: the monitor pops a widget showing the caller runtime, your instruction, a suggested name (your `name` arg, or random if unset/taken), and a Claude/Codex/pi selector defaulted to the caller's runtime. User accepts, edits, chooses the child runtime, or rejects
 - Blocking, **no timeout** — the request waits until the user resolves it. Returns `"Spawned agent with name '<chosen>'"` on acceptance; on reject returns an error and no subagent is created. The caller can interrupt the wait (Esc) to cancel the request. Orphaned requests (caller hard-killed without cleaning up) are reaped by a caller-liveness check, not a timeout.
 - **Rejections can carry a message.** The approval widget has an optional reason box; Esc (or Enter from that box) rejects and quotes what's typed there back to the requesting agent — `Spawn request rejected by the user with the message "…"`. Without it the agent only learns "rejected" and its usual next move is to ask again. A bare Esc omits the clause entirely (`Spawn request rejected by the user`), so an unexplained rejection reads no differently than it always did.
 - Concurrent spawn requests from multiple agents queue in the monitor — one modal at a time, FIFO
@@ -223,9 +223,11 @@ When to pick which:
 | "I sent a message and want to wait for the reply" | `monitor_inbox` then `check_inbox` |
 | "Did a reply land while I was working?" | `check_inbox` |
 
-### Frontier-coherent compaction
+### Frontier-coherent compaction (Claude only)
 
-When a conversation grows large, frontier-coherent compaction shrinks it **whole-session and user-driven**. You pick a total token budget; the plugin distributes it proportionally across every turn, expands each turn's pre-built summary tree to its allocated share, and atomically replaces the live JSONL with the compacted version. The original transcript is preserved in a parallel "full" JSONL that the live one is mirrored from on every hook fire.
+Codex and pi use their native compaction. The monitor's `c`, `b`, and `v` actions are intentionally unavailable for those rows.
+
+When a Claude conversation grows large, frontier-coherent compaction shrinks it **whole-session and user-driven**. You pick a total token budget; the plugin distributes it proportionally across every turn, expands each turn's pre-built summary tree to its allocated share, and atomically replaces the live JSONL with the compacted version. The original transcript is preserved in a parallel "full" JSONL that the live one is mirrored from on every hook fire.
 
 **Two-JSONL architecture.** Every session has two on-disk JSONLs:
 

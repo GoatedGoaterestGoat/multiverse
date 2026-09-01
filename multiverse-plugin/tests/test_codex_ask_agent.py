@@ -485,7 +485,7 @@ class CodexAskAgentMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "MULTIVERSE_CODEX_BIN": str(fake_runtime),
                 "ASK_TEST_LOG": str(ask_log),
                 "ASK_TEST_MODE": "success",
-                "UV_CACHE_DIR": "/private/tmp/multiverse-uv-cache",
+                "UV_CACHE_DIR": "/tmp/multiverse-uv-cache",
             }
             params = StdioServerParameters(
                 command=str(mcp_server), env=env, cwd=str(repo_root)

@@ -215,7 +215,7 @@ class CodexPluginMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 "MULTIVERSE_SESSION_CWD": cwd,
                 "MULTIVERSE_SESSION_NAME": name,
                 "MULTIVERSE_PLUGIN_ROOT": str(wrapper_root),
-                "UV_CACHE_DIR": "/private/tmp/multiverse-uv-cache",
+                "UV_CACHE_DIR": "/tmp/multiverse-uv-cache",
             }
             params = StdioServerParameters(
                 command=str(mcp_server),

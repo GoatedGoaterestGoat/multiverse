@@ -5,8 +5,8 @@ main conversation.
 
 Claude targets use ``claude -p --resume <uuid> --fork-session --session-id
 <fresh-uuid>``. Codex targets use the app-server protocol to ``thread/fork``
-the existing thread with ``ephemeral: true``, then run exactly one
-``turn/start``. Both paths leave the origin session untouched.
+the existing thread with ``ephemeral: true``. pi targets use ``pi --fork``
+with a scratch session directory. All paths leave the origin session untouched.
 
 Cache behavior: for live sessions, the subprocess rebuilds
 ``systemPrompt``/``userContext``/``systemContext`` from scratch. If the build
@@ -28,7 +28,9 @@ import os
 import queue
 import re
 import signal
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid as _uuid
@@ -38,6 +40,7 @@ from typing import Callable, Optional
 
 from . import forks
 from .paths import claude_projects_dir, multiverse_dir
+from .pi_transcript import pi_session_path
 
 
 CLAUDE_PROJECTS_DIR = claude_projects_dir()
@@ -98,6 +101,7 @@ class AskResult:
 
 
 _CODEX_RUNTIME = "codex"
+_PI_RUNTIME = "pi"
 _CODEX_PERMISSION_PROFILE = "multiverse-side-question"
 _CODEX_DISABLED_FEATURES = (
     "apps",
@@ -246,7 +250,7 @@ def _encode_cwd(cwd: str) -> str:
     return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
-def _env_without_session_vars() -> dict[str, str]:
+def _env_without_session_vars(*, drop_keys: tuple[str, ...] = ()) -> dict[str, str]:
     """Return ``os.environ`` minus session-scoped ``MULTIVERSE_*`` vars.
 
     Why this matters: when ``ask_agent`` is called by a running multiverse
@@ -267,8 +271,17 @@ def _env_without_session_vars() -> dict[str, str]:
 
     ``MULTIVERSE_PLUGIN_ROOT`` is read by the caller BEFORE calling this,
     so the ``--plugin-dir`` CLI flag is still correctly populated.
+
+    ``drop_keys`` strips additional runtime-owned session variables. The pi
+    fork drops only ``PI_CODING_AGENT_SESSION_DIR``: its explicit scratch
+    directory must win, while ``PI_CODING_AGENT_DIR`` must remain available
+    because it carries the target runtime's settings and credentials.
     """
-    return {k: v for k, v in os.environ.items() if not k.startswith("MULTIVERSE_")}
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("MULTIVERSE_") and k not in drop_keys
+    }
 
 
 def _response_result(message: dict, request_id: int) -> dict:
@@ -587,6 +600,76 @@ def _ask_one_claude(
     )
 
 
+def _ask_one_pi(
+    target: AskTarget,
+    question: str,
+    timeout: float,
+) -> AskResult:
+    """Run a tool-less side question against a scratch fork of a pi session."""
+    start = time.monotonic()
+    fork_uuid = str(_uuid.uuid4())
+    response: Optional[str] = None
+    err: Optional[str] = None
+    scratch = tempfile.mkdtemp(prefix=f"mv-pi-ask-{fork_uuid[:8]}-")
+    try:
+        source = pi_session_path(target.native_session_id or "", target.cwd)
+        if source is None:
+            err = f"pi session '{target.native_session_id or '?'}' was not found"
+        else:
+            cmd = [
+                os.environ.get("MULTIVERSE_PI_BIN") or "pi",
+                "--fork", str(source),
+                "--session-dir", scratch,
+                "--no-extensions",
+                "--no-tools",
+                "--print",
+                SIDE_QUESTION_WRAPPER + question,
+            ]
+            result = subprocess.run(
+                cmd,
+                cwd=target.cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                # Do not let an inherited session-dir override the scratch
+                # fork location. Keep PI_CODING_AGENT_DIR, though: it carries
+                # the target runtime's settings and credentials.
+                env=_env_without_session_vars(
+                    drop_keys=("PI_CODING_AGENT_SESSION_DIR",)
+                ),
+            )
+            if result.returncode != 0:
+                err = (
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or f"pi exited {result.returncode}"
+                )[:400]
+            else:
+                response = result.stdout.strip() or None
+                if response is None:
+                    err = "empty response"
+    except subprocess.TimeoutExpired:
+        err = f"timed out after {timeout:.0f}s"
+    except FileNotFoundError:
+        err = "pi CLI not found"
+    except Exception as exc:  # noqa: BLE001 — surface transport failures
+        err = f"subprocess error: {exc}"[:400]
+    finally:
+        # The fork is deliberately outside pi's configured session roots (both
+        # by --session-dir and by stripping its session-dir override above), so it can
+        # never surface as a dormant agent. No global fork registry is needed
+        # and an empty artifact can never become a dangerous Path('.').
+        shutil.rmtree(scratch, ignore_errors=True)
+
+    return AskResult(
+        name=target.name,
+        response=response,
+        error=err,
+        fork_uuid=fork_uuid,
+        elapsed=time.monotonic() - start,
+    )
+
+
 def _ask_one(
     target: AskTarget,
     question: str,
@@ -596,6 +679,8 @@ def _ask_one(
 ) -> AskResult:
     if target.runtime == _CODEX_RUNTIME:
         return _ask_one_codex(target, question, timeout)
+    if target.runtime == _PI_RUNTIME:
+        return _ask_one_pi(target, question, timeout)
     return _ask_one_claude(target, question, plugin_root, timeout, register_fork)
 
 

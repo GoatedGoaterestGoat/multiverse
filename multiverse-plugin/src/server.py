@@ -36,6 +36,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
+    RUNTIME_PI,
     all_session_names_in_cwd,
     create_session,
     find_agent_by_name,
@@ -127,10 +128,13 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
     """
     env_name = os.environ.get("MULTIVERSE_SESSION_NAME")
     env_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
-    # The shared bg-pty-host issue is specific to Claude. Each managed Codex
-    # session starts its own MCP server with wrapper-owned identity variables,
-    # so Claude transcript discovery could only misidentify a Codex caller.
-    if os.environ.get("MULTIVERSE_RUNTIME") == RUNTIME_CODEX:
+    # The shared bg-pty-host issue is specific to Claude. Every other managed
+    # runtime starts its own MCP server with wrapper-owned identity variables,
+    # so Claude transcript discovery could only misidentify a non-Claude
+    # caller — it would hand back whichever Claude agent happened to write a
+    # jsonl row in the last 10s. Unset means Claude, matching the default used
+    # everywhere else in this module.
+    if os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE) != RUNTIME_CLAUDE:
         return env_name, env_cwd
     try:
         cfg = Path(
@@ -486,11 +490,12 @@ def _auto_resume(target, cwd: str) -> None:
                 "inbox"
             )
         kill_session(target.session)
-    runtime_args = (
-        ["--resume", session_id]
-        if target.runtime == RUNTIME_CLAUDE
-        else ["resume", session_id]
-    )
+    if target.runtime == RUNTIME_CLAUDE:
+        runtime_args = ["--resume", session_id]
+    elif target.runtime == RUNTIME_CODEX:
+        runtime_args = ["resume", session_id]
+    else:
+        runtime_args = ["--session", session_id]
     create_session(
         cwd=cwd,
         claude_args=runtime_args,
@@ -509,6 +514,10 @@ def _queued_next_step(runtime: str, *, dormant: bool = False) -> str:
                 "the Codex wrapper will then prompt it to call check_inbox."
             )
         return "It will remain queued until Codex calls check_inbox."
+    if runtime == RUNTIME_PI:
+        if dormant:
+            return "The pi extension will deliver it when the session resumes."
+        return "The pi extension will deliver it directly from the durable inbox."
     if dormant:
         return "It will be delivered when the user next resumes that session."
     return "It will be delivered on the recipient's next turn."
@@ -786,7 +795,7 @@ def message_agent(
         sender_cwd="" if in_own_workspace else self_cwd_abs,
     )
     caller_runtime = os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE)
-    if caller_runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX):
+    if caller_runtime not in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI):
         caller_runtime = RUNTIME_CLAUDE
 
     log_message_sent(
@@ -921,6 +930,18 @@ def message_agent(
         )
 
     if status in ("idle", "working"):
+        if target.runtime == RUNTIME_PI:
+            # pi's extension owns live delivery through its in-process
+            # sendMessage API. Typing into its tmux pane would be both less
+            # reliable and liable to corrupt a user's draft. The extension
+            # polls while idle and drains once a working turn settles.
+            log_route("pi_extension_delivery")
+            timing = "within a couple of seconds" if status == "idle" else "when its current turn settles"
+            return (
+                f"Message queued for '{target_name}'. Its pi extension will "
+                f"deliver it {timing}." + reply_hint
+            )
+
         # Serialized per recipient across sender processes: the check below,
         # the ping, and the resulting mark must be one indivisible step, or two
         # concurrent senders both read "nothing outstanding" and both ping.
@@ -1032,7 +1053,8 @@ def message_agent(
 def check_inbox() -> str:
     """Read pending inbox messages now, without waiting for a hook to fire.
 
-    Codex sessions use this as their explicit inbox-delivery path. Call it
+    Codex sessions use this as their explicit inbox-delivery path; pi also
+    exposes it through its extension. Call it
     when a push notification or resume prompt asks you to check your inbox,
     after ``monitor_inbox`` reports a message, or whenever you suspect a
     reply arrived during a long-running turn. Claude sessions can use the
@@ -1181,7 +1203,7 @@ def ask_agent(
     ``list_agents(working_directory=...)`` to discover targets there.
 
     Mechanism: spawns a forked, one-shot subprocess against the target's
-    native Claude or Codex session (same approach as the monitor's ``a``
+    native Claude, Codex, or pi session (same approach as the monitor's ``a``
     keybinding, but for a single agent). The target's main session is NOT
     involved — no notification, no entry in their conversation history.
     The question is purely sidechannel.
@@ -1276,8 +1298,8 @@ async def spawn_agent(
     sees what you put here.
 
     User flow: a widget opens in the multiverse monitor showing your
-    instruction, a suggested name, and a Claude/Codex runtime selector. The
-    user can accept, edit the name, choose either runtime, or reject. This
+    instruction, a suggested name, and a Claude/Codex/pi runtime selector. The
+    user can accept, edit the name, choose a runtime, or reject. This
     tool blocks until they respond — there is NO timeout, so the request
     waits however long the user needs. (You can interrupt the wait with Esc
     to give up; that cancels the request and no subagent is created.) If

@@ -37,6 +37,9 @@ class MultiverseSetupTests(unittest.TestCase):
             "CODEX_HOME",
             "MULTIVERSE_CODEX_BIN",
             "MULTIVERSE_CODEX_PLUGIN_ROOT",
+            "MULTIVERSE_PI_BIN",
+            "PI_CODING_AGENT_DIR",
+            "PI_CODING_AGENT_SESSION_DIR",
             "MULTIVERSE_ROOT",
         ):
             env.pop(name, None)
@@ -47,6 +50,7 @@ class MultiverseSetupTests(unittest.TestCase):
                 "MULTIVERSE_CODEX_PLUGIN_ROOT": str(
                     self.codex_plugin_root
                 ),
+                "MULTIVERSE_SKIP_LOCAL_CONFIG": "1",
                 "PATH": f"{self.fake_bin}:/usr/bin:/bin",
             }
         )
@@ -144,6 +148,36 @@ class MultiverseSetupTests(unittest.TestCase):
         )
         self.assertNotIn(str(codex_home), refreshed_snapshot)
 
+    def test_setup_reports_and_snapshots_external_pi_cli(self) -> None:
+        state_root = self.root / "pi-state"
+        pi_sessions = self.root / "pi-sessions"
+        pi_sessions.mkdir()
+        self._write_executable(
+            "pi-custom",
+            "#!/bin/sh\nprintf 'pi 1.2.3\\n'\n",
+        )
+        env = self._environment(state_root)
+        env.update(
+            {
+                "MULTIVERSE_PI_BIN": "pi-custom",
+                "PI_CODING_AGENT_SESSION_DIR": str(pi_sessions),
+            }
+        )
+
+        completed = self._run_setup(env)
+        output = completed.stdout + completed.stderr
+
+        self.assertEqual(completed.returncode, 0, output)
+        self.assertIn(
+            f"pi CLI OK: {self.fake_bin / 'pi-custom'} (pi 1.2.3)", output
+        )
+        self.assertIn("pi extension OK", output)
+        snapshot = (state_root / "pi-env.sh").read_text()
+        self.assertIn("export MULTIVERSE_PI_BIN=pi-custom", snapshot)
+        self.assertIn(
+            f"export PI_CODING_AGENT_SESSION_DIR={pi_sessions}", snapshot
+        )
+
     def test_setup_reports_optional_codex_failures_without_failing(self) -> None:
         state_root = self.root / "missing-state"
         env = self._environment(state_root)
@@ -162,7 +196,7 @@ class MultiverseSetupTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, output)
         self.assertIn("Codex CLI not found: 'missing-codex'", output)
         self.assertIn("Codex plugin bundle incomplete", output)
-        self.assertIn("Claude sessions remain available", output)
+        self.assertIn("Other installed runtimes remain available", output)
 
 
 if __name__ == "__main__":

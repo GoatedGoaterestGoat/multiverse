@@ -48,6 +48,33 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
                 sessions.RUNTIME_CODEX,
             )
 
+    def test_pi_spawn_activity_emits_secondbrain_events(self) -> None:
+        with tempfile.TemporaryDirectory() as raw, patch.object(
+            spawn_requests, "SPAWN_REQUESTS_DIR", Path(raw)
+        ), patch.object(
+            spawn_requests.sb_notify, "record_spawn_request"
+        ) as record_request, patch.object(
+            spawn_requests.sb_notify, "record_spawn_decision"
+        ) as record_decision:
+            spawn_requests.write_spawn_request(
+                req_id="pi-request",
+                from_name="pi-caller",
+                cwd="/workspace",
+                instruction="Do the work.",
+                default_name="child",
+                caller_tmux_session="multiverse-pi",
+                caller_runtime=sessions.RUNTIME_PI,
+            )
+            self.assertTrue(
+                spawn_requests.write_resolution(
+                    "pi-request", status="accepted", name="child",
+                    runtime=sessions.RUNTIME_PI,
+                )
+            )
+
+        record_request.assert_called_once()
+        record_decision.assert_called_once()
+
     def test_dead_caller_request_is_deleted_as_an_orphan(self) -> None:
         with tempfile.TemporaryDirectory() as raw, patch.object(
             spawn_requests, "SPAWN_REQUESTS_DIR", Path(raw)
