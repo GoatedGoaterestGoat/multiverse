@@ -16,6 +16,7 @@ from src import (
     ask_agents,
     atomic_files,
     inbox,
+    pi_secondbrain_transcript,
     pi_transcript,
     sb_connector,
     sb_notify,
@@ -892,6 +893,212 @@ class InboxClaimReleaseTests(unittest.TestCase):
         self.assertEqual(out.getvalue().strip(), "1")
         self.assertEqual(inbox.pending_inbox_count(self.cwd, self.name), 1)
 
+
+class ClaudeCallerIdentityTests(unittest.TestCase):
+    """``_resolve_self_identity``'s transcript lookup, which until now could not
+    run at all: ``server.py`` referenced ``json`` at four sites without importing
+    it, and the resulting NameError was swallowed by the function's own trailing
+    ``except Exception`` env-var fallback. Every caller silently got the env
+    vars, so the bg-pty-host correction the function exists for never happened.
+    """
+
+    def _fixture(self, root: Path, transcripts: list[tuple[str, str]]) -> dict[str, str]:
+        """``transcripts`` is [(jsonl stem, sessionId)], written oldest first."""
+        projects = root / "claude" / "projects" / "-slug"
+        projects.mkdir(parents=True)
+        for index, (stem, session_id) in enumerate(transcripts):
+            path = projects / f"{stem}.jsonl"
+            path.write_text(json.dumps({"sessionId": session_id, "type": "user"}) + "\n")
+            # Space the mtimes so "freshest" is deterministic rather than
+            # dependent on filesystem timestamp granularity.
+            stamp = time.time() - (len(transcripts) - index)
+            os.utime(path, (stamp, stamp))
+        sess = root / "mv" / "sessions" / "s1"
+        sess.mkdir(parents=True)
+        (sess / "claude_uuid").write_text("sid-mine\n")
+        (sess / "meta.json").write_text(
+            json.dumps({"name": "real-name", "cwd": "/real/workspace"})
+        )
+        return {
+            "CLAUDE_CONFIG_DIR": str(root / "claude"),
+            "MULTIVERSE_ROOT": str(root / "mv"),
+            "MULTIVERSE_SESSION_NAME": "stale-env-name",
+            "MULTIVERSE_SESSION_CWD": "/stale/env/workspace",
+        }
+
+    def test_transcript_lookup_overrides_polluted_env_vars(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env = self._fixture(Path(raw), [("mine", "sid-mine")])
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("MULTIVERSE_RUNTIME", None)
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("real-name", "/real/workspace"),
+                )
+
+    def test_a_photo_finish_between_agents_falls_back_to_env(self) -> None:
+        """Enabling the lookup must not enable a coin flip. Several Claude
+        agents are live at once in a multiverse workspace; if another one writes
+        in the same instant, "freshest wins" would handoff THIS caller another
+        agent's name and cwd — stamping its outgoing messages and draining its
+        inbox. Too close to call means don't call it."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env = self._fixture(root, [("mine", "sid-mine")])
+            other = root / "claude" / "projects" / "-slug" / "other.jsonl"
+            other.write_text(json.dumps({"sessionId": "sid-other"}) + "\n")
+            mine = root / "claude" / "projects" / "-slug" / "mine.jsonl"
+            now = time.time()
+            os.utime(mine, (now, now))
+            os.utime(other, (now - 0.01, now - 0.01))
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("MULTIVERSE_RUNTIME", None)
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("stale-env-name", "/stale/env/workspace"),
+                )
+
+    def test_a_clear_winner_is_still_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env = self._fixture(root, [("mine", "sid-mine")])
+            other = root / "claude" / "projects" / "-slug" / "other.jsonl"
+            other.write_text(json.dumps({"sessionId": "sid-other"}) + "\n")
+            mine = root / "claude" / "projects" / "-slug" / "mine.jsonl"
+            now = time.time()
+            os.utime(mine, (now, now))
+            os.utime(other, (now - 5, now - 5))
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("MULTIVERSE_RUNTIME", None)
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("real-name", "/real/workspace"),
+                )
+
+    def test_non_claude_callers_are_still_short_circuited(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            env = self._fixture(Path(raw), [("mine", "sid-mine")])
+            env["MULTIVERSE_RUNTIME"] = sessions.RUNTIME_PI
+            with patch.dict(os.environ, env, clear=False):
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("stale-env-name", "/stale/env/workspace"),
+                )
+
+
+class PiTranscriptIncrementalParseTests(unittest.TestCase):
+    """pi's transcript JSONL is append-only, so a SecondBrain peek should cost
+    the new tail, not the whole session."""
+
+    def _row(self, entry_id: str, parent: str | None, text: str) -> str:
+        return json.dumps(
+            {
+                "id": entry_id,
+                "parentId": parent,
+                "type": "message",
+                "message": {"role": "user", "content": text},
+            }
+        ) + "\n"
+
+    def setUp(self) -> None:
+        pi_secondbrain_transcript._PARSE_CACHE.clear()
+
+    def test_only_new_bytes_are_parsed_on_a_second_peek(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "s.jsonl"
+            path.write_text(
+                json.dumps({"type": "session", "id": "pid-1"}) + "\n"
+                + self._row("e1", None, "first")
+            )
+            out, cursor = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", None
+            )
+            self.assertIn("first", out)
+            self.assertEqual(cursor["entry_id"], "e1")
+
+            calls: list[bytes] = []
+            real = json.loads
+
+            def counting(payload, *a, **kw):
+                calls.append(payload)
+                return real(payload, *a, **kw)
+
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(self._row("e2", "e1", "second"))
+            with patch.object(json, "loads", counting):
+                out2, cursor2 = pi_secondbrain_transcript.peek_partial_transcript(
+                    path, "pid-1", cursor
+                )
+
+            self.assertIn("second", out2)
+            self.assertNotIn("first", out2)
+            self.assertEqual(cursor2["entry_id"], "e2")
+            self.assertEqual(
+                len(calls), 1,
+                f"re-parsed rows it had already seen: {calls}",
+            )
+
+    def test_an_unchanged_file_reparses_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "s.jsonl"
+            path.write_text(
+                json.dumps({"type": "session", "id": "pid-1"}) + "\n"
+                + self._row("e1", None, "first")
+            )
+            _, cursor = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", None
+            )
+            with patch.object(json, "loads", side_effect=AssertionError("re-parsed")):
+                out, _ = pi_secondbrain_transcript.peek_partial_transcript(
+                    path, "pid-1", cursor
+                )
+            self.assertEqual(out, "")
+
+    def test_a_half_written_final_line_is_picked_up_next_time(self) -> None:
+        """The offset only advances past a newline, so a peek that races a
+        partial append must re-read that line rather than drop it."""
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "s.jsonl"
+            path.write_text(
+                json.dumps({"type": "session", "id": "pid-1"}) + "\n"
+                + self._row("e1", None, "first")
+            )
+            _, cursor = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", None
+            )
+            partial = self._row("e2", "e1", "second")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(partial[: len(partial) // 2])
+            out, mid = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", cursor
+            )
+            self.assertEqual(out, "", "a torn line must not be emitted")
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(partial[len(partial) // 2 :])
+            out2, _ = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", mid
+            )
+            self.assertIn("second", out2)
+
+    def test_a_replaced_file_is_fully_reparsed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "s.jsonl"
+            path.write_text(
+                json.dumps({"type": "session", "id": "pid-1"}) + "\n"
+                + self._row("e1", None, "first")
+            )
+            pi_secondbrain_transcript.peek_partial_transcript(path, "pid-1", None)
+            replacement = Path(raw) / "replacement.jsonl"
+            replacement.write_text(
+                json.dumps({"type": "session", "id": "pid-1"}) + "\n"
+                + self._row("z1", None, "rewritten")
+            )
+            os.replace(replacement, path)
+            out, _ = pi_secondbrain_transcript.peek_partial_transcript(
+                path, "pid-1", None
+            )
+            self.assertIn("rewritten", out)
+            self.assertNotIn("first", out)
 
 if __name__ == "__main__":
     unittest.main()

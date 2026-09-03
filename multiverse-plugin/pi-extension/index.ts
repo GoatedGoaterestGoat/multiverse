@@ -54,6 +54,42 @@ const SESSION_CWD = process.env.MULTIVERSE_SESSION_CWD ?? "";
 /** True when the monitor spawned us and the shared state dir is addressable. */
 const WRAPPED = Boolean(PLUGIN_ROOT && SESSION_NAME && SESSION_CWD);
 
+/** ``~/.multiverse`` as src/paths.py resolves it, or "" if it can't be derived. */
+function multiverseDir(): string {
+	const explicit = process.env.MULTIVERSE_ROOT;
+	if (explicit) return explicit;
+	const status = process.env.MULTIVERSE_STATUS;
+	// .../.multiverse/sessions/<id>/status.json → .../.multiverse/
+	if (status) return join(status, "..", "..", "..");
+	const home = process.env.HOME;
+	return home ? join(home, ".multiverse") : "";
+}
+
+/**
+ * Whether a SecondBrain signal could be recorded at all.
+ *
+ * Every `record_*_signal` in sb_notify is gated on this device being enrolled
+ * and the workspace having connected before; with no `state.json` the recorder
+ * is a guaranteed no-op. Checking that here turns two Python interpreter
+ * startups per turn — one for the prompt, one for the response, each importing
+ * the sb_notify chain — into one `stat` for every session in a workspace that
+ * has never used SecondBrain, which is the common case.
+ *
+ * Deliberately re-checked per call rather than cached: a user can enrol partway
+ * through a session, and a stale `false` would silently drop their signals. The
+ * check is intentionally coarse — it only skips work that provably cannot have
+ * an effect, and leaves the authoritative seeded/exposed gate in Python.
+ */
+function secondBrainMayRecord(): boolean {
+	const root = multiverseDir();
+	if (!root) return false;
+	try {
+		return existsSync(join(root, "secondbrain", "state.json"));
+	} catch {
+		return false;
+	}
+}
+
 /** Default ceiling for a bridge call. Long-running commands opt out. */
 const DEFAULT_TIMEOUT_MS = 120_000;
 
@@ -218,7 +254,7 @@ export default function multiverse(pi: ExtensionAPI) {
 	// queue as the Claude/Codex hooks. This includes prompts injected by the
 	// SecondBrain queue below: sendUserMessage emits input with source=extension.
 	pi.on("input", async (event) => {
-		if (!WRAPPED || !event.text) return;
+		if (!WRAPPED || !event.text || !secondBrainMayRecord()) return;
 		await mvctl(
 			exec,
 			[
@@ -236,7 +272,7 @@ export default function multiverse(pi: ExtensionAPI) {
 
 	pi.on("agent_settled", async (_event, ctx) => {
 		setStatus("idle");
-		if (WRAPPED) {
+		if (WRAPPED && secondBrainMayRecord()) {
 			// Record the completed response before starting any queued continuation,
 			// so SecondBrain's transcript cursor cannot fold two turns together.
 			await mvctl(exec, ["secondbrain-response"], { timeout: 15_000 });

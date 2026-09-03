@@ -14,6 +14,16 @@ class MixedRuntimeListAgentsTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.cwd = str(Path(self.temp_dir.name).resolve())
+        # Isolate Claude transcript discovery. server._resolve_self_identity
+        # scans CLAUDE_CONFIG_DIR/projects to correct bg-pty-host-frozen
+        # identity vars; left unset it reads the real ~/.claude, and any agent
+        # live on the developer's machine while the suite runs supplies a
+        # fresher transcript than this fixture, so the caller stops being
+        # recognised as itself. An empty config dir keeps the env vars
+        # authoritative, which is what these formatting assertions are about.
+        self.claude_config = tempfile.TemporaryDirectory()
+        self.addCleanup(self.claude_config.cleanup)
+        (Path(self.claude_config.name) / "projects").mkdir()
         self.agents = [
             sessions.DashboardRow(
                 name="alpha",
@@ -39,6 +49,7 @@ class MixedRuntimeListAgentsTests(unittest.TestCase):
                     "MULTIVERSE_SESSION_CWD": self.cwd,
                     "MULTIVERSE_SESSION_NAME": name,
                     "MULTIVERSE_RUNTIME": runtime,
+                    "CLAUDE_CONFIG_DIR": self.claude_config.name,
                 },
                 clear=False,
             ),

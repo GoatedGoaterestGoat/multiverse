@@ -21,6 +21,7 @@ Hosts the agent-facing tools for the multiverse plugin:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -100,6 +101,10 @@ _SPAWN_PROGRESS_INTERVAL = 10.0
 # rather than busy. Mirrors set-status.sh's JSON shape.
 _LISTENING_STATUS = "listening"
 
+#: Minimum mtime gap between the freshest transcript and the runner-up before
+#: ``_resolve_self_identity`` will trust the freshest one as its own.
+_IDENTITY_RACE_MARGIN_S = 0.25
+
 
 def _resolve_self_identity() -> tuple[str | None, str | None]:
     """Return ``(name, cwd)`` of the multiverse session this tool call
@@ -136,6 +141,14 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
     # everywhere else in this module.
     if os.environ.get("MULTIVERSE_RUNTIME", RUNTIME_CLAUDE) != RUNTIME_CLAUDE:
         return env_name, env_cwd
+    # Nothing to repair unless we are inside a managed session. The bg-pty-host
+    # failure is a session whose identity vars are present but FROZEN from
+    # another session — never one with no identity at all. An unwrapped MCP
+    # server has no claim on whichever agent happens to be writing right now,
+    # and inventing one for it is the same wrong-identity hazard this guard
+    # exists to avoid.
+    if not env_name or not env_cwd:
+        return env_name, env_cwd
     try:
         cfg = Path(
             os.environ.get("CLAUDE_CONFIG_DIR")
@@ -148,7 +161,7 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
         # to disk before dispatch to the MCP server, so at call time
         # OUR jsonl should have mtime within a second or two of now.
         now = time.time()
-        best: tuple[float, Path] | None = None
+        recent: list[tuple[float, Path]] = []
         for pd in projects.iterdir():
             if not pd.is_dir():
                 continue
@@ -162,15 +175,26 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
                 except OSError:
                     continue
                 # 10s window is generous: it comfortably includes the
-                # write-then-dispatch latency and any small clock skew,
-                # while still letting concurrent-tool-call races (where
-                # two sessions both have recent-mtime jsonls) resolve
-                # to the freshest one.
+                # write-then-dispatch latency and any small clock skew.
                 if now - mt > 10:
                     continue
-                if best is None or mt > best[0]:
-                    best = (mt, j)
-        if best is None:
+                recent.append((mt, j))
+        if not recent:
+            return env_name, env_cwd
+        recent.sort(key=lambda item: item[0], reverse=True)
+        best = recent[0]
+        # Refuse to guess when two agents raced. Our own tool_use row is
+        # written immediately before this call dispatches, so the freshest
+        # jsonl is normally ours by a clear margin — but in a multiverse
+        # workspace several Claude agents are live at once, and if another
+        # one wrote inside the same instant "freshest wins" is a coin flip
+        # that hands this caller a DIFFERENT agent's name and cwd. Wrong
+        # identity is far worse than no correction: it stamps outgoing
+        # messages with someone else's name and drains their inbox. When
+        # the top two are too close to separate, fall back to the env vars,
+        # which are correct for every session except the bg-pty-host case
+        # this lookup exists to repair.
+        if len(recent) > 1 and best[0] - recent[1][0] < _IDENTITY_RACE_MARGIN_S:
             return env_name, env_cwd
         # Read the first row's sessionId (sessionId is stable per file,
         # so any row works; first is cheapest).

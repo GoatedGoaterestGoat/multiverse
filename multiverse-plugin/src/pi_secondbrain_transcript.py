@@ -16,35 +16,104 @@ from typing import Any
 _ARG_TRUNC = 240
 
 
-def _load_active_branch(path: Path) -> tuple[str | None, list[dict], dict[str, str | None]]:
-    session_id: str | None = None
-    entries: dict[str, dict] = {}
-    order: list[str] = []
-    try:
-        with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    row = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                if row.get("type") == "session":
-                    session_id = str(row.get("id") or "") or session_id
-                    continue
-                entry_id = row.get("id")
-                if not isinstance(entry_id, str) or not entry_id:
-                    continue
-                entries[entry_id] = row
-                order.append(entry_id)
-    except OSError:
-        return session_id, [], {}
+#: Parsed-transcript cache, keyed by path. pi's JSONL is append-only, so a poll
+#: that finds no new bytes needs no work at all, and one that finds new bytes
+#: only has to parse those. Without this, every SecondBrain peek re-read and
+#: re-``json.loads``-ed the entire session — cost scaling with total history
+#: rather than with the new tail, on a path SB polls.
+_PARSE_CACHE: dict[str, dict] = {}
 
-    parent_of = {
-        entry_id: (
-            row.get("parentId") if isinstance(row.get("parentId"), str) else None
-        )
-        for entry_id, row in entries.items()
-    }
+
+def _parse_rows(blob: bytes, state: dict) -> None:
+    """Fold complete JSONL lines from ``blob`` into ``state`` in place."""
+    for raw in blob.split(b"\n"):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, TypeError):
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "session":
+            state["session_id"] = str(row.get("id") or "") or state["session_id"]
+            continue
+        entry_id = row.get("id")
+        if not isinstance(entry_id, str) or not entry_id:
+            continue
+        if entry_id not in state["entries"]:
+            state["order"].append(entry_id)
+        state["entries"][entry_id] = row
+        parent = row.get("parentId")
+        state["parent_of"][entry_id] = parent if isinstance(parent, str) else None
+
+
+def _read_state(path: Path) -> dict | None:
+    """Return the cached parse for ``path``, extending it with any new bytes.
+
+    The offset only ever advances past a trailing newline, so a peek that races
+    a half-flushed append re-reads that partial line next time instead of
+    dropping it. A shrunk file, or a different inode at the same path (resume
+    writing a fresh transcript), forces a full re-parse.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+
+    identity = (st.st_dev, st.st_ino)
+    state = _PARSE_CACHE.get(str(path))
+    if (
+        state is None
+        or state["identity"] != identity
+        or st.st_size < state["offset"]
+    ):
+        state = {
+            "identity": identity,
+            "offset": 0,
+            "session_id": None,
+            "entries": {},
+            "order": [],
+            "parent_of": {},
+            "branch": None,
+        }
+        _PARSE_CACHE[str(path)] = state
+
+    if st.st_size == state["offset"]:
+        return state
+
+    try:
+        with path.open("rb") as handle:
+            handle.seek(state["offset"])
+            chunk = handle.read()
+    except OSError:
+        return None
+
+    cut = chunk.rfind(b"\n")
+    if cut == -1:
+        # Nothing but a partial line so far; leave the offset where it is.
+        return state
+    complete = chunk[: cut + 1]
+    _parse_rows(complete, state)
+    state["offset"] += len(complete)
+    state["branch"] = None  # new rows can move the tip
+    return state
+
+
+def _load_active_branch(path: Path) -> tuple[str | None, list[dict], dict[str, str | None]]:
+    state = _read_state(path)
+    if state is None:
+        return None, [], {}
+
+    session_id = state["session_id"]
+    entries = state["entries"]
+    order = state["order"]
+    parent_of = state["parent_of"]
+
+    if state["branch"] is not None:
+        return session_id, state["branch"], parent_of
     if not order:
+        state["branch"] = []
         return session_id, [], parent_of
 
     active_ids: list[str] = []
@@ -58,7 +127,8 @@ def _load_active_branch(path: Path) -> tuple[str | None, list[dict], dict[str, s
         active_ids.append(current)
         current = parent_of.get(current)
     active_ids.reverse()
-    return session_id, [entries[entry_id] for entry_id in active_ids], parent_of
+    state["branch"] = [entries[entry_id] for entry_id in active_ids]
+    return session_id, state["branch"], parent_of
 
 
 def _content_text(content: Any) -> str:
