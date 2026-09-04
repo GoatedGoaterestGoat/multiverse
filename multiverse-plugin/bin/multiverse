@@ -121,6 +121,12 @@ export MULTIVERSE_CLAUDE_MODEL="${MULTIVERSE_CLAUDE_MODEL:-opus[1m]}"
 # because available model aliases can differ by account and installation.
 export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-5.6-sol}"
 
+# Reasoning effort for interactive multiverse-started CODEX sessions (new +
+# resumed). The Codex runner applies this as a per-launch CLI config override,
+# so project and user config cannot silently lower the effort. Override it in
+# bin/multiverse.local when a machine needs a different tradeoff.
+export MULTIVERSE_CODEX_REASONING_EFFORT="${MULTIVERSE_CODEX_REASONING_EFFORT:-xhigh}"
+
 # Extra env var NAMES (space-separated) to forward into every tmux-spawned
 # session, on top of the fixed base set in sessions.py's create_session.
 # Lets a machine propagate environment-specific auth/config vars (e.g. a

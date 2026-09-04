@@ -37,6 +37,7 @@ class MultiverseSetupTests(unittest.TestCase):
             "CODEX_HOME",
             "MULTIVERSE_CODEX_BIN",
             "MULTIVERSE_CODEX_PLUGIN_ROOT",
+            "MULTIVERSE_CODEX_REASONING_EFFORT",
             "MULTIVERSE_PI_BIN",
             "PI_CODING_AGENT_DIR",
             "PI_CODING_AGENT_SESSION_DIR",

@@ -3334,7 +3334,23 @@ class MonitorApp(App):
         self.title = "Multiverse Monitor"
         self.sub_title = f"cwd: {self.monitor_cwd}"
         self.refresh_sessions()
+        self._recover_ending_sessions()
         self.set_interval(1.0, self.refresh_sessions)
+
+    def _recover_ending_sessions(self) -> None:
+        """Resume teardown requests left behind by an exited dashboard."""
+        for session in self.sessions:
+            if (
+                session.status == "ending"
+                and session.ending_marker_path.is_file()
+                and (not session.host or session.host == current_host())
+            ):
+                try:
+                    self._launch_session_teardown(session, delay=0.0)
+                except OSError:
+                    # The row remains ``ending`` and k can retry with a visible
+                    # error. Startup recovery itself must not prevent mounting.
+                    continue
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         self.action_primary()
@@ -4032,7 +4048,21 @@ class MonitorApp(App):
             )
             return
         if e.status == "ending":
-            self.notify("Session is already ending", severity="warning")
+            if e.session is None:
+                self.notify("Session is already ending", severity="warning")
+                return
+            if e.session.host and e.session.host != current_host():
+                self.notify(
+                    f"Session is ending on host {e.session.host}; "
+                    "teardown cannot be retried from this host",
+                    severity="warning",
+                )
+                return
+            self._start_session_teardown(
+                e.session,
+                f"Finished teardown for {e.session.id}",
+                delay=0.0,
+            )
             return
         if e.status == "retired":
             self.notify(
@@ -4112,34 +4142,78 @@ class MonitorApp(App):
         self._begin_session_kill(e.session, f"Killed {e.session.id}")
 
     def _begin_session_kill(self, session: Session, success_message: str) -> None:
-        """Render ``ending`` before starting runtime teardown in a worker."""
+        """Persist ``ending`` and hand teardown to a dashboard-independent process."""
         try:
             mark_session_ending(session)
         except OSError as exc:
             self.notify(f"Could not mark session as ending: {exc}", severity="error")
             return
 
-        # Rebuild from the durable status so this monitor and every other
-        # monitor agree before teardown starts. The blocking signals/waits run
-        # in a worker so Textual can actually present and maintain this state.
+        self._start_session_teardown(
+            session,
+            success_message,
+            delay=_ENDING_MIN_VISIBLE_SECONDS,
+        )
+
+    def _launch_session_teardown(
+        self, session: Session, *, delay: float
+    ) -> subprocess.Popen[bytes]:
+        """Launch a serialized teardown process that survives this dashboard."""
+        plugin_root = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        env["MULTIVERSE_ROOT"] = str(STATE_DIR.parent)
+        return subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "src.session_teardown",
+                session.id,
+                "--delay",
+                str(delay),
+            ],
+            cwd=plugin_root,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            env=env,
+        )
+
+    def _start_session_teardown(
+        self, session: Session, success_message: str, *, delay: float
+    ) -> None:
+        try:
+            proc = self._launch_session_teardown(session, delay=delay)
+        except OSError as exc:
+            self.notify(f"Could not start session teardown: {exc}", severity="error")
+            self.refresh_sessions()
+            return
+
+        # Rebuild from the durable status immediately. The child owns the
+        # blocking wait/signals and remains alive if this Textual app exits.
         self.refresh_sessions()
         self.call_after_refresh(
-            self._kill_session_worker, session, success_message
+            self._watch_session_teardown, proc, session, success_message
         )
 
     @work(thread=True, group="session_kill")
-    def _kill_session_worker(
-        self, session: Session, success_message: str
+    def _watch_session_teardown(
+        self,
+        proc: subprocess.Popen[bytes],
+        session: Session,
+        success_message: str,
     ) -> None:
-        # A fast-exiting runtime can otherwise transition from idle to dormant
-        # between terminal frames. Keep the explicit transition visible long
-        # enough to be useful without materially delaying teardown.
-        time.sleep(_ENDING_MIN_VISIBLE_SECONDS)
         error: Optional[str] = None
-        try:
-            kill_session(session)
-        except RuntimeError as exc:
-            error = str(exc)
+        if proc.wait() != 0:
+            try:
+                import json
+
+                payload = json.loads(
+                    (session.dir / "ending_error.json").read_text()
+                )
+                error = str(payload.get("error") or "session teardown failed")
+            except (OSError, ValueError, AttributeError):
+                error = "session teardown failed"
         self.call_from_thread(
             self._finish_session_kill, success_message, error
         )

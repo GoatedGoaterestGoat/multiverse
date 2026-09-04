@@ -1362,6 +1362,7 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_SESSION_NAME": "codex-agent",
                 "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
                 "MULTIVERSE_CODEX_MODEL": "gpt-5.6-sol",
+                "MULTIVERSE_CODEX_REASONING_EFFORT": "xhigh",
                 "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime_pid"),
                 "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(
                     temp_dir / "runtime_session_id"
@@ -1383,6 +1384,7 @@ class CodexRunnerTests(unittest.TestCase):
             args = capture.read_text().splitlines()
             self.assertIn("--dangerously-bypass-hook-trust", args)
             self.assertIn("--approve-for-me", args)
+            self.assertIn('model_reasoning_effort="xhigh"', args)
             self.assertNotIn("--sandbox", args)
             self.assertNotIn("danger-full-access", args)
             resume_index = args.index("resume")
@@ -1405,6 +1407,11 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertIn(
                 "mcp_servers.multiverse.env.MULTIVERSE_CODEX_MODEL="
                 + json.dumps("gpt-5.6-sol"),
+                args,
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_CODEX_REASONING_EFFORT="
+                + json.dumps("xhigh"),
                 args,
             )
             self.assertIn(

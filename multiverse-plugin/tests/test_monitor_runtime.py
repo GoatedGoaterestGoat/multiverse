@@ -6,7 +6,7 @@ import threading
 import unittest
 from pathlib import Path
 from subprocess import CompletedProcess
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, PropertyMock, patch
 
 from textual.app import App
 from textual.widgets import DataTable, Input, RadioButton
@@ -88,11 +88,12 @@ class DashboardEndingTests(unittest.TestCase):
         attach.assert_not_called()
         self.assertIn("attach is disabled", notify.call_args.args[0])
 
-    def test_kill_worker_is_deferred_until_after_ending_refresh(self) -> None:
+    def test_kill_launches_detached_teardown_before_ending_refresh(self) -> None:
         session = self._session()
         session.status = "idle"
         events: list[str] = []
         callbacks = []
+        proc = MagicMock()
         app = monitor.MonitorApp([])
 
         def mark(_session):
@@ -101,30 +102,98 @@ class DashboardEndingTests(unittest.TestCase):
         def refresh():
             events.append("refresh")
 
+        def launch(_session, *, delay):
+            events.append(f"launch:{delay}")
+            return proc
+
         def schedule(callback, *args):
             events.append("schedule")
             callbacks.append(lambda: callback(*args))
 
         with (
             patch.object(monitor, "mark_session_ending", side_effect=mark),
+            patch.object(app, "_launch_session_teardown", side_effect=launch),
             patch.object(app, "refresh_sessions", side_effect=refresh),
             patch.object(app, "call_after_refresh", side_effect=schedule),
             patch.object(
                 app,
-                "_kill_session_worker",
-                side_effect=lambda *_args: events.append("worker"),
-            ) as worker,
+                "_watch_session_teardown",
+                side_effect=lambda *_args: events.append("watcher"),
+            ) as watcher,
+            patch.object(monitor, "_ENDING_MIN_VISIBLE_SECONDS", 0.25),
         ):
             app._begin_session_kill(session, "Killed wrapper-id")
 
-            self.assertEqual(events, ["mark", "refresh", "schedule"])
-            worker.assert_not_called()
+            self.assertEqual(
+                events, ["mark", "launch:0.25", "refresh", "schedule"]
+            )
+            watcher.assert_not_called()
 
             callbacks[0]()
 
         self.assertEqual(
             events,
-            ["mark", "refresh", "schedule", "worker"],
+            ["mark", "launch:0.25", "refresh", "schedule", "watcher"],
+        )
+
+    def test_recovery_relaunches_local_ending_session_without_delay(self) -> None:
+        session = self._session()
+        app = monitor.MonitorApp([])
+        app.sessions = [session]
+        with (
+            patch.object(
+                type(session),
+                "ending_marker_path",
+                new_callable=PropertyMock,
+                return_value=MagicMock(is_file=MagicMock(return_value=True)),
+            ),
+            patch.object(monitor, "current_host", return_value=session.host),
+            patch.object(app, "_launch_session_teardown") as launch,
+        ):
+            app._recover_ending_sessions()
+
+        launch.assert_called_once_with(session, delay=0.0)
+
+    def test_detached_teardown_survives_dashboard_process(self) -> None:
+        session = self._session()
+        app = monitor.MonitorApp([])
+        with (
+            patch.object(monitor, "STATE_DIR", Path("/state/sessions")),
+            patch.object(monitor.subprocess, "Popen") as popen,
+        ):
+            app._launch_session_teardown(session, delay=0.25)
+
+        command = popen.call_args.args[0]
+        self.assertEqual(
+            command[:3],
+            [monitor.sys.executable, "-m", "src.session_teardown"],
+        )
+        self.assertIn("wrapper-id", command)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        self.assertIs(popen.call_args.kwargs["stdin"], monitor.subprocess.DEVNULL)
+        self.assertEqual(
+            popen.call_args.kwargs["env"]["MULTIVERSE_ROOT"], "/state"
+        )
+
+    def test_k_retries_local_ending_session(self) -> None:
+        session = self._session()
+        row = monitor.DashboardRow(
+            name="agent",
+            cwd="/workspace",
+            status="ending",
+            status_ts=2,
+            runtime=monitor.RUNTIME_CODEX,
+            session=session,
+        )
+        app = monitor.MonitorApp([])
+        with (
+            patch.object(app, "_current_entry", return_value=row),
+            patch.object(app, "_start_session_teardown") as start,
+        ):
+            app.action_kill()
+
+        start.assert_called_once_with(
+            session, "Finished teardown for wrapper-id", delay=0.0
         )
 
     def test_kill_worker_completion_refreshes_success_and_failure(self) -> None:
@@ -174,44 +243,57 @@ class DashboardEndingAsyncTests(unittest.IsolatedAsyncioTestCase):
             current.status = "ending"
             current.status_ts = 2
 
-        def block_kill(current):
+        class FakeProcess:
+            def wait(self):
+                kill_started.set()
+                release_kill.wait(timeout=2)
+                session.status = "ended"
+                session.status_ts = 3
+                return 0
+
+        def launch(_current, *, delay):
+            self.assertEqual(delay, 0.01)
             kill_started.set()
-            release_kill.wait(timeout=2)
-            current.status = "ended"
-            current.status_ts = 3
+            return FakeProcess()
 
-        with (
-            patch.object(monitor, "list_sessions", return_value=[session]),
-            patch.object(monitor, "build_dashboard_rows", side_effect=rows),
-            patch.object(monitor, "list_pending_requests", return_value=[]),
-            patch.object(monitor.web_share, "status", return_value=None),
-            patch.object(monitor, "pending_inbox_count", return_value=0),
-            patch.object(monitor, "foreign_host_still_reported_live", return_value=False),
-            patch.object(monitor, "mark_session_ending", side_effect=mark_ending),
-            patch.object(monitor, "kill_session", side_effect=block_kill),
-            patch.object(monitor, "_ENDING_MIN_VISIBLE_SECONDS", 0.01),
-            patch.dict("os.environ", {"MULTIVERSE_ORIG_CWD": "/workspace"}),
-        ):
+        with patch.dict("os.environ", {"MULTIVERSE_ORIG_CWD": "/workspace"}):
             app = monitor.MonitorApp([])
-            try:
-                async with app.run_test() as pilot:
-                    await pilot.press("k")
-                    for _ in range(20):
-                        if kill_started.is_set():
-                            break
-                        await asyncio.sleep(0.01)
+            with (
+                patch.object(monitor, "list_sessions", return_value=[session]),
+                patch.object(monitor, "build_dashboard_rows", side_effect=rows),
+                patch.object(monitor, "list_pending_requests", return_value=[]),
+                patch.object(monitor.web_share, "status", return_value=None),
+                patch.object(monitor, "pending_inbox_count", return_value=0),
+                patch.object(
+                    monitor, "foreign_host_still_reported_live", return_value=False
+                ),
+                patch.object(
+                    monitor, "mark_session_ending", side_effect=mark_ending
+                ),
+                patch.object(
+                    app, "_launch_session_teardown", side_effect=launch
+                ),
+                patch.object(monitor, "_ENDING_MIN_VISIBLE_SECONDS", 0.01),
+            ):
+                try:
+                    async with app.run_test() as pilot:
+                        await pilot.press("k")
+                        for _ in range(20):
+                            if kill_started.is_set():
+                                break
+                            await asyncio.sleep(0.01)
 
-                    self.assertTrue(kill_started.is_set())
-                    self.assertEqual(app.entries[0].status, "ending")
-                    self.assertTrue(app.is_running)
+                        self.assertTrue(kill_started.is_set())
+                        self.assertEqual(app.entries[0].status, "ending")
+                        self.assertTrue(app.is_running)
+                        release_kill.set()
+                        for _ in range(20):
+                            if app.entries[0].status == "ended":
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertEqual(app.entries[0].status, "ended")
+                finally:
                     release_kill.set()
-                    for _ in range(20):
-                        if app.entries[0].status == "ended":
-                            break
-                        await asyncio.sleep(0.01)
-                    self.assertEqual(app.entries[0].status, "ended")
-            finally:
-                release_kill.set()
 
 
 class SpawnAttachGuardTests(unittest.TestCase):

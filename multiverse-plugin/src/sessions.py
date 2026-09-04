@@ -1928,7 +1928,8 @@ def create_session(
     base_env_keys = (
         "CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
         "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
-        "MULTIVERSE_CODEX_BIN", "MULTIVERSE_CODEX_MODEL", "MULTIVERSE_PI_BIN",
+        "MULTIVERSE_CODEX_BIN", "MULTIVERSE_CODEX_MODEL",
+        "MULTIVERSE_CODEX_REASONING_EFFORT", "MULTIVERSE_PI_BIN",
         "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR",
         # Rate-limit retry tuning — see bin/multiverse for defaults +
         # rationale. Propagated so interactive claude sessions inside tmux

@@ -35,9 +35,11 @@ export MULTIVERSE_RUNTIME_PID_PATH="$RUNTIME_PID_PATH"
 # historical behaviour. Only sensible on a host that is itself sandboxed.
 read -r -a CODEX_PERMISSION_ARGS \
   <<< "${MULTIVERSE_CODEX_PERMISSION_ARGS:---approve-for-me}"
+CODEX_REASONING_EFFORT="${MULTIVERSE_CODEX_REASONING_EFFORT:-xhigh}"
 CODEX_CONFIG_ARGS=(
   ${CODEX_PERMISSION_ARGS[@]+"${CODEX_PERMISSION_ARGS[@]}"}
   --dangerously-bypass-hook-trust
+  -c "model_reasoning_effort=\"$CODEX_REASONING_EFFORT\""
   -c "hooks.SessionStart=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "hooks.UserPromptSubmit=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "hooks.PermissionRequest=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
@@ -75,6 +77,7 @@ for MCP_ENV_NAME in \
   MULTIVERSE_CLAUDE_BIN \
   MULTIVERSE_CODEX_BIN \
   MULTIVERSE_CODEX_MODEL \
+  MULTIVERSE_CODEX_REASONING_EFFORT \
   MULTIVERSE_EXTRA_PLUGIN_DIRS \
   CLAUDE_CONFIG_DIR \
   CLAUDE_LOCAL_DATA_DIR \
