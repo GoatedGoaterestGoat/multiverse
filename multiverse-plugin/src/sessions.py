@@ -1090,8 +1090,8 @@ _STATUS_SORT = {
     "ending": 1,
     "unknown": 2,
     "ended": 3,
-    "retired": 3,
     "dormant": 4,
+    "retired": 5,
 }
 
 

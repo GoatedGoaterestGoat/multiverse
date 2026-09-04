@@ -414,7 +414,7 @@ class EndingStatusTests(unittest.TestCase):
                     "ended",
                 )
 
-    def test_dashboard_orders_ending_with_idle_and_ended_before_dormant(
+    def test_dashboard_orders_retired_after_dormant(
         self,
     ) -> None:
         wrapped = [
@@ -442,6 +442,15 @@ class EndingStatusTests(unittest.TestCase):
                 status_ts=1,
                 name="ended-agent",
             ),
+            sessions.Session(
+                id="retired",
+                cwd="/workspace",
+                created_at=1,
+                status="retired",
+                status_ts=200,
+                name="retired-agent",
+                successor="successor-agent",
+            ),
         ]
         dormant = [{
             "id": "dormant-thread",
@@ -460,7 +469,13 @@ class EndingStatusTests(unittest.TestCase):
 
         self.assertEqual(
             [row.name for row in rows],
-            ["idle-agent", "ending-agent", "ended-agent", "dormant-agent"],
+            [
+                "idle-agent",
+                "ending-agent",
+                "ended-agent",
+                "dormant-agent",
+                "retired-agent",
+            ],
         )
 
 
