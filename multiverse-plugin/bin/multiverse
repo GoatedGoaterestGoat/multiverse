@@ -118,8 +118,8 @@ export MULTIVERSE_CLAUDE_MODEL="${MULTIVERSE_CLAUDE_MODEL:-opus[1m]}"
 # Model for interactive multiverse-started CODEX sessions (new + resumed).
 # create_session injects this as a global --model option before Codex's resume
 # subcommand unless the caller already supplied --model/-m. Keep it configurable
-# because model availability is account-dependent during staged rollouts.
-export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-6-astra}"
+# because available model aliases can differ by account and installation.
+export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-5.6-sol}"
 
 # Extra env var NAMES (space-separated) to forward into every tmux-spawned
 # session, on top of the fixed base set in sessions.py's create_session.

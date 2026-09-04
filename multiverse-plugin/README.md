@@ -4,13 +4,15 @@ Multi-agent orchestration for Claude Code, Codex, and pi: parallel sessions, int
 
 ## What it does
 
-Three things, all designed to scale past the limits of a single agent process:
+Four things, all designed to scale past the limits of a single agent process:
 
 **1. Multi-session monitor.** A Textual TUI launched via the `multiverse` command tracks Claude Code, Codex, and pi sessions in a workspace. Each session runs in its own detached tmux session under the hood — you can attach to any one, spawn new ones with a name, resume dormant native sessions, or kill sessions you're done with. Each multiverse instance is scoped to one workspace (cwd).
 
 **2. Inter-agent communication.** Agents in the same workspace can discover each other (`list_agents`), send each other durable messages with full tool access on the receiving side (`message_agent`), check or wait on their own inbox mid-turn (`check_inbox` / `monitor_inbox`), fire quick ephemeral side-questions (`ask_agent`), or delegate fresh work to a brand-new subagent (`spawn_agent`, with user-brokered naming). Plus TUI keybindings to ask all agents the same question at once (`a`) and peek at any agent's pending inbox (`i`). Claude receives queued messages through hooks, Codex explicitly claims them with `check_inbox`, and pi's extension injects them through its in-process messaging API. Ephemeral questions use each runtime's native fork mechanism without disturbing the target's main session; spawns pop a naming and runtime-selection modal in the monitor.
 
 **3. Frontier-coherent compaction for Claude.** Codex and pi retain their native compaction. For Claude, a bottom-up agentic compaction engine (vendored from `compaction/`) builds a summary tree per turn — a tree where every internal node carries an LLM-written summary of its children — then expands those trees to a user-chosen total token budget allocated proportionally per turn. Trees are pre-built in the background on every `UserPromptSubmit` so a manual compaction usually has nothing left to wait for. The monitor exposes a `c` action that pops a Compact widget showing total uncompacted tokens, asks for a budget, drives the build/expand pipeline with progress + log tail, and atomically replaces the live JSONL. Privileged-mode tree construction reads original chain-of-thought via signature decryption (no `ANTHROPIC_API_KEY` needed — uses the same `claude` subscription credential).
+
+**4. Reach beyond the terminal.** Two optional, per-workspace surfaces. `w` starts an ephemeral **web share** — a loopback ttyd serving a dedicated monitor for this cwd through your configured tunnel and auth — and a second press tears it down. `S` opens the **SecondBrain connector**, which lets a separately-hosted assistant observe and act on this workspace's agents over one authenticated channel. Both are off until you turn them on, and neither is required for anything above.
 
 ## Prerequisites
 
@@ -73,7 +75,7 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
 | `MULTIVERSE_CODEX_BIN` | `codex` | The Codex binary used for interactive sessions, native naming, and ephemeral `ask_agent` app-server forks. |
-| `MULTIVERSE_CODEX_MODEL` | `gpt-6-astra` | Default model for new and resumed Codex sessions. An explicit `--model`/`-m` argument takes precedence. |
+| `MULTIVERSE_CODEX_MODEL` | `gpt-5.6-sol` | Default model for new and resumed Codex sessions. An explicit `--model`/`-m` argument takes precedence. |
 | `CODEX_HOME` | *(unset → `~/.codex`)* | Standard Codex configuration and session root. Set it when Codex uses a non-default home so discovery and resume target the same native sessions. |
 | `MULTIVERSE_CODEX_PLUGIN_ROOT` | sibling `plugins/multiverse-codex` | Codex plugin bundle injected into wrapped sessions. Override it for packaged installs or a separate development checkout. |
 | `MULTIVERSE_PI_BIN` | `pi` | The external pi CLI used for interactive sessions and ephemeral `ask_agent` forks. |
@@ -116,6 +118,9 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
 | `i` | View the highlighted agent's pending inbox without consuming it; the selected runtime's integration still owns delivery. |
+| `x` | Restore a lost session from an orphan full JSONL — one whose live counterpart Claude Code has reaped (`cleanupPeriodDays`) but whose mirror survived. Picks from orphans in this workspace and feeds the choice through the normal compaction flow, rendering a fresh live JSONL at the chosen budget. |
+| `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
+| `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
 | `r` | Manual refresh |
@@ -265,6 +270,40 @@ Surviving thinking blocks are emitted verbatim with their original signatures (w
 
 This is one screen moving, not a shared one: a compaction detached in one monitor can only be re-opened from that same monitor, and a lock held by a *live* monitor still blocks every other one. Only a **dead** holder's lock is reclaimable (see `list_locked`), which is what makes a compaction survive quitting the monitor mid-build.
 
+### Remote access (web share)
+
+`w` toggles an ephemeral, per-workspace share of the monitor. It starts a ttyd bound to
+loopback serving a dedicated monitor for **this cwd only**, exposed through the tunnel and
+auth configured in `bin/multiverse.local`, and a second press (or quitting the monitor)
+tears the whole stack down.
+
+Every coordination primitive is local — tmux plus files under one `$MULTIVERSE_ROOT` — so
+the share makes a workspace on *this* box reachable from a browser. It cannot drive
+sessions on a different host.
+
+### SecondBrain connector
+
+SecondBrain is a separate, locally-hosted assistant that watches you across workspaces and,
+within earned trust, acts on your behalf. The connector is the Multiverse half of that
+seam; `S` opens its panel (enroll/connect this workspace, disconnect, re-enroll, reload or
+stop the device daemon).
+
+- **This machine is a device.** One Ed25519 keypair identifies it; the `device_id` is both
+  the auth identity and the namespacing key. A device exposes one or more workspaces.
+- **The connector dials out** to SB and keeps a durable, replaying channel, so the daemon
+  outlives the monitor — it is a host-aware singleton, not a TUI child.
+- **All three runtimes participate.** SB sees the same roster the agents see, reads
+  incremental per-agent transcripts, and can prompt an agent, approve a spawn, or answer a
+  pending question. Claude and Codex accept prompts through their composer; pi never gets
+  keystrokes — prompts go into a durable queue its extension drains into
+  `pi.sendUserMessage`, gated on a versioned capability marker so a session running an
+  older extension is refused rather than silently queued forever. pi has no
+  AskUserQuestion or permission-prompt bridge, so those two actions reject explicitly.
+- **Nothing is recorded until you enroll.** Every recorder is gated on this device being
+  enrolled and the workspace seeded; with no `~/.multiverse/secondbrain/state.json` the
+  whole path is a no-op, and the pi extension checks that file before spending a
+  subprocess on a signal that would be dropped.
+
 ### With vs without the wrapper
 
 | Setup | Inter-agent comms | Multi-session monitor | Compaction (manual `c`) | Auto tree-build |
@@ -281,12 +320,30 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 ```
 ~/.multiverse/
 ├── sessions/<mv-id>/
-│   ├── meta.json     — cwd, created_at, claude_args, name, optional resumed_from
-│   ├── status.json   — {"status": "idle"|"working"|"waiting"|"ended"|…, "ts": …}
-│   └── claude_uuid   — current claude session UUID (captured by SessionStart hook)
-├── inbox/<encoded-cwd>/<recipient-name>/<message-id>.json
-│                     — pending inter-agent message; consumed (deleted) by the
-│                       deliver-inbox hook on first delivery as a system-reminder
+│   ├── meta.json       — cwd, created_at, runtime, <runtime>_args, name, host,
+│   │                     optional resumed_from
+│   ├── status.json     — {"status": "starting"|"idle"|"working"|"waiting"|
+│   │                     "listening"|"ending"|"ended", "ts": …}
+│   ├── status.json.lock — flock guard; the status guards are read-then-write,
+│   │                     so the check and the write are held together
+│   ├── ending          — teardown marker; while present, runtime hooks cannot
+│   │                     replace the dashboard-owned `ending` status
+│   ├── claude_uuid     — current claude session UUID (SessionStart hook)
+│   ├── runtime_session_id — native Codex/pi session id (recorded by the
+│   │                     runner or extension)
+│   ├── runtime_pid     — foreground runtime PID, used for liveness correction
+│   ├── pi_capabilities.json — pi only: versioned proof that the loaded
+│   │                     extension can drain the SecondBrain prompt queue.
+│   │                     Written on session_start before the session
+│   │                     advertises idle, cleared on shutdown
+│   └── initial_prompt.txt — spawn_agent's first user message, handed to the
+│                         runtime as a file so long prompts never cross a
+│                         shell re-parse boundary
+├── inbox/<encoded-cwd>/<recipient-name>/
+│   ├── <message-id>.json              — pending inter-agent message
+│   └── <message-id>.json.claim-<id>   — staged during delivery; deleted on
+│                     commit, renamed back on an explicit release, and
+│                     re-adopted after 60s if the deliverer died
 ├── spawn_requests/
 │   ├── <req-id>.json           — agent-initiated subagent spawn request
 │   └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
@@ -310,6 +367,20 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │                                 background auto tree-build is enabled for
 │                                 this session. Toggled with ``b`` in the
 │                                 dashboard. Default state is OFF (no file).
+├── secondbrain/                — SecondBrain connector state (absent until
+│   │                             this device enrolls; see below)
+│   ├── device.key.json         — Ed25519 device identity
+│   ├── state.json              — seeded/exposed workspace sets. Its absence
+│   │                             is the cheap "SB can record nothing" gate
+│   ├── pending/                — durable outbound event queue
+│   ├── transcript_markers/     — per-agent delivery cursor, keyed on
+│   │                             (resolved cwd, agent name); runtime-specific
+│   │                             cursor shape for Claude, Codex, and pi
+│   ├── pi_prompts/<encoded-cwd>/<agent>/
+│   │                           — durable SecondBrain→pi user prompts, claimed
+│   │                             and committed by the pi extension
+│   └── *_signals/              — user_prompt, response, question, answered,
+│                                 permission_request, permission_decision
 └── logs/inter-agent/<YYYY-MM-DD>.jsonl
                                 — one line per message_agent call, push-
                                   notification routing outcome, and inbox
@@ -389,11 +460,16 @@ Sessions survive monitor restarts — the TUI rebuilds its view from disk every 
 | `MULTIVERSE_SESSION_NAME=<name>` | inter-agent tools (caller identity) |
 | `MULTIVERSE_SESSION_CWD=<cwd>` | inter-agent tools (workspace scope) |
 | `MULTIVERSE_STATUS=…/status.json` | hook scripts |
-| `MULTIVERSE_RUNTIME=claude|codex` | selects runtime-specific lifecycle, discovery, and launch behavior |
+| `MULTIVERSE_RUNTIME=claude\|codex\|pi` | selects runtime-specific lifecycle, discovery, and launch behavior. Also gates caller-identity resolution: only a Claude caller consults transcripts, since every other runtime owns its own MCP server and correct identity vars |
 | `MULTIVERSE_PLUGIN_ROOT=<plugin_dir>` | inner script (passes `--plugin-dir`) |
 | `MULTIVERSE_CLAUDE_BIN=<binary>` | inner script + fork/compaction paths — which Claude binary to run (default `claude`; see [Machine-local config](#machine-local-config-binmultiverselocal)) |
 | `MULTIVERSE_CODEX_BIN=<binary>` | Codex runner, native naming, and ephemeral app-server forks |
 | `MULTIVERSE_CODEX_PLUGIN_ROOT=<plugin_dir>` | Codex hook and MCP bundle injected into wrapped Codex sessions |
+| `MULTIVERSE_PI_BIN=<binary>` | pi runner and ephemeral `ask_agent` forks |
+| `MULTIVERSE_RUNTIME_SESSION_ID_PATH=…/runtime_session_id` | where the Codex runner / pi extension records the native session id |
+| `MULTIVERSE_RUNTIME_PID_PATH=…/runtime_pid` | foreground runtime PID, so liveness correction can tell a detached session from a dead one |
+| `MULTIVERSE_INITIAL_PROMPT_FILE=…/initial_prompt.txt` | `spawn_agent`'s first user message; the runner reads and deletes it |
+| `PI_CODING_AGENT_DIR` / `PI_CODING_AGENT_SESSION_DIR` | propagated when set so pi discovery, resume, and spawned sessions share one session root. `ask_agent` forks drop the session-dir override so their scratch `--session-dir` wins, but keep `PI_CODING_AGENT_DIR` for settings and credentials |
 | `MULTIVERSE_EXTRA_PLUGIN_DIRS=<dir:dir>` | inner script — extra `--plugin-dir` entries for interactive sessions |
 | `CLAUDE_CONFIG_DIR` / `CLAUDE_LOCAL_DATA_DIR` / `PATH` | propagated when set so spawned sessions resolve transcripts under the same Claude config dir (and find the same binary) the monitor used |
 | `CODEX_HOME` | propagated when set so Codex discovery, resume, and spawned sessions use the same native session root |
@@ -415,6 +491,8 @@ The single MCP server (named `multiverse` in `.mcp.json`) exposes six tools:
 
 Wired to claude lifecycle events; all of them are no-ops outside the multiverse wrapper (they detect the absence of `MULTIVERSE_*` env vars and exit).
 
+Codex and pi have no hook system of this shape. Codex uses its injected plugin bundle, and pi's extension (`pi-extension/index.ts`) does the equivalent work in-process — status on lifecycle events, native session id on `session_start`, inbox delivery at end of turn and from a 2s idle watcher — shelling out to `src/mvctl.py` for anything that needs the Python data layer.
+
 | Hook | Script(s) | Purpose |
 |:-----|:----------|:--------|
 | `SessionStart` | `set-status.sh idle`, `record-claude-uuid.sh`, `deliver-inbox.py` | Initial status, capture claude UUID, deliver any pending inbox messages |
@@ -429,7 +507,8 @@ Wired to claude lifecycle events; all of them are no-ops outside the multiverse 
 The monitor and the sessions it spawns coordinate entirely through **files** under `~/.multiverse/`, never sockets or stdin/stdout:
 
 - **Status** — hook scripts write `~/.multiverse/sessions/<mv-id>/status.json`; the monitor polls every tick.
-- **Inter-agent messages** — `message_agent` writes `~/.multiverse/inbox/<encoded-cwd>/<recipient-name>/<message-id>.json` atomically; Claude's `deliver-inbox.py` hook or either runtime's `check_inbox` tool atomically consumes it.
+- **Inter-agent messages** — `message_agent` writes `~/.multiverse/inbox/<encoded-cwd>/<recipient-name>/<message-id>.json` atomically. Delivery is claim/commit, not consume-on-read: the deliverer *renames* the file to a claimant-unique `.claim-<id>` before handing it over, deletes it only once delivery is confirmed, renames it back immediately if the hand-off fails, and a claim abandoned by a dead deliverer is re-adopted after 60s. So a crash mid-delivery loses nothing and cannot double-deliver.
+- **SecondBrain prompts for pi** — queued under `secondbrain/pi_prompts/…` and drained by the pi extension through the same claim/commit protocol, gated on the session's `pi_capabilities.json` advertising a supported consumer version.
 - **Spawn requests** — `spawn_agent` writes `~/.multiverse/spawn_requests/<req-id>.json`; the monitor pops a naming modal and writes `<req-id>.resolved.json` (`O_EXCL`).
 - **Compaction lock** — `~/.multiverse/compacting/<uuid>.json` (`O_EXCL`) both prevents concurrent compaction and drives the `compacting` status badge.
 
@@ -527,51 +606,90 @@ The subagent starts from a **fresh prompt cache** with no memory of the caller's
 
 ```
 multiverse-plugin/
-├── .claude-plugin/
-│   └── plugin.json           # Plugin manifest
-├── .mcp.json                 # MCP server config (registers `multiverse` server)
-├── pyproject.toml            # Python package: MCP server, monitor, inter-agent tools
+├── .claude-plugin/plugin.json  # Plugin manifest
+├── .mcp.json                   # MCP server config (registers `multiverse` server)
+├── pyproject.toml              # Python package: MCP server, monitor, inter-agent tools
 ├── bin/
-│   ├── multiverse            # Launcher — execs the Textual monitor
-│   └── multiverse-session    # Per-session inner loop (runs inside each tmux session)
-├── hooks/
-│   └── hooks.json            # Hook config
-├── scripts/
-│   ├── set-status.sh         # Status writers (idle/working/waiting/ended)
-│   ├── on-notification.sh    # Notification hook — filters by notification_type
-│   ├── record-claude-uuid.sh # SessionStart hook — captures claude session UUID
-│   ├── deliver-inbox.py      # Inter-agent message delivery (3 hooks: SessionStart/UserPromptSubmit/Stop)
-│   ├── mirror-jsonl.py       # Live → full JSONL mirror hook (UserPromptSubmit/Stop/SessionEnd)
-│   ├── spawn-tree-builder.py # UserPromptSubmit hook: detach a tree-build worker
-│   ├── tree-builder-worker.py# Long-running worker: build a summary tree per completed turn
-│   └── build_tree_priv_cli.py# Per-turn build entry point (privileged-mode constructor via claude CLI)
+│   ├── multiverse              # Launcher — execs the Textual monitor
+│   ├── multiverse.local        # Gitignored machine-local config (see above)
+│   ├── multiverse-session      # Per-session inner loop for Claude
+│   ├── multiverse-codex-session# Per-session inner loop for Codex
+│   └── multiverse-pi-session   # Per-session inner loop for pi; also clears the
+│                               #  prompt-consumer capability and writes a
+│                               #  terminal `ended` if the extension never did
+├── hooks/hooks.json            # Claude hook config
+├── pi-extension/
+│   ├── index.ts                # pi extension: inter-agent tools, lifecycle
+│   │                           #  status, native session id, inbox delivery,
+│   │                           #  SecondBrain prompt queue + signals
+│   └── README.md
+├── scripts/                    # Claude hook scripts and offline tools
+│   ├── set-status.sh           #   status writers
+│   ├── on-notification.sh      #   notification hook (filters by type)
+│   ├── record-claude-uuid.sh   #   SessionStart — captures the session UUID
+│   ├── deliver-inbox.py        #   inter-agent delivery (3 hooks)
+│   ├── mirror-jsonl.py         #   live → full JSONL mirror
+│   ├── spawn-tree-builder.py   #   UserPromptSubmit — detach a tree-build worker
+│   ├── tree-builder-worker.py  #   per-turn summary tree worker
+│   ├── build_tree_priv_cli.py  #   privileged-mode per-turn build entry point
+│   ├── finalize-compaction.py  #   compaction tail
+│   ├── heal-full-jsonl.py      #   repair helpers for the mirror and live JSONL
+│   ├── heal-live-jsonl.py
+│   ├── rebuild-affected-trees.py
+│   ├── rewrite-image-tokens.py
+│   ├── bg-forks.py
+│   ├── sb-emit-*.py            #   SecondBrain signal emitters (user prompt,
+│   │                           #    response, question, answered, permission
+│   │                           #    request/decision) and sb-track-tool.py
+│   └── visualize*.py           #   HTML forest views (the `v` key)
 ├── src/
-│   ├── __init__.py
-│   ├── server.py             # MCP server: all six tools
-│   ├── sessions.py           # Multiverse session data layer (Session, DashboardRow, list/build/find,
-│   │                         #  applies compacting status override from list_locked();
-│   │                         #  still surfaces legacy folded JSONLs as ghost rows)
-│   ├── inbox.py              # Inter-agent message inbox (write/list/consume)
-│   ├── ask_agents.py         # Forked-subprocess ask machinery (used by ask_all + ask_agent)
-│   ├── forks.py              # On-disk registry of in-flight ask-fork UUIDs (hides them from dashboard + list_agents; GCs orphans)
-│   ├── spawn_requests.py     # Filesystem protocol for agent-initiated spawn_agent requests
-│   ├── paths.py              # Canonical ~/.multiverse resolution (MULTIVERSE_ROOT > MULTIVERSE_STATUS > HOME)
-│   ├── full_jsonl.py         # Two-JSONL helpers: sync_full / bootstrap / token+turn counts
-│   ├── compact_state.py      # Cross-monitor compacting lock (O_EXCL with stale-PID recovery)
-│   ├── compact_runner.py     # Compaction state machine (lock → kill → sync → build → expand → release)
-│   ├── auto_build.py         # Per-session auto tree-build toggle (marker file under auto_build/)
-│   ├── monitor.py            # Textual TUI: dashboard, modals, tmux control, CompactScreen
-│   └── names.py              # Random name pool for new sessions
+│   ├── server.py               # MCP server: the six agent-facing tools
+│   ├── mvctl.py                # CLI bridge the pi extension shells out to
+│   ├── monitor.py              # Textual TUI: dashboard, modals, tmux control
+│   ├── sessions.py             # Session data layer + status writer (flock'd,
+│   │                           #  terminal `ended`) + runtime launch
+│   ├── inbox.py                # Inter-agent inbox: claim / commit / release
+│   ├── ask_agents.py           # Forked side-question machinery, per runtime
+│   ├── forks.py                # Registry of in-flight ask-fork UUIDs
+│   ├── spawn_requests.py       # Filesystem protocol for spawn_agent
+│   ├── names.py                # Random name pool
+│   ├── paths.py                # Canonical ~/.multiverse resolution
+│   ├── atomic_files.py         # atomic write / create / flock primitives
+│   ├── interagent_log.py       # Append-only inter-agent audit log
+│   ├── tmux_attach.py          # PTY relay that answers tmux capability probes
+│   ├── full_jsonl.py           # Two-JSONL helpers; token + turn counts
+│   ├── compact_state.py        # Cross-monitor compacting lock
+│   ├── compact_runner.py       # Compaction state machine
+│   ├── auto_build.py           # Per-session auto tree-build toggle
+│   ├── codex_transcript.py     # Native Codex rollout discovery + transcripts
+│   ├── codex_startup_input.py  # Codex startup input handling
+│   ├── pi_transcript.py        # Native pi session discovery (ids, names,
+│   │                           #  previews, resolve-stable session dirs)
+│   ├── pi_prompt_queue.py      # Durable SecondBrain→pi prompt queue and the
+│   │                           #  versioned consumer capability marker
+│   ├── pi_secondbrain_transcript.py # Tree-aware incremental pi transcript
+│   │                           #  adapter for SecondBrain (byte-offset cursor)
+│   ├── sb_connector.py         # SecondBrain seam: transport, auth, actions
+│   ├── sb_control.py           # Monitor-facing start/stop/enroll surface
+│   ├── sb_queries.py           # Read-only backfill queries served to SB
+│   ├── sb_transcript.py        # Per-agent delivery markers + partial transcripts
+│   ├── sb_actions.py           # Delivery primitives (tmux composer, etc.)
+│   ├── sb_events.py            # Event shapes
+│   ├── sb_notify.py            # Firsthand event recording (seeded-gated)
+│   └── web_share.py            # Ephemeral per-workspace web share (the `w` key)
+├── tests/                      # Run as scripts: `python tests/test_x.py`
+│                               #  (test_suite_integrity.py enforces that)
 ├── vendor/
-│   └── compaction/           # Vendored copy of the standalone compaction package
-│       ├── parser.py         #   JSONL → Forest of Turns
-│       ├── preprocess.py     #   per-turn cleanup; off by default
-│       ├── constructor.py    #   bottom-up tree builder (privileged + CLI variants)
-│       ├── compactor.py      #   expand_to_budget + schedulers (proportional / recency_decay / …)
-│       ├── priv_session.py   #   synthetic JSONL builders + multi-turn renderer
-│       ├── render.py         #   frontier → message-block / constructor-input rendering
-│       ├── tokenize.py       #   token counter
-│       └── types.py          #   Leaf, Node, Turn, Forest, Frontier
+│   ├── compaction/             # Vendored standalone compaction package
+│   │   ├── parser.py           #   JSONL → Forest of Turns
+│   │   ├── preprocess.py       #   per-turn cleanup; off by default
+│   │   ├── constructor.py      #   bottom-up tree builder
+│   │   ├── compactor.py        #   expand_to_budget + schedulers
+│   │   ├── priv_session.py     #   synthetic JSONL builders + renderer
+│   │   ├── render.py           #   frontier → message-block rendering
+│   │   ├── tokenize.py         #   token counter
+│   │   └── types.py            #   Leaf, Node, Turn, Forest, Frontier
+│   └── secondbrain/            # Vendored SecondBrain protocol + auth
 └── README.md
 ```
 

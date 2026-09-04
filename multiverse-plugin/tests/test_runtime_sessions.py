@@ -710,7 +710,7 @@ class RuntimeLaunchTests(unittest.TestCase):
         created, meta, calls = self._create_with_runtime(
             sessions.RUNTIME_CODEX,
             ["resume", "native-thread"],
-            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-6-astra"},
+            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-5.6-sol"},
         )
         tmux_cmd = calls[0]
 
@@ -718,14 +718,14 @@ class RuntimeLaunchTests(unittest.TestCase):
         self.assertEqual(meta["runtime"], sessions.RUNTIME_CODEX)
         self.assertEqual(
             meta["codex_args"],
-            ["--model", "gpt-6-astra", "resume", "native-thread"],
+            ["--model", "gpt-5.6-sol", "resume", "native-thread"],
         )
         self.assertNotIn("--permission-mode", meta["codex_args"])
         self.assertIn("MULTIVERSE_RUNTIME=codex", tmux_cmd)
         self.assertIn("MULTIVERSE_RUNTIME_SESSION_ID_PATH=", " ".join(tmux_cmd))
-        self.assertIn("MULTIVERSE_CODEX_MODEL=gpt-6-astra", tmux_cmd)
+        self.assertIn("MULTIVERSE_CODEX_MODEL=gpt-5.6-sol", tmux_cmd)
         self.assertIn(
-            "multiverse-codex-session --model gpt-6-astra resume native-thread",
+            "multiverse-codex-session --model gpt-5.6-sol resume native-thread",
             " ".join(tmux_cmd),
         )
         persistence_args = [
@@ -748,7 +748,7 @@ class RuntimeLaunchTests(unittest.TestCase):
         _, meta, calls = self._create_with_runtime(
             sessions.RUNTIME_CODEX,
             ["--model", "gpt-explicit", "resume", "native-thread"],
-            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-6-astra"},
+            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-5.6-sol"},
         )
 
         self.assertEqual(
@@ -756,7 +756,7 @@ class RuntimeLaunchTests(unittest.TestCase):
             ["--model", "gpt-explicit", "resume", "native-thread"],
         )
         inner_cmd = calls[0][calls[0].index(";") - 1]
-        self.assertNotIn("gpt-6-astra", inner_cmd)
+        self.assertNotIn("gpt-5.6-sol", inner_cmd)
 
     def test_codex_launch_keeps_name_and_initial_prompt_off_command_line(
         self,
@@ -1361,7 +1361,7 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_SESSION_CWD": str(temp_dir),
                 "MULTIVERSE_SESSION_NAME": "codex-agent",
                 "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
-                "MULTIVERSE_CODEX_MODEL": "gpt-6-astra",
+                "MULTIVERSE_CODEX_MODEL": "gpt-5.6-sol",
                 "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime_pid"),
                 "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(
                     temp_dir / "runtime_session_id"
@@ -1404,7 +1404,7 @@ class CodexRunnerTests(unittest.TestCase):
             )
             self.assertIn(
                 "mcp_servers.multiverse.env.MULTIVERSE_CODEX_MODEL="
-                + json.dumps("gpt-6-astra"),
+                + json.dumps("gpt-5.6-sol"),
                 args,
             )
             self.assertIn(
