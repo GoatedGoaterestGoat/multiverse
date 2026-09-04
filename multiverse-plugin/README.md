@@ -123,11 +123,14 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
-| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder (agents are kept). Refused while the row is `compacting` |
-| `g` | New folder. On a folder header it becomes a subfolder; on an agent the folder is created at the top level with that agent inside |
-| `m` | Move the highlighted agent — or folder — into another folder, the top level, or a folder you create from the picker |
-| `e` | Rename the folder under the cursor (works from a member row too) |
-| `u` | Lift the highlighted agent or folder one level out of its folder |
+| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder, keeping the agents (an empty folder goes without a prompt). Refused while the row is `compacting` |
+| `→` | On an agent: wrap it in a new folder, with the name live for editing in the row. On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
+| `←` | On an open folder: close it. On a closed one: jump to its parent. On an agent (or a selection): lift it one level out of its folder |
+| `shift`+`↑`/`↓` | Extend a selection. The folder keys then act on the whole range; any plain cursor move ends it |
+| `m` | Move the highlighted row (or the selection). Walk the folder tree in place — `↑↓` pick, `→` step in, `←` step out, `⏎` drop, `esc` cancel — with the header line showing what's moving and where |
+| `e` | Rename the folder under the cursor, in the row itself (works from a member row too) |
+| `g` | New folder — the same thing `→` does, for anyone who'd rather press a letter |
+| `u` | Lift one level out, without `←`'s close-the-folder-first behaviour |
 | `space` | Fold/unfold. On a member row it folds the folder around it and rides the cursor up to the header |
 | `z` | Fold every folder — or unfold them all if they're already folded |
 | `r` | Manual refresh |
@@ -152,6 +155,25 @@ quiet-fox                    idle         4,310  Investigate flaky attach test
 A folded folder answers, on its own line, what its hidden rows would have: it
 rolls up the pending-inbox count, the status that most wants attention, the
 token total, the freshest timestamp, and the names inside.
+
+**No windows.** Folders are handled the way a file manager handles them —
+in the list itself, with the arrow keys:
+
+* `→` on an agent wraps it in a new folder and leaves the name selected in
+  the row, so you type over it and press `⏎`. `esc` leaves it called *New
+  folder*. `e` reopens the same in-row editor on any folder later.
+* `shift`+`↑`/`↓` grows a selection; `→` then puts the whole range in one
+  folder and `←` lifts it back out. Selecting a folder *and* something
+  inside it moves the folder once — the contents come along rather than
+  being yanked out separately.
+* `m` picks a destination by walking the tree that's already on screen:
+  `→` steps into the highlighted folder, `←` steps back out, `⏎` drops.
+  The rows being moved stay visible and marked the whole time, and the
+  header line reads `⇢ moving 'swift-otter' → backend/auth-work`.
+
+The only dialog left is the confirmation for removing a folder that still
+has something in it — and only because a folded folder hides how much is
+about to be tipped back out.
 
 **Folders form themselves.** When an agent uses `spawn_agent`, the new agent is
 filed next to whoever spawned it: into the spawner's folder if it has one, and
@@ -705,7 +727,8 @@ multiverse-plugin/
 │   ├── inbox.py                # Inter-agent inbox: claim / commit / release
 │   ├── groups.py               # Dashboard folders: per-workspace group store
 │   │                           #  (locked read-modify-write), name-keyed
-│   │                           #  membership, auto-grouping on spawn, tree layout
+│   │                           #  membership, auto-grouping on spawn, batch
+│   │                           #  wrap/move/lift, tree layout + connectors
 │   ├── ask_agents.py           # Forked side-question machinery, per runtime
 │   ├── forks.py                # Registry of in-flight ask-fork UUIDs
 │   ├── spawn_requests.py       # Filesystem protocol for spawn_agent

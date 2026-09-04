@@ -13,6 +13,8 @@ import unittest
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+from textual import events
+
 from src import groups
 from src import monitor
 
@@ -45,6 +47,16 @@ class DashboardFolderTestCase(unittest.TestCase):
         self.app.monitor_cwd = CWD
         self.table = MagicMock()
         self.table.cursor_row = 0
+        # The real widget moves its own cursor; the mock has to be told, or
+        # every redraw would restore the cursor to where it started.
+        def _move_cursor(row=None, **_kw):
+            if row is not None:
+                self.table.cursor_row = row
+
+        self.table.move_cursor.side_effect = _move_cursor
+        notifications = patch.object(self.app, "notify")
+        self.notify = notifications.start()
+        self.addCleanup(notifications.stop)
 
     def _restore(self) -> None:
         if self._prev_root is None:
@@ -55,6 +67,38 @@ class DashboardFolderTestCase(unittest.TestCase):
 
     def _reload(self) -> None:
         self.app.group_state = groups.load(CWD)
+
+    def _refresh(self) -> None:
+        """What the app's own refresh does, minus the session scan."""
+        self._reload()
+        self.app._redraw_table()
+
+    def _patched(self):
+        return (
+            patch.object(self.app, "query_one", return_value=self.table),
+            patch.object(monitor, "pending_inbox_count", return_value=0),
+            patch.object(monitor, "auto_build_enabled", return_value=False),
+            patch.object(self.app, "refresh_sessions", side_effect=self._refresh),
+        )
+
+    def _act(self, fn, *args, cursor: Optional[int] = None):
+        """Run a dashboard action with the table and refresh plumbing in place."""
+        if cursor is not None:
+            self.table.cursor_row = cursor
+        with self._patched()[0], self._patched()[1], self._patched()[2], \
+                self._patched()[3]:
+            fn(*args)
+        return self.notify
+
+    def _send_key(self, key: str, char: Optional[str] = None) -> bool:
+        """Feed one key through the interception path DashboardTable uses."""
+        with self._patched()[0], self._patched()[1], self._patched()[2], \
+                self._patched()[3]:
+            return self.app._intercept_key(events.Key(key, char))
+
+    def _type(self, text: str) -> None:
+        for ch in text:
+            self._send_key(ch, ch)
 
     def _draw(self, entries: list[monitor.DashboardRow], pending: int = 0) -> list:
         """Run one redraw and hand back the rendered rows as arg tuples."""
@@ -259,97 +303,22 @@ class FolderKeyActionTests(DashboardFolderTestCase):
         self.assertEqual(state.groups, {})
         self.assertIsNone(state.group_of("swift-otter"))
 
-    def test_new_folder_on_an_agent_row_takes_that_agent_with_it(self) -> None:
-        self._draw([_row("swift-otter"), _row("brave-mole")])
-
-        with (
-            self._cursor_on(0),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_group()
-        on_name = push.call_args.args[1]
-
-        with (
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify"),
-            patch.object(self.app, "query_one", return_value=self.table),
-        ):
-            on_name("backend")
-
-        state = groups.load(CWD)
-        self.assertEqual([g.name for g in state.groups.values()], ["backend"])
-        self.assertIsNotNone(state.group_of("swift-otter"))
-        self.assertIsNone(state.group_of("brave-mole"))
-
-    def test_new_folder_on_a_folder_row_nests_inside_it(self) -> None:
-        outer = groups.create_group(CWD, "backend")
+    def test_an_empty_folder_is_removed_without_a_prompt(self) -> None:
+        # Nothing to lose and nothing hidden, so the confirmation would be
+        # a window for its own sake.
+        group = groups.create_group(CWD, "scratch")
         self._draw([])
 
         with (
             self._cursor_on(0),
             patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_group()
-
-        with (
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify"),
-            patch.object(self.app, "query_one", return_value=self.table),
-        ):
-            push.call_args.args[1]("auth")
-
-        state = groups.load(CWD)
-        nested = next(g for g in state.groups.values() if g.name == "auth")
-        self.assertEqual(nested.parent, outer.id)
-
-    def test_a_rejected_folder_name_is_reported_and_changes_nothing(self) -> None:
-        groups.create_group(CWD, "backend")
-        self._draw([_row("swift-otter")])
-
-        # Row 1 is the loose agent, so this asks for a *top-level* folder
-        # named "backend" — where one already exists.
-        with (
-            self._cursor_on(1),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_group()
-
-        with (
-            patch.object(self.app, "refresh_sessions") as refresh,
-            patch.object(self.app, "notify") as notify,
-        ):
-            push.call_args.args[1]("backend")
-
-        refresh.assert_not_called()
-        self.assertIn("already exists", notify.call_args.args[0])
-        self.assertEqual(len(groups.load(CWD).groups), 1)
-
-    def test_ungroup_lifts_an_agent_one_level_up(self) -> None:
-        outer = groups.create_group(CWD, "backend")
-        inner = groups.create_group(CWD, "auth", parent=outer.id)
-        groups.assign_agent(CWD, "swift-otter", inner.id)
-        self._draw([_row("swift-otter")])
-
-        # rows: backend, auth, swift-otter
-        with (
-            self._cursor_on(2),
             patch.object(self.app, "refresh_sessions"),
             patch.object(self.app, "notify"),
         ):
-            self.app.action_ungroup()
+            self.app.action_kill()
 
-        self.assertEqual(groups.load(CWD).group_of("swift-otter"), outer.id)
-
-    def test_ungroup_on_a_loose_agent_says_so_and_does_nothing(self) -> None:
-        self._draw([_row("swift-otter")])
-        with (
-            self._cursor_on(0),
-            patch.object(self.app, "refresh_sessions") as refresh,
-            patch.object(self.app, "notify") as notify,
-        ):
-            self.app.action_ungroup()
-        refresh.assert_not_called()
-        self.assertIn("isn't in a folder", notify.call_args.args[0])
+        push.assert_not_called()
+        self.assertNotIn(group.id, groups.load(CWD).groups)
 
     def test_space_on_a_member_folds_the_folder_around_it(self) -> None:
         group = groups.create_group(CWD, "backend")
@@ -383,108 +352,411 @@ class FolderKeyActionTests(DashboardFolderTestCase):
 
         self.assertFalse(any(g.collapsed for g in groups.load(CWD).groups.values()))
 
-    def test_moving_an_agent_into_a_folder_via_the_picker(self) -> None:
-        group = groups.create_group(CWD, "backend")
+    def test_rename_with_no_folder_in_reach_explains_itself(self) -> None:
+        self._draw([_row("swift-otter")])
+        with (
+            self._cursor_on(0),
+            patch.object(self.app, "notify") as notify,
+        ):
+            self.app.action_rename_group()
+        self.assertIsNone(self.app._inline)
+        self.assertIn("Highlight a folder", notify.call_args.args[0])
+
+
+class ArrowStructureTests(DashboardFolderTestCase):
+    """→ and ← restructure the tree; on folders they open and close it."""
+
+    def test_right_on_an_agent_wraps_it_in_a_new_folder(self) -> None:
+        self._draw([_row("swift-otter"), _row("brave-mole")])
+        self._act(self.app.action_indent, cursor=0)
+
+        state = groups.load(CWD)
+        self.assertEqual(len(state.groups), 1)
+        gid = state.group_of("swift-otter")
+        self.assertIsNotNone(gid)
+        self.assertEqual(state.groups[gid].name, groups.DEFAULT_FOLDER_NAME)
+        self.assertIsNone(state.group_of("brave-mole"))
+
+    def test_the_new_folder_opens_its_name_for_editing_straight_away(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_indent, cursor=0)
+
+        edit = self.app._inline
+        self.assertIsNotNone(edit)
+        self.assertEqual(edit.kind, "create")
+        self.assertEqual(edit.buffer, groups.DEFAULT_FOLDER_NAME)
+        # Finder-style: the name comes up selected, so typing replaces it.
+        self.assertTrue(edit.select_all)
+
+    def test_a_folder_is_created_beside_what_it_wraps_not_at_the_root(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", outer.id)
         self._draw([_row("swift-otter")])
 
-        # rows: backend, swift-otter
-        with (
-            self._cursor_on(1),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_move_to_group()
-        picker, on_pick = push.call_args.args[0], push.call_args.args[1]
-        self.assertIsInstance(picker, monitor.GroupPickerScreen)
+        self._act(self.app.action_indent, cursor=1)  # the member row
 
-        with (
-            patch.object(self.app, "query_one", return_value=self.table),
-            patch.object(self.app, "refresh_sessions", side_effect=self._reload),
-            patch.object(self.app, "notify"),
-        ):
-            on_pick(("group", group.id))
+        state = groups.load(CWD)
+        gid = state.group_of("swift-otter")
+        self.assertEqual(state.groups[gid].parent, outer.id)
 
-        self.assertEqual(groups.load(CWD).group_of("swift-otter"), group.id)
+    def test_right_opens_a_folded_folder_rather_than_wrapping_it(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+        groups.set_collapsed(CWD, group.id, True)
+        self._draw([_row("swift-otter")])
 
-    def test_the_picker_will_not_offer_a_folders_own_subtree(self) -> None:
-        outer = groups.create_group(CWD, "backend")
-        inner = groups.create_group(CWD, "auth", parent=outer.id)
-        groups.create_group(CWD, "frontend")
-        self._draw([])
+        self._act(self.app.action_indent, cursor=0)
 
-        with (
-            self._cursor_on(0),  # the backend header
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_move_to_group()
+        state = groups.load(CWD)
+        self.assertEqual(len(state.groups), 1)
+        self.assertFalse(state.groups[group.id].collapsed)
 
-        picker = push.call_args.args[0]
-        self.assertEqual(picker.exclude, {outer.id, inner.id})
-
-    def test_moving_to_the_top_level_clears_membership(self) -> None:
+    def test_right_on_an_open_folder_steps_into_its_first_child(self) -> None:
         group = groups.create_group(CWD, "backend")
         groups.assign_agent(CWD, "swift-otter", group.id)
         self._draw([_row("swift-otter")])
 
-        with (
-            self._cursor_on(1),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_move_to_group()
+        self._act(self.app.action_indent, cursor=0)
 
-        with (
-            patch.object(self.app, "query_one", return_value=self.table),
-            patch.object(self.app, "refresh_sessions", side_effect=self._reload),
-            patch.object(self.app, "notify"),
-        ):
-            push.call_args.args[1](("root", None))
+        self.assertEqual(len(groups.load(CWD).groups), 1)
+        self.table.move_cursor.assert_called_with(row=1)
 
-        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
+    def test_left_closes_an_open_folder(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_outdent, cursor=0)
+
+        self.assertTrue(groups.load(CWD).groups[group.id].collapsed)
+
+    def test_left_on_a_closed_nested_folder_jumps_to_its_parent(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        inner = groups.create_group(CWD, "auth", parent=outer.id)
+        groups.set_collapsed(CWD, inner.id, True)
+        self._draw([])
+
+        self._act(self.app.action_outdent, cursor=1)
+
+        # Structure untouched; the cursor moved to the parent header.
+        self.assertEqual(groups.load(CWD).groups[inner.id].parent, outer.id)
+        self.table.move_cursor.assert_called_with(row=0)
+
+    def test_left_on_a_closed_top_level_folder_has_nowhere_to_go(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.set_collapsed(CWD, group.id, True)
+        self._draw([])
+
+        notify = self._act(self.app.action_outdent, cursor=0)
+
+        self.assertIn(group.id, groups.load(CWD).groups)
+        self.assertIn("top level", notify.call_args.args[0])
+
+    def test_left_on_a_member_lifts_it_one_level_out(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        inner = groups.create_group(CWD, "auth", parent=outer.id)
+        groups.assign_agent(CWD, "swift-otter", inner.id)
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_outdent, cursor=2)
+
+        self.assertEqual(groups.load(CWD).group_of("swift-otter"), outer.id)
+
+    def test_left_on_a_loose_agent_says_there_is_nowhere_to_lift_it(self) -> None:
+        self._draw([_row("swift-otter")])
+        notify = self._act(self.app.action_outdent, cursor=0)
+        self.assertIn("top level", notify.call_args.args[0])
+        self.assertEqual(groups.load(CWD).groups, {})
+
+
+class InlineNamingTests(DashboardFolderTestCase):
+    """The folder name is edited in the row, not in a window."""
+
+    def test_typing_replaces_the_preselected_name_and_enter_commits(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_indent, cursor=0)
+
+        self._type("infra")
+        self.assertEqual(self.app._inline.buffer, "infra")
+        self._send_key("enter")
+
+        self.assertIsNone(self.app._inline)
+        state = groups.load(CWD)
+        self.assertEqual(state.groups[state.group_of("swift-otter")].name, "infra")
+
+    def test_escape_leaves_a_brand_new_folder_with_its_default_name(self) -> None:
+        # Finder does the same: the folder exists, it is just still called
+        # "New folder". Deleting it on Esc would lose the agent's grouping.
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_indent, cursor=0)
+
+        self._send_key("escape")
+
+        self.assertIsNone(self.app._inline)
+        state = groups.load(CWD)
+        gid = state.group_of("swift-otter")
+        self.assertEqual(state.groups[gid].name, groups.DEFAULT_FOLDER_NAME)
+
+    def test_escape_reverts_a_rename(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+
+        self._type("something-else")
+        self._send_key("escape")
+
+        self.assertEqual(groups.load(CWD).groups[group.id].name, "backend")
+
+    def test_backspace_and_the_text_cursor_edit_the_buffer(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+
+        self._send_key("left")  # drops the selection, cursor at the end - 1
+        self._send_key("backspace")
+        self.assertEqual(self.app._inline.buffer, "backed")
+        self._type("n")
+        self.assertEqual(self.app._inline.buffer, "backend")
+
+    def test_a_duplicate_name_keeps_the_field_open_to_be_fixed(self) -> None:
+        groups.create_group(CWD, "backend")
+        other = groups.create_group(CWD, "frontend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=1)  # frontend
+
+        with patch.object(self.app, "notify") as notify:
+            self._type("backend")
+            self._send_key("enter")
+
+        self.assertIsNotNone(self.app._inline)
+        self.assertIn("already exists", notify.call_args.args[0])
+        self.assertEqual(groups.load(CWD).groups[other.id].name, "frontend")
 
     def test_rename_reaches_the_folder_from_a_member_row(self) -> None:
         group = groups.create_group(CWD, "backend")
         groups.assign_agent(CWD, "swift-otter", group.id)
         self._draw([_row("swift-otter")])
 
-        with (
-            self._cursor_on(1),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_rename_group()
-
-        with (
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify"),
-        ):
-            push.call_args.args[1]("infra")
+        self._act(self.app.action_rename_group, cursor=1)
+        self._type("infra")
+        self._send_key("enter")
 
         self.assertEqual(groups.load(CWD).groups[group.id].name, "infra")
 
-    def test_rename_with_no_folder_in_reach_explains_itself(self) -> None:
+    def test_arrows_edit_the_name_instead_of_restructuring_the_tree(self) -> None:
+        # The whole point of intercepting keys: → while naming must not
+        # also wrap the row in another folder.
         self._draw([_row("swift-otter")])
-        with (
-            self._cursor_on(0),
-            patch.object(self.app, "push_screen") as push,
-            patch.object(self.app, "notify") as notify,
-        ):
-            self.app.action_rename_group()
-        push.assert_not_called()
-        self.assertIn("Highlight a folder", notify.call_args.args[0])
+        self._act(self.app.action_indent, cursor=0)
+        before = len(groups.load(CWD).groups)
+
+        for key in ("left", "right", "up", "down"):
+            self.assertTrue(self._send_key(key))
+
+        self.assertEqual(len(groups.load(CWD).groups), before)
+        self.assertIsNotNone(self.app._inline)
+
+    def test_the_row_renders_the_buffer_with_a_cursor(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_indent, cursor=0)
+        self._type("ab")
+
+        drawn = self._draw([_row("swift-otter")])
+        self.assertIn("ab", drawn[0][NAME])
+        self.assertIn("reverse", drawn[0][NAME])
 
 
-class PickerEventTests(DashboardFolderTestCase):
-    def test_the_picker_stops_the_selection_event_from_bubbling(self) -> None:
-        # MonitorApp.on_data_table_row_selected calls action_primary(), so a
-        # selection that escapes the modal attaches or resumes whatever the
-        # dashboard cursor happens to be on. Observed for real: picking a
-        # destination folder also resumed a dormant agent behind the modal.
-        picker = monitor.GroupPickerScreen("move…", groups.load(CWD))
-        picker._choices = [("root", None)]
-        event = MagicMock()
-        event.cursor_row = 0
-        with patch.object(monitor.GroupPickerScreen, "dismiss") as dismiss:
-            picker.on_data_table_row_selected(event)
-        event.stop.assert_called_once()
-        dismiss.assert_called_once_with(("root", None))
+class MultiSelectTests(DashboardFolderTestCase):
+    def _select_down(self, start: int, times: int) -> None:
+        self.table.cursor_row = start
+        for _ in range(times):
+            self._act(self.app.action_extend_selection_down)
+
+    def test_shift_down_grows_a_range_from_the_cursor(self) -> None:
+        self._draw([_row("a"), _row("b"), _row("c")])
+        self._select_down(0, 2)
+        self.assertEqual(
+            self.app._selection, [r.key for r in self.app.display_rows]
+        )
+
+    def test_right_wraps_the_whole_selection_into_one_folder(self) -> None:
+        self._draw([_row("a"), _row("b"), _row("c")])
+        self._select_down(0, 1)
+        self._act(self.app.action_indent, cursor=1)
+
+        state = groups.load(CWD)
+        self.assertEqual(len(state.groups), 1)
+        gid = next(iter(state.groups))
+        self.assertEqual(state.group_of("a"), gid)
+        self.assertEqual(state.group_of("b"), gid)
+        self.assertIsNone(state.group_of("c"))
+        self.assertEqual(self.app._selection, [])
+
+    def test_left_lifts_the_whole_selection_out(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "a", group.id)
+        groups.assign_agent(CWD, "b", group.id)
+        self._draw([_row("a"), _row("b")])
+        self._select_down(1, 1)  # both members
+
+        self._act(self.app.action_outdent, cursor=2)
+
+        state = groups.load(CWD)
+        self.assertIsNone(state.group_of("a"))
+        self.assertIsNone(state.group_of("b"))
+
+    def test_a_selected_folder_carries_its_contents_without_double_moving(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "a", outer.id)
+        self._draw([_row("a")])
+        self._select_down(0, 1)  # the folder header and its member
+
+        self._act(self.app.action_indent, cursor=1)
+
+        state = groups.load(CWD)
+        # The member is still inside backend, and backend moved into the new
+        # folder — the agent did not get yanked out on its own.
+        self.assertEqual(state.group_of("a"), outer.id)
+        self.assertIsNotNone(state.groups[outer.id].parent)
+
+    def test_a_plain_cursor_move_drops_the_selection(self) -> None:
+        self._draw([_row("a"), _row("b"), _row("c")])
+        self._select_down(0, 1)
+        self.assertTrue(self.app._selection)
+
+        # Not consumed — the table still gets to move its own cursor.
+        self.assertFalse(self._send_key("down"))
+        self.assertEqual(self.app._selection, [])
+
+    def test_a_shift_move_is_not_a_plain_move(self) -> None:
+        self._draw([_row("a"), _row("b"), _row("c")])
+        self._select_down(0, 1)
+        self._send_key("shift+down")
+        self.assertTrue(self.app._selection)
+
+    def test_a_redraw_does_not_count_as_a_cursor_move(self) -> None:
+        # The selection used to be wiped by the very redraw that drew it:
+        # DataTable POSTS RowHighlighted (including one for its own
+        # clear() mid-rebuild), so a handler on that message fired long
+        # after the move it was meant to describe. Only a real terminal
+        # showed it, so it is pinned here.
+        self._draw([_row("a"), _row("b")])
+        self._select_down(0, 1)
+        self._draw([_row("a"), _row("b")])
+        self.assertEqual(len(self.app._selection), 2)
+
+    def test_escape_clears_the_selection(self) -> None:
+        self._draw([_row("a"), _row("b")])
+        self._select_down(0, 1)
+        with patch.object(self.app, "query_one", return_value=self.table):
+            self.app.action_clear_selection()
+        self.assertEqual(self.app._selection, [])
+
+    def test_selected_rows_render_highlighted(self) -> None:
+        self._draw([_row("a"), _row("b")])
+        self._select_down(0, 1)
+        drawn = self._draw([_row("a"), _row("b")])
+        self.assertIn("reverse", drawn[0][NAME])
+        self.assertIn("reverse", drawn[1][NAME])
+
+
+class InPlaceMoveTests(DashboardFolderTestCase):
+    def test_move_walks_into_a_folder_and_drops(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        inner = groups.create_group(CWD, "auth", parent=outer.id)
+        self._draw([_row("swift-otter")])
+
+        # rows: backend, auth, swift-otter
+        self._act(self.app.action_move_to_group, cursor=2)
+        self.assertIsNotNone(self.app._move)
+        self.assertEqual(self.app._move.highlight, outer.id)
+
+        self._send_key("right")          # into backend
+        self.assertEqual(self.app._move.dest, outer.id)
+        self.assertEqual(self.app._move.highlight, inner.id)
+        self._send_key("right")          # into auth
+        self.assertEqual(self.app._move.dest, inner.id)
+
+        with patch.object(self.app, "notify"):
+            self._send_key("enter")
+
+        self.assertIsNone(self.app._move)
+        self.assertEqual(groups.load(CWD).group_of("swift-otter"), inner.id)
+
+    def test_left_walks_back_out_and_enter_at_the_root_ungroups(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_move_to_group, cursor=1)
+        self._send_key("right")
+        self.assertEqual(self.app._move.dest, group.id)
+        self._send_key("left")
+        self.assertIsNone(self.app._move.dest)
+
+        with patch.object(self.app, "notify"):
+            self._send_key("enter")
+
+        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
+
+    def test_a_folder_is_never_offered_a_destination_inside_itself(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        groups.create_group(CWD, "auth", parent=outer.id)
+        groups.create_group(CWD, "frontend")
+        self._draw([])
+
+        self._act(self.app.action_move_to_group, cursor=0)  # moving backend
+
+        candidates = [g.name for g in self.app._move_candidates()]
+        self.assertEqual(candidates, ["frontend"])
+
+    def test_escape_cancels_without_moving_anything(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_move_to_group, cursor=1)
+        self._send_key("right")
+        with patch.object(self.app, "notify"):
+            self._send_key("escape")
+
+        self.assertIsNone(self.app._move)
+        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
+        self.assertIn(group.id, groups.load(CWD).groups)
+
+    def test_the_rows_being_moved_and_the_destination_are_both_marked(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_move_to_group, cursor=1)
+        self._send_key("right")
+
+        drawn = self._draw([_row("swift-otter")])
+        self.assertIn("drop here", drawn[0][NAME])
+        self.assertIn("⇢", drawn[1][NAME])
+
+    def test_the_header_line_says_what_is_being_moved_and_where(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_move_to_group, cursor=1)
+
+        banner = self.app._move_banner()
+        self.assertIn("swift-otter", banner)
+        self.assertIn("top level", banner)
+        self._send_key("right")
+        self.assertIn("backend", self.app._move_banner())
+
+    def test_a_move_can_carry_a_whole_selection(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([_row("a"), _row("b")])
+        self._act(self.app.action_extend_selection_down, cursor=1)
+
+        self._act(self.app.action_move_to_group)
+        self._send_key("right")
+        with patch.object(self.app, "notify"):
+            self._send_key("enter")
+
+        state = groups.load(CWD)
+        self.assertEqual(state.group_of("a"), group.id)
+        self.assertEqual(state.group_of("b"), group.id)
 
 
 class NewSessionFolderTests(DashboardFolderTestCase):

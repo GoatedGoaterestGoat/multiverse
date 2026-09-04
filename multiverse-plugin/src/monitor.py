@@ -120,6 +120,11 @@ STATUS_STYLES = {
     "unknown": "dim",
 }
 
+# Keys that move the table cursor. Pressing one ends a shift-selection.
+_CURSOR_MOVE_KEYS = frozenset(
+    {"up", "down", "home", "end", "pageup", "pagedown", "ctrl+home", "ctrl+end"}
+)
+
 # Which status a folder header reports when its members disagree: the one
 # most likely to need the user. Lower rank wins.
 _GROUP_STATUS_RANK = {
@@ -2967,133 +2972,68 @@ def _read_title_from_full(claude_uuid: str) -> Optional[str]:
     return title
 
 
-class GroupNameScreen(ModalScreen[Optional[str]]):
-    """Name prompt for a folder — shared by create and rename.
+@dataclass
+class _InlineEdit:
+    """A folder name being edited in the row itself.
 
-    Deliberately not reusing ``NameInputScreen``: that one validates against
-    the workspace's *agent* names, and a folder is allowed to share a name
-    with the agent it was created around (which is exactly what
-    ``auto_group_spawn`` does).
+    The folder is created first and named afterwards, so ``group_id``
+    always points at something real — a redraw (or another monitor) can
+    happen mid-edit without the row vanishing. ``select_all`` reproduces
+    Finder's "the name comes up highlighted": the first printable key
+    replaces it rather than appending.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
-
-    def __init__(self, heading: str, default: str = "", hint: str = "") -> None:
-        super().__init__()
-        self.heading = heading
-        self.default = default
-        self.hint = hint or "Enter to save · Esc to cancel"
-
-    def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static(self.heading, id="group-name-heading"),
-            Input(
-                value=self.default,
-                placeholder="Folder name",
-                id="group-name-input",
-            ),
-            Static("", id="group-name-error"),
-            Static(self.hint, id="group-name-hint"),
-            id="group-name-dialog",
-        )
-
-    def on_mount(self) -> None:
-        inp = self.query_one("#group-name-input", Input)
-        inp.focus()
-        try:
-            inp.cursor_position = len(inp.value)
-        except Exception:
-            pass
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        name = event.value.strip()
-        if not name:
-            self.query_one("#group-name-error", Static).update(
-                "[red]Folder name cannot be empty.[/]"
-            )
-            return
-        self.dismiss(name)
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
+    kind: str  # "create" | "rename"
+    group_id: str
+    buffer: str
+    cursor: int
+    select_all: bool
 
 
-class GroupPickerScreen(ModalScreen[Optional[tuple[str, Optional[str]]]]):
-    """Destination picker for "move into…".
+@dataclass
+class _MoveMode:
+    """A move in progress, picking its destination in the tree in place.
 
-    Dismisses with ``("root", None)`` for the top level, ``("group", id)``
-    for an existing folder, ``("new", None)`` to create one first, or
-    ``None`` if cancelled.
-
-    ``exclude`` must contain a whole subtree when it contains anything —
-    the caller moving a folder passes the folder plus its descendants, so
-    the listing can't offer a destination inside the thing being moved.
+    ``dest`` is the folder the cursor has walked *into* (``None`` = top
+    level) and is where Enter drops. ``highlight`` is the subfolder of
+    ``dest`` that ``→`` would walk into next.
     """
 
-    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    group_ids: list[str]
+    agent_names: list[str]
+    label: str
+    dest: Optional[str]
+    highlight: Optional[str]
 
-    def __init__(
-        self,
-        heading: str,
-        state: groups.GroupState,
-        *,
-        exclude: Optional[set[str]] = None,
-        current: Optional[str] = None,
-    ) -> None:
-        super().__init__()
-        self.heading = heading
-        self.state = state
-        self.exclude = exclude or set()
-        self.current = current
-        self._choices: list[tuple[str, Optional[str]]] = []
 
-    def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static(self.heading, id="group-pick-heading"),
-            DataTable(cursor_type="row", id="group-pick-table"),
-            Static("Enter to choose · Esc to cancel", id="group-pick-hint"),
-            id="group-pick-dialog",
-        )
+class DashboardTable(DataTable):
+    """The dashboard's table, with outliner keys.
 
-    def on_mount(self) -> None:
-        table = self.query_one("#group-pick-table", DataTable)
-        table.add_columns("Destination")
-        here = "  [dim]← where it is now[/]"
+    ``DataTable`` claims ``left``/``right`` for column movement and
+    ``enter`` for row selection, and knows nothing about shift-ranges or
+    editing a cell in place. Rebinding here keeps all of that scoped to
+    this one widget — the alternative, priority bindings on the App, would
+    fire even while an Input in a modal has focus and break typing there.
 
-        self._choices = [("root", None)]
-        table.add_row(
-            "[dim]▸[/] (top level — no folder)"
-            + (here if self.current is None else "")
-        )
-        for group, depth in groups.iter_groups_depth_first(self.state):
-            if group.id in self.exclude:
-                continue
-            self._choices.append(("group", group.id))
-            table.add_row(
-                "   " * depth
-                + f"{groups.CHEVRON_OPEN} {group.name}"
-                + (here if group.id == self.current else "")
-            )
-        self._choices.append(("new", None))
-        table.add_row("[bold]+ New folder…[/]")
-        table.focus()
+    ``on_key`` runs before binding resolution, which is what lets the
+    inline editor and the move mode swallow the very keys the table would
+    otherwise act on.
+    """
 
-    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
-        """Fired when Enter picks a destination.
+    BINDINGS = [
+        Binding("right", "app.indent", "Into folder", show=False),
+        Binding("left", "app.outdent", "Out of folder", show=False),
+        Binding("shift+up", "app.extend_selection_up", "Select up", show=False),
+        Binding(
+            "shift+down", "app.extend_selection_down", "Select down", show=False
+        ),
+    ]
 
-        Must call ``event.stop()``: the event bubbles otherwise, and
-        MonitorApp's own ``on_data_table_row_selected`` calls
-        ``action_primary()`` on whatever the dashboard cursor is sitting
-        on — so choosing a folder here would also attach (or resume) an
-        agent behind the modal.
-        """
-        event.stop()
-        idx = event.cursor_row
-        if 0 <= idx < len(self._choices):
-            self.dismiss(self._choices[idx])
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
+    def on_key(self, event: events.Key) -> None:
+        intercept = getattr(self.app, "_intercept_key", None)
+        if intercept is not None and intercept(event):
+            event.stop()
+            event.prevent_default()
 
 
 class ConfirmGroupDeleteScreen(ModalScreen[bool]):
@@ -3484,38 +3424,6 @@ class MonitorApp(App):
         padding-top: 1;
         height: auto;
     }
-    #group-name-dialog {
-        width: 70;
-        height: auto;
-        padding: 1 2;
-        border: round $primary;
-        background: $surface;
-    }
-    #group-name-heading { height: auto; padding-bottom: 1; }
-    #group-name-error {
-        color: $error;
-        height: auto;
-        padding-top: 1;
-    }
-    #group-name-hint {
-        color: $text-muted;
-        padding-top: 1;
-        height: auto;
-    }
-    #group-pick-dialog {
-        width: 70;
-        height: 80%;
-        padding: 1 2;
-        border: round $primary;
-        background: $surface;
-    }
-    #group-pick-heading { height: auto; padding-bottom: 1; }
-    #group-pick-table { height: 1fr; }
-    #group-pick-hint {
-        color: $text-muted;
-        padding-top: 1;
-        height: auto;
-    }
     #confirm-group-dialog {
         width: 100;
         height: auto;
@@ -3547,11 +3455,12 @@ class MonitorApp(App):
         Binding("enter", "primary", "Attach/Resume"),
         Binding("k", "kill", "Kill"),
         Binding("g", "new_group", "New folder"),
-        Binding("m", "move_to_group", "Move to folder"),
-        Binding("e", "rename_group", "Rename folder"),
-        Binding("u", "ungroup", "Out of folder"),
+        Binding("m", "move_to_group", "Move"),
+        Binding("e", "rename_group", "Rename"),
+        Binding("u", "ungroup", "Out of folder", show=False),
         Binding("space", "toggle_collapse", "Fold/unfold"),
-        Binding("z", "toggle_collapse_all", "Fold all"),
+        Binding("z", "toggle_collapse_all", "Fold all", show=False),
+        Binding("escape", "clear_selection", "Cancel", show=False),
         Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -3568,6 +3477,15 @@ class MonitorApp(App):
         # (folder headers interleaved with agents) the table renders from.
         self.group_state: groups.GroupState = groups.GroupState()
         self.display_rows: list[groups.DisplayRow] = []
+        # Folder-name edit in progress, rendered into the row itself.
+        self._inline: Optional[_InlineEdit] = None
+        # Destination pick in progress, walked in the tree itself.
+        self._move: Optional[_MoveMode] = None
+        # shift+↑/↓ range: row keys, in display order, plus the anchor the
+        # range grows from.
+        self._selection: list[str] = []
+        self._select_anchor: Optional[str] = None
+        self._web_tag = ""
         # Fork JSONLs created by in-flight ask-all subprocesses. Hidden from
         # the dashboard + resume widget for their brief lifetime.
         self._active_fork_uuids: set[str] = set()
@@ -3591,7 +3509,7 @@ class MonitorApp(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        table = DataTable(cursor_type="row", zebra_stripes=True)
+        table = DashboardTable(cursor_type="row", zebra_stripes=True)
         # Name leads so the folder tree's connectors sit flush against the
         # left edge of the dashboard, where a tree reads.
         table.add_columns(
@@ -3652,8 +3570,15 @@ class MonitorApp(App):
             share = web_share.status(self.monitor_cwd)
         except Exception:
             share = None
-        tag = "  ·  🌐 web: ON" if share is not None else ""
-        self.sub_title = f"cwd: {self.monitor_cwd}{tag}"
+        self._web_tag = "  ·  🌐 web: ON" if share is not None else ""
+        self._set_subtitle()
+
+    def _set_subtitle(self) -> None:
+        """The header line doubles as the move mode's status bar — a mode
+        needs somewhere to say what it is doing, and this is the one place
+        that isn't another window."""
+        banner = self._move_banner()
+        self.sub_title = banner or f"cwd: {self.monitor_cwd}{self._web_tag}"
 
     def _tick_spawn_requests(self) -> None:
         """One pass of the spawn-request watcher. Called every 1s.
@@ -3836,7 +3761,8 @@ class MonitorApp(App):
         preview = e.preview or "[dim](empty)[/]"
         if len(preview) > 60:
             preview = preview[:59] + "…"
-        name_cell = f"[dim]{row.prefix}[/]{e.name}" if row.prefix else e.name
+        label = self._decorate(row, e.name)
+        name_cell = f"[dim]{row.prefix}[/]{label}" if row.prefix else label
         return (
             name_cell, id_cell, e.runtime, inbox_cell, build_cell,
             status_cell, tokens_cell, updated, preview,
@@ -3856,10 +3782,13 @@ class MonitorApp(App):
             groups.CHEVRON_CLOSED if group.collapsed else groups.CHEVRON_OPEN
         )
         count = row.agent_count
-        name_cell = (
-            f"[dim]{row.prefix}[/][bold]{chevron} {group.name}[/]"
-            f"[dim] ({count})[/]"
-        )
+        if self._inline is not None and self._inline.group_id == group.id:
+            name_cell = self._inline_name_cell(row)
+        else:
+            label = self._decorate(
+                row, f"[bold]{chevron} {group.name}[/][dim] ({count})[/]"
+            )
+            name_cell = f"[dim]{row.prefix}[/]{label}"
 
         agents = row.agents
         pending = sum(pending_inbox_count(a.cwd, a.name) for a in agents)
@@ -3912,6 +3841,10 @@ class MonitorApp(App):
         self.display_rows = groups.build_display_rows(
             self.entries, self.group_state
         )
+        # Drop selected keys whose rows are gone (killed, or folded away).
+        if self._selection:
+            live = {r.key for r in self.display_rows}
+            self._selection = [k for k in self._selection if k in live]
         for row in self.display_rows:
             cells = (
                 self._group_cells(row, now)
@@ -3920,6 +3853,7 @@ class MonitorApp(App):
             )
             table.add_row(*cells, key=row.key)
         self._restore_cursor(table, prev_key, prev_cursor)
+        self._set_subtitle()
 
     def _cursor_row_key(self) -> Optional[str]:
         """Row key currently under the cursor, from the previous draw."""
@@ -3986,6 +3920,63 @@ class MonitorApp(App):
     # ------------------------------------------------------------------
     # Folders
     # ------------------------------------------------------------------
+    #
+    # Three interactions live here, and none of them opens a window:
+    #
+    #   * naming     — the folder is created first and its name is edited
+    #                  in the row itself (`_inline`), Finder-style.
+    #   * selecting  — shift+↑/↓ grows a range (`_selection`), and the
+    #                  folder keys then act on the whole range.
+    #   * moving     — `_move` walks the folder tree in place with →/←
+    #                  while the rows being moved stay visible.
+    #
+    # All three are plain app state that `_redraw_table` reads, so the
+    # 1s refresh tick can run underneath any of them without disturbing
+    # what the user is doing.
+
+    def _intercept_key(self, event: events.Key) -> bool:
+        """First refusal on a key, for the modes that own the arrows.
+
+        Called from ``DashboardTable.on_key`` — before the table's own
+        bindings resolve — so the inline editor and the move mode can hold
+        ↑↓←→ and Enter for as long as they are active, and hand everything
+        else back untouched.
+        """
+        if self._inline is not None:
+            return self._inline_key(event)
+        if self._move is not None:
+            return self._move_key(event)
+        if event.key in _CURSOR_MOVE_KEYS and self._selection:
+            # Moving the cursor ends the selection, the way every list
+            # works. Decided here, on the keystroke, rather than from
+            # DataTable's RowHighlighted message: that message is posted,
+            # not called, and the table also emits one for its own
+            # ``clear()`` mid-rebuild — so a selection was being wiped by
+            # the very redraw that drew it.
+            self._clear_selection()
+            self._redraw_table()
+        return False
+
+    def _decorate(self, row: groups.DisplayRow, label: str) -> str:
+        """Selection and move-mode styling for a name cell's label.
+
+        Applied to the label only, never the tree connectors — reversing
+        those too would smear the shape of the tree.
+        """
+        if row.key in self._selection:
+            label = f"[reverse]{label}[/]"
+        move = self._move
+        if move is None:
+            return label
+        gid = row.group.id if (row.is_group and row.group is not None) else None
+        name = row.entry.name if (not row.is_group and row.entry) else None
+        if (gid and gid in move.group_ids) or (name and name in move.agent_names):
+            return f"[b yellow]\u21e2[/] {label}"
+        if gid and gid == move.dest:
+            return f"[reverse]{label}[/] [b green]\u2190 drop here[/]"
+        if gid and gid == move.highlight:
+            return f"{label} [dim]\u2192 enter[/]"
+        return label
 
     def _current_group(self) -> Optional[groups.Group]:
         row = self._current_display()
@@ -4005,143 +3996,443 @@ class MonitorApp(App):
             return self.group_state.group_of(row.entry.name)
         return None
 
-    def _move_cursor_to_key(self, key: str) -> None:
+    def _row_index(self, key: str) -> Optional[int]:
         for i, row in enumerate(self.display_rows):
             if row.key == key:
-                try:
-                    self.query_one(DataTable).move_cursor(row=i)
-                except Exception:
-                    pass
-                return
+                return i
+        return None
 
-    def action_new_group(self) -> None:
-        """``g`` — create a folder.
+    def _move_cursor_to_key(self, key: str) -> None:
+        idx = self._row_index(key)
+        if idx is None:
+            return
+        try:
+            self.query_one(DataTable).move_cursor(row=idx)
+        except Exception:
+            pass
 
-        Where it lands follows the cursor, because that is where the user
-        is already looking: on a folder header it becomes a subfolder; on
-        an agent the folder is created at the top level with that agent
-        already inside (the common case — you notice a cluster forming and
-        want to file it); on nothing, an empty top-level folder.
+    # -- selection ------------------------------------------------------
+
+    def _clear_selection(self) -> None:
+        self._selection = []
+        self._select_anchor = None
+
+    def _targets(self) -> tuple[list[str], list[str], str]:
+        """What the folder keys act on: the selection, else the cursor row.
+
+        Returns ``(group_ids, agent_names, label)``.
         """
-        row = self._current_display()
-        parent_id: Optional[str] = None
-        parent_name: Optional[str] = None
-        agent: Optional[DashboardRow] = None
-        if row is not None and row.is_group and row.group is not None:
-            parent_id = row.group.id
-            parent_name = row.group.name
-        elif row is not None and row.entry is not None:
-            agent = row.entry
-
-        if parent_name:
-            heading = f"New folder inside [bold]{parent_name}[/]"
-        elif agent is not None:
-            heading = f"New folder — [bold]{agent.name}[/] moves into it"
+        rows = [r for r in self.display_rows if r.key in set(self._selection)]
+        if not rows:
+            row = self._current_display()
+            rows = [row] if row is not None else []
+        group_ids = [r.group.id for r in rows if r.is_group and r.group]
+        agent_names = [r.entry.name for r in rows if not r.is_group and r.entry]
+        total = len(group_ids) + len(agent_names)
+        if total == 1 and agent_names:
+            label = f"'{agent_names[0]}'"
+        elif total == 1:
+            group = self.group_state.get(group_ids[0])
+            label = f"folder '{group.name}'" if group else "folder"
         else:
-            heading = "New top-level folder"
+            label = f"{total} items"
+        return group_ids, agent_names, label
 
-        def on_name(name: Optional[str]) -> None:
-            if not name:
-                return
-            try:
-                group = groups.create_group(self.monitor_cwd, name, parent_id)
-                if agent is not None:
-                    groups.assign_agent(self.monitor_cwd, agent.name, group.id)
-            except (ValueError, OSError) as exc:
-                self.notify(str(exc), severity="error")
-                return
+    def action_extend_selection_up(self) -> None:
+        self._extend_selection(-1)
+
+    def action_extend_selection_down(self) -> None:
+        self._extend_selection(1)
+
+    def _extend_selection(self, delta: int) -> None:
+        """shift+↑/↓ — grow (or shrink) a contiguous range from an anchor."""
+        if self._inline is not None or self._move is not None:
+            return
+        if not self.display_rows:
+            return
+        table = self.query_one(DataTable)
+        idx = table.cursor_row if isinstance(table.cursor_row, int) else 0
+        idx = max(0, min(idx, len(self.display_rows) - 1))
+        if self._select_anchor is None:
+            self._select_anchor = self.display_rows[idx].key
+        target = max(0, min(idx + delta, len(self.display_rows) - 1))
+        anchor_idx = self._row_index(self._select_anchor)
+        if anchor_idx is None:
+            anchor_idx = target
+            self._select_anchor = self.display_rows[target].key
+        lo, hi = sorted((anchor_idx, target))
+        self._selection = [r.key for r in self.display_rows[lo : hi + 1]]
+        try:
+            table.move_cursor(row=target)
+        except Exception:
+            pass
+        self._redraw_table()
+
+    def action_clear_selection(self) -> None:
+        """Escape: back out of whatever is in progress."""
+        if self._inline is not None:
+            self._cancel_inline_edit()
+            return
+        if self._move is not None:
+            self._cancel_move()
+            return
+        if self._selection:
+            self._clear_selection()
+            self._redraw_table()
+
+    # -- inline naming --------------------------------------------------
+
+    def _begin_inline_edit(self, kind: str, group: groups.Group) -> None:
+        self._inline = _InlineEdit(
+            kind=kind,
+            group_id=group.id,
+            buffer=group.name,
+            cursor=len(group.name),
+            select_all=True,
+        )
+        self._move_cursor_to_key(groups.group_row_key(group.id))
+        self._redraw_table()
+
+    def _cancel_inline_edit(self) -> None:
+        """Esc. A rename reverts; a brand-new folder keeps its default name
+        (as in Finder — the folder exists, it's just still called "New
+        folder", and `e` renames it whenever the user gets to it)."""
+        self._inline = None
+        self._redraw_table()
+
+    def _commit_inline_edit(self) -> None:
+        edit = self._inline
+        if edit is None:
+            return
+        name = edit.buffer.strip()
+        group = self.group_state.get(edit.group_id)
+        if group is None:
+            self._inline = None
             self.refresh_sessions()
-            self._move_cursor_to_key(groups.group_row_key(group.id))
-            if agent is not None:
-                self.notify(
-                    f"Created folder '{group.name}' with '{agent.name}' inside"
-                )
-            else:
-                self.notify(f"Created folder '{group.name}'")
+            return
+        if not name or name == group.name:
+            self._inline = None
+            self._redraw_table()
+            return
+        try:
+            groups.rename_group(self.monitor_cwd, edit.group_id, name)
+        except (ValueError, OSError) as exc:
+            # Stay in the field so the name can be fixed without retyping.
+            self.notify(str(exc), severity="error")
+            return
+        self._inline = None
+        self.refresh_sessions()
+        self._move_cursor_to_key(groups.group_row_key(edit.group_id))
 
-        self.push_screen(GroupNameScreen(heading), on_name)
+    def _inline_key(self, event: events.Key) -> bool:
+        """Keys while a folder name is being edited. Consumes everything so
+        a stray keystroke can't fire a dashboard action mid-rename."""
+        edit = self._inline
+        if edit is None:
+            return False
+        key = event.key
+        if key == "escape":
+            self._cancel_inline_edit()
+            return True
+        if key == "enter":
+            self._commit_inline_edit()
+            return True
+        if key in ("left", "right", "home", "end"):
+            edit.select_all = False
+            if key == "left":
+                edit.cursor = max(0, edit.cursor - 1)
+            elif key == "right":
+                edit.cursor = min(len(edit.buffer), edit.cursor + 1)
+            elif key == "home":
+                edit.cursor = 0
+            else:
+                edit.cursor = len(edit.buffer)
+            self._redraw_table()
+            return True
+        if key == "backspace":
+            if edit.select_all:
+                edit.buffer, edit.cursor = "", 0
+            elif edit.cursor > 0:
+                edit.buffer = (
+                    edit.buffer[: edit.cursor - 1] + edit.buffer[edit.cursor :]
+                )
+                edit.cursor -= 1
+            edit.select_all = False
+            self._redraw_table()
+            return True
+        if key in ("delete", "ctrl+u"):
+            edit.buffer, edit.cursor, edit.select_all = "", 0, False
+            self._redraw_table()
+            return True
+        char = event.character
+        if char and char.isprintable():
+            if edit.select_all:
+                edit.buffer, edit.cursor = "", 0
+                edit.select_all = False
+            edit.buffer = (
+                edit.buffer[: edit.cursor] + char + edit.buffer[edit.cursor :]
+            )
+            edit.cursor += len(char)
+            self._redraw_table()
+            return True
+        return True
+
+    def _inline_name_cell(self, row: groups.DisplayRow) -> str:
+        """The name cell for the folder currently being renamed."""
+        edit = self._inline
+        assert edit is not None
+        if edit.select_all:
+            body = f"[reverse]{edit.buffer or ' '}[/]"
+        else:
+            before = edit.buffer[: edit.cursor]
+            at = edit.buffer[edit.cursor : edit.cursor + 1] or " "
+            after = edit.buffer[edit.cursor + 1 :]
+            body = f"{before}[reverse]{at}[/]{after}"
+        return f"[dim]{row.prefix}[/][bold]{groups.CHEVRON_OPEN}[/] {body}"
+
+    # -- in-place move --------------------------------------------------
+
+    def _move_key(self, event: events.Key) -> bool:
+        """Keys while picking a destination. →/← walk into and out of
+        folders; ↑/↓ pick which subfolder → would walk into."""
+        move = self._move
+        if move is None:
+            return False
+        key = event.key
+        if key == "escape":
+            self._cancel_move()
+            return True
+        if key == "enter":
+            self._commit_move()
+            return True
+        candidates = self._move_candidates()
+        if key in ("up", "down"):
+            if candidates:
+                keys = [g.id for g in candidates]
+                if move.highlight in keys:
+                    i = keys.index(move.highlight)
+                    i = (i + (1 if key == "down" else -1)) % len(keys)
+                else:
+                    i = 0
+                move.highlight = keys[i]
+                self._sync_move_cursor()
+                self._redraw_table()
+            return True
+        if key == "right":
+            if move.highlight:
+                move.dest = move.highlight
+                groups.set_collapsed(self.monitor_cwd, move.dest, False)
+                self.group_state = groups.load(self.monitor_cwd)
+                move.highlight = self._first_candidate_in(move.dest)
+                self._redraw_table()
+                self._sync_move_cursor()
+            return True
+        if key == "left":
+            if move.dest is not None:
+                left = move.dest
+                parent = self.group_state.get(move.dest)
+                move.dest = parent.parent if parent is not None else None
+                move.highlight = left
+                self._redraw_table()
+                self._sync_move_cursor()
+            return True
+        return True
+
+    def _move_candidates(self) -> list[groups.Group]:
+        """Subfolders of the current destination that are legal to enter —
+        a folder can't be moved inside its own subtree."""
+        move = self._move
+        if move is None:
+            return []
+        blocked: set[str] = set()
+        for gid in move.group_ids:
+            blocked.add(gid)
+            blocked |= set(self.group_state.descendants_of(gid))
+        return [
+            g
+            for g in self.group_state.children_of(move.dest)
+            if g.id not in blocked
+        ]
+
+    def _first_candidate_in(self, group_id: Optional[str]) -> Optional[str]:
+        move = self._move
+        if move is None:
+            return None
+        saved, move.dest = move.dest, group_id
+        try:
+            candidates = self._move_candidates()
+        finally:
+            move.dest = saved
+        return candidates[0].id if candidates else None
+
+    def _sync_move_cursor(self) -> None:
+        """Keep the table cursor on whatever the move is pointing at, so the
+        destination is visible even in a long list."""
+        move = self._move
+        if move is None:
+            return
+        focus = move.highlight or move.dest
+        if focus:
+            self._move_cursor_to_key(groups.group_row_key(focus))
 
     def action_move_to_group(self) -> None:
-        """``m`` — move the highlighted agent or folder somewhere else."""
+        """``m`` — start picking a destination, in the tree itself."""
+        if self._inline is not None:
+            return
+        if self._move is not None:
+            self._commit_move()
+            return
+        group_ids, agent_names, label = self._targets()
+        if not group_ids and not agent_names:
+            return
+        self._move = _MoveMode(
+            group_ids=group_ids,
+            agent_names=agent_names,
+            label=label,
+            dest=None,
+            highlight=None,
+        )
+        self._move.highlight = self._first_candidate_in(None)
+        self._clear_selection()
+        self._redraw_table()
+        self._sync_move_cursor()
+
+    def _cancel_move(self) -> None:
+        self._move = None
+        self._redraw_table()
+        self.notify("Move cancelled")
+
+    def _commit_move(self) -> None:
+        move = self._move
+        if move is None:
+            return
+        self._move = None
+        try:
+            moved = groups.move_into(
+                self.monitor_cwd,
+                move.dest,
+                group_ids=move.group_ids,
+                agent_names=move.agent_names,
+            )
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error")
+            self.refresh_sessions()
+            return
+        self.refresh_sessions()
+        dest = self.group_state.get(move.dest)
+        where = f"into '{dest.name}'" if dest is not None else "to the top level"
+        if moved:
+            self.notify(f"Moved {move.label} {where}")
+        else:
+            self.notify(f"{move.label} — already {where}")
+        focus = move.group_ids[0] if move.group_ids else None
+        if focus:
+            self._move_cursor_to_key(groups.group_row_key(focus))
+
+    def _move_banner(self) -> str:
+        move = self._move
+        if move is None:
+            return ""
+        dest = self.group_state.get(move.dest)
+        path = "/".join(self.group_state.path_names(move.dest)) if dest else "top level"
+        return (
+            f"⇢ moving {move.label} → {path}"
+            "    ↑↓ pick · → into · ← out · ⏎ drop · esc cancel"
+        )
+
+    # -- structure keys -------------------------------------------------
+
+    def action_indent(self) -> None:
+        """``→`` — on a folder, open it; on anything else, wrap it in a new
+        folder and start naming that folder in place."""
+        if self._inline is not None or self._move is not None:
+            return
         row = self._current_display()
         if row is None:
             return
-        state = self.group_state
-
-        if row.is_group and row.group is not None:
+        if not self._selection and row.is_group and row.group is not None:
             group = row.group
-            # A folder can't be moved inside itself, so its whole subtree
-            # is off the menu.
-            exclude = {group.id} | set(state.descendants_of(group.id))
-            heading = f"Move folder [bold]{group.name}[/] into…"
-            current = group.parent
-            label = f"folder '{group.name}'"
-            focus_key = groups.group_row_key(group.id)
-
-            def apply(target: Optional[str]) -> None:
-                groups.move_group(self.monitor_cwd, group.id, target)
-
-        elif row.entry is not None:
-            entry = row.entry
-            exclude = set()
-            heading = f"Move [bold]{entry.name}[/] into…"
-            current = state.group_of(entry.name)
-            label = f"'{entry.name}'"
-            focus_key = entry.row_key
-
-            def apply(target: Optional[str]) -> None:
-                groups.assign_agent(self.monitor_cwd, entry.name, target)
-
-        else:
+            if group.collapsed:
+                groups.set_collapsed(self.monitor_cwd, group.id, False)
+                self.refresh_sessions()
+                self._move_cursor_to_key(row.key)
+            else:
+                idx = self._row_index(row.key)
+                if idx is not None and idx + 1 < len(self.display_rows):
+                    nxt = self.display_rows[idx + 1]
+                    if nxt.depth > row.depth:
+                        self._move_cursor_to_key(nxt.key)
             return
-
-        def commit(target: Optional[str]) -> None:
-            try:
-                apply(target)
-            except (ValueError, OSError) as exc:
-                self.notify(str(exc), severity="error")
-                return
-            self.refresh_sessions()
-            self._move_cursor_to_key(focus_key)
-            dest = self.group_state.get(target)
-            where = (
-                f"into '{dest.name}'" if dest is not None else "to the top level"
+        group_ids, agent_names, _ = self._targets()
+        if not group_ids and not agent_names:
+            return
+        try:
+            group = groups.wrap_in_new_folder(
+                self.monitor_cwd,
+                group_ids=group_ids,
+                agent_names=agent_names,
             )
-            self.notify(f"Moved {label} {where}")
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        self._clear_selection()
+        self.refresh_sessions()
+        self._begin_inline_edit("create", group)
 
-        def on_pick(result: Optional[tuple[str, Optional[str]]]) -> None:
-            if result is None:
-                return
-            kind, gid = result
-            if kind == "root":
-                commit(None)
-            elif kind == "group":
-                commit(gid)
-            elif kind == "new":
+    def action_outdent(self) -> None:
+        """``←`` — on an open folder, close it; otherwise lift the row (or
+        the selection) one level out of its folder."""
+        if self._inline is not None or self._move is not None:
+            return
+        row = self._current_display()
+        if row is None:
+            return
+        if not self._selection and row.is_group and row.group is not None:
+            group = row.group
+            if not group.collapsed:
+                groups.set_collapsed(self.monitor_cwd, group.id, True)
+                self.refresh_sessions()
+                self._move_cursor_to_key(row.key)
+            elif group.parent:
+                self._move_cursor_to_key(groups.group_row_key(group.parent))
+            else:
+                self._lift([group.id], [])
+            return
+        group_ids, agent_names, _ = self._targets()
+        self._lift(group_ids, agent_names)
 
-                def on_name(name: Optional[str]) -> None:
-                    if not name:
-                        return
-                    try:
-                        created = groups.create_group(
-                            self.monitor_cwd, name, None
-                        )
-                    except (ValueError, OSError) as exc:
-                        self.notify(str(exc), severity="error")
-                        return
-                    commit(created.id)
+    def _lift(self, group_ids: list[str], agent_names: list[str]) -> None:
+        if not group_ids and not agent_names:
+            return
+        focus_key = None
+        row = self._current_display()
+        if row is not None:
+            focus_key = row.key
+        try:
+            moved = groups.lift_out(
+                self.monitor_cwd,
+                group_ids=group_ids,
+                agent_names=agent_names,
+            )
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error")
+            return
+        if not moved:
+            self.notify("Already at the top level", severity="warning")
+            return
+        self._clear_selection()
+        self.refresh_sessions()
+        if focus_key:
+            self._move_cursor_to_key(focus_key)
 
-                self.push_screen(
-                    GroupNameScreen("New top-level folder"), on_name
-                )
-
-        self.push_screen(
-            GroupPickerScreen(heading, state, exclude=exclude, current=current),
-            on_pick,
-        )
+    def action_new_group(self) -> None:
+        """``g`` — same as ``→``, for anyone who'd rather press a letter."""
+        self.action_indent()
 
     def action_rename_group(self) -> None:
-        """``e`` — rename the folder under (or around) the cursor."""
+        """``e`` — edit the folder's name where it sits."""
+        if self._inline is not None or self._move is not None:
+            return
         group = self.group_state.get(self._cursor_folder_id())
         if group is None:
             self.notify(
@@ -4149,75 +4440,19 @@ class MonitorApp(App):
                 severity="warning",
             )
             return
-
-        def on_name(name: Optional[str]) -> None:
-            if not name or name == group.name:
-                return
-            try:
-                groups.rename_group(self.monitor_cwd, group.id, name)
-            except (ValueError, OSError) as exc:
-                self.notify(str(exc), severity="error")
-                return
-            self.refresh_sessions()
-            self.notify(f"Renamed folder to '{name}'")
-
-        self.push_screen(
-            GroupNameScreen(
-                f"Rename folder [bold]{group.name}[/]", group.name
-            ),
-            on_name,
-        )
+        self._begin_inline_edit("rename", group)
 
     def action_ungroup(self) -> None:
-        """``u`` — lift the highlighted row one level out of its folder."""
-        row = self._current_display()
-        if row is None:
+        """``u`` — lift out one level, without ``←``'s fold-first behaviour."""
+        if self._inline is not None or self._move is not None:
             return
-
-        if row.is_group and row.group is not None:
-            group = row.group
-            if group.parent is None:
-                self.notify(
-                    f"Folder '{group.name}' is already at the top level",
-                    severity="warning",
-                )
-                return
-            grandparent = self.group_state.get(group.parent)
-            target = grandparent.parent if grandparent is not None else None
-            try:
-                groups.move_group(self.monitor_cwd, group.id, target)
-            except (ValueError, OSError) as exc:
-                self.notify(str(exc), severity="error")
-                return
-            self.refresh_sessions()
-            self._move_cursor_to_key(groups.group_row_key(group.id))
-            dest = self.group_state.get(target)
-            where = f"into '{dest.name}'" if dest is not None else "to the top level"
-            self.notify(f"Moved folder '{group.name}' {where}")
-            return
-
-        entry = row.entry
-        if entry is None:
-            return
-        gid = self.group_state.group_of(entry.name)
-        if gid is None:
-            self.notify(f"'{entry.name}' isn't in a folder", severity="warning")
-            return
-        group = self.group_state.get(gid)
-        target = group.parent if group is not None else None
-        try:
-            groups.assign_agent(self.monitor_cwd, entry.name, target)
-        except (ValueError, OSError) as exc:
-            self.notify(str(exc), severity="error")
-            return
-        self.refresh_sessions()
-        self._move_cursor_to_key(entry.row_key)
-        dest = self.group_state.get(target)
-        where = f"into '{dest.name}'" if dest is not None else "out to the top level"
-        self.notify(f"Moved '{entry.name}' {where}")
+        group_ids, agent_names, _ = self._targets()
+        self._lift(group_ids, agent_names)
 
     def action_toggle_collapse(self) -> None:
         """``space`` — fold or unfold a folder."""
+        if self._inline is not None or self._move is not None:
+            return
         row = self._current_display()
         if row is None:
             return
@@ -4242,8 +4477,10 @@ class MonitorApp(App):
 
     def action_toggle_collapse_all(self) -> None:
         """``z`` — fold everything, or unfold everything if already folded."""
+        if self._inline is not None or self._move is not None:
+            return
         if not self.group_state.groups:
-            self.notify("No folders yet — press g to make one", severity="warning")
+            self.notify("No folders yet — press → to make one", severity="warning")
             return
         collapse = any(
             not g.collapsed for g in self.group_state.groups.values()
@@ -4253,15 +4490,18 @@ class MonitorApp(App):
         self.notify("Folded every folder" if collapse else "Unfolded every folder")
 
     def _delete_group_flow(self, group: groups.Group) -> None:
-        """``k`` on a folder header: remove the folder, keep the agents."""
+        """``k`` on a folder header: remove the folder, keep the agents.
+
+        An empty folder goes without a prompt — there is nothing to lose
+        and nothing hidden. A folder with contents still confirms, because
+        when it's folded the user can't see how much is about to be tipped
+        back out.
+        """
         state = self.group_state
         agent_count = len(state.members_of(group.id, recursive=True))
         subgroup_count = len(state.descendants_of(group.id))
-        parent = state.get(group.parent)
 
-        def on_close(confirmed: Optional[bool]) -> None:
-            if not confirmed:
-                return
+        def remove() -> None:
             try:
                 groups.delete_group(self.monitor_cwd, group.id)
             except OSError as exc:
@@ -4269,6 +4509,16 @@ class MonitorApp(App):
                 return
             self.refresh_sessions()
             self.notify(f"Removed folder '{group.name}'")
+
+        if not agent_count and not subgroup_count:
+            remove()
+            return
+
+        parent = state.get(group.parent)
+
+        def on_close(confirmed: Optional[bool]) -> None:
+            if confirmed:
+                remove()
 
         self.push_screen(
             ConfirmGroupDeleteScreen(

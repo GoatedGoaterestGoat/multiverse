@@ -87,6 +87,7 @@ The wrapper script was rewritten from "single claude in a loop" into a **multi-s
 | `bin/multiverse-session` | Per-session inner loop: runs one claude, dispatches `resume_folded`, passes `--plugin-dir` for dev mode |
 | `src/monitor.py` | Textual `App` with a `DataTable` of sessions, modals for new/resume, keybindings |
 | `src/groups.py` | Dashboard folders: the per-workspace group store and the tree layout the table renders (no Textual dependency, so both are unit-testable) |
+| `monitor.py:DashboardTable` | DataTable subclass owning the outliner keys (`←`/`→` restructure, `shift`+`↑↓` select) and giving the inline name editor and the in-place move mode first refusal on every keystroke, so folders need no modals |
 | `scripts/set-status.sh` | One-liner called by status hooks with `idle`/`working`/`waiting`/`ended` |
 | `hooks/hooks.json` | Added `SessionStart`, `UserPromptSubmit`, `Notification`, `PostToolUse` (`.*`), `Stop`, `SessionEnd` handlers alongside the existing `context_fold` hook |
 

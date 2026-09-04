@@ -40,7 +40,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from .atomic_files import atomic_write_json, exclusive_file_lock
 from .paths import multiverse_dir
@@ -468,6 +468,170 @@ def set_all_collapsed(cwd: str, collapsed: bool) -> None:
     with mutate(cwd) as state:
         for group in state.groups.values():
             group.collapsed = collapsed
+
+
+# Finder's name for a folder you just made and haven't named yet. The
+# dashboard creates the folder first and edits the name in place, so this
+# is what shows for the half-second before the user types.
+DEFAULT_FOLDER_NAME = "New folder"
+
+
+def _prune_contained(
+    state: GroupState,
+    group_ids: Iterable[str],
+    agent_names: Iterable[str],
+) -> tuple[list[str], list[str]]:
+    """Drop items that a selected folder already carries.
+
+    Selecting a folder and something inside it and then moving both would
+    move the inner item twice — out of its folder and into the destination
+    separately — quietly flattening the structure the user could see on
+    screen. Anything with a selected ancestor comes along with that
+    ancestor, so it is removed from the operation.
+    """
+    selected = {gid for gid in group_ids if gid in state.groups}
+    keep_groups = [
+        gid for gid in selected
+        if not (selected & set(state.ancestors_of(gid)))
+    ]
+    keep_agents = []
+    for name in agent_names:
+        gid = state.group_of(name)
+        if gid is None:
+            keep_agents.append(name)
+            continue
+        chain = {gid} | set(state.ancestors_of(gid))
+        if not (selected & chain):
+            keep_agents.append(name)
+    return keep_groups, keep_agents
+
+
+def common_parent(
+    state: GroupState,
+    group_ids: Iterable[str],
+    agent_names: Iterable[str],
+) -> Optional[str]:
+    """The folder holding every item, or ``None`` when they disagree.
+
+    Used to decide where a "wrap these in a new folder" lands: beside the
+    things being wrapped, the way Finder's New Folder with Selection puts
+    it in the current directory.
+    """
+    parents: set[Optional[str]] = set()
+    for gid in group_ids:
+        group = state.groups.get(gid)
+        if group is not None:
+            parents.add(group.parent)
+    for name in agent_names:
+        parents.add(state.group_of(name))
+    if len(parents) == 1:
+        return parents.pop()
+    return None
+
+
+def wrap_in_new_folder(
+    cwd: str,
+    *,
+    group_ids: Iterable[str] = (),
+    agent_names: Iterable[str] = (),
+    name: Optional[str] = None,
+) -> Group:
+    """Create a folder beside the given items and move them all into it."""
+    with mutate(cwd) as state:
+        gids, names = _prune_contained(state, group_ids, agent_names)
+        parent = common_parent(state, gids, names)
+        base = (name or DEFAULT_FOLDER_NAME).strip() or DEFAULT_FOLDER_NAME
+        group = Group(
+            id=new_group_id(),
+            name=unique_sibling_name(state, parent, base),
+            parent=parent,
+            collapsed=False,
+            created_at=time.time(),
+        )
+        state.groups[group.id] = group
+        for gid in gids:
+            child = state.groups.get(gid)
+            if child is not None:
+                child.parent = group.id
+        for agent in names:
+            key = member_key(agent)
+            if key:
+                state.members[key] = group.id
+        return group
+
+
+def move_into(
+    cwd: str,
+    target: Optional[str],
+    *,
+    group_ids: Iterable[str] = (),
+    agent_names: Iterable[str] = (),
+) -> int:
+    """Move items into ``target`` (``None`` = top level). Returns the count.
+
+    Skips a folder that would end up inside itself rather than failing the
+    whole batch — the caller has usually already excluded the subtree, and
+    a partial move the user can see beats an error they can't act on.
+    """
+    with mutate(cwd) as state:
+        if target is not None and target not in state.groups:
+            raise ValueError("That folder no longer exists.")
+        gids, names = _prune_contained(state, group_ids, agent_names)
+        moved = 0
+        for gid in gids:
+            group = state.groups.get(gid)
+            if group is None or group.parent == target:
+                continue
+            if _would_cycle(state, gid, target):
+                continue
+            if group.name.casefold() in _sibling_names(state, target):
+                group.name = unique_sibling_name(state, target, group.name)
+            group.parent = target
+            moved += 1
+        for agent in names:
+            key = member_key(agent)
+            if not key or state.members.get(key) == target:
+                continue
+            if target is None:
+                state.members.pop(key, None)
+            else:
+                state.members[key] = target
+            moved += 1
+        return moved
+
+
+def lift_out(
+    cwd: str,
+    *,
+    group_ids: Iterable[str] = (),
+    agent_names: Iterable[str] = (),
+) -> int:
+    """Move each item one level up. Returns how many actually moved."""
+    with mutate(cwd) as state:
+        gids, names = _prune_contained(state, group_ids, agent_names)
+        moved = 0
+        for gid in gids:
+            group = state.groups.get(gid)
+            if group is None or group.parent is None:
+                continue
+            grandparent = state.groups.get(group.parent)
+            target = grandparent.parent if grandparent is not None else None
+            if group.name.casefold() in _sibling_names(state, target):
+                group.name = unique_sibling_name(state, target, group.name)
+            group.parent = target
+            moved += 1
+        for agent in names:
+            key = member_key(agent)
+            gid = state.members.get(key) if key else None
+            group = state.groups.get(gid) if gid else None
+            if group is None:
+                continue
+            if group.parent is None:
+                state.members.pop(key, None)
+            else:
+                state.members[key] = group.parent
+            moved += 1
+        return moved
 
 
 def auto_group_spawn(
