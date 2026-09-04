@@ -100,6 +100,11 @@ class DashboardFolderTestCase(unittest.TestCase):
         for ch in text:
             self._send_key(ch, ch)
 
+    def _select_down(self, start: int, times: int) -> None:
+        self.table.cursor_row = start
+        for _ in range(times):
+            self._act(self.app.action_extend_selection_down)
+
     def _draw(self, entries: list[monitor.DashboardRow], pending: int = 0) -> list:
         """Run one redraw and hand back the rendered rows as arg tuples."""
         self.app.entries = entries
@@ -484,18 +489,53 @@ class InlineNamingTests(DashboardFolderTestCase):
         state = groups.load(CWD)
         self.assertEqual(state.groups[state.group_of("swift-otter")].name, "infra")
 
-    def test_escape_leaves_a_brand_new_folder_with_its_default_name(self) -> None:
-        # Finder does the same: the folder exists, it is just still called
-        # "New folder". Deleting it on Esc would lose the agent's grouping.
+    def test_escape_aborts_the_new_folder_entirely(self) -> None:
+        # Esc on a name prompt means "never mind" — leaving a stray "New
+        # folder" behind is not that.
         self._draw([_row("swift-otter")])
         self._act(self.app.action_indent, cursor=0)
+        self.assertEqual(len(groups.load(CWD).groups), 1)
 
         self._send_key("escape")
 
         self.assertIsNone(self.app._inline)
         state = groups.load(CWD)
-        gid = state.group_of("swift-otter")
-        self.assertEqual(state.groups[gid].name, groups.DEFAULT_FOLDER_NAME)
+        self.assertEqual(state.groups, {})
+        self.assertIsNone(state.group_of("swift-otter"))
+
+    def test_escape_puts_a_wrapped_agent_back_in_the_folder_it_came_from(self) -> None:
+        outer = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", outer.id)
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_indent, cursor=1)  # wrap the member
+        self._send_key("escape")
+
+        state = groups.load(CWD)
+        self.assertEqual(list(state.groups), [outer.id])
+        self.assertEqual(state.group_of("swift-otter"), outer.id)
+
+    def test_escape_restores_a_selection_that_spanned_two_folders(self) -> None:
+        # The wrapped items came from different places, so simply deleting
+        # the folder would dump them both at the top level instead of
+        # putting each one back.
+        a = groups.create_group(CWD, "a-team")
+        b = groups.create_group(CWD, "b-team")
+        groups.assign_agent(CWD, "swift-otter", a.id)
+        groups.assign_agent(CWD, "brave-mole", b.id)
+        self._draw([_row("swift-otter"), _row("brave-mole")])
+
+        # rows: a-team, swift-otter, b-team, brave-mole
+        self._select_down(1, 2)
+        self._act(self.app.action_indent)
+        self._send_key("escape")
+
+        state = groups.load(CWD)
+        self.assertEqual(sorted(state.groups), sorted([a.id, b.id]))
+        self.assertEqual(state.group_of("swift-otter"), a.id)
+        self.assertEqual(state.group_of("brave-mole"), b.id)
+        # And the selection the user had is handed back to them.
+        self.assertEqual(len(self.app._selection), 3)
 
     def test_escape_reverts_a_rename(self) -> None:
         group = groups.create_group(CWD, "backend")
@@ -567,11 +607,6 @@ class InlineNamingTests(DashboardFolderTestCase):
 
 
 class MultiSelectTests(DashboardFolderTestCase):
-    def _select_down(self, start: int, times: int) -> None:
-        self.table.cursor_row = start
-        for _ in range(times):
-            self._act(self.app.action_extend_selection_down)
-
     def test_shift_down_grows_a_range_from_the_cursor(self) -> None:
         self._draw([_row("a"), _row("b"), _row("c")])
         self._select_down(0, 2)

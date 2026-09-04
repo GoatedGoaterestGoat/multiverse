@@ -529,13 +529,29 @@ def common_parent(
     return None
 
 
+@dataclass
+class Wrap:
+    """A "put these in a new folder" operation, and how to take it back.
+
+    The dashboard creates the folder before the user has named it, so Esc
+    has to be able to unwind the whole thing. Restoring from the recorded
+    parents rather than just deleting the folder matters when the wrapped
+    items came from *different* places: deleting alone would dump them all
+    at the level the folder happened to be created at.
+    """
+
+    group: Group
+    previous_group_parents: dict[str, Optional[str]]
+    previous_agent_groups: dict[str, Optional[str]]
+
+
 def wrap_in_new_folder(
     cwd: str,
     *,
     group_ids: Iterable[str] = (),
     agent_names: Iterable[str] = (),
     name: Optional[str] = None,
-) -> Group:
+) -> Wrap:
     """Create a folder beside the given items and move them all into it."""
     with mutate(cwd) as state:
         gids, names = _prune_contained(state, group_ids, agent_names)
@@ -548,16 +564,56 @@ def wrap_in_new_folder(
             collapsed=False,
             created_at=time.time(),
         )
+        previous_groups: dict[str, Optional[str]] = {}
+        previous_agents: dict[str, Optional[str]] = {}
         state.groups[group.id] = group
         for gid in gids:
             child = state.groups.get(gid)
             if child is not None:
+                previous_groups[gid] = child.parent
                 child.parent = group.id
         for agent in names:
             key = member_key(agent)
             if key:
+                previous_agents[key] = state.members.get(key)
                 state.members[key] = group.id
-        return group
+        return Wrap(group, previous_groups, previous_agents)
+
+
+def undo_wrap(cwd: str, wrap: Wrap) -> None:
+    """Take back a :func:`wrap_in_new_folder` — folder gone, items home.
+
+    Tolerates the folder having changed underneath (another monitor, an
+    agent spawning into it): anything found inside it that this wrap did
+    not put there is promoted to where the folder was, rather than
+    disappearing with it.
+    """
+    with mutate(cwd) as state:
+        removed = state.groups.pop(wrap.group.id, None)
+        parent = removed.parent if removed is not None else wrap.group.parent
+        for gid, previous in wrap.previous_group_parents.items():
+            group = state.groups.get(gid)
+            if group is None:
+                continue
+            group.parent = previous if previous in state.groups else None
+        for name, previous in wrap.previous_agent_groups.items():
+            key = member_key(name)
+            if not key:
+                continue
+            if previous is not None and previous in state.groups:
+                state.members[key] = previous
+            else:
+                state.members.pop(key, None)
+        for group in state.groups.values():
+            if group.parent == wrap.group.id:
+                group.parent = parent
+        for key, gid in list(state.members.items()):
+            if gid != wrap.group.id:
+                continue
+            if parent is None:
+                state.members.pop(key, None)
+            else:
+                state.members[key] = parent
 
 
 def move_into(

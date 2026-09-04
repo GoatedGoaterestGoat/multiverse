@@ -124,7 +124,7 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder, keeping the agents (an empty folder goes without a prompt). Refused while the row is `compacting` |
-| `→` | On an agent: wrap it in a new folder, with the name live for editing in the row. On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
+| `→` | On an agent: wrap it in a new folder, with the name live for editing in the row (`esc` aborts and puts everything back). On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
 | `←` | On an open folder: close it. On a closed one: jump to its parent. On an agent (or a selection): lift it one level out of its folder |
 | `shift`+`↑`/`↓` | Extend a selection. The folder keys then act on the whole range; any plain cursor move ends it |
 | `m` | Move the highlighted row (or the selection). Walk the folder tree in place — `↑↓` pick, `→` step in, `←` step out, `⏎` drop, `esc` cancel — with the header line showing what's moving and where |
@@ -160,8 +160,10 @@ token total, the freshest timestamp, and the names inside.
 in the list itself, with the arrow keys:
 
 * `→` on an agent wraps it in a new folder and leaves the name selected in
-  the row, so you type over it and press `⏎`. `esc` leaves it called *New
-  folder*. `e` reopens the same in-row editor on any folder later.
+  the row, so you type over it and press `⏎`. `esc` aborts the whole thing:
+  the folder goes away and everything it swept up goes back where it came
+  from, even if the selection spanned several folders. `e` reopens the same
+  in-row editor on any folder later.
 * `shift`+`↑`/`↓` grows a selection; `→` then puts the whole range in one
   folder and `←` lifts it back out. Selecting a folder *and* something
   inside it moves the folder once — the contents come along rather than

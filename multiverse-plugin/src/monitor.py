@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from textual import events, on, work
@@ -2988,6 +2988,13 @@ class _InlineEdit:
     buffer: str
     cursor: int
     select_all: bool
+    # For a "create": everything needed to put the workspace back exactly
+    # as it was if the user presses Esc. The folder is already on disk by
+    # the time the name is being typed, so backing out has to undo the
+    # wrap, not just close the editor.
+    undo: Optional[groups.Wrap] = None
+    prev_selection: list[str] = field(default_factory=list)
+    prev_cursor_key: Optional[str] = None
 
 
 @dataclass
@@ -4082,23 +4089,62 @@ class MonitorApp(App):
 
     # -- inline naming --------------------------------------------------
 
-    def _begin_inline_edit(self, kind: str, group: groups.Group) -> None:
+    def _begin_inline_edit(
+        self,
+        kind: str,
+        group: groups.Group,
+        undo: Optional[groups.Wrap] = None,
+        prev_selection: Optional[list[str]] = None,
+        prev_cursor_key: Optional[str] = None,
+    ) -> None:
         self._inline = _InlineEdit(
             kind=kind,
             group_id=group.id,
             buffer=group.name,
             cursor=len(group.name),
             select_all=True,
+            undo=undo,
+            prev_selection=list(prev_selection or ()),
+            prev_cursor_key=prev_cursor_key,
         )
         self._move_cursor_to_key(groups.group_row_key(group.id))
         self._redraw_table()
 
     def _cancel_inline_edit(self) -> None:
-        """Esc. A rename reverts; a brand-new folder keeps its default name
-        (as in Finder — the folder exists, it's just still called "New
-        folder", and `e` renames it whenever the user gets to it)."""
+        """Esc aborts, it doesn't just close the field.
+
+        A rename simply reverts. A create undoes the whole thing — the
+        folder goes away and everything it swept up goes back where it
+        was, including a selection spanning several folders — because
+        pressing Esc on a name prompt means "never mind", and leaving a
+        stray "New folder" behind is not that.
+        """
+        edit = self._inline
         self._inline = None
-        self._redraw_table()
+        if edit is None:
+            self._redraw_table()
+            return
+        if edit.kind != "create" or edit.undo is None:
+            self._redraw_table()
+            return
+        try:
+            groups.undo_wrap(self.monitor_cwd, edit.undo)
+        except OSError as exc:
+            self.notify(f"Could not undo: {exc}", severity="error")
+            self.refresh_sessions()
+            return
+        self.refresh_sessions()
+        # Put the user back where they were, selection included.
+        self._selection = [
+            k for k in edit.prev_selection
+            if k in {r.key for r in self.display_rows}
+        ]
+        self._select_anchor = self._selection[0] if self._selection else None
+        if self._selection:
+            self._redraw_table()
+        if edit.prev_cursor_key:
+            self._move_cursor_to_key(edit.prev_cursor_key)
+        self.notify("New folder discarded")
 
     def _commit_inline_edit(self) -> None:
         edit = self._inline
@@ -4366,8 +4412,10 @@ class MonitorApp(App):
         group_ids, agent_names, _ = self._targets()
         if not group_ids and not agent_names:
             return
+        prev_selection = list(self._selection)
+        prev_cursor_key = row.key
         try:
-            group = groups.wrap_in_new_folder(
+            wrap = groups.wrap_in_new_folder(
                 self.monitor_cwd,
                 group_ids=group_ids,
                 agent_names=agent_names,
@@ -4377,7 +4425,13 @@ class MonitorApp(App):
             return
         self._clear_selection()
         self.refresh_sessions()
-        self._begin_inline_edit("create", group)
+        self._begin_inline_edit(
+            "create",
+            wrap.group,
+            undo=wrap,
+            prev_selection=prev_selection,
+            prev_cursor_key=prev_cursor_key,
+        )
 
     def action_outdent(self) -> None:
         """``←`` — on an open folder, close it; otherwise lift the row (or
