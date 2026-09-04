@@ -16,9 +16,11 @@ cache hit on the big prefix. For dormant sessions the cache is cold anyway,
 so rebuilding is equivalent to /btw's fallback path.
 
 Tool denial: Claude uses ``--tools ""`` plus ``--max-turns 1``. Codex disables
-tool-bearing features and integrations, selects a permission profile that
-denies the filesystem and network, and treats any action item in the event
-stream as a failed ask. The strict side-question prompt backs up both paths.
+tool-bearing features and integrations, runs in its built-in read-only sandbox,
+and treats any action item in the event stream as a failed ask. The strict
+side-question prompt backs up both paths. Read-only (rather than a deny-all
+filesystem profile) is required so Codex can load the forked session's
+``AGENTS.md`` instructions during initialization.
 """
 
 from __future__ import annotations
@@ -102,7 +104,6 @@ class AskResult:
 
 _CODEX_RUNTIME = "codex"
 _PI_RUNTIME = "pi"
-_CODEX_PERMISSION_PROFILE = "multiverse-side-question"
 _CODEX_DISABLED_FEATURES = (
     "apps",
     "browser_use",
@@ -338,7 +339,7 @@ def _codex_fork_params(target: AskTarget) -> dict:
         "ephemeral": True,
         "excludeTurns": True,
         "approvalPolicy": "never",
-        "permissions": _CODEX_PERMISSION_PROFILE,
+        "sandbox": "read-only",
         "baseInstructions": _CODEX_SIDE_QUESTION_INSTRUCTIONS,
         "developerInstructions": _CODEX_SIDE_QUESTION_INSTRUCTIONS,
         "runtimeWorkspaceRoots": [],
@@ -347,12 +348,6 @@ def _codex_fork_params(target: AskTarget) -> dict:
             "features": disabled_features,
             "mcp_servers": {},
             "apps": {"_default": {"enabled": False}},
-            "permissions": {
-                _CODEX_PERMISSION_PROFILE: {
-                    "filesystem": {":root": "deny"},
-                    "network": {"enabled": False},
-                }
-            },
         },
     }
 

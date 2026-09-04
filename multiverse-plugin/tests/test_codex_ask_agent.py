@@ -170,9 +170,9 @@ class CodexSideQuestionProtocolTests(unittest.TestCase):
         self.assertTrue(params["excludeTurns"])
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["runtimeWorkspaceRoots"], [])
-        profile = params["config"]["permissions"]["multiverse-side-question"]
-        self.assertEqual(profile["filesystem"], {":root": "deny"})
-        self.assertFalse(profile["network"]["enabled"])
+        self.assertEqual(params["sandbox"], "read-only")
+        self.assertNotIn("permissions", params)
+        self.assertNotIn("permissions", params["config"])
         self.assertEqual(params["config"]["mcp_servers"], {})
         self.assertFalse(params["config"]["apps"]["_default"]["enabled"])
 

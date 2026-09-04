@@ -199,6 +199,34 @@ class DashboardHandoffTests(unittest.TestCase):
         self.assertEqual(kwargs["target"].runtime, monitor.RUNTIME_CLAUDE)
         self.assertEqual(kwargs["timeout"], monitor._HANDOFF_TIMEOUT_SECONDS)
 
+    def test_escape_from_successor_widget_cancels_handoff(self) -> None:
+        app = monitor.MonitorApp([])
+        target = self._dormant()
+        result = AskResult(target.name, "handoff", None, "fork", 1)
+        pushed: list[tuple[monitor.NewSessionScreen, object]] = []
+        with (
+            patch.object(
+                app,
+                "push_screen",
+                side_effect=lambda screen, callback: pushed.append((screen, callback)),
+            ),
+            patch.object(app, "notify") as notify,
+            patch.object(monitor, "sync_full") as sync,
+            patch.object(monitor, "create_retired_session_record") as retire,
+            patch.object(monitor, "create_session") as create,
+        ):
+            app._handoff_context_ready(target, "native-id", result)
+            screen, callback = pushed[0]
+            with patch.object(screen, "dismiss") as dismiss:
+                screen.action_cancel()
+            callback(None)
+
+        dismiss.assert_called_once_with(None)
+        sync.assert_not_called()
+        retire.assert_not_called()
+        create.assert_not_called()
+        self.assertIn("cancelled", notify.call_args.args[0])
+
     def test_failed_successor_start_rolls_predecessor_back_to_dormant(self) -> None:
         app = monitor.MonitorApp([])
         target = self._dormant()
