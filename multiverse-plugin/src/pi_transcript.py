@@ -40,7 +40,8 @@ def encode_pi_cwd(cwd: str) -> str:
     except (OSError, RuntimeError):
         resolved = str(Path(cwd).expanduser())
     stripped = re.sub(r"^[/\\]", "", resolved)
-    return f"--{re.sub(r'[/\\:]', '-', stripped)}--"
+    encoded = re.sub(r"[/\\:]", "-", stripped)
+    return f"--{encoded}--"
 
 
 def pi_sessions_dir(cwd: str) -> Path:
