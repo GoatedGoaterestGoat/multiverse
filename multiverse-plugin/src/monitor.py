@@ -4041,9 +4041,7 @@ class MonitorApp(App):
             self._cancel_inline_edit()
             return
         if self._draft is not None:
-            self._draft = None
-            self._redraw_table()
-            self.notify("New agent cancelled")
+            self._cancel_draft()
             return
         if self._move is not None:
             self._cancel_move()
@@ -4605,9 +4603,7 @@ class MonitorApp(App):
             return False
         key = event.key
         if key == "escape":
-            self._draft = None
-            self._redraw_table()
-            self.notify("New agent cancelled")
+            self._cancel_draft()
             return True
         if key == "enter":
             self._commit_draft()
@@ -4621,6 +4617,18 @@ class MonitorApp(App):
             return True
         self._edit_text(draft, event)
         return True
+
+    def _cancel_draft(self) -> None:
+        """Esc on a draft. Nothing was created, so there is nothing to undo
+        — but this is reached from two places (the key interceptor and the
+        app-level Esc binding, which covers the case where the table isn't
+        focused), so it lives in one place to keep them from drifting.
+        """
+        if self._draft is None:
+            return
+        self._draft = None
+        self._redraw_table()
+        self.notify("New agent cancelled")
 
     def _commit_draft(self) -> None:
         draft = self._draft

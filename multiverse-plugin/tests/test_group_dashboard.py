@@ -945,6 +945,19 @@ class DraftAgentTests(DashboardFolderTestCase):
         self.assertIsNone(self.app._draft)
         self.assertFalse(any(r.is_draft for r in self.app.display_rows))
 
+    def test_the_app_level_escape_binding_aborts_the_draft_too(self) -> None:
+        # Two things route Esc: the key interceptor (while the table has
+        # focus) and this binding. Both must abort, and neither may leave a
+        # session behind.
+        self._draw([_row("swift-otter")])
+        with patch.object(monitor, "create_session") as create:
+            self._act(self.app.action_new_session, cursor=0)
+            self._act(self.app.action_clear_selection)
+
+        create.assert_not_called()
+        self.assertIsNone(self.app._draft)
+        self.assertFalse(any(r.is_draft for r in self.app.display_rows))
+
     def test_a_failed_spawn_reports_and_files_nothing(self) -> None:
         group = groups.create_group(CWD, "backend")
         self._draw([])
