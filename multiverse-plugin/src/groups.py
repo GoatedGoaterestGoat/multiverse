@@ -768,6 +768,10 @@ class DisplayRow:
         return self.kind == "group"
 
     @property
+    def is_draft(self) -> bool:
+        return self.kind == "draft"
+
+    @property
     def collapsed(self) -> bool:
         return bool(self.group is not None and self.group.collapsed)
 
@@ -776,7 +780,24 @@ def group_row_key(group_id: str) -> str:
     return f"grp:{group_id}"
 
 
-def build_display_rows(entries: list, state: GroupState) -> list[DisplayRow]:
+# The placeholder row for an agent that hasn't been created yet. A session
+# can't be created and renamed afterwards the way a folder can — the name
+# is baked in at spawn (custom title, tmux env, inbox routing) — so the
+# dashboard draws a draft in the tree and only calls create_session once
+# the user presses Enter.
+DRAFT_ROW_KEY = "draft:new-agent"
+
+# Distinguishes "no draft" from "a draft at the top level", which is a
+# perfectly ordinary place to put one.
+NO_DRAFT = object()
+
+
+def build_display_rows(
+    entries: list,
+    state: GroupState,
+    *,
+    draft_in: Any = NO_DRAFT,
+) -> list[DisplayRow]:
     """Lay the dashboard out as a tree.
 
     ``entries`` is the flat, already-sorted list of ``DashboardRow``. Their
@@ -786,6 +807,12 @@ def build_display_rows(entries: list, state: GroupState) -> list[DisplayRow]:
 
     Folders come before loose agents at every level, the way a file pane
     lists directories first.
+
+    ``draft_in`` places an unnamed, not-yet-created agent in a folder (or
+    at the top level with ``None``). It is laid out as the last child of
+    that folder so the connectors around it close correctly — the row
+    above it becomes a ``├─`` while the draft takes the ``└─``, exactly as
+    if the agent already existed.
     """
     by_group: dict[Optional[str], list] = {}
     for entry in entries:
@@ -814,7 +841,10 @@ def build_display_rows(entries: list, state: GroupState) -> list[DisplayRow]:
                 agents=agents,
             )
         )
-        if group.collapsed or depth >= _MAX_DEPTH:
+        holds_draft = draft_in is not NO_DRAFT and (
+            draft_in == group.id or draft_in in set(state.descendants_of(group.id))
+        )
+        if (group.collapsed and not holds_draft) or depth >= _MAX_DEPTH:
             return
         # Bars for this group's children: a continuation bar only if this
         # group itself has a sibling below it.
@@ -824,7 +854,8 @@ def build_display_rows(entries: list, state: GroupState) -> list[DisplayRow]:
     def emit_level(group_id: Optional[str], bars: str, depth: int) -> None:
         subgroups = state.children_of(group_id)
         agents = by_group.get(group_id, [])
-        total = len(subgroups) + len(agents)
+        draft_here = draft_in is not NO_DRAFT and draft_in == group_id
+        total = len(subgroups) + len(agents) + (1 if draft_here else 0)
         for i, sub in enumerate(subgroups):
             emit_group(sub, bars, last=(i == total - 1), depth=depth)
         for j, entry in enumerate(agents):
@@ -839,6 +870,16 @@ def build_display_rows(entries: list, state: GroupState) -> list[DisplayRow]:
                     depth=depth,
                     prefix=bars + connector,
                     entry=entry,
+                )
+            )
+        if draft_here:
+            connector = "" if depth == 0 else _ELBOW
+            rows.append(
+                DisplayRow(
+                    kind="draft",
+                    key=DRAFT_ROW_KEY,
+                    depth=depth,
+                    prefix=bars + connector,
                 )
             )
 

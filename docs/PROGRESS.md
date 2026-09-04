@@ -85,7 +85,7 @@ The wrapper script was rewritten from "single claude in a loop" into a **multi-s
 |:-----|:--------|
 | `bin/multiverse` | Launches the Textual monitor (forwards args as default claude args) |
 | `bin/multiverse-session` | Per-session inner loop: runs one claude, dispatches `resume_folded`, passes `--plugin-dir` for dev mode |
-| `src/monitor.py` | Textual `App` with a `DataTable` of sessions, modals for new/resume, keybindings |
+| `src/monitor.py` | Textual `App` with a `DataTable` of sessions, modals for resume/spawn-approval, keybindings. New agents and folders are handled in the table itself (draft row, in-row rename, in-place move) rather than in modals |
 | `src/groups.py` | Dashboard folders: the per-workspace group store and the tree layout the table renders (no Textual dependency, so both are unit-testable) |
 | `monitor.py:DashboardTable` | DataTable subclass owning the outliner keys (`←`/`→` restructure, `shift`+`↑↓` select) and giving the inline name editor and the in-place move mode first refusal on every keystroke, so folders need no modals |
 | `scripts/set-status.sh` | One-liner called by status hooks with `idle`/`working`/`waiting`/`ended` |

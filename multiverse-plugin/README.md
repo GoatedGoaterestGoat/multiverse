@@ -111,8 +111,8 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — name and runtime prompt; choose Claude, Codex, or pi. Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
-| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then opens the normal New session name/runtime widget and starts the chosen successor with that report. |
+| `n` | New agent, drafted in place — a placeholder row appears in the folder the cursor is in, with a suggested name selected for typing over. `⇥` cycles the runtime (Claude/Codex/pi), `⏎` creates it, `esc` discards it (nothing was started). Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
+| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then drafts the successor in place (same row editor as `n`) and starts it with that report. |
 | `R` | Resume — pick from runtime sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Uses the same runtime-specific permission default as a new session. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `retired` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
@@ -172,6 +172,20 @@ in the list itself, with the arrow keys:
   `→` steps into the highlighted folder, `←` steps back out, `⏎` drops.
   The rows being moved stay visible and marked the whole time, and the
   header line reads `⇢ moving 'swift-otter' → backend/auth-work`.
+
+`n` works the same way — it makes an agent where you are, the way you'd
+make a file in the folder you have open:
+
+```
+▼ backend (2)
+├─ quiet-fox        claude   dormant
+└─ Quasar        —  claude   new       ⇥ runtime · ⏎ create · esc cancel
+```
+
+The row is only a placeholder. A session can't be created and renamed
+afterwards the way a folder can — the name is baked in at spawn (custom
+title, tmux env, inbox routing, name claims) — so nothing is started until
+`⏎`, and `esc` costs nothing.
 
 The only dialog left is the confirmation for removing a folder that still
 has something in it — and only because a folded folder hides how much is

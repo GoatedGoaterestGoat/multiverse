@@ -72,6 +72,7 @@ from .sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
     RUNTIME_PI,
+    RUNTIMES,
     STATE_DIR,
     TMUX_PREFIX,
     DashboardRow,
@@ -276,73 +277,6 @@ class _SpawnAttachGuard:
             return True
         except (OSError, subprocess.SubprocessError):
             return False
-
-
-class NewSessionScreen(ModalScreen[Optional[tuple[str, str]]]):
-    """Prompt for a session name for a new session in the monitor's cwd."""
-
-    BINDINGS = [
-        Binding("escape", "cancel", "Cancel"),
-        Binding("enter", "submit", "Create", show=False, priority=True),
-    ]
-
-    def __init__(self, cwd: str) -> None:
-        super().__init__()
-        self.cwd = cwd
-        suggestion = pick_random_name(all_session_names_in_cwd(cwd))
-        self.default_name = suggestion or ""
-
-    def compose(self) -> ComposeResult:
-        yield Vertical(
-            Static("New session"),
-            Static(f"[dim]cwd: {self.cwd}[/]"),
-            Static("Session name:"),
-            Input(value=self.default_name, id="new-name"),
-            Static("Runtime:"),
-            RadioSet(
-                RadioButton("Claude", value=True, id="new-runtime-claude"),
-                RadioButton("Codex", id="new-runtime-codex"),
-                RadioButton("pi", id="new-runtime-pi"),
-                id="new-runtime",
-            ),
-            Static("", id="new-error"),
-            Static(
-                "Tab to choose runtime · Enter to create · Esc to go back",
-                id="new-hint",
-            ),
-            id="new-dialog",
-        )
-
-    def on_mount(self) -> None:
-        self.query_one("#new-name", Input).focus()
-
-    def on_input_submitted(self, event: Input.Submitted) -> None:
-        self._try_submit()
-
-    def action_submit(self) -> None:
-        self._try_submit()
-
-    def _try_submit(self) -> None:
-        name = self.query_one("#new-name", Input).value.strip()
-        err = self.query_one("#new-error", Static)
-        if not name:
-            err.update("[red]Name cannot be empty.[/]")
-            return
-        if name in all_session_names_in_cwd(self.cwd):
-            err.update(
-                f"[red]'{name}' is already used in this workspace. Choose another.[/]"
-            )
-            return
-        if self.query_one("#new-runtime-pi", RadioButton).value:
-            runtime = RUNTIME_PI
-        elif self.query_one("#new-runtime-codex", RadioButton).value:
-            runtime = RUNTIME_CODEX
-        else:
-            runtime = RUNTIME_CLAUDE
-        self.dismiss((name, runtime))
-
-    def action_cancel(self) -> None:
-        self.dismiss(None)
 
 
 @dataclass
@@ -2998,6 +2932,23 @@ class _InlineEdit:
 
 
 @dataclass
+class _DraftAgent:
+    """An agent the user is describing but hasn't created yet.
+
+    Unlike a folder, a session can't be made first and named afterwards:
+    the name is baked in at spawn (custom title, tmux env, inbox routing,
+    name claims). So the row is a placeholder until Enter, and Esc costs
+    nothing because nothing was started.
+    """
+
+    buffer: str
+    cursor: int
+    select_all: bool
+    runtime: str
+    group_id: Optional[str]
+
+
+@dataclass
 class _MoveMode:
     """A move in progress, picking its destination in the tree in place.
 
@@ -3488,6 +3439,8 @@ class MonitorApp(App):
         self._inline: Optional[_InlineEdit] = None
         # Destination pick in progress, walked in the tree itself.
         self._move: Optional[_MoveMode] = None
+        # New agent being described in a placeholder row.
+        self._draft: Optional[_DraftAgent] = None
         # shift+↑/↓ range: row keys, in display order, plus the anchor the
         # range grows from.
         self._selection: list[str] = []
@@ -3584,7 +3537,7 @@ class MonitorApp(App):
         """The header line doubles as the move mode's status bar — a mode
         needs somewhere to say what it is doing, and this is the one place
         that isn't another window."""
-        banner = self._move_banner()
+        banner = self._move_banner() or self._draft_banner()
         self.sub_title = banner or f"cwd: {self.monitor_cwd}{self._web_tag}"
 
     def _tick_spawn_requests(self) -> None:
@@ -3846,18 +3799,23 @@ class MonitorApp(App):
         table.clear()
         now = time.time()
         self.display_rows = groups.build_display_rows(
-            self.entries, self.group_state
+            self.entries,
+            self.group_state,
+            draft_in=(
+                self._draft.group_id if self._draft is not None else groups.NO_DRAFT
+            ),
         )
         # Drop selected keys whose rows are gone (killed, or folded away).
         if self._selection:
             live = {r.key for r in self.display_rows}
             self._selection = [k for k in self._selection if k in live]
         for row in self.display_rows:
-            cells = (
-                self._group_cells(row, now)
-                if row.is_group
-                else self._agent_cells(row, now)
-            )
+            if row.is_group:
+                cells = self._group_cells(row, now)
+            elif row.is_draft:
+                cells = self._draft_cells(row)
+            else:
+                cells = self._agent_cells(row, now)
             table.add_row(*cells, key=row.key)
         self._restore_cursor(table, prev_key, prev_cursor)
         self._set_subtitle()
@@ -3951,6 +3909,8 @@ class MonitorApp(App):
         """
         if self._inline is not None:
             return self._inline_key(event)
+        if self._draft is not None:
+            return self._draft_key(event)
         if self._move is not None:
             return self._move_key(event)
         if event.key in _CURSOR_MOVE_KEYS and self._selection:
@@ -4080,6 +4040,11 @@ class MonitorApp(App):
         if self._inline is not None:
             self._cancel_inline_edit()
             return
+        if self._draft is not None:
+            self._draft = None
+            self._redraw_table()
+            self.notify("New agent cancelled")
+            return
         if self._move is not None:
             self._cancel_move()
             return
@@ -4170,19 +4135,15 @@ class MonitorApp(App):
         self.refresh_sessions()
         self._move_cursor_to_key(groups.group_row_key(edit.group_id))
 
-    def _inline_key(self, event: events.Key) -> bool:
-        """Keys while a folder name is being edited. Consumes everything so
-        a stray keystroke can't fire a dashboard action mid-rename."""
-        edit = self._inline
-        if edit is None:
-            return False
+    def _edit_text(self, edit: Any, event: events.Key) -> bool:
+        """One text field's worth of behaviour, shared by the folder-name
+        editor and the new-agent draft. Returns True if the key was a text
+        edit; the callers own Enter, Esc and Tab.
+
+        ``select_all`` is Finder's "the name comes up highlighted": the
+        first printable key replaces it rather than appending to it.
+        """
         key = event.key
-        if key == "escape":
-            self._cancel_inline_edit()
-            return True
-        if key == "enter":
-            self._commit_inline_edit()
-            return True
         if key in ("left", "right", "home", "end"):
             edit.select_all = False
             if key == "left":
@@ -4221,19 +4182,37 @@ class MonitorApp(App):
             edit.cursor += len(char)
             self._redraw_table()
             return True
+        return False
+
+    def _field_cell(self, edit: Any) -> str:
+        """A text field rendered into a table cell, cursor and all."""
+        if edit.select_all:
+            return f"[reverse]{edit.buffer or ' '}[/]"
+        before = edit.buffer[: edit.cursor]
+        at = edit.buffer[edit.cursor : edit.cursor + 1] or " "
+        after = edit.buffer[edit.cursor + 1 :]
+        return f"{before}[reverse]{at}[/]{after}"
+
+    def _inline_key(self, event: events.Key) -> bool:
+        """Keys while a folder name is being edited. Consumes everything so
+        a stray keystroke can't fire a dashboard action mid-rename."""
+        edit = self._inline
+        if edit is None:
+            return False
+        if event.key == "escape":
+            self._cancel_inline_edit()
+            return True
+        if event.key == "enter":
+            self._commit_inline_edit()
+            return True
+        self._edit_text(edit, event)
         return True
 
     def _inline_name_cell(self, row: groups.DisplayRow) -> str:
         """The name cell for the folder currently being renamed."""
         edit = self._inline
         assert edit is not None
-        if edit.select_all:
-            body = f"[reverse]{edit.buffer or ' '}[/]"
-        else:
-            before = edit.buffer[: edit.cursor]
-            at = edit.buffer[edit.cursor : edit.cursor + 1] or " "
-            after = edit.buffer[edit.cursor + 1 :]
-            body = f"{before}[reverse]{at}[/]{after}"
+        body = self._field_cell(edit)
         return f"[dim]{row.prefix}[/][bold]{groups.CHEVRON_OPEN}[/] {body}"
 
     # -- in-place move --------------------------------------------------
@@ -4585,41 +4564,130 @@ class MonitorApp(App):
         )
 
     def action_new_session(self) -> None:
-        # Starting a session with a folder header highlighted files it in
-        # that folder. Only a folder header counts — highlighting an agent
-        # is too weak a signal to move a brand-new session somewhere the
-        # user didn't ask for.
-        folder = self._current_group()
+        """``n`` — start a new agent where the cursor is, like making a file
+        in the folder you are looking at.
 
-        def cb(result: Optional[tuple[str, str]]) -> None:
-            if not result:
-                return
-            name, runtime = result
-            runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
+        Nothing is spawned yet: a placeholder row appears in the tree with
+        its suggested name selected for typing over, and Tab cycles the
+        runtime. Enter creates it; Esc costs nothing because nothing has
+        started.
+        """
+        if self._inline is not None or self._move is not None:
+            return
+        if self._draft is not None:
+            self._commit_draft()
+            return
+        suggestion = pick_random_name(all_session_names_in_cwd(self.monitor_cwd))
+        if not suggestion:
+            self.notify(
+                "Could not pick a name — the workspace pool is exhausted",
+                severity="error",
+            )
+            return
+        self._draft = _DraftAgent(
+            buffer=suggestion,
+            cursor=len(suggestion),
+            select_all=True,
+            runtime=RUNTIME_CLAUDE,
+            # The folder the cursor is in — on a folder header, that
+            # folder; on an agent, whichever folder holds it.
+            group_id=self._cursor_folder_id(),
+        )
+        self._clear_selection()
+        self._redraw_table()
+        self._move_cursor_to_key(groups.DRAFT_ROW_KEY)
+
+    def _draft_key(self, event: events.Key) -> bool:
+        """Keys while a new agent is being described. Consumes everything,
+        so a stray keystroke can't act on the dashboard behind the draft."""
+        draft = self._draft
+        if draft is None:
+            return False
+        key = event.key
+        if key == "escape":
+            self._draft = None
+            self._redraw_table()
+            self.notify("New agent cancelled")
+            return True
+        if key == "enter":
+            self._commit_draft()
+            return True
+        if key in ("tab", "shift+tab"):
+            step = 1 if key == "tab" else -1
+            order = list(RUNTIMES)
+            i = order.index(draft.runtime) if draft.runtime in order else 0
+            draft.runtime = order[(i + step) % len(order)]
+            self._redraw_table()
+            return True
+        self._edit_text(draft, event)
+        return True
+
+    def _commit_draft(self) -> None:
+        draft = self._draft
+        if draft is None:
+            return
+        name = draft.buffer.strip()
+        # Both checks leave the draft open so the name can be fixed
+        # without starting over.
+        if not name:
+            self.notify("Name cannot be empty", severity="error")
+            return
+        if name in all_session_names_in_cwd(self.monitor_cwd):
+            self.notify(
+                f"'{name}' is already used in this workspace", severity="error"
+            )
+            return
+        runtime = draft.runtime
+        runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
+        try:
+            session = create_session(
+                self.monitor_cwd,
+                runtime_args,
+                name=name,
+                runtime=runtime,
+            )
+        except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+            self.notify(f"Spawn failed: {e}", severity="error")
+            return
+        self._draft = None
+        folder = self.group_state.get(draft.group_id)
+        if folder is not None:
             try:
-                create_session(
-                    self.monitor_cwd,
-                    runtime_args,
-                    name=name,
-                    runtime=runtime,
-                )
-            except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
-                self.notify(f"Spawn failed: {e}", severity="error")
-                return
-            if folder is not None:
-                try:
-                    groups.assign_agent(self.monitor_cwd, name, folder.id)
-                except (ValueError, OSError):
-                    pass  # the session exists; filing it is a nicety
-            self.refresh_sessions()
-            if folder is not None:
-                self.notify(
-                    f"Spawned {name} with {runtime} in '{folder.name}'"
-                )
-            else:
-                self.notify(f"Spawned {name} with {runtime}")
+                groups.assign_agent(self.monitor_cwd, name, folder.id)
+            except (ValueError, OSError):
+                pass  # the session exists; filing it is a nicety
+        self.refresh_sessions()
+        self._move_cursor_to_key(f"mv:{session.id}")
+        where = f" in '{folder.name}'" if folder is not None else ""
+        self.notify(f"Spawned {name} with {runtime}{where}")
 
-        self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
+    def _draft_cells(self, row: groups.DisplayRow) -> tuple:
+        """The placeholder row: a name field and a Tab-cycled runtime."""
+        draft = self._draft
+        assert draft is not None
+        name_cell = f"[dim]{row.prefix}[/]{self._field_cell(draft)}"
+        return (
+            name_cell,
+            "[dim]—[/]",
+            f"[reverse]{draft.runtime}[/]",
+            "[dim]·[/]",
+            "[dim]-[/]",
+            "[b green]new[/]",
+            "[dim]-[/]",
+            "-",
+            "[dim]⇥ runtime · ⏎ create · esc cancel[/]",
+        )
+
+    def _draft_banner(self) -> str:
+        draft = self._draft
+        if draft is None:
+            return ""
+        folder = self.group_state.get(draft.group_id)
+        where = f"in {'/'.join(self.group_state.path_names(folder.id))}" if folder else "at the top level"
+        return (
+            f"+ new {draft.runtime} agent {where}"
+            "    type a name · ⇥ runtime · ⏎ create · esc cancel"
+        )
 
     def action_handoff(self) -> None:
         """Generate context from a dormant agent, then create its successor."""

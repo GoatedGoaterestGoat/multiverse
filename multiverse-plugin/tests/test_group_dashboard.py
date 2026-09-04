@@ -794,73 +794,198 @@ class InPlaceMoveTests(DashboardFolderTestCase):
         self.assertEqual(state.group_of("b"), group.id)
 
 
-class NewSessionFolderTests(DashboardFolderTestCase):
-    def test_a_session_started_on_a_folder_header_lands_in_that_folder(self) -> None:
+class DraftAgentTests(DashboardFolderTestCase):
+    """`n` drafts an agent in place — nothing spawns until Enter."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        names = patch.object(monitor, "all_session_names_in_cwd", return_value=set())
+        names.start()
+        self.addCleanup(names.stop)
+        suggest = patch.object(monitor, "pick_random_name", return_value="new-agent")
+        suggest.start()
+        self.addCleanup(suggest.stop)
+
+    def _draft_row(self):
+        return next(r for r in self.app.display_rows if r.is_draft)
+
+    def test_n_puts_a_placeholder_row_in_the_tree_without_spawning(self) -> None:
+        with patch.object(monitor, "create_session") as create:
+            self._act(self.app.action_new_session, cursor=0)
+
+        create.assert_not_called()
+        draft = self.app._draft
+        self.assertIsNotNone(draft)
+        self.assertEqual(draft.buffer, "new-agent")
+        self.assertTrue(draft.select_all)
+        self.assertEqual(draft.runtime, monitor.RUNTIME_CLAUDE)
+        self._draft_row()  # raises if the row isn't in the tree
+
+    def test_the_draft_lands_in_the_folder_the_cursor_is_in(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+        self._draw([_row("swift-otter")])
+
+        # Cursor on the member row, not the header — "the path I'm in".
+        self._act(self.app.action_new_session, cursor=1)
+
+        self.assertEqual(self.app._draft.group_id, group.id)
+        # And it is drawn inside that folder, as its last child.
+        self.assertEqual(self._draft_row().depth, 1)
+        self.assertIn("└─", self._draft_row().prefix)
+
+    def test_the_draft_lands_in_the_folder_under_the_cursor(self) -> None:
         group = groups.create_group(CWD, "backend")
         self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+        self.assertEqual(self.app._draft.group_id, group.id)
 
-        self.table.cursor_row = 0
-        with (
-            patch.object(self.app, "query_one", return_value=self.table),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_session()
-        cb = push.call_args.args[1]
+    def test_a_loose_cursor_drafts_at_the_top_level(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        self.assertIsNone(self.app._draft.group_id)
+        self.assertEqual(self._draft_row().depth, 0)
 
-        with (
-            patch.object(monitor, "create_session") as create,
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify") as notify,
-        ):
-            cb(("swift-otter", monitor.RUNTIME_CLAUDE))
+    def test_the_draft_shows_even_inside_a_folded_folder(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.set_collapsed(CWD, group.id, True)
+        self._draw([])
+
+        self._act(self.app.action_new_session, cursor=0)
+
+        self.assertEqual(self.app._draft.group_id, group.id)
+        self._draft_row()
+
+    def test_typing_replaces_the_suggested_name(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        self._type("scout")
+        self.assertEqual(self.app._draft.buffer, "scout")
+
+    def test_tab_cycles_the_runtime_both_ways(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+
+        self._send_key("tab")
+        self.assertEqual(self.app._draft.runtime, monitor.RUNTIME_CODEX)
+        self._send_key("tab")
+        self.assertEqual(self.app._draft.runtime, monitor.RUNTIME_PI)
+        self._send_key("tab")
+        self.assertEqual(self.app._draft.runtime, monitor.RUNTIME_CLAUDE)
+        self._send_key("shift+tab")
+        self.assertEqual(self.app._draft.runtime, monitor.RUNTIME_PI)
+
+    def test_enter_creates_the_session_with_the_chosen_name_and_runtime(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+        self._type("scout")
+        self._send_key("tab")  # codex
+
+        with patch.object(monitor, "create_session") as create:
+            self._send_key("enter")
 
         create.assert_called_once()
-        self.assertEqual(groups.load(CWD).group_of("swift-otter"), group.id)
-        self.assertIn("backend", notify.call_args.args[0])
+        self.assertEqual(create.call_args.kwargs["name"], "scout")
+        self.assertEqual(create.call_args.kwargs["runtime"], monitor.RUNTIME_CODEX)
+        self.assertIsNone(self.app._draft)
+        self.assertEqual(groups.load(CWD).group_of("scout"), group.id)
 
-    def test_a_session_started_on_an_agent_row_is_left_at_the_top_level(self) -> None:
-        group = groups.create_group(CWD, "backend")
-        groups.assign_agent(CWD, "brave-mole", group.id)
-        self._draw([_row("brave-mole")])
+    def test_claude_args_are_forwarded_only_to_claude(self) -> None:
+        self.app.claude_args = ["--permission-mode", "plan"]
+        self._draw([_row("swift-otter")])
 
-        self.table.cursor_row = 1  # the member row, not the header
-        with (
-            patch.object(self.app, "query_one", return_value=self.table),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_session()
+        self._act(self.app.action_new_session, cursor=0)
+        with patch.object(monitor, "create_session") as create:
+            self._send_key("enter")
+        self.assertEqual(create.call_args.args[1], ["--permission-mode", "plan"])
 
-        with (
-            patch.object(monitor, "create_session"),
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify"),
-        ):
-            push.call_args.args[1](("swift-otter", monitor.RUNTIME_CLAUDE))
+        self._act(self.app.action_new_session, cursor=0)
+        self._send_key("tab")  # codex
+        with patch.object(monitor, "create_session") as create:
+            self._send_key("enter")
+        self.assertEqual(create.call_args.args[1], [])
 
-        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
-
-    def test_a_failed_spawn_does_not_file_a_session_that_does_not_exist(self) -> None:
-        group = groups.create_group(CWD, "backend")
-        self._draw([])
-
-        self.table.cursor_row = 0
-        with (
-            patch.object(self.app, "query_one", return_value=self.table),
-            patch.object(self.app, "push_screen") as push,
-        ):
-            self.app.action_new_session()
+    def test_a_duplicate_name_keeps_the_draft_open_and_creates_nothing(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        self._type("swift-otter")
 
         with (
             patch.object(
-                monitor, "create_session", side_effect=RuntimeError("boom")
+                monitor, "all_session_names_in_cwd", return_value={"swift-otter"}
             ),
-            patch.object(self.app, "refresh_sessions"),
-            patch.object(self.app, "notify"),
+            patch.object(monitor, "create_session") as create,
         ):
-            push.call_args.args[1](("swift-otter", monitor.RUNTIME_CLAUDE))
+            self._send_key("enter")
 
-        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
+        create.assert_not_called()
+        self.assertIsNotNone(self.app._draft)
+        self.assertIn("already used", self.notify.call_args.args[0])
+
+    def test_an_empty_name_keeps_the_draft_open(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        self._send_key("ctrl+u")
+
+        with patch.object(monitor, "create_session") as create:
+            self._send_key("enter")
+
+        create.assert_not_called()
+        self.assertIsNotNone(self.app._draft)
+
+    def test_escape_discards_the_draft_and_nothing_was_started(self) -> None:
+        self._draw([_row("swift-otter")])
+        with patch.object(monitor, "create_session") as create:
+            self._act(self.app.action_new_session, cursor=0)
+            self._type("scout")
+            self._send_key("escape")
+
+        create.assert_not_called()
+        self.assertIsNone(self.app._draft)
+        self.assertFalse(any(r.is_draft for r in self.app.display_rows))
+
+    def test_a_failed_spawn_reports_and_files_nothing(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+
+        with patch.object(
+            monitor, "create_session", side_effect=RuntimeError("boom")
+        ):
+            self._send_key("enter")
+
+        self.assertIn("Spawn failed", self.notify.call_args.args[0])
+        self.assertIsNone(groups.load(CWD).group_of("new-agent"))
         self.assertIn(group.id, groups.load(CWD).groups)
+
+    def test_the_draft_row_shows_its_runtime_and_how_to_finish(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        self._send_key("tab")
+
+        drawn = self._draw([_row("swift-otter")])
+        draft = next(c for c in drawn if "new" in c[STATUS])
+        self.assertIn("codex", draft[RUNTIME])
+        self.assertIn("reverse", draft[RUNTIME])
+        self.assertIn("esc cancel", draft[PREVIEW])
+
+    def test_the_header_says_what_is_being_created_and_where(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+        self.assertIn("backend", self.app._draft_banner())
+        self.assertIn("claude", self.app._draft_banner())
+
+    def test_a_draft_row_is_not_an_agent_for_session_actions(self) -> None:
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_new_session, cursor=0)
+        idx = self.app.display_rows.index(self._draft_row())
+
+        self.table.cursor_row = idx
+        with patch.object(self.app, "query_one", return_value=self.table):
+            self.assertIsNone(self.app._current_entry())
+            self.assertIsNone(self.app._current_group())
 
 
 if __name__ == "__main__":

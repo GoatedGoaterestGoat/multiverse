@@ -8,6 +8,7 @@ from pathlib import Path
 from subprocess import CompletedProcess
 from unittest.mock import MagicMock, PropertyMock, patch
 
+from textual import events
 from textual.app import App
 from textual.widgets import DataTable, Input, RadioButton
 
@@ -391,43 +392,45 @@ class SpawnAttachGuardTests(unittest.TestCase):
 
 
 class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
-    async def test_new_session_modal_returns_codex_selection(self) -> None:
-        results: list[tuple[str, str] | None] = []
-        with tempfile.TemporaryDirectory() as cwd, patch.object(
-            monitor, "all_session_names_in_cwd", return_value=set()
-        ):
-            app = App()
-            async with app.run_test() as pilot:
-                screen = monitor.NewSessionScreen(cwd)
-                app.push_screen(screen, results.append)
-                await pilot.pause()
-
-                screen.query_one("#new-name", Input).value = "codex-agent"
-                screen.query_one("#new-runtime-codex", RadioButton).value = True
-                await pilot.press("enter")
-                await pilot.pause()
-
-        self.assertEqual(
-            results, [("codex-agent", monitor.RUNTIME_CODEX)]
+    async def test_new_agent_draft_cycles_runtime_with_tab(self) -> None:
+        # The new-session modal is gone: the runtime is picked on the draft
+        # row itself, so the coverage moves with it.
+        app = monitor.MonitorApp([])
+        app._draft = monitor._DraftAgent(
+            buffer="agent",
+            cursor=5,
+            select_all=False,
+            runtime=monitor.RUNTIME_CLAUDE,
+            group_id=None,
         )
+        with patch.object(app, "_redraw_table"):
+            app._draft_key(events.Key("tab", None))
+            self.assertEqual(app._draft.runtime, monitor.RUNTIME_CODEX)
+            app._draft_key(events.Key("tab", None))
+            self.assertEqual(app._draft.runtime, monitor.RUNTIME_PI)
 
-    async def test_new_session_modal_returns_pi_selection(self) -> None:
-        results: list[tuple[str, str] | None] = []
-        with tempfile.TemporaryDirectory() as cwd, patch.object(
-            monitor, "all_session_names_in_cwd", return_value=set()
+    async def test_new_agent_draft_creates_the_selected_runtime(self) -> None:
+        app = monitor.MonitorApp([])
+        app.monitor_cwd = "/workspace"
+        app._draft = monitor._DraftAgent(
+            buffer="pi-agent",
+            cursor=8,
+            select_all=False,
+            runtime=monitor.RUNTIME_PI,
+            group_id=None,
+        )
+        with (
+            patch.object(monitor, "all_session_names_in_cwd", return_value=set()),
+            patch.object(monitor, "create_session") as create,
+            patch.object(app, "refresh_sessions"),
+            patch.object(app, "_move_cursor_to_key"),
+            patch.object(app, "notify"),
         ):
-            app = App()
-            async with app.run_test() as pilot:
-                screen = monitor.NewSessionScreen(cwd)
-                app.push_screen(screen, results.append)
-                await pilot.pause()
+            app._commit_draft()
 
-                screen.query_one("#new-name", Input).value = "pi-agent"
-                screen.query_one("#new-runtime-pi", RadioButton).value = True
-                await pilot.press("enter")
-                await pilot.pause()
-
-        self.assertEqual(results, [("pi-agent", monitor.RUNTIME_PI)])
+        self.assertEqual(create.call_args.kwargs["name"], "pi-agent")
+        self.assertEqual(create.call_args.kwargs["runtime"], monitor.RUNTIME_PI)
+        self.assertIsNone(app._draft)
 
     async def test_spawn_modal_shows_caller_runtime_and_returns_codex(self) -> None:
         results: list[tuple[str, str] | None] = []
