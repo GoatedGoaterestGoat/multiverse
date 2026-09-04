@@ -666,6 +666,7 @@ class RuntimeLaunchTests(unittest.TestCase):
         runtime: str,
         runtime_args: list[str],
         initial_prompt: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -686,6 +687,7 @@ class RuntimeLaunchTests(unittest.TestCase):
             "MULTIVERSE_CODEX_PLUGIN_ROOT": str(codex_plugin_root),
             "PATH": os.environ.get("PATH", ""),
         }
+        env.update(extra_env or {})
         with (
             patch.object(sessions, "STATE_DIR", state_dir),
             patch.object(sessions, "MULTIVERSE_DIR", root),
@@ -706,18 +708,25 @@ class RuntimeLaunchTests(unittest.TestCase):
 
     def test_codex_launch_uses_codex_runner_and_resume_command(self) -> None:
         created, meta, calls = self._create_with_runtime(
-            sessions.RUNTIME_CODEX, ["resume", "native-thread"]
+            sessions.RUNTIME_CODEX,
+            ["resume", "native-thread"],
+            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-6-astra"},
         )
         tmux_cmd = calls[0]
 
         self.assertEqual(created.runtime, sessions.RUNTIME_CODEX)
         self.assertEqual(meta["runtime"], sessions.RUNTIME_CODEX)
-        self.assertEqual(meta["codex_args"], ["resume", "native-thread"])
+        self.assertEqual(
+            meta["codex_args"],
+            ["--model", "gpt-6-astra", "resume", "native-thread"],
+        )
         self.assertNotIn("--permission-mode", meta["codex_args"])
         self.assertIn("MULTIVERSE_RUNTIME=codex", tmux_cmd)
         self.assertIn("MULTIVERSE_RUNTIME_SESSION_ID_PATH=", " ".join(tmux_cmd))
+        self.assertIn("MULTIVERSE_CODEX_MODEL=gpt-6-astra", tmux_cmd)
         self.assertIn(
-            "multiverse-codex-session resume native-thread", " ".join(tmux_cmd)
+            "multiverse-codex-session --model gpt-6-astra resume native-thread",
+            " ".join(tmux_cmd),
         )
         persistence_args = [
             ";",
@@ -734,6 +743,20 @@ class RuntimeLaunchTests(unittest.TestCase):
             ],
             persistence_args,
         )
+
+    def test_codex_launch_preserves_explicit_model_override(self) -> None:
+        _, meta, calls = self._create_with_runtime(
+            sessions.RUNTIME_CODEX,
+            ["--model", "gpt-explicit", "resume", "native-thread"],
+            extra_env={"MULTIVERSE_CODEX_MODEL": "gpt-6-astra"},
+        )
+
+        self.assertEqual(
+            meta["codex_args"],
+            ["--model", "gpt-explicit", "resume", "native-thread"],
+        )
+        inner_cmd = calls[0][calls[0].index(";") - 1]
+        self.assertNotIn("gpt-6-astra", inner_cmd)
 
     def test_codex_launch_keeps_name_and_initial_prompt_off_command_line(
         self,
@@ -1338,6 +1361,7 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_SESSION_CWD": str(temp_dir),
                 "MULTIVERSE_SESSION_NAME": "codex-agent",
                 "MULTIVERSE_RUNTIME": sessions.RUNTIME_CODEX,
+                "MULTIVERSE_CODEX_MODEL": "gpt-6-astra",
                 "MULTIVERSE_RUNTIME_PID_PATH": str(temp_dir / "runtime_pid"),
                 "MULTIVERSE_RUNTIME_SESSION_ID_PATH": str(
                     temp_dir / "runtime_session_id"
@@ -1376,6 +1400,11 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertIn(
                 "mcp_servers.multiverse.env.MULTIVERSE_SESSION_NAME="
                 + json.dumps("codex-agent"),
+                args,
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_CODEX_MODEL="
+                + json.dumps("gpt-6-astra"),
                 args,
             )
             self.assertIn(

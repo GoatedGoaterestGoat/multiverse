@@ -73,6 +73,7 @@ Any arguments passed to `multiverse` (other than a subcommand like `setup`/`upda
 |:---------|:--------|:-------------|
 | `MULTIVERSE_CLAUDE_BIN` | `claude` | The Claude binary the whole stack invokes — monitor-spawned interactive sessions, the `ask_agent` fork path, and compaction merge calls. Point it at an alternate build (e.g. a company-packaged `claude`) without editing tracked files. |
 | `MULTIVERSE_CODEX_BIN` | `codex` | The Codex binary used for interactive sessions, native naming, and ephemeral `ask_agent` app-server forks. |
+| `MULTIVERSE_CODEX_MODEL` | `gpt-6-astra` | Default model for new and resumed Codex sessions. An explicit `--model`/`-m` argument takes precedence. |
 | `CODEX_HOME` | *(unset → `~/.codex`)* | Standard Codex configuration and session root. Set it when Codex uses a non-default home so discovery and resume target the same native sessions. |
 | `MULTIVERSE_CODEX_PLUGIN_ROOT` | sibling `plugins/multiverse-codex` | Codex plugin bundle injected into wrapped sessions. Override it for packaged installs or a separate development checkout. |
 | `MULTIVERSE_PI_BIN` | `pi` | The external pi CLI used for interactive sessions and ephemeral `ask_agent` forks. |
