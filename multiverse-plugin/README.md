@@ -195,7 +195,15 @@ about to be tipped back out.
 filed next to whoever spawned it: into the spawner's folder if it has one, and
 otherwise into a new folder named after the spawner, which both of them move
 into. So a delegation lineage becomes a folder the first time it branches,
-without anyone having to anticipate it. Everything it does is undoable by hand
+without anyone having to anticipate it.
+
+The filing happens in two places on purpose. The spawning agent's MCP server
+does it, and so does the monitor at the moment it approves the request. The
+server is whatever plugin build that *agent* started with, so an agent that has
+been running since before folders existed would never file its children; the
+monitor is the process you actually restart. The two agree rather than
+duplicating — by the time the agent's own call runs, the spawner is already in
+a folder, so the child just joins it. Everything it does is undoable by hand
 (`e` rename, `m` move, `u` lift out, `k` remove the folder), and removing a
 folder never touches a session — it only undoes the grouping.
 

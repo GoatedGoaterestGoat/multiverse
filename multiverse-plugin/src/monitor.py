@@ -3651,6 +3651,23 @@ class MonitorApp(App):
                 runtime=chosen_runtime,
             )
             if won:
+                # File the pair here as well as in the spawning agent's MCP
+                # server. Belt and braces on purpose: the server that calls
+                # auto_group_spawn is the plugin build the AGENT started
+                # with, so a long-running agent from an older build would
+                # never file its children. The monitor is the process the
+                # user just upgraded, and it is the authoritative resolver
+                # (we won the O_EXCL race), so doing it here makes the
+                # folder appear the moment the spawn is approved regardless
+                # of what the agent is running. The two calls agree: by the
+                # time the agent's own call runs, the spawner is already in
+                # a folder, so the child simply joins the same one.
+                try:
+                    groups.auto_group_spawn(
+                        self.monitor_cwd, req.get("from", ""), chosen_name
+                    )
+                except (OSError, ValueError):
+                    pass  # the spawn is approved; filing it is a nicety
                 self.notify(
                     f"Approved spawn from '{req.get('from', '?')}' "
                     f"as '{chosen_name}' ({chosen_runtime})"

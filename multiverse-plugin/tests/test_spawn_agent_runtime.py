@@ -102,6 +102,22 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
 
 
 class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # spawn_agent files the new agent into the workspace's folder tree,
+        # so these tests write to the group store. Keep that off the real
+        # ~/.multiverse when the file is run on its own.
+        self._groups_root = tempfile.TemporaryDirectory()
+        self._prev_mv_root = os.environ.get("MULTIVERSE_ROOT")
+        os.environ["MULTIVERSE_ROOT"] = self._groups_root.name
+        self.addCleanup(self._restore_mv_root)
+
+    def _restore_mv_root(self) -> None:
+        if self._prev_mv_root is None:
+            os.environ.pop("MULTIVERSE_ROOT", None)
+        else:
+            os.environ["MULTIVERSE_ROOT"] = self._prev_mv_root
+        self._groups_root.cleanup()
+
     async def test_user_selected_codex_runtime_starts_named_prompted_child(
         self,
     ) -> None:
