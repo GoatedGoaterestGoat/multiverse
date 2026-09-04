@@ -122,6 +122,7 @@ class CompactRunner:
         scheduler_params: Optional[dict] = None,
         image_mode: str = "budget_fit",
         own_lock: bool = True,
+        sync_full_before_build: bool = True,
     ) -> None:
         self.claude_uuid = claude_uuid
         self.cwd = cwd
@@ -139,6 +140,10 @@ class CompactRunner:
         # to the picker. So CompactScreen takes the lock once for the whole
         # flow and passes own_lock=False here.
         self.own_lock = own_lock
+        # Retired sessions have a frozen full JSONL. They may be re-compacted
+        # repeatedly with different schedulers, but only their live JSONL may
+        # change, so those runs must never call sync_full().
+        self.sync_full_before_build = sync_full_before_build
         # Summarize-only mode: run every step through tree-build, then
         # STOP — do not expand + rewrite live. Useful for pre-warming
         # the tree cache before an eventual compaction. The compacting
@@ -257,17 +262,22 @@ class CompactRunner:
                 return
 
             # 2. Sync full.jsonl from live (idempotent, bootstraps if needed).
+            # Retired sessions explicitly skip this: their full mirror is an
+            # immutable handoff artifact even when live is re-rendered later.
             on_state(State.SYNCING)
-            try:
-                appended = sync_full(self.claude_uuid, self.cwd)
-                if appended:
-                    on_log(f"Synced {appended} new row(s) into full.jsonl.")
-                else:
-                    on_log("full.jsonl already up-to-date.")
-            except Exception as e:  # noqa: BLE001
-                on_state(State.FAILED)
-                on_done(False, f"sync_full failed: {e}")
-                return
+            if self.sync_full_before_build:
+                try:
+                    appended = sync_full(self.claude_uuid, self.cwd)
+                    if appended:
+                        on_log(f"Synced {appended} new row(s) into full.jsonl.")
+                    else:
+                        on_log("full.jsonl already up-to-date.")
+                except Exception as e:  # noqa: BLE001
+                    on_state(State.FAILED)
+                    on_done(False, f"sync_full failed: {e}")
+                    return
+            else:
+                on_log("Retired session: full.jsonl is frozen; sync skipped.")
 
             full = full_jsonl_path(self.claude_uuid)
             if not full.is_file():

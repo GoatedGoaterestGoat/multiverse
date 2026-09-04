@@ -323,7 +323,7 @@ export default function multiverse(pi: ExtensionAPI) {
 		description:
 			"List the named agents in your Multiverse workspace — the ones you can " +
 			"reach with message_agent and ask_agent. Shows each agent's status " +
-			"(idle / working / listening / ended / dormant). Your own entry is " +
+			"(idle / working / listening / ended / retired / dormant). Your own entry is " +
 			"marked. Pass working_directory to list a different workspace instead.",
 		promptSnippet: "Discover other agents you can talk to",
 		parameters: Type.Object({
@@ -353,6 +353,7 @@ export default function multiverse(pi: ExtensionAPI) {
 			"able to use tools to act on — they get the message in their " +
 			"conversation and can take their time. Delivery is active: a dormant " +
 			"recipient is woken and a live one receives it once its current turn settles. " +
+			"A retired recipient rejects the message and identifies its successor. " +
 			"Fire-and-forget — this returns as soon as the message is queued. To " +
 			"reply to someone, call message_agent back at them; there is no " +
 			"separate respond tool. Pass working_directory to reach an agent in a " +

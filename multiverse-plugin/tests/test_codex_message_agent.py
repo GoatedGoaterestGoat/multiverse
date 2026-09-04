@@ -248,6 +248,38 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
             routed.call_args.kwargs["route"], "already_listening"
         )
 
+    def test_retired_agent_rejects_message_and_names_successor(self) -> None:
+        target = self._target(status="retired")
+        target.session.successor = "replacement-agent"
+        with (
+            patch.object(server, "_wake_via_tmux") as wake,
+            patch.object(server, "_auto_resume") as resume,
+        ):
+            result, sent, routed = self._message(target)
+
+        self.assertEqual(
+            result,
+            "'receiver' cannot be messaged because it has retired. "
+            "Consider messaging its successor 'replacement-agent' instead.",
+        )
+        self.assertEqual(inbox.pending_inbox_count(self.cwd, target.name), 0)
+        wake.assert_not_called()
+        resume.assert_not_called()
+        sent.assert_not_called()
+        routed.assert_not_called()
+
+    def test_retired_agent_stays_rejected_under_compaction_overlay(self) -> None:
+        target = self._target(status="compacting")
+        target.session.status = "retired"
+        target.session.successor = "replacement-agent"
+
+        result, sent, routed = self._message(target)
+
+        self.assertIn("successor 'replacement-agent'", result)
+        self.assertEqual(inbox.pending_inbox_count(self.cwd, target.name), 0)
+        sent.assert_not_called()
+        routed.assert_not_called()
+
     def test_starting_and_waiting_codex_are_always_left_queued(self) -> None:
         for status in ("starting", "waiting"):
             with self.subTest(status=status):

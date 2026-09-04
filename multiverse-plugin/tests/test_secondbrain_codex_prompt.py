@@ -478,6 +478,32 @@ class CodexPromptConnectorTests(unittest.TestCase):
                 send.assert_not_called()
                 wait.assert_not_called()
 
+    def test_retired_session_rejects_prompt_and_names_successor(self) -> None:
+        target = self._target(status="retired")
+        target.session.successor = "replacement-agent"
+
+        result, send, wait = self._deliver(target)
+
+        self.assertEqual(result[0], "retired")
+        self.assertEqual(
+            result[2],
+            "'codex-target' cannot be messaged because it has retired. "
+            "Consider messaging its successor 'replacement-agent' instead.",
+        )
+        send.assert_not_called()
+        wait.assert_not_called()
+
+    def test_retired_session_wins_over_compaction_overlay(self) -> None:
+        target = self._target(status="compacting")
+        target.session.status = "retired"
+        target.session.successor = "replacement-agent"
+
+        result, send, wait = self._deliver(target)
+
+        self.assertEqual(result[0], "retired")
+        send.assert_not_called()
+        wait.assert_not_called()
+
     def test_starting_prompt_is_not_sent_if_kill_begins_while_waiting(
         self,
     ) -> None:

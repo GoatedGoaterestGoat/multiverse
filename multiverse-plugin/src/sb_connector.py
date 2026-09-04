@@ -2010,10 +2010,11 @@ class SBConnector:
           waiting                       → refuse while its interactive modal is open
           dormant/ended                  → create_session(initial_prompt=text) — auto-submits
                                             as the first user turn via the runtime wrapper
+          retired                       → refuse permanently and name its successor
           starting                       → wait bounded for ready, then send-keys
           compacting/ending (locked)     → refuse with a specific message; SB retries later
 
-        Errors: not_found | forbidden | locked | deliver_failed. All ActionResults are
+        Errors: not_found | forbidden | retired | locked | deliver_failed. All ActionResults are
         cached in ``self.dedup`` so a retry with the same action_id returns the cached
         outcome and never re-executes (§8.2).
         """
@@ -2101,7 +2102,12 @@ class SBConnector:
         """
         from . import sb_actions
         from .compact_state import is_locked
-        from .sessions import find_agent_by_name, current_host, tmux_session_exists
+        from .sessions import (
+            current_host,
+            find_agent_by_name,
+            retired_agent_message,
+            tmux_session_exists,
+        )
 
         target = find_agent_by_name(cwd_abs, agent_name)
         if target is None or not _supports_secondbrain_runtime(target.runtime):
@@ -2110,6 +2116,22 @@ class SBConnector:
         native_session_id = target.session_id
         if not native_session_id and target.session is not None:
             native_session_id = target.session.runtime_session_id
+
+        # A compaction lock temporarily overlays a retired row as
+        # ``compacting``, so consult the underlying persisted Session as well.
+        # This must precede the lock route: retirement forbids new prompts at
+        # all times, rather than merely postponing them until compaction ends.
+        if target.status == "retired" or (
+            target.session is not None and target.session.status == "retired"
+        ):
+            return (
+                "retired",
+                "",
+                retired_agent_message(
+                    agent_name,
+                    target.session.successor if target.session is not None else None,
+                ),
+            )
 
         # The status is part of the durable roster and must be sufficient on
         # its own. The lock remains an authoritative second source for the

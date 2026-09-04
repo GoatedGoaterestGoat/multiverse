@@ -139,7 +139,10 @@ fi
 if [ -n "${MULTIVERSE_STATUS:-}" ]; then
   TS=$(date +%s)
   STATUS_TMP="${MULTIVERSE_STATUS}.$$.$RANDOM.tmp"
-  if printf '{"status":"ended","ts":%d}\n' "$TS" > "$STATUS_TMP"; then
+  if [ -f "$MULTIVERSE_STATUS" ] \
+     && grep -Eq '"status"[[:space:]]*:[[:space:]]*"retired"' "$MULTIVERSE_STATUS"; then
+    : # A handoff's terminal retired status must survive this late exit.
+  elif printf '{"status":"ended","ts":%d}\n' "$TS" > "$STATUS_TMP"; then
     mv -f "$STATUS_TMP" "$MULTIVERSE_STATUS"
   else
     rm -f "$STATUS_TMP" 2>/dev/null || true

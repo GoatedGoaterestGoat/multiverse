@@ -496,6 +496,10 @@ class Session:
     # it isn't, when MULTIVERSE_ROOT is shared network storage and the
     # session was actually spawned on a different host's tmux server.
     host: Optional[str] = None
+    # Name of the fresh agent that took over this agent's work. Present only
+    # when status is ``retired`` and persisted in meta.json so every registry
+    # consumer can direct callers to the replacement.
+    successor: Optional[str] = None
 
     @property
     def tmux_name(self) -> str:
@@ -621,7 +625,7 @@ class DashboardRow:
 
     @property
     def is_live(self) -> bool:
-        return self.session is not None and self.status not in ("ended",)
+        return self.session is not None and self.status not in ("ended", "retired")
 
     @property
     def row_key(self) -> str:
@@ -645,7 +649,7 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
-_TERMINAL_STATUSES = ("ended", "ending")
+_TERMINAL_STATUSES = ("ended", "ending", "retired")
 
 
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
@@ -678,12 +682,20 @@ def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> No
         # Runtime hooks can still fire while SIGTERM is being handled; without
         # this marker a Stop/SessionEnd hook could replace ``ending`` with
         # idle/ended before the teardown operation has actually finished.
-        if status != "ending" and (path.parent / _ENDING_MARKER_NAME).is_file():
+        if status not in ("ending", "retired") and (
+            path.parent / _ENDING_MARKER_NAME
+        ).is_file():
             return
-        # ``ended`` is terminal. A session whose status.json says ended never
-        # goes live again — resuming builds a new session dir — so a live
-        # status arriving afterwards is always the stale one, whichever
-        # process emitted it.
+        # ``retired`` is permanent. The handoff has stopped this wrapper and
+        # assigned a successor; neither late runtime hooks nor dashboard
+        # teardown may move it into another state. During compaction the row is
+        # rendered as ``compacting`` from the external lock, without changing
+        # this durable value.
+        if status != "retired" and _status_is(path, "retired"):
+            return
+        # ``ended`` is terminal with respect to live states. A session whose
+        # status.json says ended never goes live again — resuming builds a new
+        # session dir — so a live status arriving afterwards is always stale.
         if status not in _TERMINAL_STATUSES and _status_is_ended(path):
             return
         atomic_write_json(
@@ -693,9 +705,13 @@ def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> No
 
 
 def _status_is_ended(path: Path) -> bool:
+    return _status_is(path, "ended")
+
+
+def _status_is(path: Path, expected: str) -> bool:
     try:
         with path.open(encoding="utf-8") as fh:
-            return json.load(fh).get("status") == "ended"
+            return json.load(fh).get("status") == expected
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -954,7 +970,7 @@ def _correct_local_liveness(s: Session) -> bool:
     Codex runners record the foreground Codex PID, allowing correction even
     when an abnormal wrapper leaves its tmux pane behind.
     """
-    if s.status == "ended" or (s.host and s.host != current_host()):
+    if s.status in ("ended", "retired") or (s.host and s.host != current_host()):
         return False
 
     within_startup_grace = (
@@ -1030,6 +1046,7 @@ def load_session(session_id: str) -> Optional[Session]:
         ),
         superseded_uuids=superseded,
         host=meta.get("host"),
+        successor=meta.get("successor"),
     )
     st = _read_json(s.status_path)
     if st:
@@ -1073,6 +1090,7 @@ _STATUS_SORT = {
     "ending": 1,
     "unknown": 2,
     "ended": 3,
+    "retired": 3,
     "dormant": 4,
 }
 
@@ -1633,6 +1651,94 @@ def _release_session_claims(s: Session) -> None:
         _release_claim(_claim_path(kind, value), s.id)
 
 
+def create_retired_session_record(
+    cwd: str,
+    name: str,
+    runtime: str,
+    native_session_id: str,
+    successor: str,
+) -> Session:
+    """Claim a dormant native session and persist it as a retired agent.
+
+    Unlike :func:`create_session`, this creates no tmux session and starts no
+    runtime. The wrapper record keeps the predecessor in the dashboard and
+    hides the same native transcript from dormant discovery, while preserving
+    its native ID for ask_agent and Claude compaction.
+    """
+    runtime = normalize_runtime(runtime)
+    cwd_abs = str(Path(cwd).expanduser().resolve())
+    name = name.strip()
+    native_session_id = native_session_id.strip()
+    successor = successor.strip()
+    if not name:
+        raise ValueError("A retired agent must have a name")
+    if not native_session_id:
+        raise ValueError("A retired agent must have a native session ID")
+    if not successor:
+        raise ValueError("A retired agent must have a successor")
+    if name == successor:
+        raise ValueError("A retired agent's successor must be a different agent")
+
+    sid = short_id()
+    directory = STATE_DIR / sid
+    directory.mkdir(parents=True, exist_ok=False)
+    claim_paths: list[Path] = []
+    try:
+        for kind, value in _session_claim_specs(
+            cwd_abs, runtime, name, native_session_id
+        ):
+            path = _claim_path(kind, value)
+            _acquire_claim(path, sid)
+            claim_paths.append(path)
+        _assert_no_existing_wrapper_claim(
+            sid, cwd_abs, runtime, name, native_session_id
+        )
+        now = time.time()
+        host = current_host()
+        atomic_write_json(
+            directory / "meta.json",
+            {
+                "cwd": cwd_abs,
+                "created_at": now,
+                "runtime": runtime,
+                "host": host,
+                "name": name,
+                "resumed_from": native_session_id,
+                "successor": successor,
+            },
+        )
+        write_status_path(directory / "status.json", "retired", now)
+    except Exception:
+        for path in claim_paths:
+            _release_claim(path, sid)
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
+
+    return Session(
+        id=sid,
+        cwd=cwd_abs,
+        created_at=now,
+        status="retired",
+        status_ts=now,
+        resumed_from=native_session_id,
+        name=name,
+        runtime=runtime,
+        claude_uuid=(native_session_id if runtime == RUNTIME_CLAUDE else None),
+        codex_session_id=(native_session_id if runtime == RUNTIME_CODEX else None),
+        pi_session_id=(native_session_id if runtime == RUNTIME_PI else None),
+        host=host,
+        successor=successor,
+    )
+
+
+def remove_retired_session_record(session: Session) -> None:
+    """Roll back an uncompleted handoff without touching the native session."""
+    if session.status != "retired":
+        raise ValueError("Only retired session records can be rolled back")
+    shutil.rmtree(session.dir, ignore_errors=True)
+    _release_session_claims(session)
+
+
 def create_session(
     cwd: str,
     claude_args: list[str],
@@ -1970,7 +2076,44 @@ def foreign_host_still_reported_live(s: Session) -> bool:
     fresh = load_session(s.id)
     if fresh is None:
         return False  # already reaped by someone else; nothing to protect
-    return fresh.status != "ended"
+    return fresh.status not in ("ended", "retired")
+
+
+def retired_agent_message(name: str, successor: Optional[str]) -> str:
+    """Shared refusal text for every channel that can prompt an agent."""
+    message = f"'{name}' cannot be messaged because it has retired."
+    if successor:
+        message += f" Consider messaging its successor '{successor}' instead."
+    return message
+
+
+def mark_session_retired(s: Session, successor: str) -> None:
+    """Persist a stopped agent's permanent retired state and successor.
+
+    The handoff implementation is responsible for stopping the runtime and
+    freezing its full transcript before calling this helper. Metadata lands
+    first so no observer can see ``retired`` without also knowing where to
+    redirect messages.
+    """
+    successor = successor.strip()
+    if not successor:
+        raise ValueError("A retired agent must have a successor")
+    if successor == s.name:
+        raise ValueError("A retired agent's successor must be a different agent")
+    meta = _read_json(s.meta_path)
+    if meta is None:
+        raise RuntimeError(f"Session metadata is missing for '{s.name or s.id}'")
+    meta["successor"] = successor
+    atomic_write_json(s.meta_path, meta)
+    now = time.time()
+    # Handoff teardown may have used the ordinary dashboard `ending` guard.
+    # Retirement supersedes that transient state and becomes the permanent
+    # guard itself.
+    s.ending_marker_path.unlink(missing_ok=True)
+    write_status_path(s.status_path, "retired", now)
+    s.status = "retired"
+    s.status_ts = now
+    s.successor = successor
 
 
 def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:

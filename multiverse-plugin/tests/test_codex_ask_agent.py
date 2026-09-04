@@ -361,6 +361,39 @@ class AskAgentRuntimeRoutingTests(unittest.TestCase):
         find.assert_called_once_with(remote, "remote-codex")
         self.assertEqual(ask.call_args.kwargs["target"].cwd, remote)
 
+    def test_retired_agent_remains_available_to_ask_agent(self) -> None:
+        target = sessions.DashboardRow(
+            name="retired-agent",
+            cwd=self.cwd,
+            status="retired",
+            status_ts=1,
+            runtime=sessions.RUNTIME_CODEX,
+            session_id="retired-thread-id",
+        )
+        completed = ask_agents.AskResult(
+            name=target.name,
+            response="answer from frozen context",
+            error=None,
+            fork_uuid="fork",
+            elapsed=0.1,
+        )
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MULTIVERSE_SESSION_CWD": self.cwd,
+                    "MULTIVERSE_SESSION_NAME": "caller",
+                },
+                clear=False,
+            ),
+            patch.object(server, "find_agent_by_name", return_value=target),
+            patch.object(server, "ask_one", return_value=completed) as ask,
+        ):
+            result = server.ask_agent(target.name, "What did you know?")
+
+        self.assertEqual(result, "answer from frozen context")
+        ask.assert_called_once()
+
 
 class SecondBrainCodexAskTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:

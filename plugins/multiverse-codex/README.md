@@ -38,6 +38,10 @@ its first user turn. Starting and approval-waiting sessions remain queued.
 Attached sessions are delivered to whenever the normal composer is focused;
 attachment by itself does not prevent delivery.
 
+A retired agent is permanently stopped after handing off to a saved successor.
+`message_agent` rejects it without writing an inbox file and names that successor;
+`ask_agent` remains available through its read-only ephemeral native-thread fork.
+
 The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
 Claude-to-Codex messages. Cross-workspace messages retain the sender workspace
 so `check_inbox` can tell the recipient how to route a reply. Internal delivery

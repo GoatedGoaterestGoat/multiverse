@@ -58,7 +58,7 @@ def _corrected_status(row) -> str:  # noqa: ANN001 - DashboardRow
     s = row.session
     if (
         s is not None
-        and row.status not in ("ended",)
+        and row.status not in ("ended", "retired")
         and (not s.host or s.host == current_host())
         and not tmux_session_exists(s.tmux_name)
     ):
@@ -180,7 +180,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
 
     status = _corrected_status(target)
 
-    if status in ("dormant", "ended"):
+    if status in ("dormant", "ended", "retired"):
         return "not_running", {"message": f"'{agent_name}' is {status}"}
 
     if target.claude_uuid and is_locked(target.claude_uuid):

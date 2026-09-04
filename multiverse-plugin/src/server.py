@@ -45,6 +45,7 @@ from src.sessions import (
     kill_session,
     list_named_agents_in_cwd,
     normalize_runtime,
+    retired_agent_message,
     write_status_path,
 )
 from src.inbox import (
@@ -558,6 +559,7 @@ _STATUS_PRIORITY = {
     "ending": 1,
     "unknown": 2,
     "ended": 3,
+    "retired": 3,
     "dormant": 4,
 }
 
@@ -578,12 +580,13 @@ def list_agents(
       - idle / working / waiting / starting — currently running
       - ending   — runtime teardown is in progress (not interactive)
       - ended    — was running, now stopped (still resumable)
+      - retired  — permanently stopped after handing off to a successor
       - dormant  — never wrapped by multiverse this run, but the underlying
                    transcript exists and is named
 
     Your own entry is marked with ``← this is you`` (only when listing your
     own workspace). The list is sorted with you first, then live agents,
-    then ended/dormant. Claude and Codex agents share this registry, but the
+    then ended/retired/dormant. Claude and Codex agents share this registry, but the
     output intentionally does not expose an agent's runtime.
 
     Args:
@@ -643,7 +646,9 @@ def list_agents(
     )
 
     total = len(agents)
-    live_count = sum(1 for a in agents if a.status not in ("ended", "dormant"))
+    live_count = sum(
+        1 for a in agents if a.status not in ("ended", "retired", "dormant")
+    )
     cap = max(1, int(max_agents))
 
     # Truncate, but keep "you" in the visible slice no matter what
@@ -739,11 +744,13 @@ def message_agent(
         and the session resumes.
       - ending → runtime teardown is already in progress, so it is NOT woken
         or auto-resumed; the message stays queued for the next resume.
+      - retired → rejected without writing to the inbox; the result names the
+        successor that should be messaged instead.
 
-    In every case the message is queued in the recipient's inbox first, so
-    the states that can't be woken still receive it through their normal
-    delivery path. The tool result tells you exactly what happened (woke a
-    dormant agent, pinged a live one, fell back to queued delivery, etc.).
+    Except for retired recipients, the message is queued in the inbox before
+    delivery is attempted, so states that can't be woken still receive it
+    through their normal path. Retired recipients are rejected before any
+    inbox write. The tool result tells you exactly what happened.
 
     At most one outstanding prompt: if the recipient was already asked to
     check its inbox and hasn't done so yet, no second prompt is sent. Your
@@ -798,6 +805,18 @@ def message_agent(
             f"Error: no agent named '{target_name}' in workspace '{cwd}'. "
             f"Call list_agents(working_directory='{cwd}') to see who's "
             "available."
+        )
+
+    # Retirement is permanent and differs from ended/dormant: the native
+    # transcript remains available to ask_agent and compaction, but no new
+    # durable input may enter it. Check the underlying Session too because a
+    # compaction lock temporarily overlays the dashboard row status.
+    if target.status == "retired" or (
+        target.session is not None and target.session.status == "retired"
+    ):
+        return retired_agent_message(
+            target_name,
+            target.session.successor if target.session is not None else None,
         )
 
     # Called for its side effect, not its answer: wake_is_outstanding() retires

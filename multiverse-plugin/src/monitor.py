@@ -46,7 +46,7 @@ from textual.widgets import (
     Static,
 )
 
-from .ask_agents import AskResult, AskTarget, ask_all
+from .ask_agents import AskResult, AskTarget, ask_all, ask_one
 from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
 from .compact_state import acquire_lock, release_lock
@@ -60,6 +60,7 @@ from .full_jsonl import (
     minimum_compacted_tokens,
     structural_tokens,
     structural_tokens_cached,
+    sync_full,
     total_token_count,
     total_turn_count,
 )
@@ -78,6 +79,7 @@ from .sessions import (
     all_session_names_in_cwd,
     build_dashboard_rows,
     create_session,
+    create_retired_session_record,
     current_host,
     delete_codex_thread,
     existing_names_in_cwd,
@@ -87,6 +89,7 @@ from .sessions import (
     list_codex_sessions_in,
     list_sessions,
     mark_session_ending,
+    remove_retired_session_record,
     strip_fold_suffix,
     tmux_session_exists,
     wrapped_runtime_session_ids,
@@ -110,6 +113,7 @@ STATUS_STYLES = {
     "starting": "cyan",
     "ending": "bold red",
     "ended": "dim strike",
+    "retired": "bold blue strike",
     "dormant": "blue",
     "compacting": "bold magenta",
     "unknown": "dim",
@@ -118,8 +122,42 @@ STATUS_STYLES = {
 # Statuses where the user is allowed to launch a compaction. Working/
 # waiting/starting/compacting are excluded — the session is busy or
 # already locked.
-_COMPACTABLE_STATUSES = {"idle", "ended", "dormant"}
+_COMPACTABLE_STATUSES = {"idle", "ended", "retired", "dormant"}
 _ENDING_MIN_VISIBLE_SECONDS = 0.25
+_HANDOFF_TIMEOUT_SECONDS = 300.0
+
+_HANDOFF_PROMPT = """You are being retired due to context-length limitations, and your responsibilities will be inherited by a successor agent.
+
+Produce a concise, self-contained handoff context for your successor using only what you know from this conversation.
+
+Include:
+
+- General project background and important constraints
+- Your responsibilities and completed work
+- Currently open tasks, blockers, and unresolved decisions
+- Full paths to important files, scripts, directories, and assets
+- Important experience and lessons you learned
+- Anything else that you feel is important for your successor agent to know
+
+Preserve the concrete details needed to continue the work without repeating completed tasks. Clearly distinguish completed work from open work. Output only the handoff context."""
+
+
+def _successor_prompt(predecessor_name: str, handoff_context: str) -> str:
+    return f"""You are the successor to the retired agent "{predecessor_name}" in this workspace. You now own their responsibilities and outstanding work.
+
+Your predecessor has provided you the following historical project context as well as your responsibilities:
+
+{handoff_context.strip()}
+
+Verify the current workspace and repository state before making changes, because files or external state may have changed since the report was produced. Preserve existing user work and do not repeat work that is already complete.
+
+If you need clarification about prior decisions, reasoning, or experience, you may use:
+
+ask_agent(target_name="{predecessor_name}", question="...")
+
+The predecessor is retired: it cannot receive message_agent calls or new prompts, and it cannot use tools. ask_agent consults only its frozen context.
+
+Begin by reconciling this report with the current workspace state. Then continue the outstanding work autonomously. Surface any decision that genuinely requires the user, and clearly report blockers rather than inventing missing context."""
 
 
 class _SpawnAttachGuard:
@@ -2401,6 +2439,9 @@ class CompactScreen(ModalScreen[None]):
             kill_session_fn=kill_fn,
             summarize_only=True,
             own_lock=False,  # this screen holds it for the whole flow
+            sync_full_before_build=(
+                self.mv_session is None or self.mv_session.status != "retired"
+            ),
         )
         self._run_in_thread()
 
@@ -3234,6 +3275,7 @@ class MonitorApp(App):
 
     BINDINGS = [
         Binding("n", "new_session", "New"),
+        Binding("h", "handoff", "Handoff"),
         Binding("R", "resume_session", "Resume"),
         Binding("c", "compact", "Compact"),
         Binding("x", "restore", "Restore"),
@@ -3275,6 +3317,7 @@ class MonitorApp(App):
         # reattach once the queue fully drains (set by ``_attach_to``;
         # consumed by ``_tick_spawn_requests``).
         self._pending_reattach: Optional[str] = None
+        self._handoff_in_progress = False
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -3546,6 +3589,132 @@ class MonitorApp(App):
 
         self.push_screen(NewSessionScreen(self.monitor_cwd), cb)
 
+    def action_handoff(self) -> None:
+        """Generate context from a dormant agent, then create its successor."""
+        target = self._current_entry()
+        if target is None:
+            return
+        if target.is_ghost:
+            self.notify("Folded ghost rows cannot be handed off", severity="warning")
+            return
+        if target.status != "dormant" or target.session is not None:
+            self.notify(
+                "Handoff is only available for dormant agents",
+                severity="warning",
+            )
+            return
+        native_id = target.session_id or target.claude_uuid
+        if not native_id:
+            self.notify(
+                f"'{target.name}' has no native session ID to hand off",
+                severity="error",
+            )
+            return
+        if self._handoff_in_progress:
+            self.notify("A handoff context is already being generated", severity="warning")
+            return
+
+        self._handoff_in_progress = True
+        self.notify(f"Generating handoff context from '{target.name}'…")
+        self._handoff_context_worker(target, native_id)
+
+    @work(thread=True, exclusive=True, group="handoff")
+    def _handoff_context_worker(
+        self, target: DashboardRow, native_id: str
+    ) -> None:
+        try:
+            result = ask_one(
+                question=_HANDOFF_PROMPT,
+                target=AskTarget(
+                    name=target.name,
+                    cwd=target.cwd,
+                    claude_uuid=target.claude_uuid,
+                    runtime=target.runtime,
+                    session_id=native_id,
+                ),
+                timeout=_HANDOFF_TIMEOUT_SECONDS,
+                register_fork=self._register_fork,
+            )
+        except Exception as exc:  # noqa: BLE001 — return failure to the TUI
+            result = AskResult(
+                name=target.name,
+                response=None,
+                error=f"handoff fork failed: {exc}",
+                fork_uuid="",
+                elapsed=0.0,
+            )
+        self.call_from_thread(self._handoff_context_ready, target, native_id, result)
+
+    def _handoff_context_ready(
+        self,
+        target: DashboardRow,
+        native_id: str,
+        result: AskResult,
+    ) -> None:
+        self._handoff_in_progress = False
+        if result.error or not result.response:
+            detail = result.error or "the predecessor returned an empty handoff"
+            self.notify(
+                f"Could not generate handoff context for '{target.name}': {detail}",
+                severity="error",
+            )
+            return
+
+        handoff_context = result.response.strip()
+
+        def create_successor(selection: Optional[tuple[str, str]]) -> None:
+            if not selection:
+                self.notify(f"Handoff from '{target.name}' cancelled")
+                return
+            successor_name, successor_runtime = selection
+            retired: Optional[Session] = None
+            try:
+                # A dormant Claude transcript has no writer, so this is the
+                # final synchronization. Once the retired record exists all
+                # future compactions deliberately treat full.jsonl as frozen.
+                if target.runtime == RUNTIME_CLAUDE:
+                    sync_full(native_id, target.cwd)
+                retired = create_retired_session_record(
+                    cwd=target.cwd,
+                    name=target.name,
+                    runtime=target.runtime,
+                    native_session_id=native_id,
+                    successor=successor_name,
+                )
+                runtime_args = (
+                    self.claude_args if successor_runtime == RUNTIME_CLAUDE else []
+                )
+                create_session(
+                    target.cwd,
+                    runtime_args,
+                    name=successor_name,
+                    runtime=successor_runtime,
+                    initial_prompt=_successor_prompt(
+                        target.name, handoff_context
+                    ),
+                )
+            except (OSError, subprocess.CalledProcessError, ValueError, RuntimeError) as exc:
+                # Retirement is committed first so the predecessor can never
+                # race back to life while its successor starts. If startup
+                # fails, remove only that wrapper record; the native dormant
+                # transcript was never deleted and becomes available again.
+                if retired is not None:
+                    remove_retired_session_record(retired)
+                self.refresh_sessions()
+                self.notify(f"Handoff failed: {exc}", severity="error")
+                return
+
+            self.refresh_sessions()
+            self.notify(
+                f"Retired '{target.name}' and spawned successor "
+                f"'{successor_name}' ({successor_runtime})"
+            )
+
+        # Reuse the dashboard's ordinary New Session modal verbatim: random
+        # default name, shared uniqueness validation, and Claude/Codex/pi
+        # runtime selector.
+        self.push_screen(NewSessionScreen(self.monitor_cwd), create_successor)
+
     def action_resume_session(self) -> None:
         hide = wrapped_runtime_session_ids(self.sessions)
         with self._fork_lock:
@@ -3600,10 +3769,12 @@ class MonitorApp(App):
             None,
         )
         if session is not None and (
-            session.status == "ending" or session.ending_marker_path.is_file()
+            session.status in ("ending", "retired")
+            or session.ending_marker_path.is_file()
         ):
+            state = session.status
             self.notify(
-                "Session is ending — attach is disabled until teardown finishes",
+                f"Session is {state} — attach is disabled",
                 severity="warning",
             )
             return
@@ -3674,6 +3845,15 @@ class MonitorApp(App):
         if e.status == "ending":
             self.notify(
                 "Session is ending — attach is disabled until teardown finishes",
+                severity="warning",
+            )
+            return
+
+        if e.status == "retired":
+            successor = e.session.successor if e.session is not None else None
+            hint = f"; its successor is '{successor}'" if successor else ""
+            self.notify(
+                f"Session is retired and cannot be attached or resumed{hint}",
                 severity="warning",
             )
             return
@@ -3854,6 +4034,12 @@ class MonitorApp(App):
         if e.status == "ending":
             self.notify("Session is already ending", severity="warning")
             return
+        if e.status == "retired":
+            self.notify(
+                "Retired sessions are preserved and cannot be killed",
+                severity="warning",
+            )
+            return
         if e.session is None:
             native_session_id = e.session_id
             cwd = e.cwd
@@ -3994,7 +4180,7 @@ class MonitorApp(App):
 
         if e.status not in _COMPACTABLE_STATUSES:
             self.notify(
-                f"Compaction only allowed for idle/ended/dormant sessions "
+                f"Compaction only allowed for idle/ended/retired/dormant sessions "
                 f"(this is {e.status})",
                 severity="warning",
             )
@@ -4113,6 +4299,12 @@ class MonitorApp(App):
         if e.is_ghost:
             self.notify(
                 "Cannot toggle auto-build on a folded ghost row",
+                severity="warning",
+            )
+            return
+        if e.status == "retired":
+            self.notify(
+                "Retired sessions are frozen; run compaction explicitly with c",
                 severity="warning",
             )
             return

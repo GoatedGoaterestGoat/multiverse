@@ -12,7 +12,14 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from src import atomic_files, compact_state, full_jsonl, sb_connector, spawn_requests
+from src import (
+    atomic_files,
+    compact_state,
+    full_jsonl,
+    sb_connector,
+    sessions,
+    spawn_requests,
+)
 
 
 class AtomicFilePrimitiveTests(unittest.TestCase):
@@ -181,6 +188,50 @@ class AtomicFilePrimitiveTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 0)
 
         self.assertEqual(json.loads(path.read_text())["status"], "ending")
+
+    def test_retired_status_is_permanent_and_persists_successor(self) -> None:
+        state_dir = self.root / "sessions"
+        session_dir = state_dir / "old-wrapper"
+        session_dir.mkdir(parents=True)
+        (session_dir / "meta.json").write_text(
+            json.dumps({
+                "cwd": "/workspace",
+                "created_at": 1,
+                "runtime": "claude",
+                "name": "old-agent",
+            })
+        )
+        (session_dir / "status.json").write_text(
+            json.dumps({"status": "ended", "ts": 1})
+        )
+        old = sessions.Session(
+            id="old-wrapper",
+            cwd="/workspace",
+            created_at=1,
+            status="ended",
+            name="old-agent",
+        )
+
+        with patch.object(sessions, "STATE_DIR", state_dir):
+            sessions.mark_session_retired(old, "new-agent")
+            for stale in ("starting", "idle", "working", "ending", "ended"):
+                sessions.write_status_path(old.status_path, stale)
+            script = Path(__file__).resolve().parents[1] / "scripts" / "set-status.sh"
+            env = {**os.environ, "MULTIVERSE_STATUS": str(old.status_path)}
+            subprocess.run([str(script), "ended"], env=env, check=True)
+            loaded = sessions.load_session(old.id)
+
+        self.assertIsNotNone(loaded)
+        self.assertEqual(loaded.status, "retired")
+        self.assertEqual(loaded.successor, "new-agent")
+        row = sessions.DashboardRow(
+            name=loaded.name or "old-agent",
+            cwd=loaded.cwd,
+            status=loaded.status,
+            status_ts=loaded.status_ts,
+            session=loaded,
+        )
+        self.assertFalse(row.is_live)
 
 
 class SharedStateRaceTests(unittest.TestCase):

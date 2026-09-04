@@ -112,8 +112,9 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | Key | Action |
 |:----|:-------|
 | `n` | New session — name and runtime prompt; choose Claude, Codex, or pi. Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
+| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then opens the normal New session name/runtime widget and starts the chosen successor with that report. |
 | `R` | Resume — pick from runtime sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Uses the same runtime-specific permission default as a new session. |
-| `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
+| `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `retired` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
 | `b` | Toggle background auto tree-build for the highlighted session — off by default; flip on per-session for the ones you expect to compact. State shown in the dashboard's "Build" column. |
 | `a` | Ask all named agents a temporary question (one-shot, context-aware, not persisted) |
@@ -121,7 +122,7 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `x` | Restore a lost session from an orphan full JSONL — one whose live counterpart Claude Code has reaped (`cleanupPeriodDays`) but whose mirror survived. Picks from orphans in this workspace and feeds the choice through the normal compaction flow, rendering a fresh live JSONL at the chosen budget. |
 | `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
@@ -154,7 +155,7 @@ The scroll wheel works natively inside attached sessions — the monitor sets pe
 
 Several MCP tools are available to any agent running under the wrapper. They default to your own workspace, but `list_agents`, `ask_agent`, and `message_agent` all accept a `working_directory` argument to reach agents in other workspaces.
 
-**`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster.
+**`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, retired, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster. A retired agent is permanently stopped after a handoff; failed delivery tells the caller which saved successor to message instead.
 
 **`message_agent(target_name, message, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 
@@ -180,8 +181,9 @@ Several MCP tools are available to any agent running under the wrapper. They def
 | starting | Remains queued; no terminal input is sent while the runtime TUI is still starting. |
 | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
 | compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
+| retired | Rejected without writing to the inbox. The result identifies the successor agent to message instead. |
 
-The states that can't be woken still receive the message through their normal delivery path (Claude hooks, Codex `check_inbox`, or the pi extension). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
+Except for `retired`, states that can't be woken still receive the message through their normal delivery path (Claude hooks, Codex `check_inbox`, or the pi extension). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
 
 **At most one outstanding prompt.** Reading an inbox drains *all* of it, so a second "check your inbox" prompt sent before the agent acted on the first is wasted — it burns a turn to arrive at an empty inbox. A marker under `~/.multiverse/wake_pending/<encoded-cwd>/<name>` records that a prompt was accepted by the target's composer and not yet acted on; while it's set, further messages are queued without typing anything (route `skipped_wake_outstanding`).
 
@@ -200,6 +202,7 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 - Target's main session is NOT involved (no notification, no entry in their conversation history)
 - Blocking — returns the answer inline, or `'<agent>' did not respond within Ns` on timeout
 - Works regardless of target state (idle, working, dormant) — uses the target runtime's native fork mechanism without disturbing its main process
+- Retired agents remain askable from their frozen native context even though they cannot receive durable messages or prompts
 
 **`check_inbox()`** — read your pending inbox messages on demand, mid-turn, without waiting for a hook to fire. Returns the queued messages (plain-text tool result) or `"You have no pending inbox messages."`, and **clears the inbox** just like a hook delivery. Use it when you just sent a `message_agent` and suspect a reply landed, or want to drain anything that piled up during a long task.
 
@@ -217,6 +220,8 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 
 **TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
 
+**TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, the ordinary New session widget opens with its usual random name and Claude/Codex/pi selector. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
+
 When to pick which:
 
 | Use case | Tool |
@@ -226,6 +231,7 @@ When to pick which:
 | "Find me which agent owns the auth code" | `list_agents` then `ask_agent` |
 | "Run tests and tell me what failed" (delegate to an existing agent) | `message_agent` |
 | "Investigate the migration failure from scratch" (fresh context, no distractions) | `spawn_agent` |
+| "Transfer everything this dormant agent owns to a fresh agent" | Dashboard `h` |
 | "I sent a message and want to wait for the reply" | `monitor_inbox` then `check_inbox` |
 | "Did a reply land while I was working?" | `check_inbox` |
 
@@ -260,7 +266,7 @@ A `mirror-jsonl.py` hook wired into `UserPromptSubmit` / `Stop` / `SessionEnd` k
    - Loads each turn's tree, allocates the total budget across turns proportionally to each turn's full token count, expands each tree to its slice, and renders the new compacted JSONL via `compact_forest_to_session_jsonl`.
    - Atomically replaces live (`tempfile` + `os.replace`); resets the mirror marker so subsequent appends are mirrored from the new boundary.
    - Releases the lock.
-4. The dashboard refreshes; the row reverts to `ended` / `dormant`. `Enter` resumes from the compacted state seamlessly.
+4. The dashboard refreshes; the row reverts to `ended` / `dormant`, or back to `retired` when re-compacting a handed-off agent. `Enter` resumes ordinary ended/dormant rows from the compacted state; retired rows remain non-interactive.
 
 Surviving thinking blocks are emitted verbatim with their original signatures (which validate server-side via subscription auth, so no `ANTHROPIC_API_KEY` needed). Summary nodes emit as `<compacted-context entries="N">…</compacted-context>` text blocks so the live agent can distinguish summarized regions from native output.
 
@@ -321,9 +327,9 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 ~/.multiverse/
 ├── sessions/<mv-id>/
 │   ├── meta.json       — cwd, created_at, runtime, <runtime>_args, name, host,
-│   │                     optional resumed_from
+│   │                     optional resumed_from, successor (when retired)
 │   ├── status.json     — {"status": "starting"|"idle"|"working"|"waiting"|
-│   │                     "listening"|"ending"|"ended", "ts": …}
+│   │                     "listening"|"ending"|"ended"|"retired", "ts": …}
 │   ├── status.json.lock — flock guard; the status guards are read-then-write,
 │   │                     so the check and the write are held together
 │   ├── ending          — teardown marker; while present, runtime hooks cannot
@@ -516,7 +522,7 @@ Every writer uses tmp+rename (or `O_EXCL`) so readers never see a partial file.
 
 ### What happens during a compaction
 
-1. User selects a session row (must be `idle` / `ended` / `dormant`) and presses `c`
+1. User selects a session row (must be `idle` / `ended` / `retired` / `dormant`) and presses `c`
 2. `CompactScreen` opens and runs `total_token_count` + `total_turn_count` against the full JSONL in a worker thread; stats render once loaded. `compaction.parser.parse_session` is the underlying counter.
 3. User types a token budget and hits Enter
 4. `CompactRunner` (in a worker thread) executes the state machine:
@@ -529,7 +535,7 @@ Every writer uses tmp+rename (or `O_EXCL`) so readers never see a partial file.
    7. Atomically replace live (`tempfile.mkstemp` in the same directory + `os.replace`). Original `custom-title` is preserved so the dashboard row keeps its name.
    8. Reset the mirror marker to the new live's last uuid so subsequent `mirror-jsonl.py` calls pick up only post-compaction additions correctly.
    9. `release_lock` in a `finally`.
-5. Dashboard refresh removes the `compacting` override; the row reverts to `ended` (or `dormant` if no mv wrapper) and is resumable normally. Resuming reads the new compacted JSONL — the live agent sees a mix of native thinking blocks (verbatim with original signatures) and `<compacted-context entries="N">…</compacted-context>` summary text blocks.
+5. Dashboard refresh removes the `compacting` override; an ordinary row reverts to `ended` (or `dormant` if no mv wrapper) and is resumable normally. A retired row reverts to `retired` and remains non-interactive. Its full JSONL is frozen: re-compaction skips full synchronization and only rewrites live JSONL from the immutable full mirror using the newly selected scheduler.
 
 If the user presses Esc during the running phase, the runner sets a cancellation flag and bails at the next checkpoint — but it does **not** kill any in-flight `claude --resume <synthetic>` subprocess that's mid-merge (that would leave a half-built tree). Worst case: one in-flight build finishes, then the runner exits.
 
@@ -552,6 +558,8 @@ If the user presses Esc during the running phase, the runner sets a cancellation
    - **Deletes** the consumed files (so subsequent hook fires don't re-inject)
 5. A Codex recipient calls `check_inbox`, which atomically claims the same files and returns their contents as the tool result. Push and resume prompts cause that call; without a push, the agent or user can request it explicitly.
 6. The recipient may use tools to act on the message and reply via `message_agent` back at the sender.
+
+Retired recipients are the exception: `message_agent` refuses before creating an inbox file and points the caller to the successor saved in the retired wrapper's metadata. `ask_agent` remains available because its ephemeral fork cannot mutate the retired main session.
 
 **Wakeup on resume.** SessionStart's `additionalContext` is buffered in claude's REPL but doesn't autonomously trigger an API call — without intervention the model wouldn't engage with the message until a human attached and typed something. To bridge that gap, `bin/multiverse-session` checks the inbox at the top of every loop iteration and, if non-empty, appends a positional-arg prompt (`"You have N pending inbox messages…"`) to the interactive `claude` launch. claude auto-submits a positional arg as its first user message, so the model engages with the just-delivered inbox `additionalContext` immediately, inside the interactive session — permission prompts surface normally and an attaching user can grant them. (This replaced an earlier print-mode prime call, `claude -p … --resume`: print mode is headless, so a model that tried to call a tool while processing the inbox would block on a permission prompt with no way to answer it, hanging the whole wrapper.) Applies uniformly across every resume path: user-initiated Enter on a dormant row and `message_agent` auto-resume.
 
