@@ -239,14 +239,20 @@ class SpawnGroupingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class MonitorSideFilingTests(unittest.TestCase):
-    """The monitor files the pair too, when it approves the request.
+    """The monitor files the pair too — once the child actually exists.
 
     The MCP server that calls ``auto_group_spawn`` is the plugin build the
     *agent* started with, so an agent that has been running since before
     folders existed would never file its children. The monitor is the
     process the user actually restarts, and it is the authoritative
-    resolver, so it does the same filing — and the two agree, because by
-    the time the agent's own call runs the spawner is already in a folder.
+    resolver, so it does the same filing — and the two agree, because
+    whichever runs first puts the spawner in a folder and the other joins
+    it.
+
+    Approving is not creating, though: the agent still has to run
+    ``create_session``, which can fail or never run at all. So the monitor
+    remembers the approved pair and files it on the refresh that first
+    sees the new agent's row.
     """
 
     def setUp(self) -> None:
@@ -273,6 +279,11 @@ class MonitorSideFilingTests(unittest.TestCase):
             os.environ["MULTIVERSE_ROOT"] = self._prev
         self._tmp.cleanup()
 
+    def _arrive(self, *names: str) -> None:
+        """The refresh that first sees the spawned agent's row."""
+        self.app.entries = [_row(n) for n in names]
+        self.app._file_arrived_spawns()
+
     def _decide(self, decision, *, won: bool = True):
         with (
             patch.object(monitor, "write_resolution", return_value=won),
@@ -284,7 +295,7 @@ class MonitorSideFilingTests(unittest.TestCase):
             on_close = push.call_args.args[1]
             on_close(decision)
 
-    def test_approving_a_spawn_files_the_pair(self) -> None:
+    def test_the_pair_is_filed_once_the_child_exists(self) -> None:
         self._decide(
             monitor.SpawnDecision(
                 accepted=True,
@@ -292,6 +303,11 @@ class MonitorSideFilingTests(unittest.TestCase):
                 runtime=sessions.RUNTIME_CLAUDE,
             )
         )
+
+        # Approval alone files nothing: create_session has not run yet.
+        self.assertEqual(groups.load(CWD).groups, {})
+
+        self._arrive("swift-otter", "brave-mole")
 
         state = groups.load(CWD)
         folder = state.group_of("swift-otter")
@@ -307,6 +323,7 @@ class MonitorSideFilingTests(unittest.TestCase):
                 runtime=sessions.RUNTIME_CLAUDE,
             )
         )
+        self._arrive("swift-otter", "renamed-child")
         state = groups.load(CWD)
         self.assertEqual(
             state.group_of("renamed-child"), state.group_of("swift-otter")
@@ -345,12 +362,12 @@ class MonitorSideFilingTests(unittest.TestCase):
                     runtime=sessions.RUNTIME_CLAUDE,
                 )
             )
+            self._arrive("swift-otter", "brave-mole")
         self.assertEqual(groups.load(CWD).groups, {})
 
-    def test_the_monitor_and_the_agent_agree_rather_than_duplicating(self) -> None:
-        # Monitor files on approval; the agent's own MCP server then calls
-        # auto_group_spawn for the same pair. The second call must find the
-        # spawner already filed and join, not create a second folder.
+    def test_a_spawn_that_never_starts_files_nothing(self) -> None:
+        # create_session failed, or the requesting agent died before it
+        # ever ran: the child never appears, so neither does a folder.
         self._decide(
             monitor.SpawnDecision(
                 accepted=True,
@@ -358,6 +375,24 @@ class MonitorSideFilingTests(unittest.TestCase):
                 runtime=sessions.RUNTIME_CLAUDE,
             )
         )
+        self._arrive("swift-otter")
+
+        self.assertEqual(groups.load(CWD).groups, {})
+        self.assertEqual(groups.load(CWD).members, {})
+
+    def test_the_monitor_and_the_agent_agree_rather_than_duplicating(self) -> None:
+        # The monitor files the pair when the child turns up; the agent's
+        # own MCP server then calls auto_group_spawn for the same pair. The
+        # second call must find the spawner already filed and join it, not
+        # create a second folder.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._arrive("swift-otter", "brave-mole")
         before = groups.load(CWD)
         groups.auto_group_spawn(CWD, "swift-otter", "brave-mole")
         after = groups.load(CWD)

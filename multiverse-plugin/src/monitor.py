@@ -28,6 +28,7 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+from rich.markup import escape
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -787,8 +788,6 @@ class InboxViewerScreen(ModalScreen[None]):
         self.messages = messages
 
     def compose(self) -> ComposeResult:
-        from rich.markup import escape
-
         n = len(self.messages)
         plural = "s" if n != 1 else ""
         blocks: list[Static] = [
@@ -3044,7 +3043,7 @@ class ConfirmGroupDeleteScreen(ModalScreen[bool]):
                 + ("s" if self.subgroup_count != 1 else "")
             )
         where = (
-            f"into '{self.parent_name}'"
+            f"into '{escape(self.parent_name)}'"
             if self.parent_name
             else "back to the top level"
         )
@@ -3055,7 +3054,7 @@ class ConfirmGroupDeleteScreen(ModalScreen[bool]):
         )
         yield Vertical(
             Static(
-                f"Remove folder [bold]'{self.group_name}'[/]?",
+                f"Remove folder [bold]'{escape(self.group_name)}'[/]?",
                 id="confirm-group-header",
             ),
             Static(
@@ -3477,6 +3476,13 @@ class MonitorApp(App):
         # reattach once the queue fully drains (set by ``_attach_to``;
         # consumed by ``_tick_spawn_requests``).
         self._pending_reattach: Optional[str] = None
+        # Cleared and refilled by each _redraw_table pass.
+        self._inbox_cache: dict[tuple[str, str], int] = {}
+        self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
+        # chosen name → spawner name, for spawns approved but not yet
+        # created. Deliberately in memory only: a spawn that never happens
+        # should leave nothing behind, here or on disk.
+        self._pending_group_spawns: dict[str, str] = {}
         self._handoff_in_progress = False
 
     def compose(self) -> ComposeResult:
@@ -3529,10 +3535,46 @@ class MonitorApp(App):
             cwd=self.monitor_cwd,
             hide_uuids=hide,
         )
+        self._file_arrived_spawns()
         self.group_state = groups.load(self.monitor_cwd)
         self._redraw_table()
         self._tick_spawn_requests()
         self._update_web_indicator()
+
+    def _reload_groups_and_redraw(self) -> None:
+        """Redraw for a change that is only about the tree.
+
+        Folding, renaming, moving and deleting a folder touch the group
+        store and nothing else. Going through ``refresh_sessions`` for
+        those re-scans every transcript in the workspace — and re-runs the
+        spawn tick and the web-share probe — from inside a keypress
+        handler, which is both slow and capable of pushing a modal at the
+        user because they folded a folder.
+        """
+        self.group_state = groups.load(self.monitor_cwd)
+        self._redraw_table()
+
+    def _file_arrived_spawns(self) -> None:
+        """File approved spawns once the agent they named actually exists.
+
+        Filing at approval time would leave a folder — and a membership
+        row for a name with no session — behind whenever create_session
+        fails or the requesting agent dies before running it.
+        """
+        if not self._pending_group_spawns:
+            return
+        live = {groups.member_key(e.name) for e in self.entries}
+        arrived = [
+            name
+            for name in self._pending_group_spawns
+            if groups.member_key(name) in live
+        ]
+        for name in arrived:
+            spawner = self._pending_group_spawns.pop(name)
+            try:
+                groups.auto_group_spawn(self.monitor_cwd, spawner, name)
+            except (OSError, ValueError):
+                pass  # the spawn happened; filing it is a nicety
 
     def _update_web_indicator(self) -> None:
         """Reflect web-share state in the header subtitle. ``status`` also
@@ -3551,6 +3593,31 @@ class MonitorApp(App):
         that isn't another window."""
         banner = self._move_banner() or self._draft_banner()
         self.sub_title = banner or f"cwd: {self.monitor_cwd}{self._web_tag}"
+
+    def _in_place_edit_active(self) -> bool:
+        """True while a row in the table is being edited in place.
+
+        The folder keys are App-level bindings, so they still fire in the
+        moments the table itself does not have focus. Every in-place mode
+        has to be listed here or those keys mutate the tree under a live
+        draft, rename or move.
+        """
+        return (
+            self._inline is not None
+            or self._move is not None
+            or self._draft is not None
+        )
+
+    def _user_is_busy(self) -> bool:
+        """True while the user is mid-something the tick must not interrupt.
+
+        A modal is the obvious case, but the draft row, the inline rename
+        and the move mode are edits in the table itself rather than
+        screens — pushing a spawn modal (or worse, the tmux reattach)
+        under one of those steals the keystrokes mid-word and leaves the
+        half-finished edit live behind it.
+        """
+        return self._in_place_edit_active() or isinstance(self.screen, ModalScreen)
 
     def _tick_spawn_requests(self) -> None:
         """One pass of the spawn-request watcher. Called every 1s.
@@ -3587,9 +3654,9 @@ class MonitorApp(App):
                         pass
 
         if self._active_spawn_id is None and self._spawn_queue:
-            # Don't stomp on a modal the user opened explicitly (New,
-            # Resume, Ask, etc). Wait for the next tick.
-            if isinstance(self.screen, ModalScreen):
+            # Don't stomp on something the user opened explicitly (New,
+            # Resume, Ask, a rename, a move). Wait for the next tick.
+            if self._user_is_busy():
                 return
             while self._spawn_queue:
                 req = self._spawn_queue.pop(0)
@@ -3615,7 +3682,7 @@ class MonitorApp(App):
             self._pending_reattach
             and self._active_spawn_id is None
             and not self._spawn_queue
-            and not isinstance(self.screen, ModalScreen)
+            and not self._user_is_busy()
         ):
             target = self._pending_reattach
             self._pending_reattach = None
@@ -3669,20 +3736,20 @@ class MonitorApp(App):
                 # with, so a long-running agent from an older build would
                 # never file its children. The monitor is the process the
                 # user just upgraded, and it is the authoritative resolver
-                # (we won the O_EXCL race), so doing it here makes the
-                # folder appear the moment the spawn is approved regardless
-                # of what the agent is running. The two calls agree: by the
-                # time the agent's own call runs, the spawner is already in
-                # a folder, so the child simply joins the same one.
-                try:
-                    groups.auto_group_spawn(
-                        self.monitor_cwd, req.get("from", ""), chosen_name
-                    )
-                except (OSError, ValueError):
-                    pass  # the spawn is approved; filing it is a nicety
+                # (we won the O_EXCL race), so doing it here covers the
+                # child regardless of what the agent is running. The two
+                # calls agree: whichever runs first puts the spawner in a
+                # folder, and the other simply joins the same one.
+                #
+                # Approval is not creation, though: the agent still has to
+                # run create_session, and that can fail or never happen.
+                # Remember the pair and file it when the child actually
+                # turns up, so a failed spawn leaves no folder behind.
+                self._pending_group_spawns[chosen_name] = req.get("from", "")
                 self.notify(
                     f"Approved spawn from '{req.get('from', '?')}' "
-                    f"as '{chosen_name}' ({chosen_runtime})"
+                    f"as '{chosen_name}' ({chosen_runtime})",
+                    markup=False,
                 )
             else:
                 # Another monitor beat us to the resolution. Show what
@@ -3700,6 +3767,20 @@ class MonitorApp(App):
         modal = SpawnRequestScreen(self.monitor_cwd, req)
         self._active_spawn_modal = modal
         self.push_screen(modal, on_close)
+
+    def _pending_inbox(self, e: DashboardRow) -> int:
+        """``pending_inbox_count`` for one agent, once per redraw."""
+        key = (e.cwd, e.name)
+        if key not in self._inbox_cache:
+            self._inbox_cache[key] = pending_inbox_count(e.cwd, e.name)
+        return self._inbox_cache[key]
+
+    def _tokens_of(self, e: DashboardRow) -> Optional[int]:
+        """``_agent_tokens`` for one agent, once per redraw."""
+        key = (e.cwd, e.name)
+        if key not in self._tokens_cache:
+            self._tokens_cache[key] = self._agent_tokens(e)
+        return self._tokens_cache[key]
 
     def _agent_tokens(self, e: DashboardRow) -> Optional[int]:
         """Token total shown for one agent, or ``None`` when unmeasurable.
@@ -3737,7 +3818,7 @@ class MonitorApp(App):
         else:
             session_id = e.session_id or ""
             id_cell = f"[dim]{session_id[:8]}[/]"
-        pending = pending_inbox_count(e.cwd, e.name)
+        pending = self._pending_inbox(e)
         inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
         if e.runtime != RUNTIME_CLAUDE:
             build_cell = "[dim]-[/]"
@@ -3745,7 +3826,7 @@ class MonitorApp(App):
             build_cell = "[bold green]on[/]"
         else:
             build_cell = "[dim]off[/]"
-        tokens = self._agent_tokens(e)
+        tokens = self._tokens_of(e)
         tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
         preview = e.preview or "[dim](empty)[/]"
         if len(preview) > 60:
@@ -3775,12 +3856,13 @@ class MonitorApp(App):
             name_cell = self._inline_name_cell(row)
         else:
             label = self._decorate(
-                row, f"[bold]{chevron} {group.name}[/][dim] ({count})[/]"
+                row,
+                f"[bold]{chevron} {escape(group.name)}[/][dim] ({count})[/]",
             )
             name_cell = f"[dim]{row.prefix}[/]{label}"
 
         agents = row.agents
-        pending = sum(pending_inbox_count(a.cwd, a.name) for a in agents)
+        pending = sum(self._pending_inbox(a) for a in agents)
         inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
 
         if agents:
@@ -3797,7 +3879,7 @@ class MonitorApp(App):
             status_cell = "[dim]empty[/]"
 
         token_total = sum(
-            t for t in (self._agent_tokens(a) for a in agents) if t is not None
+            t for t in (self._tokens_of(a) for a in agents) if t is not None
         )
         tokens_cell = f"[dim]{token_total:,}[/]" if token_total else "[dim]-[/]"
 
@@ -3812,7 +3894,7 @@ class MonitorApp(App):
             preview = ", ".join(shown) + (f", +{rest}" if rest > 0 else "")
             if len(preview) > 60:
                 preview = preview[:59] + "…"
-            preview_cell = f"[dim]{preview}[/]"
+            preview_cell = f"[dim]{escape(preview)}[/]"
         else:
             preview_cell = ""
 
@@ -3827,6 +3909,12 @@ class MonitorApp(App):
         prev_cursor = table.cursor_row
         table.clear()
         now = time.time()
+        # One pass, one answer per agent: a folder header rolls up every
+        # agent beneath it at any depth, so without this an agent nested
+        # d deep is globbed and token-counted d+1 times per redraw — and
+        # typing a folder name redraws on every keystroke.
+        self._inbox_cache.clear()
+        self._tokens_cache.clear()
         self.display_rows = groups.build_display_rows(
             self.entries,
             self.group_state,
@@ -4042,7 +4130,7 @@ class MonitorApp(App):
 
     def _extend_selection(self, delta: int) -> None:
         """shift+↑/↓ — grow (or shrink) a contiguous range from an anchor."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         if not self.display_rows:
             return
@@ -4123,9 +4211,9 @@ class MonitorApp(App):
             groups.undo_wrap(self.monitor_cwd, edit.undo)
         except OSError as exc:
             self.notify(f"Could not undo: {exc}", severity="error")
-            self.refresh_sessions()
+            self._reload_groups_and_redraw()
             return
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         # Put the user back where they were, selection included.
         self._selection = [
             k for k in edit.prev_selection
@@ -4146,7 +4234,7 @@ class MonitorApp(App):
         group = self.group_state.get(edit.group_id)
         if group is None:
             self._inline = None
-            self.refresh_sessions()
+            self._reload_groups_and_redraw()
             return
         if not name or name == group.name:
             self._inline = None
@@ -4156,10 +4244,10 @@ class MonitorApp(App):
             groups.rename_group(self.monitor_cwd, edit.group_id, name)
         except (ValueError, OSError) as exc:
             # Stay in the field so the name can be fixed without retyping.
-            self.notify(str(exc), severity="error")
+            self.notify(str(exc), severity="error", markup=False)
             return
         self._inline = None
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         self._move_cursor_to_key(groups.group_row_key(edit.group_id))
 
     def _edit_text(self, edit: Any, event: events.Key) -> bool:
@@ -4194,7 +4282,17 @@ class MonitorApp(App):
             edit.select_all = False
             self._redraw_table()
             return True
-        if key in ("delete", "ctrl+u"):
+        if key == "delete":
+            if edit.select_all:
+                edit.buffer, edit.cursor = "", 0
+            else:
+                edit.buffer = (
+                    edit.buffer[: edit.cursor] + edit.buffer[edit.cursor + 1 :]
+                )
+            edit.select_all = False
+            self._redraw_table()
+            return True
+        if key == "ctrl+u":
             edit.buffer, edit.cursor, edit.select_all = "", 0, False
             self._redraw_table()
             return True
@@ -4212,12 +4310,17 @@ class MonitorApp(App):
         return False
 
     def _field_cell(self, edit: Any) -> str:
-        """A text field rendered into a table cell, cursor and all."""
+        """A text field rendered into a table cell, cursor and all.
+
+        The buffer is whatever the user has typed, so it is escaped before
+        it goes anywhere near markup — a lone ``[/]`` mid-rename would
+        otherwise raise out of the table's render and take the app down.
+        """
         if edit.select_all:
-            return f"[reverse]{edit.buffer or ' '}[/]"
-        before = edit.buffer[: edit.cursor]
-        at = edit.buffer[edit.cursor : edit.cursor + 1] or " "
-        after = edit.buffer[edit.cursor + 1 :]
+            return f"[reverse]{escape(edit.buffer) or ' '}[/]"
+        before = escape(edit.buffer[: edit.cursor])
+        at = escape(edit.buffer[edit.cursor : edit.cursor + 1]) or " "
+        after = escape(edit.buffer[edit.cursor + 1 :])
         return f"{before}[reverse]{at}[/]{after}"
 
     def _inline_key(self, event: events.Key) -> bool:
@@ -4368,15 +4471,15 @@ class MonitorApp(App):
             )
         except (ValueError, OSError) as exc:
             self.notify(str(exc), severity="error")
-            self.refresh_sessions()
+            self._reload_groups_and_redraw()
             return
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         dest = self.group_state.get(move.dest)
         where = f"into '{dest.name}'" if dest is not None else "to the top level"
         if moved:
-            self.notify(f"Moved {move.label} {where}")
+            self.notify(f"Moved {move.label} {where}", markup=False)
         else:
-            self.notify(f"{move.label} — already {where}")
+            self.notify(f"{move.label} — already {where}", markup=False)
         focus = move.group_ids[0] if move.group_ids else None
         if focus:
             self._move_cursor_to_key(groups.group_row_key(focus))
@@ -4397,7 +4500,7 @@ class MonitorApp(App):
     def action_indent(self) -> None:
         """``→`` — on a folder, open it; on anything else, wrap it in a new
         folder and start naming that folder in place."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         row = self._current_display()
         if row is None:
@@ -4406,7 +4509,7 @@ class MonitorApp(App):
             group = row.group
             if group.collapsed:
                 groups.set_collapsed(self.monitor_cwd, group.id, False)
-                self.refresh_sessions()
+                self._reload_groups_and_redraw()
                 self._move_cursor_to_key(row.key)
             else:
                 idx = self._row_index(row.key)
@@ -4430,7 +4533,7 @@ class MonitorApp(App):
             self.notify(str(exc), severity="error")
             return
         self._clear_selection()
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         self._begin_inline_edit(
             "create",
             wrap.group,
@@ -4442,7 +4545,7 @@ class MonitorApp(App):
     def action_outdent(self) -> None:
         """``←`` — on an open folder, close it; otherwise lift the row (or
         the selection) one level out of its folder."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         row = self._current_display()
         if row is None:
@@ -4451,12 +4554,13 @@ class MonitorApp(App):
             group = row.group
             if not group.collapsed:
                 groups.set_collapsed(self.monitor_cwd, group.id, True)
-                self.refresh_sessions()
+                self._reload_groups_and_redraw()
                 self._move_cursor_to_key(row.key)
             elif group.parent:
                 self._move_cursor_to_key(groups.group_row_key(group.parent))
-            else:
-                self._lift([group.id], [])
+            # A collapsed folder already at the top level has nowhere left
+            # to go: ← stops there rather than warning about it. Lifting a
+            # nested folder out is ``u``'s job, not this key's.
             return
         group_ids, agent_names, _ = self._targets()
         self._lift(group_ids, agent_names)
@@ -4481,17 +4585,46 @@ class MonitorApp(App):
             self.notify("Already at the top level", severity="warning")
             return
         self._clear_selection()
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         if focus_key:
             self._move_cursor_to_key(focus_key)
 
     def action_new_group(self) -> None:
-        """``g`` — same as ``→``, for anyone who'd rather press a letter."""
-        self.action_indent()
+        """``g`` — a new folder, always.
+
+        With a selection, or on an agent row, that is ``→``'s wrap. On a
+        folder header ``→`` means "open this", so there it makes an empty
+        subfolder inside the folder the cursor is in — otherwise the key
+        the footer calls "New folder" is the one key that cannot make one.
+        """
+        if self._in_place_edit_active():
+            return
+        row = self._current_display()
+        if self._selection or (row is not None and not row.is_group):
+            self.action_indent()
+            return
+        parent_id = self._cursor_folder_id()
+        parent = self.group_state.get(parent_id)
+        # A new row inside a folded folder would be invisible, and the
+        # name field with it.
+        if parent is not None and parent.collapsed:
+            groups.set_collapsed(self.monitor_cwd, parent.id, False)
+        try:
+            wrap = groups.wrap_in_new_folder(self.monitor_cwd, parent=parent_id)
+        except (ValueError, OSError) as exc:
+            self.notify(str(exc), severity="error", markup=False)
+            return
+        self._reload_groups_and_redraw()
+        self._begin_inline_edit(
+            "create",
+            wrap.group,
+            undo=wrap,
+            prev_cursor_key=row.key if row is not None else None,
+        )
 
     def action_rename_group(self) -> None:
         """``e`` — edit the folder's name where it sits."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         group = self.group_state.get(self._cursor_folder_id())
         if group is None:
@@ -4504,21 +4637,21 @@ class MonitorApp(App):
 
     def action_ungroup(self) -> None:
         """``u`` — lift out one level, without ``←``'s fold-first behaviour."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         group_ids, agent_names, _ = self._targets()
         self._lift(group_ids, agent_names)
 
     def action_toggle_collapse(self) -> None:
         """``space`` — fold or unfold a folder."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         row = self._current_display()
         if row is None:
             return
         if row.is_group and row.group is not None:
             groups.toggle_collapsed(self.monitor_cwd, row.group.id)
-            self.refresh_sessions()
+            self._reload_groups_and_redraw()
             self._move_cursor_to_key(row.key)
             return
         # On an agent, fold the folder it lives in — and ride the cursor up
@@ -4532,12 +4665,12 @@ class MonitorApp(App):
             self.notify("Not in a folder — nothing to fold", severity="warning")
             return
         groups.set_collapsed(self.monitor_cwd, gid, True)
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         self._move_cursor_to_key(groups.group_row_key(gid))
 
     def action_toggle_collapse_all(self) -> None:
         """``z`` — fold everything, or unfold everything if already folded."""
-        if self._inline is not None or self._move is not None:
+        if self._in_place_edit_active():
             return
         if not self.group_state.groups:
             self.notify("No folders yet — press → to make one", severity="warning")
@@ -4546,7 +4679,7 @@ class MonitorApp(App):
             not g.collapsed for g in self.group_state.groups.values()
         )
         groups.set_all_collapsed(self.monitor_cwd, collapse)
-        self.refresh_sessions()
+        self._reload_groups_and_redraw()
         self.notify("Folded every folder" if collapse else "Unfolded every folder")
 
     def _delete_group_flow(self, group: groups.Group) -> None:
@@ -4558,7 +4691,12 @@ class MonitorApp(App):
         back out.
         """
         state = self.group_state
-        agent_count = len(state.members_of(group.id, recursive=True))
+        # Count agents the dashboard can actually show. Membership is kept
+        # by name and nothing prunes it when a transcript is deleted, so
+        # the raw member list can name agents that no longer exist — and
+        # then the prompt promises to move rows the user cannot see.
+        live = {groups.member_key(e.name) for e in self.entries}
+        agent_count = len(state.members_of(group.id, recursive=True) & live)
         subgroup_count = len(state.descendants_of(group.id))
 
         def remove() -> None:
@@ -4567,8 +4705,8 @@ class MonitorApp(App):
             except OSError as exc:
                 self.notify(f"Failed to remove folder: {exc}", severity="error")
                 return
-            self.refresh_sessions()
-            self.notify(f"Removed folder '{group.name}'")
+            self._reload_groups_and_redraw()
+            self.notify(f"Removed folder '{group.name}'", markup=False)
 
         if not agent_count and not subgroup_count:
             remove()
@@ -4687,7 +4825,9 @@ class MonitorApp(App):
             return
         if name in all_session_names_in_cwd(self.monitor_cwd):
             self.notify(
-                f"'{name}' is already used in this workspace", severity="error"
+                f"'{name}' is already used in this workspace",
+                severity="error",
+                markup=False,
             )
             return
         runtime = draft.runtime
@@ -4711,7 +4851,7 @@ class MonitorApp(App):
                 return
             self._draft = None
             where = f" in '{folder.name}'" if folder is not None else ""
-            self.notify(f"Spawned {name} with {runtime}{where}")
+            self.notify(f"Spawned {name} with {runtime}{where}", markup=False)
         if session is None:
             self.refresh_sessions()
             return
@@ -4777,7 +4917,7 @@ class MonitorApp(App):
             return
 
         self._handoff_in_progress = True
-        self.notify(f"Generating handoff context from '{target.name}'…")
+        self.notify(f"Generating handoff context from '{target.name}'…", markup=False)
         self._handoff_context_worker(target, native_id)
 
     @work(thread=True, exclusive=True, group="handoff")
@@ -5001,7 +5141,7 @@ class MonitorApp(App):
         row = self._current_display()
         if row is not None and row.is_group and row.group is not None:
             groups.toggle_collapsed(self.monitor_cwd, row.group.id)
-            self.refresh_sessions()
+            self._reload_groups_and_redraw()
             self._move_cursor_to_key(row.key)
             return
         e = self._current_entry()
@@ -5265,7 +5405,19 @@ class MonitorApp(App):
                 except (OSError, RuntimeError, ValueError) as exc:
                     self.notify(f"Failed to delete: {exc}", severity="error")
                     return
-                self.notify(f"Deleted dormant session '{display_name}'")
+                # The name goes back into the pool the moment the
+                # transcript is gone, so drop its folder membership too —
+                # otherwise the next agent to draw this name is filed
+                # into a folder it was never put in.
+                try:
+                    groups.assign_agent(cwd, display_name, None)
+                except OSError:
+                    # The transcript is already gone; a stale membership
+                    # row is not worth failing the delete over.
+                    pass
+                self.notify(
+                    f"Deleted dormant session '{display_name}'", markup=False
+                )
                 self.refresh_sessions()
 
             self.push_screen(

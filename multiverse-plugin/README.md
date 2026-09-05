@@ -125,11 +125,11 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder, keeping the agents (an empty folder goes without a prompt). Refused while the row is `compacting` |
 | `→` | On an agent: wrap it in a new folder, with the name live for editing in the row (`esc` aborts and puts everything back). On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
-| `←` | On an open folder: close it. On a closed one: jump to its parent. On an agent (or a selection): lift it one level out of its folder |
+| `←` | On an open folder: close it. On a closed one: jump to its parent (a closed top-level folder has nowhere to go, so nothing happens). On an agent (or a selection): lift it one level out of its folder |
 | `shift`+`↑`/`↓` | Extend a selection. The folder keys then act on the whole range; any plain cursor move ends it |
 | `m` | Move the highlighted row (or the selection). Walk the folder tree in place — `↑↓` pick, `→` step in, `←` step out, `⏎` drop, `esc` cancel — with the header line showing what's moving and where |
 | `e` | Rename the folder under the cursor, in the row itself (works from a member row too) |
-| `g` | New folder — the same thing `→` does, for anyone who'd rather press a letter |
+| `g` | New folder, always: on an agent (or a selection) it's `→`'s wrap; on a folder header — where `→` means "open this" — it makes an empty subfolder inside it, named in the row like any other |
 | `u` | Lift one level out, without `←`'s close-the-folder-first behaviour |
 | `space` | Fold/unfold. On a member row it folds the folder around it and rides the cursor up to the header |
 | `z` | Fold every folder — or unfold them all if they're already folded |
@@ -172,6 +172,9 @@ in the list itself, with the arrow keys:
   `→` steps into the highlighted folder, `←` steps back out, `⏎` drops.
   The rows being moved stay visible and marked the whole time, and the
   header line reads `⇢ moving 'swift-otter' → backend/auth-work`.
+* `g` is the one that makes a folder out of nothing — an empty one, or a
+  subfolder inside the folder you are looking at, since `→` on a folder
+  header means "open this" instead.
 
 `n` works the same way — it makes an agent where you are, the way you'd
 make a file in the folder you have open:
@@ -198,19 +201,23 @@ into. So a delegation lineage becomes a folder the first time it branches,
 without anyone having to anticipate it.
 
 The filing happens in two places on purpose. The spawning agent's MCP server
-does it, and so does the monitor at the moment it approves the request. The
-server is whatever plugin build that *agent* started with, so an agent that has
-been running since before folders existed would never file its children; the
-monitor is the process you actually restart. The two agree rather than
-duplicating — by the time the agent's own call runs, the spawner is already in
-a folder, so the child just joins it. Everything it does is undoable by hand
+does it, and so does the monitor — on the refresh that first sees the new
+agent's row, not when it approves the request, because approving is not
+creating and a spawn that fails should leave no folder behind. The server is
+whatever plugin build that *agent* started with, so an agent that has been
+running since before folders existed would never file its children; the monitor
+is the process you actually restart. The two agree rather than duplicating —
+whichever gets there first puts the spawner in a folder, and the other joins
+it. Everything it does is undoable by hand
 (`e` rename, `m` move, `u` lift out, `k` remove the folder), and removing a
 folder never touches a session — it only undoes the grouping.
 
 Membership is keyed by agent *name*, which is the identifier that survives a
 resume, a compaction, and a context fold — so agents stay in their folder
 across all three, and a `(folded …)` ghost row files itself next to the live
-agent it came from. State lives in `~/.multiverse/groups/<encoded-cwd>.json`,
+agent it came from. Deleting a dormant session's transcript (`k`) drops its
+membership with it, because the name goes straight back into the pool and the
+next agent to draw it is a different agent. State lives in `~/.multiverse/groups/<encoded-cwd>.json`,
 per workspace, written under a lock so two monitors on one workspace don't
 clobber each other. `list_agents` shows each agent's folder in brackets, so
 agents can see who they're teamed with.

@@ -40,10 +40,10 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Iterable, Optional
 
 from .atomic_files import atomic_write_json, exclusive_file_lock
-from .paths import multiverse_dir
+from .paths import encode_cwd as _encode_cwd, multiverse_dir
 
 
 STATE_VERSION = 1
@@ -56,10 +56,6 @@ _BG_FORK_SUFFIX = " (bg fork)"
 # Guards against a pathological (or hand-edited) file turning tree walks
 # into an infinite loop. Deeper than anyone will nest on purpose.
 _MAX_DEPTH = 64
-
-
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def groups_dir() -> Path:
@@ -85,10 +81,14 @@ def member_key(display_name: Optional[str]) -> str:
     if not display_name:
         return ""
     name = display_name
-    while name.endswith(_BG_FORK_SUFFIX):
-        name = name[: -len(_BG_FORK_SUFFIX)]
+    # The suffixes nest in either order — build_dashboard_rows wraps a
+    # background fork's title in the fold suffix, so a folded fork reads
+    # "name (bg fork) (folded 02:33)". Strip until nothing changes rather
+    # than assuming one layering.
     while True:
         stripped = _FOLD_SUFFIX_RE.sub("", name)
+        if stripped.endswith(_BG_FORK_SUFFIX):
+            stripped = stripped[: -len(_BG_FORK_SUFFIX)]
         if stripped == name:
             break
         name = stripped
@@ -415,24 +415,6 @@ def delete_group(cwd: str, group_id: str) -> None:
                 state.members[name] = group.parent
 
 
-def move_group(cwd: str, group_id: str, new_parent: Optional[str]) -> None:
-    """Reparent a group. Refuses to move a group into its own subtree."""
-    with mutate(cwd) as state:
-        group = state.groups.get(group_id)
-        if group is None:
-            raise ValueError("That group no longer exists.")
-        if new_parent is not None and new_parent not in state.groups:
-            raise ValueError("That destination group no longer exists.")
-        if _would_cycle(state, group_id, new_parent):
-            raise ValueError("A group can't be moved inside itself.")
-        if group.parent == new_parent:
-            return
-        siblings = _sibling_names(state, new_parent)
-        if group.name.casefold() in siblings:
-            group.name = unique_sibling_name(state, new_parent, group.name)
-        group.parent = new_parent
-
-
 def assign_agent(cwd: str, agent_name: str, group_id: Optional[str]) -> None:
     """Put an agent in a group, or take it out (``group_id=None``)."""
     key = member_key(agent_name)
@@ -489,11 +471,19 @@ def _prune_contained(
     screen. Anything with a selected ancestor comes along with that
     ancestor, so it is removed from the operation.
     """
-    selected = {gid for gid in group_ids if gid in state.groups}
-    keep_groups = [
-        gid for gid in selected
-        if not (selected & set(state.ancestors_of(gid)))
-    ]
+    ordered = list(group_ids)
+    selected = {gid for gid in ordered if gid in state.groups}
+    # Keep the caller's order rather than the set's: a batch move renames
+    # whichever of two same-named folders it visits second, and iterating
+    # a set of ids would pick a different loser on every run.
+    seen: set[str] = set()
+    keep_groups = []
+    for gid in ordered:
+        if gid not in selected or gid in seen:
+            continue
+        seen.add(gid)
+        if not (selected & set(state.ancestors_of(gid))):
+            keep_groups.append(gid)
     keep_agents = []
     for name in agent_names:
         gid = state.group_of(name)
@@ -543,6 +533,9 @@ class Wrap:
     group: Group
     previous_group_parents: dict[str, Optional[str]]
     previous_agent_groups: dict[str, Optional[str]]
+    # Only for subfolders the wrap had to rename to keep sibling names
+    # unique; undoing puts the original name back.
+    previous_group_names: dict[str, str] = field(default_factory=dict)
 
 
 def wrap_in_new_folder(
@@ -551,11 +544,20 @@ def wrap_in_new_folder(
     group_ids: Iterable[str] = (),
     agent_names: Iterable[str] = (),
     name: Optional[str] = None,
+    parent: Optional[str] = None,
 ) -> Wrap:
-    """Create a folder beside the given items and move them all into it."""
+    """Create a folder beside the given items and move them all into it.
+
+    With nothing to wrap this is just "make a folder", and ``parent`` says
+    where — the folder the dashboard's cursor is in. It is ignored when
+    there are items, which land beside themselves instead.
+    """
     with mutate(cwd) as state:
         gids, names = _prune_contained(state, group_ids, agent_names)
-        parent = common_parent(state, gids, names)
+        if gids or names:
+            parent = common_parent(state, gids, names)
+        elif parent is not None and parent not in state.groups:
+            raise ValueError("That folder no longer exists.")
         base = (name or DEFAULT_FOLDER_NAME).strip() or DEFAULT_FOLDER_NAME
         group = Group(
             id=new_group_id(),
@@ -565,19 +567,27 @@ def wrap_in_new_folder(
             created_at=time.time(),
         )
         previous_groups: dict[str, Optional[str]] = {}
+        previous_names: dict[str, str] = {}
         previous_agents: dict[str, Optional[str]] = {}
         state.groups[group.id] = group
         for gid in gids:
             child = state.groups.get(gid)
             if child is not None:
                 previous_groups[gid] = child.parent
+                # Wrapping can pull same-named folders together out of
+                # different parents, so uniquify like every other move.
+                if child.name.casefold() in _sibling_names(state, group.id):
+                    previous_names[gid] = child.name
+                    child.name = unique_sibling_name(
+                        state, group.id, child.name
+                    )
                 child.parent = group.id
         for agent in names:
             key = member_key(agent)
             if key:
                 previous_agents[key] = state.members.get(key)
                 state.members[key] = group.id
-        return Wrap(group, previous_groups, previous_agents)
+        return Wrap(group, previous_groups, previous_agents, previous_names)
 
 
 def undo_wrap(cwd: str, wrap: Wrap) -> None:
@@ -596,6 +606,11 @@ def undo_wrap(cwd: str, wrap: Wrap) -> None:
             if group is None:
                 continue
             group.parent = previous if previous in state.groups else None
+            original = wrap.previous_group_names.get(gid)
+            if original and original.casefold() not in _sibling_names(
+                state, group.parent
+            ):
+                group.name = original
         for name, previous in wrap.previous_agent_groups.items():
             key = member_key(name)
             if not key:
@@ -885,17 +900,3 @@ def build_display_rows(
 
     emit_level(None, "", 0)
     return rows
-
-
-def iter_groups_depth_first(state: GroupState) -> Iterator[tuple[Group, int]]:
-    """Every group with its nesting depth, in display order. Used by the
-    move-into picker so it reads like the dashboard."""
-
-    def walk(parent: Optional[str], depth: int) -> Iterator[tuple[Group, int]]:
-        if depth > _MAX_DEPTH:
-            return
-        for group in state.children_of(parent):
-            yield group, depth
-            yield from walk(group.id, depth + 1)
-
-    yield from walk(None, 0)

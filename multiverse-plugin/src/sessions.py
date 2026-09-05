@@ -37,7 +37,12 @@ from typing import Any, Optional
 from . import forks
 from .atomic_files import atomic_write_json, exclusive_file_lock
 from .compact_state import list_locked
-from .paths import claude_projects_dir, codex_home, multiverse_dir
+from .paths import (
+    claude_projects_dir,
+    codex_home,
+    encode_cwd as _encode_cwd,
+    multiverse_dir,
+)
 from .pi_transcript import list_pi_sessions_in
 
 
@@ -78,10 +83,6 @@ def normalize_runtime(runtime: Optional[str]) -> str:
             f"Unsupported runtime '{runtime}'. Expected one of: {', '.join(RUNTIMES)}"
         )
     return value
-
-
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 # Suffix written by build_dashboard_rows onto ghost row display names,

@@ -28,7 +28,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import re
 import signal
 import shutil
 import subprocess
@@ -41,7 +40,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 
 from . import forks
-from .paths import claude_projects_dir, multiverse_dir
+from .paths import claude_projects_dir, encode_cwd as _encode_cwd, multiverse_dir
 from .pi_transcript import pi_session_path
 
 
@@ -245,10 +244,6 @@ class _JsonLineProcess:
                     stream.close()
                 except OSError:
                     pass
-
-
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def _env_without_session_vars(*, drop_keys: tuple[str, ...] = ()) -> dict[str, str]:

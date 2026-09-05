@@ -139,6 +139,18 @@ class MemberKeyTests(unittest.TestCase):
     def test_a_parenthetical_that_is_not_a_suffix_is_left_alone(self) -> None:
         self.assertEqual(groups.member_key("agent (v2)"), "agent (v2)")
 
+    def test_a_folded_background_fork_strips_both_suffixes(self) -> None:
+        # build_dashboard_rows wraps the fork title in the fold suffix, so
+        # the two land in this order and stripping has to survive it.
+        self.assertEqual(
+            groups.member_key("swift-otter (bg fork) (folded 02:33)"),
+            "swift-otter",
+        )
+        self.assertEqual(
+            groups.member_key("swift-otter (folded 02:33) (bg fork)"),
+            "swift-otter",
+        )
+
 
 class GhostMembershipTests(GroupStoreTestCase):
     def test_a_folded_ghost_row_resolves_to_the_live_agent_folder(self) -> None:
@@ -146,6 +158,65 @@ class GhostMembershipTests(GroupStoreTestCase):
         groups.assign_agent(CWD, "swift-otter", group.id)
         state = groups.load(CWD)
         self.assertEqual(state.group_of("swift-otter (folded 14:03)"), group.id)
+
+
+class WrapTests(GroupStoreTestCase):
+    def test_wrapping_same_named_folders_keeps_their_names_unique(self) -> None:
+        one = groups.create_group(CWD, "frontend-work")
+        two = groups.create_group(CWD, "api-work")
+        a = groups.create_group(CWD, "backend", parent=one.id)
+        b = groups.create_group(CWD, "backend", parent=two.id)
+
+        wrap = groups.wrap_in_new_folder(CWD, group_ids=[a.id, b.id])
+
+        state = groups.load(CWD)
+        names = sorted(g.name for g in state.children_of(wrap.group.id))
+        self.assertEqual(names, ["backend", "backend 2"])
+
+    def test_undoing_a_wrap_restores_a_name_it_had_to_change(self) -> None:
+        one = groups.create_group(CWD, "frontend-work")
+        two = groups.create_group(CWD, "api-work")
+        a = groups.create_group(CWD, "backend", parent=one.id)
+        b = groups.create_group(CWD, "backend", parent=two.id)
+
+        wrap = groups.wrap_in_new_folder(CWD, group_ids=[a.id, b.id])
+        groups.undo_wrap(CWD, wrap)
+
+        state = groups.load(CWD)
+        self.assertEqual(state.groups[a.id].name, "backend")
+        self.assertEqual(state.groups[b.id].name, "backend")
+        self.assertEqual(state.groups[a.id].parent, one.id)
+        self.assertEqual(state.groups[b.id].parent, two.id)
+
+    def test_wrapping_nothing_makes_an_empty_folder_where_asked(self) -> None:
+        backend = groups.create_group(CWD, "backend")
+
+        wrap = groups.wrap_in_new_folder(CWD, parent=backend.id)
+
+        state = groups.load(CWD)
+        self.assertEqual(state.groups[wrap.group.id].parent, backend.id)
+        self.assertEqual(
+            [g.id for g in state.children_of(backend.id)], [wrap.group.id]
+        )
+
+    def test_wrapping_nothing_with_a_dead_parent_is_refused(self) -> None:
+        with self.assertRaises(ValueError):
+            groups.wrap_in_new_folder(CWD, parent="g-gone")
+
+    def test_a_batch_move_renames_the_same_loser_every_run(self) -> None:
+        # _prune_contained used to iterate a set, so which of two identically
+        # named folders got renamed depended on hash randomization.
+        dest = groups.create_group(CWD, "dest")
+        one = groups.create_group(CWD, "frontend-work")
+        two = groups.create_group(CWD, "api-work")
+        first = groups.create_group(CWD, "backend", parent=one.id)
+        second = groups.create_group(CWD, "backend", parent=two.id)
+
+        groups.move_into(CWD, dest.id, group_ids=[first.id, second.id])
+
+        state = groups.load(CWD)
+        self.assertEqual(state.groups[first.id].name, "backend")
+        self.assertEqual(state.groups[second.id].name, "backend 2")
 
 
 class HierarchyTests(GroupStoreTestCase):
@@ -178,17 +249,21 @@ class HierarchyTests(GroupStoreTestCase):
     def test_a_folder_cannot_be_moved_inside_itself_or_a_descendant(self) -> None:
         outer = groups.create_group(CWD, "backend")
         inner = groups.create_group(CWD, "auth", parent=outer.id)
-        with self.assertRaises(ValueError):
-            groups.move_group(CWD, outer.id, outer.id)
-        with self.assertRaises(ValueError):
-            groups.move_group(CWD, outer.id, inner.id)
+
+        # Skipped rather than raised: a batch move the user can see beats
+        # an error they can't act on.
+        self.assertEqual(groups.move_into(CWD, outer.id, group_ids=[outer.id]), 0)
+        self.assertEqual(groups.move_into(CWD, inner.id, group_ids=[outer.id]), 0)
+
         self.assertIsNone(groups.load(CWD).groups[outer.id].parent)
 
     def test_moving_into_a_name_clash_uniquifies_rather_than_failing(self) -> None:
         outer = groups.create_group(CWD, "backend")
         groups.create_group(CWD, "auth", parent=outer.id)
         loose = groups.create_group(CWD, "auth")
-        groups.move_group(CWD, loose.id, outer.id)
+
+        groups.move_into(CWD, outer.id, group_ids=[loose.id])
+
         state = groups.load(CWD)
         self.assertEqual(state.groups[loose.id].parent, outer.id)
         self.assertEqual(state.groups[loose.id].name, "auth 2")
@@ -436,21 +511,6 @@ class DisplayTreeTests(GroupStoreTestCase):
         self.assertEqual(rows[0].key, f"grp:{group.id}")
         self.assertEqual(rows[1].key, rows[1].entry.row_key)
         self.assertNotEqual(rows[0].key, rows[1].key)
-
-
-class PickerListingTests(GroupStoreTestCase):
-    def test_depth_first_listing_matches_the_dashboard_order(self) -> None:
-        backend = groups.create_group(CWD, "backend")
-        groups.create_group(CWD, "auth", parent=backend.id)
-        groups.create_group(CWD, "api", parent=backend.id)
-        groups.create_group(CWD, "frontend")
-        listing = [
-            (g.name, depth)
-            for g, depth in groups.iter_groups_depth_first(groups.load(CWD))
-        ]
-        self.assertEqual(listing, [
-            ("backend", 0), ("api", 1), ("auth", 1), ("frontend", 0),
-        ])
 
 
 if __name__ == "__main__":

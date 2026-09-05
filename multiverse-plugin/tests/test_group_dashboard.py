@@ -8,11 +8,13 @@ and assert on the cells and the calls rather than on pixels.
 from __future__ import annotations
 
 import os
+import pathlib
 import tempfile
 import unittest
 from typing import Optional
 from unittest.mock import MagicMock, patch
 
+from rich.text import Text
 from textual import events
 
 from src import groups
@@ -104,6 +106,10 @@ class DashboardFolderTestCase(unittest.TestCase):
         self.table.cursor_row = start
         for _ in range(times):
             self._act(self.app.action_extend_selection_down)
+
+    def _cursor_on(self, index: int):
+        self.table.cursor_row = index
+        return patch.object(self.app, "query_one", return_value=self.table)
 
     def _draw(self, entries: list[monitor.DashboardRow], pending: int = 0) -> list:
         """Run one redraw and hand back the rendered rows as arg tuples."""
@@ -209,6 +215,67 @@ class FolderRenderingTests(DashboardFolderTestCase):
         self.assertEqual(drawn[0][UPDATED], "-")
 
 
+class MarkupSafetyTests(DashboardFolderTestCase):
+    """Names the user types are data, not markup.
+
+    Every cell goes through Rich's markup parser on its way into the
+    table, and an unbalanced tag there raises out of the render — which in
+    a Textual app means the monitor exits. A folder name lives on disk, so
+    one bad name would take the workspace down on every restart until the
+    JSON was hand-edited.
+    """
+
+    def _assert_renders(self, drawn: list) -> None:
+        for cells in drawn:
+            for cell in cells:
+                if isinstance(cell, str):
+                    Text.from_markup(cell)
+
+    def test_a_folder_named_with_markup_still_renders(self) -> None:
+        group = groups.create_group(CWD, "todo [/] urgent")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+
+        drawn = self._draw([_row("swift-otter")])
+
+        self._assert_renders(drawn)
+        self.assertIn("todo [/] urgent", Text.from_markup(drawn[0][NAME]).plain)
+
+    def test_a_collapsed_folder_preview_of_such_names_still_renders(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter [/]", group.id)
+        groups.set_collapsed(CWD, group.id, True)
+
+        self._assert_renders(self._draw([_row("swift-otter [/]")]))
+
+    def test_typing_markup_into_a_rename_does_not_crash_the_redraw(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+
+        self._type("a[/]b")
+
+        self.assertEqual(self.app._inline.buffer, "a[/]b")
+        self._assert_renders(self._draw([]))
+
+    def test_typing_markup_into_the_draft_row_does_not_crash_the_redraw(self) -> None:
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+
+        self._type("a[/]b")
+
+        self.assertEqual(self.app._draft.buffer, "a[/]b")
+        self._assert_renders(self._draw([]))
+
+    def test_the_delete_prompt_renders_a_folder_named_with_markup(self) -> None:
+        screen = monitor.ConfirmGroupDeleteScreen(
+            "todo [/] urgent", 1, 0, "parent [/] folder"
+        )
+
+        for container in screen.compose():
+            for child in container._pending_children:
+                child.render()  # Static parses markup here
+
+
 class CursorTests(DashboardFolderTestCase):
     def test_a_folder_row_is_not_an_agent_for_session_actions(self) -> None:
         group = groups.create_group(CWD, "backend")
@@ -258,9 +325,48 @@ class CursorTests(DashboardFolderTestCase):
 
 
 class FolderKeyActionTests(DashboardFolderTestCase):
-    def _cursor_on(self, index: int):
-        self.table.cursor_row = index
-        return patch.object(self.app, "query_one", return_value=self.table)
+    def test_g_on_a_folder_header_makes_an_empty_subfolder(self) -> None:
+        # → on a folder means "open it", so g is the only way to make a
+        # folder that holds nothing yet, or one nested inside another.
+        backend = groups.create_group(CWD, "backend")
+        self._draw([])
+
+        self._act(self.app.action_new_group, cursor=0)
+
+        state = groups.load(CWD)
+        children = state.children_of(backend.id)
+        self.assertEqual(len(children), 1)
+        # And it comes up with its name selected, like every other new folder.
+        self.assertIsNotNone(self.app._inline)
+        self.assertEqual(self.app._inline.group_id, children[0].id)
+
+    def test_g_expands_the_folder_it_puts_the_new_one_in(self) -> None:
+        backend = groups.create_group(CWD, "backend")
+        groups.set_collapsed(CWD, backend.id, True)
+        self._draw([])
+
+        self._act(self.app.action_new_group, cursor=0)
+
+        # A row inside a folded folder would be invisible — and so would
+        # the name field the user is now typing into.
+        self.assertFalse(groups.load(CWD).groups[backend.id].collapsed)
+
+    def test_g_on_an_agent_still_wraps_it(self) -> None:
+        self._draw([_row("swift-otter")])
+
+        self._act(self.app.action_new_group, cursor=0)
+
+        state = groups.load(CWD)
+        self.assertIsNotNone(state.group_of("swift-otter"))
+
+    def test_escape_takes_back_an_empty_folder_made_with_g(self) -> None:
+        backend = groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_new_group, cursor=0)
+
+        self._send_key("escape")
+
+        self.assertEqual(list(groups.load(CWD).groups), [backend.id])
 
     def test_enter_on_a_folder_folds_it_instead_of_attaching(self) -> None:
         group = groups.create_group(CWD, "backend")
@@ -269,13 +375,14 @@ class FolderKeyActionTests(DashboardFolderTestCase):
 
         with (
             self._cursor_on(0),
-            patch.object(self.app, "refresh_sessions") as refresh,
+            patch.object(self.app, "_reload_groups_and_redraw") as redraw,
             patch.object(self.app, "_attach_to") as attach,
         ):
             self.app.action_primary()
 
         attach.assert_not_called()
-        refresh.assert_called()
+        # Folding is a tree change, not a session change: no rescan.
+        redraw.assert_called()
         self.assertTrue(groups.load(CWD).groups[group.id].collapsed)
 
     def test_kill_on_a_folder_asks_about_the_folder_not_the_sessions(self) -> None:
@@ -311,7 +418,7 @@ class FolderKeyActionTests(DashboardFolderTestCase):
         confirm = push.call_args.args[1]
 
         with (
-            patch.object(self.app, "refresh_sessions"),
+            patch.object(self.app, "_reload_groups_and_redraw"),
             patch.object(self.app, "notify"),
         ):
             confirm(True)
@@ -319,6 +426,25 @@ class FolderKeyActionTests(DashboardFolderTestCase):
         state = groups.load(CWD)
         self.assertEqual(state.groups, {})
         self.assertIsNone(state.group_of("swift-otter"))
+
+    def test_the_delete_prompt_counts_only_agents_that_still_exist(self) -> None:
+        # Membership is by name and nothing prunes it when a transcript is
+        # deleted, so the raw member list can name agents that are gone.
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "long-gone", group.id)
+        self._draw([])  # no live rows at all
+
+        with (
+            self._cursor_on(0),
+            patch.object(self.app, "push_screen") as push,
+            patch.object(self.app, "_reload_groups_and_redraw"),
+            patch.object(self.app, "notify"),
+        ):
+            self.app.action_kill()
+
+        # Nothing the user can see is in there, so nothing to confirm.
+        push.assert_not_called()
+        self.assertEqual(groups.load(CWD).groups, {})
 
     def test_an_empty_folder_is_removed_without_a_prompt(self) -> None:
         # Nothing to lose and nothing hidden, so the confirmation would be
@@ -466,8 +592,11 @@ class ArrowStructureTests(DashboardFolderTestCase):
 
         notify = self._act(self.app.action_outdent, cursor=0)
 
+        # Nothing to fold, nowhere to go, and nothing to complain about:
+        # lifting a nested folder out is ``u``'s job, not ←'s.
         self.assertIn(group.id, groups.load(CWD).groups)
-        self.assertIn("top level", notify.call_args.args[0])
+        self.assertIsNone(groups.load(CWD).groups[group.id].parent)
+        notify.assert_not_called()
 
     def test_left_on_a_member_lifts_it_one_level_out(self) -> None:
         outer = groups.create_group(CWD, "backend")
@@ -500,6 +629,28 @@ class InlineNamingTests(DashboardFolderTestCase):
         self.assertIsNone(self.app._inline)
         state = groups.load(CWD)
         self.assertEqual(state.groups[state.group_of("swift-otter")].name, "infra")
+
+    def test_delete_removes_one_character_not_the_whole_name(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+        self._type("infra")
+
+        self._send_key("left")
+        self._send_key("left")
+        self._send_key("delete")
+
+        self.assertEqual(self.app._inline.buffer, "infa")
+
+    def test_ctrl_u_is_the_one_that_clears_the_field(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+        self._type("infra")
+
+        self._send_key("ctrl+u")
+
+        self.assertEqual(self.app._inline.buffer, "")
 
     def test_escape_aborts_the_new_folder_entirely(self) -> None:
         # Esc on a name prompt means "never mind" — leaving a stray "New
@@ -1011,6 +1162,98 @@ class DraftAgentTests(DashboardFolderTestCase):
         with patch.object(self.app, "query_one", return_value=self.table):
             self.assertIsNone(self.app._current_entry())
             self.assertIsNone(self.app._current_group())
+
+
+class MembershipUpkeepTests(DashboardFolderTestCase):
+    """A name that goes back in the pool must not drag a folder with it."""
+
+    def test_deleting_a_dormant_transcript_drops_its_membership(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        groups.assign_agent(CWD, "swift-otter", group.id)
+        self._draw([_row("swift-otter")])
+
+        jsonl = pathlib.Path(self._tmp.name) / "swift-otter.jsonl"
+        jsonl.write_text("{}\n")
+
+        with (
+            self._cursor_on(1),
+            patch.object(self.app, "push_screen") as push,
+        ):
+            self.app.action_kill()
+        confirm = push.call_args.args[1]
+
+        with (
+            patch.object(monitor, "live_jsonl_path", return_value=jsonl),
+            patch.object(self.app, "refresh_sessions"),
+            patch.object(self.app, "notify"),
+        ):
+            confirm(True)
+
+        # pick_random_name can hand "swift-otter" straight back out now, and
+        # the next agent to get it is not this one.
+        self.assertFalse(jsonl.exists())
+        self.assertIsNone(groups.load(CWD).group_of("swift-otter"))
+        self.assertIn(group.id, groups.load(CWD).groups)
+
+
+class InterruptionTests(DashboardFolderTestCase):
+    """A tick must not shove a modal in front of an edit in progress.
+
+    Before folders, ``n`` opened a ModalScreen and the spawn tick checked
+    for one. The draft row, the inline rename and the move mode are edits
+    in the table itself, so the check has to know about them too.
+    """
+
+    def _queue_a_spawn(self) -> None:
+        self.app._active_spawn_id = None
+        self.app._spawn_queue = [{"id": "req-1", "from": "swift-otter"}]
+
+    def test_a_queued_spawn_waits_for_the_draft_row(self) -> None:
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+        self._queue_a_spawn()
+
+        with patch.object(self.app, "_show_spawn_modal") as show:
+            self.app._tick_spawn_requests()
+
+        show.assert_not_called()
+        self.assertEqual(len(self.app._spawn_queue), 1)
+        self.assertIsNotNone(self.app._draft)
+
+    def test_a_queued_spawn_waits_for_an_inline_rename(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([])
+        self._act(self.app.action_rename_group, cursor=0)
+        self._queue_a_spawn()
+
+        with patch.object(self.app, "_show_spawn_modal") as show:
+            self.app._tick_spawn_requests()
+
+        show.assert_not_called()
+
+    def test_a_queued_spawn_waits_for_a_move_in_progress(self) -> None:
+        groups.create_group(CWD, "backend")
+        self._draw([_row("swift-otter")])
+        self._act(self.app.action_move_to_group, cursor=1)
+        self._queue_a_spawn()
+
+        with patch.object(self.app, "_show_spawn_modal") as show:
+            self.app._tick_spawn_requests()
+
+        show.assert_not_called()
+
+    def test_the_tmux_reattach_also_waits(self) -> None:
+        self._draw([])
+        self._act(self.app.action_new_session, cursor=0)
+        self.app._pending_reattach = "multiverse-swift-otter"
+        self.app._active_spawn_id = None
+        self.app._spawn_queue = []
+
+        with patch.object(self.app, "_attach_to") as attach:
+            self.app._tick_spawn_requests()
+
+        attach.assert_not_called()
+        self.assertEqual(self.app._pending_reattach, "multiverse-swift-otter")
 
 
 if __name__ == "__main__":
