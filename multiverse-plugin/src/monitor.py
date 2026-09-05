@@ -26,7 +26,7 @@ import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 from rich.markup import escape
 from textual import events, on, work
@@ -68,7 +68,7 @@ from .full_jsonl import (
 from .paths import multiverse_dir
 from .pi_transcript import delete_pi_session, list_pi_sessions_in
 from .inbox import list_pending_messages, pending_inbox_count
-from .names import pick_random_name
+from .names import pick_random_name, successor_name as pick_successor_name
 from .sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
@@ -443,6 +443,126 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
 
     def action_cancel(self) -> None:
         self.dismiss(SpawnDecision(accepted=False, reason=self._reject_reason()))
+
+
+class HandoffSuccessorScreen(ModalScreen[Optional[tuple[str, str]]]):
+    """Review the hand-off report, then name the successor.
+
+    A hand-off is the one spawn the user cannot sanity-check anywhere
+    else: the predecessor wrote the report to its own successor, and once
+    the successor starts, that report is its entire inherited memory. So
+    it gets the same treatment as an agent-initiated spawn — the text is
+    on screen, in full, before anything is created — rather than the
+    in-row draft `n` uses, where there is nothing to read.
+
+    Returns ``(name, runtime)``, or ``None`` if the user backed out.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("enter", "submit", "Create", show=False, priority=True),
+    ]
+
+    def __init__(
+        self,
+        cwd: str,
+        predecessor: str,
+        predecessor_runtime: str,
+        handoff_context: str,
+        default_name: str,
+    ) -> None:
+        super().__init__()
+        self.cwd = cwd
+        self.predecessor = predecessor
+        self.predecessor_runtime = (
+            predecessor_runtime
+            if predecessor_runtime in (RUNTIME_CLAUDE, RUNTIME_CODEX, RUNTIME_PI)
+            else RUNTIME_CLAUDE
+        )
+        self.handoff_context = handoff_context
+        self.default_name = default_name
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Static(
+                f"[bold]'{escape(self.predecessor)}'[/] is retiring. Its "
+                "successor inherits this report:",
+                id="handoff-header",
+            ),
+            VerticalScroll(
+                Static(
+                    escape(self.handoff_context) or "[dim](empty report)[/]",
+                    id="handoff-context",
+                ),
+                id="handoff-context-scroll",
+            ),
+            Static("Name the successor:", id="handoff-prompt"),
+            Input(value=self.default_name, id="handoff-name"),
+            Static("Successor runtime:", id="handoff-runtime-prompt"),
+            RadioSet(
+                RadioButton(
+                    "Claude",
+                    value=self.predecessor_runtime == RUNTIME_CLAUDE,
+                    id="handoff-runtime-claude",
+                ),
+                RadioButton(
+                    "Codex",
+                    value=self.predecessor_runtime == RUNTIME_CODEX,
+                    id="handoff-runtime-codex",
+                ),
+                RadioButton(
+                    "pi",
+                    value=self.predecessor_runtime == RUNTIME_PI,
+                    id="handoff-runtime-pi",
+                ),
+                id="handoff-runtime",
+            ),
+            Static("", id="handoff-error"),
+            Static(
+                "Tab to move · Enter to create · Esc to cancel "
+                "(nothing is retired until you create)",
+                id="handoff-hint",
+            ),
+            id="handoff-dialog",
+        )
+
+    def on_mount(self) -> None:
+        inp = self.query_one("#handoff-name", Input)
+        inp.focus()
+        try:
+            inp.cursor_position = len(inp.value)
+        except Exception:
+            pass
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        self._try_submit()
+
+    def action_submit(self) -> None:
+        self._try_submit()
+
+    def _try_submit(self) -> None:
+        name = self.query_one("#handoff-name", Input).value.strip()
+        err = self.query_one("#handoff-error", Static)
+        if not name:
+            err.update("[red]Name cannot be empty.[/]")
+            return
+        if name in all_session_names_in_cwd(self.cwd):
+            # The predecessor keeps its name when it retires, so this also
+            # catches "just call it the same thing".
+            err.update(
+                f"[red]'{escape(name)}' is already used in this workspace.[/]"
+            )
+            return
+        if self.query_one("#handoff-runtime-pi", RadioButton).value:
+            runtime = RUNTIME_PI
+        elif self.query_one("#handoff-runtime-codex", RadioButton).value:
+            runtime = RUNTIME_CODEX
+        else:
+            runtime = RUNTIME_CLAUDE
+        self.dismiss((name, runtime))
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class NameInputScreen(ModalScreen[Optional[str]]):
@@ -2968,15 +3088,6 @@ class _DraftAgent:
     select_all: bool
     runtime: str
     group_id: Optional[str]
-    # What Enter actually does with (name, runtime), when it is more than
-    # "start a session": the hand-off has to retire the predecessor and
-    # pass it a context report in the same step. Returns the new Session,
-    # or None if it failed and has already reported why. Defaults to the
-    # ordinary spawn.
-    create: Optional[Callable[[str, str], Optional[Session]]] = None
-    # Wording for the header banner and the cancellation notice.
-    what: str = "agent"
-    cancel_note: str = "New agent cancelled"
 
 
 @dataclass
@@ -3322,6 +3433,49 @@ class MonitorApp(App):
         padding-top: 1;
     }
     #spawn-hint {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
+    #handoff-dialog {
+        width: 100%;
+        height: 100%;
+        padding: 1 2;
+        border: round $warning;
+        background: $surface;
+    }
+    #handoff-header {
+        padding-bottom: 1;
+        height: auto;
+    }
+    #handoff-context-scroll {
+        /* The report is the point of this dialog, so it gets the room —
+           and its own scrollbar, because a hand-off can run long. */
+        height: 1fr;
+        min-height: 6;
+        border: round $panel;
+        padding: 0 1;
+    }
+    #handoff-context {
+        height: auto;
+    }
+    #handoff-prompt {
+        padding-top: 1;
+        height: auto;
+    }
+    #handoff-runtime-prompt {
+        color: $text-muted;
+        padding-top: 1;
+        height: auto;
+    }
+    #handoff-runtime {
+        height: auto;
+    }
+    #handoff-error {
+        color: $error;
+        height: auto;
+    }
+    #handoff-hint {
         color: $text-muted;
         padding-top: 1;
         height: auto;
@@ -4826,14 +4980,7 @@ class MonitorApp(App):
         # on an agent, whichever folder holds it.
         self._begin_draft(group_id=self._cursor_folder_id())
 
-    def _begin_draft(
-        self,
-        *,
-        group_id: Optional[str],
-        create: Optional[Callable[[str, str], Optional[Session]]] = None,
-        what: str = "agent",
-        cancel_note: str = "New agent cancelled",
-    ) -> bool:
+    def _begin_draft(self, *, group_id: Optional[str]) -> bool:
         """Open a placeholder row for a session that doesn't exist yet."""
         suggestion = pick_random_name(all_session_names_in_cwd(self.monitor_cwd))
         if not suggestion:
@@ -4848,9 +4995,6 @@ class MonitorApp(App):
             select_all=True,
             runtime=RUNTIME_CLAUDE,
             group_id=group_id,
-            create=create,
-            what=what,
-            cancel_note=cancel_note,
         )
         self._clear_selection()
         self._redraw_table()
@@ -4888,11 +5032,9 @@ class MonitorApp(App):
         """
         if self._draft is None:
             return
-        note = self._draft.cancel_note
         self._draft = None
         self._redraw_table()
-        # The hand-off's cancel note names the agent being retired.
-        self.notify(note, markup=False)
+        self.notify("New agent cancelled")
 
     def _commit_draft(self) -> None:
         draft = self._draft
@@ -4913,26 +5055,20 @@ class MonitorApp(App):
             return
         runtime = draft.runtime
         folder = self.group_state.get(draft.group_id)
-        if draft.create is not None:
-            # The caller's step owns its own failure reporting, so a
-            # half-finished hand-off can say what actually went wrong.
-            self._draft = None
-            session = draft.create(name, runtime)
-        else:
-            runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
-            try:
-                session = create_session(
-                    self.monitor_cwd,
-                    runtime_args,
-                    name=name,
-                    runtime=runtime,
-                )
-            except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
-                self.notify(f"Spawn failed: {e}", severity="error")
-                return
-            self._draft = None
-            where = f" in '{folder.name}'" if folder is not None else ""
-            self.notify(f"Spawned {name} with {runtime}{where}", markup=False)
+        runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
+        try:
+            session = create_session(
+                self.monitor_cwd,
+                runtime_args,
+                name=name,
+                runtime=runtime,
+            )
+        except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+            self.notify(f"Spawn failed: {e}", severity="error")
+            return
+        self._draft = None
+        where = f" in '{folder.name}'" if folder is not None else ""
+        self.notify(f"Spawned {name} with {runtime}{where}", markup=False)
         if session is None:
             self.refresh_sessions()
             return
@@ -4968,7 +5104,7 @@ class MonitorApp(App):
         folder = self.group_state.get(draft.group_id)
         where = f"in {'/'.join(self.group_state.path_names(folder.id))}" if folder else "at the top level"
         return (
-            f"+ new {draft.runtime} {draft.what} {where}"
+            f"+ new {draft.runtime} agent {where}"
             "    type a name · ⇥ runtime · ⏎ create · esc cancel"
         )
 
@@ -5094,16 +5230,45 @@ class MonitorApp(App):
             )
             return session
 
-        # Same in-row draft as `n`: random default name, the shared
-        # uniqueness check, and Tab for the runtime — but Enter runs the
-        # retire-then-spawn step above instead of a plain spawn. The
-        # successor is drafted into the predecessor's folder, so a handoff
-        # keeps the lineage together the way a spawn does.
-        self._begin_draft(
-            group_id=self.group_state.group_of(target.name),
-            create=create_successor,
-            what=f"successor for '{target.name}'",
-            cancel_note=f"Handoff from '{target.name}' cancelled",
+        folder_id = self.group_state.group_of(target.name)
+
+        def on_close(chosen: Optional[tuple[str, str]]) -> None:
+            if chosen is None:
+                self.notify(
+                    f"Handoff from '{target.name}' cancelled", markup=False
+                )
+                return
+            successor_name, successor_runtime = chosen
+            session = create_successor(successor_name, successor_runtime)
+            if session is None:
+                self.refresh_sessions()
+                return
+            # The successor lands in the predecessor's folder, so a
+            # hand-off keeps the lineage together the way a spawn does.
+            if folder_id is not None:
+                try:
+                    groups.assign_agent(
+                        self.monitor_cwd, successor_name, folder_id
+                    )
+                except (ValueError, OSError):
+                    pass  # the session exists; filing it is a nicety
+            self.refresh_sessions()
+            self._move_cursor_to_key(f"mv:{session.id}")
+
+        # Unlike `n`, this spawn has something to read before it happens:
+        # the report the predecessor wrote for whoever takes over. Show it
+        # in full, with the next name in the line filled in.
+        self.push_screen(
+            HandoffSuccessorScreen(
+                target.cwd,
+                target.name,
+                target.runtime,
+                handoff_context,
+                pick_successor_name(
+                    target.name, all_session_names_in_cwd(target.cwd)
+                ),
+            ),
+            on_close,
         )
 
     def action_resume_session(self) -> None:

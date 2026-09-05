@@ -101,31 +101,28 @@ class DashboardHandoffTests(unittest.TestCase):
             claude_uuid="native-id",
         )
 
-    def _draft_successor(
+    def _name_successor(
         self, app, target, result, *, name="successor", runtime=None, cancel=False
     ):
-        """Run the hand-off up to the draft row, then finish (or abort) it.
+        """Run the hand-off up to its modal, then answer it (or back out).
 
-        The successor used to be named in a modal; it is now the same
-        in-row draft as ``n``, so there is no screen to push — the test
-        drives the draft state directly, the way the key handler does.
+        The screen is where the user reads the report before anything is
+        retired, so the test pushes it the way the app does and calls the
+        callback with what the user would have chosen.
         """
         with (
-            patch.object(app, "_redraw_table"),
             patch.object(app, "_move_cursor_to_key"),
             patch.object(monitor, "all_session_names_in_cwd", return_value=set()),
-            patch.object(monitor, "pick_random_name", return_value="suggested"),
+            patch.object(app, "push_screen") as push,
         ):
             app._handoff_context_ready(target, "native-id", result)
-            if app._draft is None:
-                return
-            if cancel:
-                app._cancel_draft()
-                return
-            app._draft.buffer = name
-            if runtime is not None:
-                app._draft.runtime = runtime
-            app._commit_draft()
+            if not push.call_args_list:
+                return None
+            screen, on_close = push.call_args.args[:2]
+            on_close(
+                None if cancel else (name, runtime or monitor.RUNTIME_CLAUDE)
+            )
+            return screen
 
     def test_handoff_starts_only_for_dormant_agent(self) -> None:
         app = monitor.MonitorApp([])
@@ -151,7 +148,7 @@ class DashboardHandoffTests(unittest.TestCase):
         worker.assert_called_once_with(dormant, "native-id")
         self.assertTrue(app._handoff_in_progress)
 
-    def test_generated_context_drafts_and_spawns_the_successor(self) -> None:
+    def test_generated_context_names_and_spawns_the_successor(self) -> None:
         app = monitor.MonitorApp([])
         target = self._dormant()
         result = AskResult(
@@ -180,7 +177,7 @@ class DashboardHandoffTests(unittest.TestCase):
             ) as retire,
             patch.object(monitor, "create_session") as create,
         ):
-            self._draft_successor(
+            self._name_successor(
                 app, target, result, runtime=monitor.RUNTIME_CODEX
             )
 
@@ -204,25 +201,70 @@ class DashboardHandoffTests(unittest.TestCase):
             'ask_agent(target_name="predecessor", question="...")', prompt
         )
 
-    def test_the_successor_is_drafted_into_the_predecessors_folder(self) -> None:
+    def test_the_successor_is_filed_into_the_predecessors_folder(self) -> None:
         # A handoff keeps the lineage together the same way a spawn does.
         app = monitor.MonitorApp([])
         target = self._dormant()
         result = AskResult(target.name, "handoff", None, "fork", 1)
+        session = sessions.Session(
+            id="successor-session", cwd=target.cwd, created_at=1,
+            status="idle", name="successor",
+        )
         with (
-            patch.object(app, "_redraw_table"),
-            patch.object(app, "_move_cursor_to_key"),
-            patch.object(monitor, "all_session_names_in_cwd", return_value=set()),
-            patch.object(monitor, "pick_random_name", return_value="suggested"),
+            patch.object(app, "notify"),
+            patch.object(app, "refresh_sessions"),
+            patch.object(monitor, "sync_full"),
+            patch.object(monitor, "create_retired_session_record"),
+            patch.object(monitor, "create_session", return_value=session),
             patch.object(
                 app.group_state, "group_of", return_value="g-predecessor"
+            ),
+            patch.object(monitor.groups, "assign_agent") as assign,
+        ):
+            self._name_successor(app, target, result)
+
+        assign.assert_called_once_with(app.monitor_cwd, "successor", "g-predecessor")
+
+    def test_the_modal_shows_the_report_and_the_next_name_in_the_line(self) -> None:
+        # The report is the successor's whole inherited memory, so it is on
+        # screen before anything is retired — and the name follows the
+        # lineage rather than the random pool.
+        app = monitor.MonitorApp([])
+        target = self._dormant()
+        result = AskResult(target.name, "Completed A. Open task B.", None, "fork", 1)
+
+        with (
+            patch.object(app, "notify"),
+            patch.object(monitor, "create_session"),
+            patch.object(monitor, "create_retired_session_record"),
+            patch.object(monitor, "sync_full"),
+        ):
+            screen = self._name_successor(app, target, result, cancel=True)
+
+        self.assertIsInstance(screen, monitor.HandoffSuccessorScreen)
+        self.assertEqual(screen.handoff_context, "Completed A. Open task B.")
+        self.assertEqual(screen.predecessor, "predecessor")
+        self.assertEqual(screen.default_name, "predecessor II")
+        self.assertEqual(screen.predecessor_runtime, monitor.RUNTIME_CLAUDE)
+
+    def test_the_default_name_walks_past_generations_already_in_use(self) -> None:
+        app = monitor.MonitorApp([])
+        target = self._dormant()
+        target.name = "predecessor II"
+        result = AskResult(target.name, "handoff", None, "fork", 1)
+
+        with (
+            patch.object(app, "notify"),
+            patch.object(app, "push_screen") as push,
+            patch.object(
+                monitor,
+                "all_session_names_in_cwd",
+                return_value={"predecessor", "predecessor II", "predecessor III"},
             ),
         ):
             app._handoff_context_ready(target, "native-id", result)
 
-        self.assertIsNotNone(app._draft)
-        self.assertEqual(app._draft.group_id, "g-predecessor")
-        self.assertIn(target.name, app._draft.what)
+        self.assertEqual(push.call_args.args[0].default_name, "predecessor IV")
 
     def test_handoff_ask_uses_approved_prompt_and_native_fork(self) -> None:
         app = monitor.MonitorApp([])
@@ -238,7 +280,7 @@ class DashboardHandoffTests(unittest.TestCase):
         self.assertEqual(kwargs["target"].runtime, monitor.RUNTIME_CLAUDE)
         self.assertEqual(kwargs["timeout"], monitor._HANDOFF_TIMEOUT_SECONDS)
 
-    def test_escape_on_the_successor_draft_cancels_the_handoff(self) -> None:
+    def test_escape_on_the_successor_modal_cancels_the_handoff(self) -> None:
         app = monitor.MonitorApp([])
         target = self._dormant()
         result = AskResult(target.name, "handoff", None, "fork", 1)
@@ -248,9 +290,8 @@ class DashboardHandoffTests(unittest.TestCase):
             patch.object(monitor, "create_retired_session_record") as retire,
             patch.object(monitor, "create_session") as create,
         ):
-            self._draft_successor(app, target, result, cancel=True)
+            self._name_successor(app, target, result, cancel=True)
 
-        self.assertIsNone(app._draft)
         sync.assert_not_called()
         retire.assert_not_called()
         create.assert_not_called()
@@ -285,7 +326,7 @@ class DashboardHandoffTests(unittest.TestCase):
             ),
             patch.object(monitor, "remove_retired_session_record") as rollback,
         ):
-            self._draft_successor(
+            self._name_successor(
                 app, target, result, runtime=monitor.RUNTIME_PI
             )
 

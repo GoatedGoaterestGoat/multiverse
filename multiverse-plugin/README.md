@@ -112,7 +112,7 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | Key | Action |
 |:----|:-------|
 | `n` | New agent, drafted in place — a placeholder row appears in the folder the cursor is in, with a suggested name selected for typing over. `⇥` cycles the runtime (Claude/Codex/pi), `⏎` creates it, `esc` discards it (nothing was started). Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
-| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then drafts the successor in place (same row editor as `n`) and starts it with that report. |
+| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then opens a widget showing that report, with the successor's name defaulting to the next generation of the lineage (`Quasar` → `Quasar II`), and starts the successor with the report as its first message. |
 | `R` | Resume — pick from runtime sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Uses the same runtime-specific permission default as a new session. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `retired` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
@@ -190,9 +190,11 @@ afterwards the way a folder can — the name is baked in at spawn (custom
 title, tmux env, inbox routing, name claims) — so nothing is started until
 `⏎`, and `esc` costs nothing.
 
-The only dialog left is the confirmation for removing a folder that still
-has something in it — and only because a folded folder hides how much is
-about to be tipped back out.
+Folders and new agents need no dialogs at all now. What still gets one is
+what you have to *read* before answering: an agent asking to spawn a
+subagent, a hand-off's report, and the confirmation for removing a folder
+that still has something in it — a folded folder hides how much is about
+to be tipped back out.
 
 **Folders form themselves.** When an agent uses `spawn_agent`, the new agent is
 filed next to whoever spawned it: into the spawner's folder if it has one, and
@@ -313,7 +315,7 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 
 **TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
 
-**TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, the ordinary New session widget opens with its usual random name and Claude/Codex/pi selector. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
+**TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, a handoff widget opens showing the report in full — it becomes the successor's entire inherited memory, so it is reviewable before anything is retired — alongside a name field and a Claude/Codex/pi selector defaulting to the predecessor's runtime. The name defaults to the next generation of the same lineage: `Quasar` hands off to `Quasar II`, which hands off to `Quasar III`, skipping any generation the workspace is still using. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. The successor is filed into the predecessor's folder, so a lineage stays together the way a spawn does. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
 
 When to pick which:
 
