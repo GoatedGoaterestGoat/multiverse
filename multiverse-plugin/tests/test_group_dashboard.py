@@ -240,6 +240,23 @@ class MarkupSafetyTests(DashboardFolderTestCase):
         self._assert_renders(drawn)
         self.assertIn("todo [/] urgent", Text.from_markup(drawn[0][NAME]).plain)
 
+    def test_a_live_agent_row_named_with_markup_still_renders(self) -> None:
+        # The draft row accepts any name, so this reaches the table for
+        # real once the agent is created — and stays there.
+        drawn = self._draw([_row("a[/]b")])
+
+        self._assert_renders(drawn)
+        self.assertEqual(Text.from_markup(drawn[0][NAME]).plain, "a[/]b")
+
+    def test_an_agent_preview_containing_markup_still_renders(self) -> None:
+        row = _row("swift-otter")
+        row.preview = "wrote [/] to the file"
+
+        drawn = self._draw([row])
+
+        self._assert_renders(drawn)
+        self.assertIn("wrote [/] to", Text.from_markup(drawn[0][PREVIEW]).plain)
+
     def test_a_collapsed_folder_preview_of_such_names_still_renders(self) -> None:
         group = groups.create_group(CWD, "backend")
         groups.assign_agent(CWD, "swift-otter [/]", group.id)

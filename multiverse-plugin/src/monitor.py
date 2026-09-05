@@ -151,6 +151,11 @@ _GROUP_STATUS_RANK = {
 _COMPACTABLE_STATUSES = {"idle", "ended", "retired", "dormant"}
 _ENDING_MIN_VISIBLE_SECONDS = 0.25
 _HANDOFF_TIMEOUT_SECONDS = 300.0
+# How long the monitor keeps an approved spawn on file waiting for the
+# agent to actually create it, and how long it waits after the request
+# file disappears before giving up on the row showing up.
+_SPAWN_FILING_TTL = 300.0
+_SPAWN_FILING_GRACE = 30.0
 
 _HANDOFF_PROMPT = """You are being retired due to context-length limitations, and your responsibilities will be inherited by a successor agent.
 
@@ -343,11 +348,14 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
 
         yield Vertical(
             Static(
-                f"[bold]'{from_name}'[/] ({self.caller_runtime}) wants to "
+                f"[bold]'{escape(from_name)}'[/] ({self.caller_runtime}) wants to "
                 "spawn a subagent:",
                 id="spawn-header",
             ),
-            Static(f"[dim italic]{preview or '(empty instruction)'}[/]", id="spawn-preview"),
+            Static(
+                f"[dim italic]{escape(preview) or '(empty instruction)'}[/]",
+                id="spawn-preview",
+            ),
             Static("Name the new agent:", id="spawn-prompt"),
             Input(value=self.default_name, id="spawn-name"),
             Static("Child runtime:", id="spawn-runtime-prompt"),
@@ -510,7 +518,7 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         )
         yield Vertical(
             Static(
-                f"Delete dormant session [bold]'{self.display_name}'[/]?",
+                f"Delete dormant session [bold]'{escape(self.display_name)}'[/]?",
                 id="confirm-delete-header",
             ),
             Static(
@@ -553,7 +561,7 @@ class ConfirmForceKillScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(
-                f"Force-kill session [bold]'{self.display_name}'[/]?",
+                f"Force-kill session [bold]'{escape(self.display_name)}'[/]?",
                 id="confirm-force-header",
             ),
             Static(
@@ -1461,7 +1469,7 @@ class ChooseSchedulerScreen(ModalScreen[Optional[dict]]):
         # preview became unreachable on shorter terminals.
         yield VerticalScroll(
             Static(
-                f"Compact: [bold]{self.display_name}[/]\n"
+                f"Compact: [bold]{escape(self.display_name)}[/]\n"
                 f"[dim]Full (uncompacted): {self.full_tokens:,}t · "
                 f"{self.full_turns} turn(s)[/]"
                 f"{live_line}"
@@ -2010,7 +2018,7 @@ class CompactScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         yield Vertical(
             Static(
-                f"Compact session: [bold]{self.display_name}[/]",
+                f"Compact session: [bold]{escape(self.display_name)}[/]",
                 id="compact-title",
             ),
             Static(
@@ -2593,7 +2601,8 @@ class CompactScreen(ModalScreen[None]):
                 self._pending_picker = True
                 self.app.notify(
                     f"'{self.display_name}': trees built — press Enter on "
-                    "its row to choose the budget."
+                    "its row to choose the budget.",
+                    markup=False,
                 )
                 return
             self._push_picker()
@@ -2618,6 +2627,7 @@ class CompactScreen(ModalScreen[None]):
                 f"'{self.display_name}': {verdict.strip()}"
                 + ("" if ok else f" {msg}"),
                 severity="information" if ok else "error",
+                markup=False,
             )
             self._teardown_detached()
 
@@ -2698,7 +2708,8 @@ class CompactScreen(ModalScreen[None]):
         app.pop_screen()
         app.notify(
             f"'{self.display_name}' is still compacting in the background — "
-            "press Enter on its row to come back."
+            "press Enter on its row to come back.",
+            markup=False,
         )
 
     def on_screen_resume(self) -> None:
@@ -3479,10 +3490,11 @@ class MonitorApp(App):
         # Cleared and refilled by each _redraw_table pass.
         self._inbox_cache: dict[tuple[str, str], int] = {}
         self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
-        # chosen name → spawner name, for spawns approved but not yet
-        # created. Deliberately in memory only: a spawn that never happens
-        # should leave nothing behind, here or on disk.
-        self._pending_group_spawns: dict[str, str] = {}
+        # chosen name → (spawner name, request id, approved at), for
+        # spawns approved but not yet created. Deliberately in memory
+        # only: a spawn that never happens should leave nothing behind,
+        # here or on disk.
+        self._pending_group_spawns: dict[str, tuple[str, str, float]] = {}
         self._handoff_in_progress = False
 
     def compose(self) -> ComposeResult:
@@ -3560,21 +3572,43 @@ class MonitorApp(App):
         Filing at approval time would leave a folder — and a membership
         row for a name with no session — behind whenever create_session
         fails or the requesting agent dies before running it.
+
+        The window is deliberately short. An approval that never becomes a
+        session is dropped once its request is gone (plus a grace period
+        for the row to appear), and in any case after
+        ``_SPAWN_FILING_TTL``: the name returns to the pool when the
+        request does, and without the expiry an unrelated agent that later
+        draws that name would be filed under a spawner it has nothing to
+        do with.
         """
         if not self._pending_group_spawns:
             return
+        now = time.time()
         live = {groups.member_key(e.name) for e in self.entries}
-        arrived = [
-            name
-            for name in self._pending_group_spawns
-            if groups.member_key(name) in live
-        ]
-        for name in arrived:
-            spawner = self._pending_group_spawns.pop(name)
+        for name, (spawner, rid, approved_at) in list(
+            self._pending_group_spawns.items()
+        ):
+            waited = now - approved_at
+            # The requesting agent removes its request file in a
+            # ``finally``, so a missing file means it is done either way —
+            # but the row it just created can take a tick or two to show
+            # up, hence the grace period before believing it.
+            gone = bool(rid) and not request_path(rid).is_file()
+            if waited > _SPAWN_FILING_TTL or (
+                gone and waited > _SPAWN_FILING_GRACE
+            ):
+                # Checked before the row, not after: an agent appearing
+                # under this name long after the approval expired is a
+                # different agent that drew a freed name.
+                self._pending_group_spawns.pop(name, None)
+                continue
+            if groups.member_key(name) not in live:
+                continue
             try:
                 groups.auto_group_spawn(self.monitor_cwd, spawner, name)
             except (OSError, ValueError):
-                pass  # the spawn happened; filing it is a nicety
+                continue  # transient; keep the pair and retry next pass
+            self._pending_group_spawns.pop(name, None)
 
     def _update_web_indicator(self) -> None:
         """Reflect web-share state in the header subtitle. ``status`` also
@@ -3718,9 +3752,12 @@ class MonitorApp(App):
                 )
                 who = req.get("from", "?")
                 if decision.reason:
-                    self.notify(f"Rejected spawn from '{who}': {decision.reason}")
+                    self.notify(
+                        f"Rejected spawn from '{who}': {decision.reason}",
+                        markup=False,
+                    )
                 else:
-                    self.notify(f"Rejected spawn from '{who}'")
+                    self.notify(f"Rejected spawn from '{who}'", markup=False)
                 return
             chosen_name, chosen_runtime = decision.name, decision.runtime
             won = write_resolution(
@@ -3744,8 +3781,15 @@ class MonitorApp(App):
                 # Approval is not creation, though: the agent still has to
                 # run create_session, and that can fail or never happen.
                 # Remember the pair and file it when the child actually
-                # turns up, so a failed spawn leaves no folder behind.
-                self._pending_group_spawns[chosen_name] = req.get("from", "")
+                # turns up, so a failed spawn leaves no folder behind. Two
+                # approvals landing on one name means the first never
+                # became a session — the newer approval is the one about
+                # to create it, so it wins.
+                self._pending_group_spawns[chosen_name] = (
+                    req.get("from", ""),
+                    rid,
+                    time.time(),
+                )
                 self.notify(
                     f"Approved spawn from '{req.get('from', '?')}' "
                     f"as '{chosen_name}' ({chosen_runtime})",
@@ -3814,10 +3858,10 @@ class MonitorApp(App):
         status_cell = f"[{style}]{e.status}[/]"
         updated = _ago(now - e.status_ts) if e.status_ts else "-"
         if e.session is not None:
-            id_cell = e.session.id
+            id_cell = escape(e.session.id)
         else:
             session_id = e.session_id or ""
-            id_cell = f"[dim]{session_id[:8]}[/]"
+            id_cell = f"[dim]{escape(session_id[:8])}[/]"
         pending = self._pending_inbox(e)
         inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
         if e.runtime != RUNTIME_CLAUDE:
@@ -3828,10 +3872,17 @@ class MonitorApp(App):
             build_cell = "[dim]off[/]"
         tokens = self._tokens_of(e)
         tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
-        preview = e.preview or "[dim](empty)[/]"
-        if len(preview) > 60:
-            preview = preview[:59] + "…"
-        label = self._decorate(row, e.name)
+        # Both are text the user or the transcript produced — the draft
+        # row accepts any name, and a preview is whatever the agent last
+        # said — so neither goes into a cell as markup.
+        if e.preview:
+            # Truncate first, escape second: the other way round can slice
+            # an escape sequence in half.
+            preview = e.preview[:59] + "…" if len(e.preview) > 60 else e.preview
+            preview = escape(preview)
+        else:
+            preview = "[dim](empty)[/]"
+        label = self._decorate(row, escape(e.name))
         name_cell = f"[dim]{row.prefix}[/]{label}" if row.prefix else label
         return (
             name_cell, id_cell, e.runtime, inbox_cell, build_cell,
@@ -4613,6 +4664,9 @@ class MonitorApp(App):
             wrap = groups.wrap_in_new_folder(self.monitor_cwd, parent=parent_id)
         except (ValueError, OSError) as exc:
             self.notify(str(exc), severity="error", markup=False)
+            # The expand above is already on disk; don't leave the cached
+            # tree disagreeing with it until the next tick.
+            self._reload_groups_and_redraw()
             return
         self._reload_groups_and_redraw()
         self._begin_inline_edit(
@@ -5130,7 +5184,7 @@ class MonitorApp(App):
             self.notify(f"Resume failed: {e}", severity="error")
             return
         self.refresh_sessions()
-        self.notify(f"Resumed {runtime} {session_id[:8]} as {name}")
+        self.notify(f"Resumed {runtime} {session_id[:8]} as {name}", markup=False)
 
     def action_primary(self) -> None:
         """Enter: attach for live sessions, resume for dormant/ended ones.
@@ -5307,7 +5361,7 @@ class MonitorApp(App):
             return
         messages = list_pending_messages(e.cwd, e.name)
         if not messages:
-            self.notify(f"No pending messages for '{e.name}'")
+            self.notify(f"No pending messages for '{e.name}'", markup=False)
             return
         self.push_screen(InboxViewerScreen(e.name, messages))
 

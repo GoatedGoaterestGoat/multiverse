@@ -284,6 +284,14 @@ class MonitorSideFilingTests(unittest.TestCase):
         self.app.entries = [_row(n) for n in names]
         self.app._file_arrived_spawns()
 
+    def _age_pending(self, seconds: float) -> None:
+        """Pretend the approvals still on file happened ``seconds`` ago."""
+        self.app._pending_group_spawns = {
+            name: (spawner, rid, approved_at - seconds)
+            for name, (spawner, rid, approved_at)
+            in self.app._pending_group_spawns.items()
+        }
+
     def _decide(self, decision, *, won: bool = True):
         with (
             patch.object(monitor, "write_resolution", return_value=won),
@@ -379,6 +387,84 @@ class MonitorSideFilingTests(unittest.TestCase):
 
         self.assertEqual(groups.load(CWD).groups, {})
         self.assertEqual(groups.load(CWD).members, {})
+
+    def test_an_approval_that_never_becomes_a_session_expires(self) -> None:
+        # The name goes back into the pool when the request does, so a
+        # much later agent that happens to draw it is a different agent.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._age_pending(monitor._SPAWN_FILING_TTL + 1)
+
+        self._arrive("swift-otter", "brave-mole")
+
+        self.assertEqual(groups.load(CWD).groups, {})
+        self.assertEqual(self.app._pending_group_spawns, {})
+
+    def test_a_request_that_is_gone_is_dropped_after_the_grace_period(self) -> None:
+        # The requesting agent removes its request file either way, so the
+        # row is given a moment to appear before we believe it failed.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._arrive("swift-otter")  # within the grace period
+        self.assertIn("brave-mole", self.app._pending_group_spawns)
+
+        self._age_pending(monitor._SPAWN_FILING_GRACE + 1)
+        self._arrive("swift-otter")
+
+        self.assertEqual(self.app._pending_group_spawns, {})
+
+    def test_a_store_failure_keeps_the_pair_for_the_next_pass(self) -> None:
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        with patch.object(
+            monitor.groups, "auto_group_spawn", side_effect=OSError("nope")
+        ):
+            self._arrive("swift-otter", "brave-mole")
+        self.assertIn("brave-mole", self.app._pending_group_spawns)
+
+        self._arrive("swift-otter", "brave-mole")
+
+        state = groups.load(CWD)
+        self.assertEqual(state.group_of("brave-mole"), state.group_of("swift-otter"))
+        self.assertEqual(self.app._pending_group_spawns, {})
+
+    def test_two_approvals_on_one_name_file_the_later_spawner(self) -> None:
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self.req = dict(self.req, id="req-2", **{"from": "quiet-fox"})
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+
+        self._arrive("swift-otter", "quiet-fox", "brave-mole")
+
+        state = groups.load(CWD)
+        self.assertEqual(state.group_of("brave-mole"), state.group_of("quiet-fox"))
+        self.assertIsNone(state.group_of("swift-otter"))
 
     def test_the_monitor_and_the_agent_agree_rather_than_duplicating(self) -> None:
         # The monitor files the pair when the child turns up; the agent's
