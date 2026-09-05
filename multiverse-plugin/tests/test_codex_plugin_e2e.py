@@ -378,8 +378,21 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
             self.assertEqual(results["ask_agent"], "Wrapped Codex answer")
             self.assertEqual(
                 results["spawn_agent"],
-                "Spawned agent with name 'e2e-child'.",
+                "Spawned agent with name 'e2e-child' in folder 'codex-caller'.",
             )
+            # The folder is really on disk, written by the plugin running
+            # inside the wrapped session — the only end-to-end proof that a
+            # spawned agent is filed with its spawner.
+            group_state = json.loads(
+                (
+                    state_root
+                    / "groups"
+                    / f"{inbox._encode_cwd(str(workspace))}.json"
+                ).read_text()
+            )
+            folder = group_state["members"]["codex-caller"]
+            self.assertEqual(group_state["members"]["e2e-child"], folder)
+            self.assertEqual(group_state["groups"][folder]["name"], "codex-caller")
             self.assertEqual(list(caller_inbox.glob("*.json")), [])
 
             target_inbox = (

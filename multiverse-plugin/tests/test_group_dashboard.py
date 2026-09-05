@@ -190,6 +190,18 @@ class FolderRenderingTests(DashboardFolderTestCase):
         ])
         self.assertIn("1 waiting", drawn[0][STATUS])
 
+    def test_a_retired_member_never_outranks_a_usable_one(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        for name in ("swift-otter", "brave-mole"):
+            groups.assign_agent(CWD, name, group.id)
+        groups.set_collapsed(CWD, group.id, True)
+
+        drawn = self._draw([
+            _row("swift-otter", "retired"),
+            _row("brave-mole", "dormant"),
+        ])
+        self.assertIn("1 dormant", drawn[0][STATUS])
+
     def test_an_empty_folder_says_so_rather_than_borrowing_a_status(self) -> None:
         groups.create_group(CWD, "backend")
         drawn = self._draw([_row("quiet-fox")])

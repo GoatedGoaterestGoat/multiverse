@@ -26,7 +26,7 @@ import threading
 import time
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from textual import events, on, work
 from textual.app import App, ComposeResult
@@ -138,7 +138,10 @@ _GROUP_STATUS_RANK = {
     "idle": 6,
     "dormant": 7,
     "ended": 8,
-    "unknown": 9,
+    # Retired agents are handed off and never coming back, so a folder
+    # full of them should not out-rank one holding anything still usable.
+    "retired": 9,
+    "unknown": 10,
 }
 
 # Statuses where the user is allowed to launch a compaction. Working/
@@ -2946,6 +2949,15 @@ class _DraftAgent:
     select_all: bool
     runtime: str
     group_id: Optional[str]
+    # What Enter actually does with (name, runtime), when it is more than
+    # "start a session": the hand-off has to retire the predecessor and
+    # pass it a context report in the same step. Returns the new Session,
+    # or None if it failed and has already reported why. Defaults to the
+    # ordinary spawn.
+    create: Optional[Callable[[str, str], Optional[Session]]] = None
+    # Wording for the header banner and the cancellation notice.
+    what: str = "agent"
+    cancel_note: str = "New agent cancelled"
 
 
 @dataclass
@@ -4592,25 +4604,40 @@ class MonitorApp(App):
         if self._draft is not None:
             self._commit_draft()
             return
+        # The folder the cursor is in — on a folder header, that folder;
+        # on an agent, whichever folder holds it.
+        self._begin_draft(group_id=self._cursor_folder_id())
+
+    def _begin_draft(
+        self,
+        *,
+        group_id: Optional[str],
+        create: Optional[Callable[[str, str], Optional[Session]]] = None,
+        what: str = "agent",
+        cancel_note: str = "New agent cancelled",
+    ) -> bool:
+        """Open a placeholder row for a session that doesn't exist yet."""
         suggestion = pick_random_name(all_session_names_in_cwd(self.monitor_cwd))
         if not suggestion:
             self.notify(
                 "Could not pick a name — the workspace pool is exhausted",
                 severity="error",
             )
-            return
+            return False
         self._draft = _DraftAgent(
             buffer=suggestion,
             cursor=len(suggestion),
             select_all=True,
             runtime=RUNTIME_CLAUDE,
-            # The folder the cursor is in — on a folder header, that
-            # folder; on an agent, whichever folder holds it.
-            group_id=self._cursor_folder_id(),
+            group_id=group_id,
+            create=create,
+            what=what,
+            cancel_note=cancel_note,
         )
         self._clear_selection()
         self._redraw_table()
         self._move_cursor_to_key(groups.DRAFT_ROW_KEY)
+        return True
 
     def _draft_key(self, event: events.Key) -> bool:
         """Keys while a new agent is being described. Consumes everything,
@@ -4643,9 +4670,10 @@ class MonitorApp(App):
         """
         if self._draft is None:
             return
+        note = self._draft.cancel_note
         self._draft = None
         self._redraw_table()
-        self.notify("New agent cancelled")
+        self.notify(note)
 
     def _commit_draft(self) -> None:
         draft = self._draft
@@ -4663,19 +4691,30 @@ class MonitorApp(App):
             )
             return
         runtime = draft.runtime
-        runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
-        try:
-            session = create_session(
-                self.monitor_cwd,
-                runtime_args,
-                name=name,
-                runtime=runtime,
-            )
-        except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
-            self.notify(f"Spawn failed: {e}", severity="error")
-            return
-        self._draft = None
         folder = self.group_state.get(draft.group_id)
+        if draft.create is not None:
+            # The caller's step owns its own failure reporting, so a
+            # half-finished hand-off can say what actually went wrong.
+            self._draft = None
+            session = draft.create(name, runtime)
+        else:
+            runtime_args = self.claude_args if runtime == RUNTIME_CLAUDE else []
+            try:
+                session = create_session(
+                    self.monitor_cwd,
+                    runtime_args,
+                    name=name,
+                    runtime=runtime,
+                )
+            except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+                self.notify(f"Spawn failed: {e}", severity="error")
+                return
+            self._draft = None
+            where = f" in '{folder.name}'" if folder is not None else ""
+            self.notify(f"Spawned {name} with {runtime}{where}")
+        if session is None:
+            self.refresh_sessions()
+            return
         if folder is not None:
             try:
                 groups.assign_agent(self.monitor_cwd, name, folder.id)
@@ -4683,8 +4722,6 @@ class MonitorApp(App):
                 pass  # the session exists; filing it is a nicety
         self.refresh_sessions()
         self._move_cursor_to_key(f"mv:{session.id}")
-        where = f" in '{folder.name}'" if folder is not None else ""
-        self.notify(f"Spawned {name} with {runtime}{where}")
 
     def _draft_cells(self, row: groups.DisplayRow) -> tuple:
         """The placeholder row: a name field and a Tab-cycled runtime."""
@@ -4710,7 +4747,7 @@ class MonitorApp(App):
         folder = self.group_state.get(draft.group_id)
         where = f"in {'/'.join(self.group_state.path_names(folder.id))}" if folder else "at the top level"
         return (
-            f"+ new {draft.runtime} agent {where}"
+            f"+ new {draft.runtime} {draft.what} {where}"
             "    type a name · ⇥ runtime · ⏎ create · esc cancel"
         )
 
@@ -4787,11 +4824,9 @@ class MonitorApp(App):
 
         handoff_context = result.response.strip()
 
-        def create_successor(selection: Optional[tuple[str, str]]) -> None:
-            if not selection:
-                self.notify(f"Handoff from '{target.name}' cancelled")
-                return
-            successor_name, successor_runtime = selection
+        def create_successor(
+            successor_name: str, successor_runtime: str
+        ) -> Optional[Session]:
             retired: Optional[Session] = None
             try:
                 # A dormant Claude transcript has no writer, so this is the
@@ -4809,7 +4844,7 @@ class MonitorApp(App):
                 runtime_args = (
                     self.claude_args if successor_runtime == RUNTIME_CLAUDE else []
                 )
-                create_session(
+                session = create_session(
                     target.cwd,
                     runtime_args,
                     name=successor_name,
@@ -4827,18 +4862,25 @@ class MonitorApp(App):
                     remove_retired_session_record(retired)
                 self.refresh_sessions()
                 self.notify(f"Handoff failed: {exc}", severity="error")
-                return
+                return None
 
-            self.refresh_sessions()
             self.notify(
                 f"Retired '{target.name}' and spawned successor "
                 f"'{successor_name}' ({successor_runtime})"
             )
+            return session
 
-        # Reuse the dashboard's ordinary New Session modal verbatim: random
-        # default name, shared uniqueness validation, and Claude/Codex/pi
-        # runtime selector.
-        self.push_screen(NewSessionScreen(self.monitor_cwd), create_successor)
+        # Same in-row draft as `n`: random default name, the shared
+        # uniqueness check, and Tab for the runtime — but Enter runs the
+        # retire-then-spawn step above instead of a plain spawn. The
+        # successor is drafted into the predecessor's folder, so a handoff
+        # keeps the lineage together the way a spawn does.
+        self._begin_draft(
+            group_id=self.group_state.group_of(target.name),
+            create=create_successor,
+            what=f"successor for '{target.name}'",
+            cancel_note=f"Handoff from '{target.name}' cancelled",
+        )
 
     def action_resume_session(self) -> None:
         hide = wrapped_runtime_session_ids(self.sessions)
