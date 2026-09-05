@@ -119,7 +119,7 @@ export MULTIVERSE_CLAUDE_MODEL="${MULTIVERSE_CLAUDE_MODEL:-opus[1m]}"
 # create_session injects this as a global --model option before Codex's resume
 # subcommand unless the caller already supplied --model/-m. Keep it configurable
 # because available model aliases can differ by account and installation.
-export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-5.6-sol}"
+export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-6-astra}"
 
 # Reasoning effort for interactive multiverse-started CODEX sessions (new +
 # resumed). The Codex runner applies this as a per-launch CLI config override,

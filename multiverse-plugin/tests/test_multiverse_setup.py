@@ -36,6 +36,7 @@ class MultiverseSetupTests(unittest.TestCase):
         for name in (
             "CODEX_HOME",
             "MULTIVERSE_CODEX_BIN",
+            "MULTIVERSE_CODEX_MODEL",
             "MULTIVERSE_CODEX_PLUGIN_ROOT",
             "MULTIVERSE_CODEX_REASONING_EFFORT",
             "MULTIVERSE_PI_BIN",
@@ -66,6 +67,36 @@ class MultiverseSetupTests(unittest.TestCase):
             text=True,
             timeout=20,
         )
+
+    def test_launcher_defaults_codex_model_and_preserves_override(self) -> None:
+        self._write_executable(
+            "uv",
+            "#!/bin/sh\nprintf '%s\\n' \"$MULTIVERSE_CODEX_MODEL\"\n",
+        )
+        env = self._environment(self.root / "model-state")
+
+        defaulted = subprocess.run(
+            [str(self.wrapper)],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(defaulted.returncode, 0, defaulted.stderr)
+        self.assertEqual(defaulted.stdout.strip(), "gpt-6-astra")
+
+        env["MULTIVERSE_CODEX_MODEL"] = "gpt-explicit"
+        overridden = subprocess.run(
+            [str(self.wrapper)],
+            cwd=self.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(overridden.returncode, 0, overridden.stderr)
+        self.assertEqual(overridden.stdout.strip(), "gpt-explicit")
 
     def test_setup_snapshots_and_restores_codex_environment(self) -> None:
         state_root = self.root / "state"
