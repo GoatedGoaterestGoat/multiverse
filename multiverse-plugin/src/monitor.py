@@ -430,7 +430,7 @@ class SpawnRequestScreen(ModalScreen[Optional[SpawnDecision]]):
             return
         if name in all_session_names_in_cwd(self.cwd):
             err.update(
-                f"[red]'{name}' is already used in this workspace.[/]"
+                f"[red]'{escape(name)}' is already used in this workspace.[/]"
             )
             return
         if self.query_one("#spawn-runtime-pi", RadioButton).value:
@@ -485,7 +485,8 @@ class NameInputScreen(ModalScreen[Optional[str]]):
             return
         if name in all_session_names_in_cwd(self.cwd):
             err.update(
-                f"[red]'{name}' is already used in this workspace. Choose another.[/]"
+                f"[red]'{escape(name)}' is already used in this workspace. "
+                "Choose another.[/]"
             )
             return
         self.dismiss(name)
@@ -755,17 +756,25 @@ class AskResultsScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         blocks: list[Static] = [
-            Static(f"[bold]Q:[/] {self.question}", id="ask-results-question"),
+            Static(
+                f"[bold]Q:[/] {escape(self.question)}",
+                id="ask-results-question",
+            ),
         ]
         if not self.results:
             blocks.append(Static("[dim](no targets)[/]"))
         for r in self.results:
-            header = f"[bold yellow]━━━ {r.name}[/] [dim]({r.elapsed:.1f}s)[/]"
+            header = (
+                f"[bold yellow]━━━ {escape(r.name)}[/] "
+                f"[dim]({r.elapsed:.1f}s)[/]"
+            )
             blocks.append(Static(header))
             if r.error:
-                blocks.append(Static(f"[red]error:[/] {r.error}"))
+                blocks.append(Static(f"[red]error:[/] {escape(r.error)}"))
+            elif r.response:
+                blocks.append(Static(escape(r.response)))
             else:
-                blocks.append(Static(r.response or "[dim](empty)[/]"))
+                blocks.append(Static("[dim](empty)[/]"))
         blocks.append(Static("Esc to go back", id="ask-results-hint"))
         yield VerticalScroll(*blocks, id="ask-results-dialog")
 
@@ -3491,10 +3500,13 @@ class MonitorApp(App):
         self._inbox_cache: dict[tuple[str, str], int] = {}
         self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
         # chosen name → (spawner name, request id, approved at), for
-        # spawns approved but not yet created. Deliberately in memory
-        # only: a spawn that never happens should leave nothing behind,
-        # here or on disk.
-        self._pending_group_spawns: dict[str, tuple[str, str, float]] = {}
+        # spawns approved but not yet created. A ``None`` spawner marks a
+        # name two approvals are racing for, which the monitor cannot
+        # attribute. Deliberately in memory only: a spawn that never
+        # happens should leave nothing behind, here or on disk.
+        self._pending_group_spawns: dict[
+            str, tuple[Optional[str], str, float]
+        ] = {}
         self._handoff_in_progress = False
 
     def compose(self) -> ComposeResult:
@@ -3603,6 +3615,11 @@ class MonitorApp(App):
                 self._pending_group_spawns.pop(name, None)
                 continue
             if groups.member_key(name) not in live:
+                continue
+            if not spawner:
+                # Ambiguous (or an unnamed requester): the row exists, but
+                # not whose child it is. Drop it rather than pick a parent.
+                self._pending_group_spawns.pop(name, None)
                 continue
             try:
                 groups.auto_group_spawn(self.monitor_cwd, spawner, name)
@@ -3781,12 +3798,21 @@ class MonitorApp(App):
                 # Approval is not creation, though: the agent still has to
                 # run create_session, and that can fail or never happen.
                 # Remember the pair and file it when the child actually
-                # turns up, so a failed spawn leaves no folder behind. Two
-                # approvals landing on one name means the first never
-                # became a session — the newer approval is the one about
-                # to create it, so it wins.
+                # turns up, so a failed spawn leaves no folder behind.
+                #
+                # Two live approvals on one name is the case this can't
+                # resolve: whichever agent wins the name claim decides
+                # whose child the row is, and that is settled elsewhere.
+                # Rather than guess a parent, mark the name ambiguous and
+                # skip the fallback — the agent's own server still files
+                # the real winner on every current build, so only an old
+                # build loses the (optional) grouping.
+                held = self._pending_group_spawns.get(chosen_name)
+                spawner: Optional[str] = req.get("from", "")
+                if held is not None and held[1] != rid:
+                    spawner = None
                 self._pending_group_spawns[chosen_name] = (
-                    req.get("from", ""),
+                    spawner,
                     rid,
                     time.time(),
                 )
@@ -4865,7 +4891,8 @@ class MonitorApp(App):
         note = self._draft.cancel_note
         self._draft = None
         self._redraw_table()
-        self.notify(note)
+        # The hand-off's cancel note names the agent being retired.
+        self.notify(note, markup=False)
 
     def _commit_draft(self) -> None:
         draft = self._draft
@@ -4964,6 +4991,7 @@ class MonitorApp(App):
             self.notify(
                 f"'{target.name}' has no native session ID to hand off",
                 severity="error",
+                markup=False,
             )
             return
         if self._handoff_in_progress:
@@ -5013,6 +5041,7 @@ class MonitorApp(App):
             self.notify(
                 f"Could not generate handoff context for '{target.name}': {detail}",
                 severity="error",
+                markup=False,
             )
             return
 
@@ -5055,12 +5084,13 @@ class MonitorApp(App):
                 if retired is not None:
                     remove_retired_session_record(retired)
                 self.refresh_sessions()
-                self.notify(f"Handoff failed: {exc}", severity="error")
+                self.notify(f"Handoff failed: {exc}", severity="error", markup=False)
                 return None
 
             self.notify(
                 f"Retired '{target.name}' and spawned successor "
-                f"'{successor_name}' ({successor_runtime})"
+                f"'{successor_name}' ({successor_runtime})",
+                markup=False,
             )
             return session
 
@@ -5765,7 +5795,7 @@ class MonitorApp(App):
         new_state = auto_build_toggle(e.claude_uuid)
         label = "ON" if new_state else "OFF"
         self.notify(
-            f"Auto tree-build for [bold]{e.name}[/]: {label}",
+            f"Auto tree-build for [bold]{escape(e.name)}[/]: {label}",
         )
         self.refresh_sessions()
 

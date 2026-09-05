@@ -443,7 +443,11 @@ class MonitorSideFilingTests(unittest.TestCase):
         self.assertEqual(state.group_of("brave-mole"), state.group_of("swift-otter"))
         self.assertEqual(self.app._pending_group_spawns, {})
 
-    def test_two_approvals_on_one_name_file_the_later_spawner(self) -> None:
+    def test_two_approvals_on_one_name_file_nothing(self) -> None:
+        # Both requesters can be inside create_session before either row
+        # reaches the monitor, and the name claim — decided elsewhere —
+        # says whose child it is. Guessing a parent would file the row
+        # under the wrong agent, so the fallback sits this one out.
         self._decide(
             monitor.SpawnDecision(
                 accepted=True,
@@ -463,8 +467,9 @@ class MonitorSideFilingTests(unittest.TestCase):
         self._arrive("swift-otter", "quiet-fox", "brave-mole")
 
         state = groups.load(CWD)
-        self.assertEqual(state.group_of("brave-mole"), state.group_of("quiet-fox"))
-        self.assertIsNone(state.group_of("swift-otter"))
+        self.assertEqual(state.groups, {})
+        self.assertIsNone(state.group_of("brave-mole"))
+        self.assertEqual(self.app._pending_group_spawns, {})
 
     def test_the_monitor_and_the_agent_agree_rather_than_duplicating(self) -> None:
         # The monitor files the pair when the child turns up; the agent's
