@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 import time
 import uuid
 from pathlib import Path
 
 from .atomic_files import atomic_write_json
-from .paths import multiverse_dir
+from .paths import encode_cwd, multiverse_dir
 
 _STALE_CLAIM_SECONDS = 60.0
 PROMPT_CONSUMER_VERSION = 1
@@ -60,11 +59,13 @@ def has_prompt_consumer_capability(session_dir: Path) -> bool:
 
 
 def _encode_cwd(cwd: str) -> str:
+    """As :func:`paths.encode_cwd`, but resolved first — pi hands us the
+    path the user typed, which may be relative or contain ``~``."""
     try:
         cwd = str(Path(cwd).expanduser().resolve())
     except (OSError, RuntimeError):
         pass
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
+    return encode_cwd(cwd)
 
 
 def prompt_dir(cwd: str, agent_name: str) -> Path:

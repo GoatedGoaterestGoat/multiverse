@@ -32,7 +32,19 @@ precedence is:
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+
+def encode_cwd(cwd: str) -> str:
+    """A workspace path as one filename-safe segment.
+
+    Every per-workspace state directory under the multiverse root is keyed
+    by this — inbox queues, spawn requests, ask-agent forks, prompt queues,
+    group stores. They have to agree, so the rule lives here once rather
+    than as a copy per subsystem.
+    """
+    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def multiverse_dir() -> Path:

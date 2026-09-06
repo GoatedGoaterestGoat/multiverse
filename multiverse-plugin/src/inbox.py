@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 import time
 import uuid
@@ -28,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 
 from .atomic_files import atomic_write_json, exclusive_file_lock
-from .paths import multiverse_dir
+from .paths import encode_cwd as _encode_cwd, multiverse_dir
 
 
 MULTIVERSE_DIR = multiverse_dir()
@@ -39,10 +38,6 @@ INBOX_DIR = MULTIVERSE_DIR / "inbox"
 # itself takes milliseconds; see _readopt_stale_claims for why this is
 # age-based rather than pid-based.
 _STALE_CLAIM_SECONDS = 60.0
-
-
-def _encode_cwd(cwd: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9]", "-", cwd)
 
 
 def agent_inbox_dir(cwd: str, name: str) -> Path:

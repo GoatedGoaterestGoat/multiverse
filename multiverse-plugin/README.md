@@ -111,8 +111,8 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 
 | Key | Action |
 |:----|:-------|
-| `n` | New session — name and runtime prompt; choose Claude, Codex, or pi. Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
-| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then opens the normal New session name/runtime widget and starts the chosen successor with that report. |
+| `n` | New agent, drafted in place — a placeholder row appears in the folder the cursor is in, with a suggested name selected for typing over. `⇥` cycles the runtime (Claude/Codex/pi), `⏎` creates it, `esc` discards it (nothing was started). Claude starts in auto permission mode; Codex starts with automatic approval review; pi uses its native permission behavior. |
+| `h` | Hand off the highlighted dormant agent. Generates a concise context report through the same tool-less native fork used by `ask_agent`, then opens a widget showing that report, with the successor's name defaulting to the next generation of the lineage (`Quasar` → `Quasar II`), and starts the successor with the report as its first message. |
 | `R` | Resume — pick from runtime sessions in the workspace (sessions already wrapped by a live/ended multiverse session are hidden). Uses the same runtime-specific permission default as a new session. |
 | `c` | Compact the highlighted session (only allowed while it's `idle` / `ended` / `retired` / `dormant`) — see "Frontier-coherent compaction" below. On a row whose compaction you detached with `d`, re-opens that screen instead |
 | `v` | Visualize the highlighted session as a navigable HTML forest view — chain-walked turns with cached trees show frontier highlighting against the live JSONL; uncached turns show as a flat leaf listing. Output is `/tmp/multiverse-viz-<uuid>.html`, auto-opened via `open` / `xdg-open` when available. |
@@ -122,12 +122,107 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `x` | Restore a lost session from an orphan full JSONL — one whose live counterpart Claude Code has reaped (`cleanupPeriodDays`) but whose mirror survived. Picks from orphans in this workspace and feeds the choice through the normal compaction flow, rendering a fresh live JSONL at the chosen budget. |
 | `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
-| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. Refused while the row is `compacting` |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
+| `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder, keeping the agents (an empty folder goes without a prompt). Refused while the row is `compacting` |
+| `→` | On an agent: wrap it in a new folder, with the name live for editing in the row (`esc` aborts and puts everything back). On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
+| `←` | On an open folder: close it. On a closed one: jump to its parent (a closed top-level folder has nowhere to go, so nothing happens). On an agent (or a selection): lift it one level out of its folder |
+| `shift`+`↑`/`↓` | Extend a selection. The folder keys then act on the whole range; any plain cursor move ends it |
+| `m` | Move the highlighted row (or the selection). Walk the folder tree in place — `↑↓` pick, `→` step in, `←` step out, `⏎` drop, `esc` cancel — with the header line showing what's moving and where |
+| `e` | Rename the folder under the cursor, in the row itself (works from a member row too) |
+| `g` | New folder, always: on an agent (or a selection) it's `→`'s wrap; on a folder header — where `→` means "open this" — it makes an empty subfolder inside it, named in the row like any other |
+| `u` | Lift one level out, without `←`'s close-the-folder-first behaviour |
+| `space` | Fold/unfold. On a member row it folds the folder around it and rides the cursor up to the header |
+| `z` | Fold every folder — or unfold them all if they're already folded |
 | `r` | Manual refresh |
 | `q` | Quit the monitor — sessions keep running in tmux |
 
 **Detach** from an attached session with the normal tmux prefix: `Ctrl-b d`.
+
+#### Folders
+
+A busy workspace turns the dashboard into a wall of names. Folders give it a
+shape: a folder holds agents and other folders, it folds away, and it survives
+monitor restarts. Nesting is drawn with tree connectors, and top-level rows stay
+flush left — a workspace with no folders looks exactly like it always did.
+
+```
+▼ merge-review (3)    📩 3   1 waiting  551,127
+├─ ▶ runtime-work (2) 📩 1   2 working  139,124  swift-otter, brave-mole
+└─ merge-captain      📩 2   waiting    412,003  Review the pi runtime diff…
+quiet-fox                    idle         4,310  Investigate flaky attach test
+```
+
+A folded folder answers, on its own line, what its hidden rows would have: it
+rolls up the pending-inbox count, the status that most wants attention, the
+token total, the freshest timestamp, and the names inside.
+
+**No windows.** Folders are handled the way a file manager handles them —
+in the list itself, with the arrow keys:
+
+* `→` on an agent wraps it in a new folder and leaves the name selected in
+  the row, so you type over it and press `⏎`. `esc` aborts the whole thing:
+  the folder goes away and everything it swept up goes back where it came
+  from, even if the selection spanned several folders. `e` reopens the same
+  in-row editor on any folder later.
+* `shift`+`↑`/`↓` grows a selection; `→` then puts the whole range in one
+  folder and `←` lifts it back out. Selecting a folder *and* something
+  inside it moves the folder once — the contents come along rather than
+  being yanked out separately.
+* `m` picks a destination by walking the tree that's already on screen:
+  `→` steps into the highlighted folder, `←` steps back out, `⏎` drops.
+  The rows being moved stay visible and marked the whole time, and the
+  header line reads `⇢ moving 'swift-otter' → backend/auth-work`.
+* `g` is the one that makes a folder out of nothing — an empty one, or a
+  subfolder inside the folder you are looking at, since `→` on a folder
+  header means "open this" instead.
+
+`n` works the same way — it makes an agent where you are, the way you'd
+make a file in the folder you have open:
+
+```
+▼ backend (2)
+├─ quiet-fox        claude   dormant
+└─ Quasar        —  claude   new       ⇥ runtime · ⏎ create · esc cancel
+```
+
+The row is only a placeholder. A session can't be created and renamed
+afterwards the way a folder can — the name is baked in at spawn (custom
+title, tmux env, inbox routing, name claims) — so nothing is started until
+`⏎`, and `esc` costs nothing.
+
+Folders and new agents need no dialogs at all now. What still gets one is
+what you have to *read* before answering: an agent asking to spawn a
+subagent, a hand-off's report, and the confirmation for removing a folder
+that still has something in it — a folded folder hides how much is about
+to be tipped back out.
+
+**Folders form themselves.** When an agent uses `spawn_agent`, the new agent is
+filed next to whoever spawned it: into the spawner's folder if it has one, and
+otherwise into a new folder named after the spawner, which both of them move
+into. So a delegation lineage becomes a folder the first time it branches,
+without anyone having to anticipate it.
+
+The filing happens in two places on purpose. The spawning agent's MCP server
+does it, and so does the monitor — on the refresh that first sees the new
+agent's row, not when it approves the request, because approving is not
+creating and a spawn that fails should leave no folder behind. The server is
+whatever plugin build that *agent* started with, so an agent that has been
+running since before folders existed would never file its children; the monitor
+is the process you actually restart. The two agree rather than duplicating —
+whichever gets there first puts the spawner in a folder, and the other joins
+it. Everything it does is undoable by hand
+(`e` rename, `m` move, `u` lift out, `k` remove the folder), and removing a
+folder never touches a session — it only undoes the grouping.
+
+Membership is keyed by agent *name*, which is the identifier that survives a
+resume, a compaction, and a context fold — so agents stay in their folder
+across all three, and a `(folded …)` ghost row files itself next to the live
+agent it came from. Deleting a dormant session's transcript (`k`) drops its
+membership with it, because the name goes straight back into the pool and the
+next agent to draw it is a different agent. State lives in `~/.multiverse/groups/<encoded-cwd>.json`,
+per workspace, written under a lock so two monitors on one workspace don't
+clobber each other. `list_agents` shows each agent's folder in brackets, so
+agents can see who they're teamed with.
 
 The monitor attaches through a local PTY relay that answers tmux's DA1, DA2, and
 XTVERSION capability probes before they reach the outer terminal. This prevents
@@ -220,7 +315,7 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 
 **TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
 
-**TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, the ordinary New session widget opens with its usual random name and Claude/Codex/pi selector. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
+**TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, a handoff widget opens showing the report in full — it becomes the successor's entire inherited memory, so it is reviewable before anything is retired — alongside a name field and a Claude/Codex/pi selector defaulting to the predecessor's runtime. The name defaults to the next generation of the same lineage: `Quasar` hands off to `Quasar II`, which hands off to `Quasar III`, skipping any generation the workspace is still using. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. The successor is filed into the predecessor's folder, so a lineage stays together the way a spawn does. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
 
 When to pick which:
 
@@ -350,6 +445,12 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │   └── <message-id>.json.claim-<id>   — staged during delivery; deleted on
 │                     commit, renamed back on an explicit release, and
 │                     re-adopted after 60s if the deliverer died
+├── groups/
+│   ├── <encoded-cwd>.json      — dashboard folders for one workspace: the
+│   │                             folder tree plus agent-name → folder map
+│   └── <encoded-cwd>.lock      — flock target; every mutation is a locked
+│                                 read-modify-write so two monitors on the
+│                                 same workspace can't clobber each other
 ├── spawn_requests/
 │   ├── <req-id>.json           — agent-initiated subagent spawn request
 │   └── <req-id>.resolved.json  — user's decision (O_EXCL-atomic so racing
@@ -657,6 +758,10 @@ multiverse-plugin/
 │   ├── sessions.py             # Session data layer + status writer (flock'd,
 │   │                           #  terminal `ended`) + runtime launch
 │   ├── inbox.py                # Inter-agent inbox: claim / commit / release
+│   ├── groups.py               # Dashboard folders: per-workspace group store
+│   │                           #  (locked read-modify-write), name-keyed
+│   │                           #  membership, auto-grouping on spawn, batch
+│   │                           #  wrap/move/lift, tree layout + connectors
 │   ├── ask_agents.py           # Forked side-question machinery, per runtime
 │   ├── forks.py                # Registry of in-flight ask-fork UUIDs
 │   ├── spawn_requests.py       # Filesystem protocol for spawn_agent
