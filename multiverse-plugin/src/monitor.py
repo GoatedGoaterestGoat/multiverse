@@ -61,6 +61,7 @@ from .full_jsonl import (
     minimum_compacted_tokens,
     structural_tokens,
     structural_tokens_cached,
+    total_token_count_cached,
     sync_full,
     total_token_count,
     total_turn_count,
@@ -97,7 +98,9 @@ from .sessions import (
     wrapped_runtime_session_ids,
 )
 from .spawn_requests import (
+    clear_outcome,
     list_pending_requests,
+    read_outcome,
     read_resolution,
     request_path,
     write_resolution,
@@ -3653,6 +3656,7 @@ class MonitorApp(App):
         # Cleared and refilled by each _redraw_table pass.
         self._inbox_cache: dict[tuple[str, str], int] = {}
         self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
+        self._total_cache: dict[tuple[str, str], Optional[int]] = {}
         # chosen name → (spawner name, request id, approved at), for
         # spawns approved but not yet created. A ``None`` spawner marks a
         # name two approvals are racing for, which the monitor cannot
@@ -3670,7 +3674,7 @@ class MonitorApp(App):
         # left edge of the dashboard, where a tree reads.
         table.add_columns(
             "Name", "ID", "Runtime", "Inbox", "Build", "Status", "Tokens",
-            "Updated", "Preview",
+            "Total", "Updated", "Preview",
         )
         yield table
         yield Footer()
@@ -3739,13 +3743,16 @@ class MonitorApp(App):
         row for a name with no session — behind whenever create_session
         fails or the requesting agent dies before running it.
 
-        The window is deliberately short. An approval that never becomes a
-        session is dropped once its request is gone (plus a grace period
-        for the row to appear), and in any case after
-        ``_SPAWN_FILING_TTL``: the name returns to the pool when the
-        request does, and without the expiry an unrelated agent that later
-        draws that name would be filed under a spawner it has nothing to
-        do with.
+        The requesting tool says which happened, in an outcome record
+        keyed by request id, and that is the authority: a failure ends the
+        pending filing on the spot, and a success names the agent that was
+        actually created — which is the name the *user* typed into the
+        approval widget, not the one the requesting agent proposed.
+
+        An agent on a build too old to write outcomes falls back to
+        watching for the row, which is why the expiry below still exists:
+        without it an unrelated agent that later drew a freed name would
+        be filed under a spawner it has nothing to do with.
         """
         if not self._pending_group_spawns:
             return
@@ -3754,11 +3761,24 @@ class MonitorApp(App):
         for name, (spawner, rid, approved_at) in list(
             self._pending_group_spawns.items()
         ):
+            outcome = read_outcome(rid) if rid else None
+            if outcome is not None:
+                self._pending_group_spawns.pop(name, None)
+                clear_outcome(rid)
+                if not outcome.get("created") or not spawner:
+                    continue
+                created = (outcome.get("name") or name).strip()
+                try:
+                    groups.auto_group_spawn(self.monitor_cwd, spawner, created)
+                except (OSError, ValueError):
+                    pass  # the session exists; filing it is a nicety
+                continue
+
             waited = now - approved_at
-            # The requesting agent removes its request file in a
-            # ``finally``, so a missing file means it is done either way —
-            # but the row it just created can take a tick or two to show
-            # up, hence the grace period before believing it.
+            # No outcome to go on. The requesting agent removes its request
+            # file in a ``finally``, so a missing file means it is done
+            # either way — but the row it just created can take a tick or
+            # two to show up, hence the grace period before believing it.
             gone = bool(rid) and not request_path(rid).is_file()
             if waited > _SPAWN_FILING_TTL or (
                 gone and waited > _SPAWN_FILING_GRACE
@@ -4006,6 +4026,33 @@ class MonitorApp(App):
             self._tokens_cache[key] = self._agent_tokens(e)
         return self._tokens_cache[key]
 
+    def _total_of(self, e: DashboardRow) -> Optional[int]:
+        """``_agent_total`` for one agent, once per redraw."""
+        key = (e.cwd, e.name)
+        if key not in self._total_cache:
+            self._total_cache[key] = self._agent_total(e)
+        return self._total_cache[key]
+
+    def _agent_total(self, e: DashboardRow) -> Optional[int]:
+        """Uncompacted lifetime tokens for one agent, or None if unknown.
+
+        Distinct from ``_agent_tokens``, which reports the CURRENT context
+        size (what /context shows, and what shrinks when you compact).
+        This is every token the session has ever accumulated, read from
+        the full jsonl mirror — so it only grows, and compaction doesn't
+        move it. The pair answers "how big is the context" and "how much
+        history is behind it", which is the question compaction is
+        weighing up.
+
+        Claude only for now: the mirror is claude-specific (keyed by
+        claude_uuid, written by our mirror hook). Codex is Ed's to fill
+        in; pi has no equivalent yet. Both show "-" rather than 0, so an
+        unmeasured runtime never reads as an empty session.
+        """
+        if e.runtime != RUNTIME_CLAUDE or not e.claude_uuid:
+            return None
+        return total_token_count_cached(e.claude_uuid, e.cwd) or None
+
     def _agent_tokens(self, e: DashboardRow) -> Optional[int]:
         """Token total shown for one agent, or ``None`` when unmeasurable.
 
@@ -4052,6 +4099,8 @@ class MonitorApp(App):
             build_cell = "[dim]off[/]"
         tokens = self._tokens_of(e)
         tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
+        total = self._total_of(e)
+        total_cell = f"[dim]{total:,}[/]" if total is not None else "[dim]-[/]"
         # Both are text the user or the transcript produced — the draft
         # row accepts any name, and a preview is whatever the agent last
         # said — so neither goes into a cell as markup.
@@ -4066,7 +4115,7 @@ class MonitorApp(App):
         name_cell = f"[dim]{row.prefix}[/]{label}" if row.prefix else label
         return (
             name_cell, id_cell, e.runtime, inbox_cell, build_cell,
-            status_cell, tokens_cell, updated, preview,
+            status_cell, tokens_cell, total_cell, updated, preview,
         )
 
     def _group_cells(self, row: groups.DisplayRow, now: float) -> tuple:
@@ -4113,6 +4162,10 @@ class MonitorApp(App):
             t for t in (self._tokens_of(a) for a in agents) if t is not None
         )
         tokens_cell = f"[dim]{token_total:,}[/]" if token_total else "[dim]-[/]"
+        grand_total = sum(
+            t for t in (self._total_of(a) for a in agents) if t is not None
+        )
+        total_cell = f"[dim]{grand_total:,}[/]" if grand_total else "[dim]-[/]"
 
         latest = max((a.status_ts or 0 for a in agents), default=0)
         updated = _ago(now - latest) if latest else "-"
@@ -4131,7 +4184,7 @@ class MonitorApp(App):
 
         return (
             name_cell, "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
-            status_cell, tokens_cell, updated, preview_cell,
+            status_cell, tokens_cell, total_cell, updated, preview_cell,
         )
 
     def _redraw_table(self) -> None:
@@ -4146,6 +4199,7 @@ class MonitorApp(App):
         # typing a folder name redraws on every keystroke.
         self._inbox_cache.clear()
         self._tokens_cache.clear()
+        self._total_cache.clear()
         self.display_rows = groups.build_display_rows(
             self.entries,
             self.group_state,
@@ -5092,6 +5146,7 @@ class MonitorApp(App):
             "[dim]·[/]",
             "[dim]-[/]",
             "[b green]new[/]",
+            "[dim]-[/]",
             "[dim]-[/]",
             "-",
             "[dim]⇥ runtime · ⏎ create · esc cancel[/]",

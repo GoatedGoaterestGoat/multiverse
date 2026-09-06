@@ -256,6 +256,36 @@ def total_turn_count(claude_uuid: str, cwd: str) -> int:
     return len(_parse_full(claude_uuid, cwd))
 
 
+_FULL_TOTAL_CACHE: dict[str, tuple[float, int]] = {}
+
+
+def total_token_count_cached(claude_uuid: str, cwd: str) -> int:
+    """mtime-cached ``total_token_count``, keyed on the FULL jsonl.
+
+    The dashboard redraws every second and this parses a file that runs
+    to megabytes on a long session, so an uncached call would dominate
+    the tick. Keyed on the full jsonl's mtime rather than the live one:
+    the number is a property of the mirror, and compaction rewrites live
+    without changing full, so a live-keyed cache would recompute for a
+    value that hadn't moved.
+
+    Returns 0 when the mirror doesn't exist yet — a session that has
+    never had a mirror pass has no uncompacted history to report.
+    """
+    full = full_jsonl_path(claude_uuid)
+    try:
+        mtime = full.stat().st_mtime
+    except OSError:
+        return 0
+    key = str(full)
+    cached = _FULL_TOTAL_CACHE.get(key)
+    if cached and cached[0] == mtime:
+        return cached[1]
+    result = total_token_count(claude_uuid, cwd)
+    _FULL_TOTAL_CACHE[key] = (mtime, result)
+    return result
+
+
 def live_stats(claude_uuid: str, cwd: str) -> tuple[int, int]:
     """Return ``(total_tokens, total_turns)`` for the LIVE jsonl — what
     the live agent currently sees on resume. Reflects any compaction

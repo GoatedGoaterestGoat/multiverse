@@ -23,7 +23,9 @@ from src import monitor
 
 CWD = "/workspace/project"
 
-NAME, ID, RUNTIME, INBOX, BUILD, STATUS, TOKENS, UPDATED, PREVIEW = range(9)
+NAME, ID, RUNTIME, INBOX, BUILD, STATUS, TOKENS, TOTAL, UPDATED, PREVIEW = (
+    range(10)
+)
 
 
 def _row(name: str, status: str = "idle") -> monitor.DashboardRow:
