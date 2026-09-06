@@ -4231,11 +4231,6 @@ class MonitorApp(App):
         table = self.query_one(DataTable)
         prev_key = self._cursor_row_key()
         prev_cursor = table.cursor_row
-        table.clear()
-        # DataTable retains auto-width measurements across clear(). Reset
-        # this column so it also shrinks when descriptions change or vanish.
-        description_column = table.columns["description"]
-        description_column.content_width = description_column.label.cell_len
         now = time.time()
         # One pass, one answer per agent: a folder header rolls up every
         # agent beneath it at any depth, so without this an agent nested
@@ -4251,6 +4246,18 @@ class MonitorApp(App):
                 self._draft.group_id if self._draft is not None else groups.NO_DRAFT
             ),
         )
+        # DataTable retains widths across clear() and remeasures on idle.
+        # Seed the FINAL visible width before adding rows: resetting to the
+        # header width can paint a narrow frame during ending -> dormant.
+        # Measuring afresh still allows shrinkage after edits or folding.
+        description_width = len("Description")
+        for row in self.display_rows:
+            if row.entry is not None:
+                description_width = max(
+                    description_width, Text(row.entry.description or "None").cell_len,
+                )
+        table.clear()
+        table.columns["description"].content_width = description_width
         # Drop selected keys whose rows are gone (killed, or folded away).
         if self._selection:
             live = {r.key for r in self.display_rows}

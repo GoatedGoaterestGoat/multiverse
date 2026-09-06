@@ -284,6 +284,52 @@ class DescriptionLifecycleTests(DescriptionFixture, unittest.TestCase):
 
 
 class DescriptionDashboardTests(DescriptionFixture, unittest.IsolatedAsyncioTestCase):
+    async def test_ending_to_dormant_keeps_full_width_before_textual_idle(self) -> None:
+        description = "Codex integration; MCP tools; dashboard features."
+        wrapper = monitor.Session(
+            id="test-wrapper", name="agent", cwd=self.cwd, created_at=1,
+            status="ending", runtime="codex",
+        )
+        row = monitor.DashboardRow(
+            name="agent", cwd=self.cwd, status="ending", status_ts=1,
+            runtime="codex", session=wrapper, session_id="test-thread",
+            description=description,
+        )
+        app = monitor.MonitorApp([])
+        app.monitor_cwd = self.cwd
+
+        def refresh():
+            app.entries = [row]
+            app._redraw_table()
+
+        with (
+            patch.object(monitor, "STATE_DIR", self.state / "sessions"),
+            patch.object(monitor, "pending_inbox_count", return_value=0),
+            patch.object(app, "_tokens_of", return_value=None),
+            patch.object(app, "_total_of", return_value=None),
+            patch.object(app, "refresh_sessions", side_effect=refresh),
+            patch.object(app, "_recover_ending_sessions"),
+        ):
+            async with app.run_test(size=(240, 16)) as pilot:
+                table = app.query_one(DataTable)
+                column = table.columns["description"]
+                self.assertEqual(column.content_width, len(description))
+                self.assertEqual(app.display_rows[0].key, "mv:test-wrapper")
+                row = monitor.DashboardRow(
+                    name="agent", cwd=self.cwd, status="dormant", status_ts=2,
+                    runtime="codex", session_id="test-thread", description=description,
+                )
+                app._finish_session_kill("Session stopped", None)
+                self.assertEqual(app.display_rows[0].key, "co:test-thread")
+                # Assert BEFORE yielding to Textual: waiting for idle would
+                # hide the one-frame header-width regression (49 -> 11 -> 49).
+                self.assertEqual(column.content_width, len(description))
+                self.assertEqual(table.get_row_at(0)[1].plain, description)
+                self.assertIn(description, table.render_line(1).text)
+                await pilot.pause()
+                self.assertEqual(column.content_width, len(description))
+                self.assertIn(description, table.render_line(1).text)
+
     async def test_description_column_fits_current_longest_row_without_truncation(self) -> None:
         row = monitor.DashboardRow(name="agent", cwd=self.cwd, status="idle", status_ts=1,
                                    session_id="thread-agent",
@@ -330,11 +376,13 @@ class DescriptionDashboardTests(DescriptionFixture, unittest.IsolatedAsyncioTest
                 # the historical width retained by DataTable.clear().
                 row.description = None
                 refresh()
+                self.assertEqual(column.content_width, len(other.description))
                 await pilot.pause()
                 self.assertEqual(column.content_width, len(other.description))
                 self.assertEqual(table.get_row_at(0)[1].plain, "None")
                 entries.remove(other)
                 refresh()
+                self.assertEqual(column.content_width, len("Description"))
                 await pilot.pause()
                 self.assertEqual(column.content_width, len("Description"))
                 # Grow and shrink again; wide characters need more terminal
@@ -342,11 +390,29 @@ class DescriptionDashboardTests(DescriptionFixture, unittest.IsolatedAsyncioTest
                 for description in ("x" * 60, "界" * 60, "MCP tools", None):
                     row.description = description
                     refresh()
+                    expected_width = max(len("Description"), Text(description or "None").cell_len)
+                    self.assertEqual(column.content_width, expected_width)
                     await pilot.pause()
                     cell = table.get_row_at(0)[1]
                     self.assertEqual(cell.plain, description or "None")
                     self.assertEqual(column.content_width, max(len("Description"), cell.cell_len))
                     self.assertEqual(next(iter(table.rows.values())).height, 1)
+                # Hidden members must not hold the column open. Folding
+                # and unfolding should use the right width on the first frame.
+                folder = groups.Group(id="folder", name="Work")
+                app.group_state = groups.GroupState(
+                    groups={folder.id: folder}, members={row.name: folder.id},
+                )
+                row.description = "界" * 45
+                for collapsed, expected_width in ((False, 90), (True, 11), (False, 90)):
+                    folder.collapsed = collapsed
+                    refresh()
+                    self.assertEqual(column.content_width, expected_width)
+                    await pilot.pause()
+                    self.assertEqual(column.content_width, expected_width)
+                entries.clear()
+                refresh()
+                self.assertEqual(column.content_width, len("Description"))
 
 
 if __name__ == "__main__":
