@@ -16,7 +16,7 @@ when testing outside the monitor.
 
 | | |
 |---|---|
-| **Tools** | `list_agents`, `message_agent`, `ask_agent`, `check_inbox`, `monitor_inbox`, `spawn_agent` — the same six every other runtime exposes, with the same semantics |
+| **Tools** | `list_agents`, `set_description`, `message_agent`, `ask_agent`, `check_inbox`, `monitor_inbox`, `spawn_agent` — the same seven every other runtime exposes, with the same semantics |
 | **Status** | Writes `status.json` from pi's lifecycle events, so pi sessions appear in the monitor dashboard alongside Claude and Codex ones |
 | **Session id** | Records pi's native session id so the monitor can resume it |
 | **Inbox** | Delivers inter-agent messages into the conversation, including into a session that is idle at the prompt |

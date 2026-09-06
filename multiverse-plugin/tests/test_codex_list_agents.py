@@ -111,8 +111,9 @@ class MixedRuntimeListAgentsTests(unittest.TestCase):
             result,
             "2 agent(s) in workspace (2 live)\n"
             "\n"
-            "- alpha  idle  ← this is you\n"
-            "- beta   working",
+            "  Name   Status   Description\n"
+            "- alpha  idle     None  ← this is you\n"
+            "- beta   working  None",
         )
 
     def test_codex_caller_sees_claude_agent_without_runtime_column(self) -> None:
@@ -122,8 +123,9 @@ class MixedRuntimeListAgentsTests(unittest.TestCase):
             result,
             "2 agent(s) in workspace (2 live)\n"
             "\n"
-            "- beta   working  ← this is you\n"
-            "- alpha  idle",
+            "  Name   Status   Description\n"
+            "- beta   working  None  ← this is you\n"
+            "- alpha  idle     None",
         )
 
     def test_cross_workspace_listing_suppresses_self_marker_and_runtime(self) -> None:
@@ -157,7 +159,8 @@ class MixedRuntimeListAgentsTests(unittest.TestCase):
         self.assertEqual(
             result,
             f"1 agent(s) in workspace '{other}' (0 live)\n\n"
-            "- remote  dormant",
+            "  Name    Status   Description\n"
+            "- remote  dormant  None",
         )
 
 

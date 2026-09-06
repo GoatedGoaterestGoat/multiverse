@@ -238,7 +238,7 @@ approval requests through Codex's automatic reviewer using its `workspace-write`
 sandbox. Codex rejects combining that preset with `--sandbox danger-full-access`, so
 Multiverse does not pass the former full-access sandbox flag. pi sessions use pi's native behavior and extension API; Multiverse does not add a permission gate.
 
-**Dashboard columns**: `Name · ID · Runtime · Inbox · Build · Status · Tokens · Total · Updated · Preview`. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages — press `i` to peek at them without consuming them. For Claude sessions, the Build column shows `on` (green) / `off` for the per-session auto tree-build toggle; Codex and pi show `-` because they use native compaction. The Preview column shows the first user message from each session's transcript.
+**Dashboard columns**: `Name · Description · ID · Runtime · Inbox · Build · Status · Tokens · Total · Updated · Preview`. Description shows the agent's self-maintained work/role label, or `None` when unset. It occupies 40 terminal cells beside Name, never wraps, and ellipsizes longer or wide-Unicode labels; `list_agents` returns the full description. The Inbox column shows `📩 N` when an agent has pending `message_agent` messages — press `i` to peek at them without consuming them. For Claude sessions, the Build column shows `on` (green) / `off` for the per-session auto tree-build toggle; Codex and pi show `-` because they use native compaction. The Preview column shows the first user message from each session's transcript.
 
 **Tokens** shows current context size, which can shrink after compaction. Claude uses the latest real API input usage (including cache reads/writes), falling back to live transcript tokens plus structural overhead. Codex reads `last_token_usage.total_tokens` from its latest native rollout `event_msg/token_count` usage snapshot — the same context-size source its TUI uses, including native post-compaction estimates.
 
@@ -255,6 +255,14 @@ The scroll wheel works natively inside attached sessions — the monitor sets pe
 Several MCP tools are available to any agent running under the wrapper. They default to your own workspace, but `list_agents`, `ask_agent`, and `message_agent` all accept a `working_directory` argument to reach agents in other workspaces.
 
 **`list_agents(max_agents=15)`** — discover other agents in this workspace. Returns named agents (live, ended, retired, dormant) sorted by status priority. Your own entry is marked with `← this is you`. Long lists are truncated; pass a larger `max_agents` if you need the full roster. A retired agent is permanently stopped after a handoff; failed delivery tells the caller which saved successor to message instead.
+
+The list includes a **Description** column containing each agent's full short description or the literal `None`. It does not expose runtime.
+
+**`set_description(description)`** — set only your own very short, concise description. Summarize responsibilities, completed tasks, ongoing implementations, or expertise so other agents and the user can tell at first glance what to delegate to you. The hard limit is **60 Unicode characters**, including spaces and punctuation. Newlines and control characters are rejected. An over-limit call returns an explicit error with the measured length and limit, without changing the previous value. Use the tool at your discretion when ready, and update it as your work changes; an empty string clears it.
+
+Descriptions are stored atomically under `~/.multiverse/agent_descriptions/`, scoped by canonical workspace path and agent name. They survive stop/resume and compaction; new agents, including handoff successors and newly created agents reusing a deleted name, start without one.
+
+**Tool-result reminders** are appended to every agent-facing Multiverse inter-agent tool result while a condition applies, including results reporting errors. An agent without a description is reminded to use `set_description` when ready. A successful update stops that reminder immediately; clearing the description restores it. This applies to the shared Claude/Codex MCP server and the pi tool bridge, not internal lifecycle commands or SecondBrain responses. Existing MCP processes/extensions need a restart/reload to pick up the new tool and result wrapper.
 
 **`message_agent(target_name, message, working_directory="")`** — send a durable message. Use this for instructions, in-depth questions, or anything where the recipient should be able to use tools to respond.
 

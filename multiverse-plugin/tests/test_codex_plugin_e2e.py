@@ -172,6 +172,14 @@ async def run_wrapped_client() -> None:
                     },
                 )
             )
+            results["set_description"] = result_text(
+                await session.call_tool("set_description", {
+                    "description": "Codex MCP integration tests",
+                })
+            )
+            results["check_after_description"] = result_text(
+                await session.call_tool("check_inbox", {})
+            )
     Path(os.environ["E2E_RESULT_PATH"]).write_text(json.dumps(results))
 
 
@@ -183,7 +191,7 @@ else:
 
 
 class WrappedCodexPluginEndToEndTests(unittest.TestCase):
-    def test_wrapped_codex_loads_plugin_and_calls_all_six_tools(self) -> None:
+    def test_wrapped_codex_loads_plugin_and_calls_all_seven_tools(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         wrapper_root = repo_root / "multiverse-plugin"
         codex_plugin_root = repo_root / "plugins" / "multiverse-codex"
@@ -363,6 +371,7 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
                     "list_agents",
                     "message_agent",
                     "monitor_inbox",
+                    "set_description",
                     "spawn_agent",
                 ],
             )
@@ -375,11 +384,20 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
                 "prompted Codex to call check_inbox on startup",
                 results["message_agent"],
             )
-            self.assertEqual(results["ask_agent"], "Wrapped Codex answer")
             self.assertEqual(
-                results["spawn_agent"],
+                results["ask_agent"].split("\n\n[Multiverse reminder]", 1)[0],
+                "Wrapped Codex answer",
+            )
+            self.assertIn("[Multiverse reminder]", results["ask_agent"])
+            self.assertEqual(
+                results["spawn_agent"].split("\n\n[Multiverse reminder]", 1)[0],
                 "Spawned agent with name 'e2e-child' in folder 'codex-caller'.",
             )
+            self.assertIn("[Multiverse reminder]", results["spawn_agent"])
+            self.assertEqual(results["set_description"],
+                             "Your agent description is now: Codex MCP integration tests")
+            self.assertEqual(results["check_after_description"],
+                             "You have no pending inbox messages.")
             # The folder is really on disk, written by the plugin running
             # inside the wrapped session — the only end-to-end proof that a
             # spawned agent is filed with its spawner.

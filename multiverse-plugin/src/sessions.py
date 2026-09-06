@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 from . import forks
 from .atomic_files import atomic_write_json, exclusive_file_lock
+from .agent_descriptions import read_description, write_description
 from .compact_state import list_locked
 from .paths import (
     claude_projects_dir,
@@ -619,6 +620,7 @@ class DashboardRow:
     # out of the inter-agent registry (list_agents/message_agent/ask_agent).
     is_ghost: bool = False
     folded_at: Optional[float] = None
+    description: Optional[str] = None
 
     @property
     def is_dormant(self) -> bool:
@@ -1398,6 +1400,10 @@ def build_dashboard_rows(
             if r.claude_uuid and r.claude_uuid in locked:
                 r.status = "compacting"
 
+    for row in rows:
+        if not row.is_ghost:
+            row.description = read_description(row.cwd, row.name, root=STATE_DIR.parent)
+
     # Sort: non-ghosts first by status then recency, ghosts always last
     # (regardless of how recent the underlying fold was — they're stale
     # forks the user shouldn't have to scroll past).
@@ -1850,6 +1856,12 @@ def create_session(
             meta["superseded_uuids"] = ancestors
 
     try:
+        # A new agent never inherits the description of a previously deleted
+        # agent with the same name. Resumes keep the logical agent's profile.
+        # Do this before launching the runtime, which may set its description
+        # as soon as it starts. The name claim above excludes competing spawns.
+        if name and not resumed_from and not resume_uuid:
+            write_description(cwd_abs, name, "", root=STATE_DIR.parent)
         atomic_write_json(d / "meta.json", meta)
         write_status_path(d / "status.json", "starting", now)
     except Exception:

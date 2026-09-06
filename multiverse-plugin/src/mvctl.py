@@ -49,11 +49,30 @@ def _identity(args) -> tuple[str, str]:
 # Agent-facing commands
 # ---------------------------------------------------------------------------
 
+_AGENT_COMMANDS = frozenset({
+    "list-agents", "set-description", "message", "ask", "spawn",
+    "check-inbox", "monitor-inbox",
+})
+
+
+def _emit_agent_result(text: str, as_json: bool) -> int:
+    from src.server import _resolve_self_identity
+    from src.reminders import append_reminders
+
+    name, cwd = _resolve_self_identity()
+    return _emit(append_reminders(text, name, cwd), as_json)
+
+
+def cmd_set_description(args) -> int:
+    from src.server import set_description
+
+    return _emit_agent_result(set_description(args.description), args.json)
+
 
 def cmd_list_agents(args) -> int:
     from src.server import list_agents
 
-    return _emit(
+    return _emit_agent_result(
         list_agents(max_agents=args.max, working_directory=args.cwd or ""),
         args.json,
     )
@@ -62,7 +81,7 @@ def cmd_list_agents(args) -> int:
 def cmd_message(args) -> int:
     from src.server import message_agent
 
-    return _emit(
+    return _emit_agent_result(
         message_agent(
             target_name=args.to,
             message=args.body if args.body is not None else sys.stdin.read(),
@@ -75,13 +94,13 @@ def cmd_message(args) -> int:
 def cmd_check_inbox(args) -> int:
     from src.server import check_inbox
 
-    return _emit(check_inbox(), args.json)
+    return _emit_agent_result(check_inbox(), args.json)
 
 
 def cmd_monitor_inbox(args) -> int:
     from src.server import monitor_inbox
 
-    return _emit(
+    return _emit_agent_result(
         asyncio.run(monitor_inbox(timeout_seconds=args.timeout)),
         args.json,
     )
@@ -90,7 +109,7 @@ def cmd_monitor_inbox(args) -> int:
 def cmd_ask(args) -> int:
     from src.server import ask_agent
 
-    return _emit(
+    return _emit_agent_result(
         ask_agent(
             target_name=args.to,
             question=args.question if args.question is not None else sys.stdin.read(),
@@ -112,7 +131,7 @@ def cmd_spawn(args) -> int:
             name=args.name or "",
         )
     )
-    return _emit(text, args.json)
+    return _emit_agent_result(text, args.json)
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +358,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
+    p = sub.add_parser("set-description")
+    p.set_defaults(fn=cmd_set_description)
+    p.add_argument("--description", required=True)
+
     p = sub.add_parser("list-agents")
     p.set_defaults(fn=cmd_list_agents)
     p.add_argument("--max", type=int, default=15)
@@ -429,6 +452,8 @@ def main(argv: list[str] | None = None) -> int:
         return args.fn(args)
     except Exception as exc:  # caller converts stderr/non-zero into a tool result
         print(f"mvctl {args.cmd}: {exc}", file=sys.stderr)
+        if args.cmd in _AGENT_COMMANDS:
+            return _emit_agent_result(f"Error: {exc}", args.json)
         if args.json:
             json.dump({"ok": False, "text": str(exc)}, sys.stdout)
             sys.stdout.write("\n")

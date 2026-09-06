@@ -2,6 +2,7 @@
 
 Hosts the agent-facing tools for the multiverse plugin:
   - list_agents                   — discover other agents in workspace
+  - set_description               — set your own concise responsibility label
   - message_agent                 — send a persistent message to another
                                     agent through its durable inbox;
                                     recipient may use tools and reply by
@@ -21,15 +22,20 @@ Hosts the agent-facing tools for the multiverse plugin:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import subprocess
 import sys
 import time
+from functools import wraps
+from contextvars import ContextVar
 from pathlib import Path
-from typing import Optional
+from typing import Annotated, Optional
 
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+from pydantic import Field
 
 # Add parent to path for imports when run directly
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -68,6 +74,8 @@ from src.compact_state import is_locked
 from src import groups
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
+from src.agent_descriptions import write_description
+from src.reminders import append_reminders
 from src.spawn_requests import (
     cleanup_request,
     new_request_id,
@@ -86,7 +94,54 @@ from src.sb_actions import (
     send_prompt_via_tmux,
 )
 
-mcp = FastMCP("multiverse")
+_CALLER_IDENTITY: ContextVar[tuple[str | None, str | None] | None] = ContextVar(
+    "multiverse_caller_identity", default=None,
+)
+
+
+class InteragentMCP(FastMCP):
+    async def call_tool(self, name, arguments):
+        # Resolve once, before long-running calls or concurrent agents can
+        # move the Claude transcript heuristic. ContextVar also isolates
+        # simultaneous calls, including synchronous functions run in threads.
+        caller = _resolve_self_identity()
+        token = _CALLER_IDENTITY.set(caller)
+        try:
+            return await super().call_tool(name, arguments)
+        except ToolError as exc:
+            # Includes argument-validation errors, which occur before the
+            # registered function's normal result wrapper can run.
+            raise ToolError(append_reminders(str(exc), *caller)) from exc
+        finally:
+            _CALLER_IDENTITY.reset(token)
+
+
+mcp = InteragentMCP("multiverse")
+
+
+def interagent_tool(fn):
+    """Register the MCP result wrapper while preserving internal Python calls.
+
+    SecondBrain also calls these functions directly; its responses must not
+    receive agent reminders. Pi's mvctl transport applies the same helper.
+    wraps preserves the original signature/docstring and thus the MCP schema.
+    Capture identity before a potentially long async wait, but check reminder
+    conditions afterwards so a successful set_description stops the reminder.
+    """
+    if inspect.iscoroutinefunction(fn):
+        @wraps(fn)
+        async def wrapped(*args, **kwargs):
+            name, cwd = _resolve_self_identity()
+            result = await fn(*args, **kwargs)
+            return append_reminders(result, name, cwd)
+    else:
+        @wraps(fn)
+        def wrapped(*args, **kwargs):
+            name, cwd = _resolve_self_identity()
+            result = fn(*args, **kwargs)
+            return append_reminders(result, name, cwd)
+    mcp.tool()(wrapped)
+    return fn
 
 _DEFAULT_ASK_TIMEOUT = 60
 _DEFAULT_MONITOR_INBOX_TIMEOUT = 300
@@ -134,6 +189,9 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
     Falls back to env vars if any step of the lookup fails — the env
     values are still correct for the vast majority of non-bg sessions.
     """
+    caller = _CALLER_IDENTITY.get()
+    if caller is not None:
+        return caller
     env_name = os.environ.get("MULTIVERSE_SESSION_NAME")
     env_cwd = os.environ.get("MULTIVERSE_SESSION_CWD")
     # The shared bg-pty-host issue is specific to Claude. Every other managed
@@ -566,7 +624,47 @@ _STATUS_PRIORITY = {
 }
 
 
-@mcp.tool()
+@interagent_tool
+def set_description(
+    description: Annotated[str, Field(
+        description="Very short, concise summary of responsibilities, completed tasks, "
+        "ongoing implementations, or expertise: at most 60 characters, one line. "
+        "Help others see what to delegate to you. Empty string clears it."
+    )],
+) -> str:
+    """Set or update YOUR OWN very short, concise agent description.
+
+    Summarize responsibilities, completed tasks, ongoing implementations, or
+    expertise so other agents and the user can tell at first glance what tasks
+    can be allocated to you. Use a brief label, not a detailed report or paragraph.
+    Hard limit: 60 Unicode characters, including spaces and punctuation.
+    One line only; no newlines or control characters. Over-limit calls fail
+    with an explicit error and leave your existing description unchanged.
+
+    Other agents see it in list_agents, and the user sees it on the dashboard.
+    Call this at your own discretion when ready, and again whenever your
+    work or responsibilities change to keep it accurate. New agents have no description.
+    You can only change your own description, never another agent's. Pass an
+    empty string to clear it and restore the missing-description reminder.
+    """
+    name, cwd = _resolve_self_identity()
+    if not name or not cwd:
+        return (
+            "Error: set_description requires a named multiverse-managed session "
+            "(MULTIVERSE_SESSION_CWD / MULTIVERSE_SESSION_NAME unset)."
+        )
+    try:
+        value = write_description(cwd, name, description)
+    except ValueError as exc:
+        return f"Error: {exc}. Your existing description was not changed."
+    except (OSError, RuntimeError) as exc:
+        return f"Error: could not save your description: {exc}"
+    if value is None:
+        return "Your agent description was cleared."
+    return f"Your agent description is now: {value}"
+
+
+@interagent_tool
 def list_agents(
     max_agents: int = _DEFAULT_MAX_AGENTS,
     working_directory: str = "",
@@ -595,6 +693,10 @@ def list_agents(
     own workspace). The list is sorted with you first, then live agents,
     then ended/retired/dormant. Claude and Codex agents share this registry, but the
     output intentionally does not expose an agent's runtime.
+
+    The Description column shows each agent's short, self-maintained
+    work/responsibility summary, or "None" when unset. Use set_description at
+    your discretion to keep your own description current.
 
     Args:
         max_agents: Maximum entries to show before truncating with "and N
@@ -689,17 +791,18 @@ def list_agents(
     except OSError:
         group_state = groups.GroupState()
 
-    lines = [summary, ""]
-    name_width = max(len(a.name) for a in visible)
-    status_width = max(len(a.status) for a in visible)
+    name_width = max(len("Name"), *(len(a.name) for a in visible))
+    status_width = max(len("Status"), *(len(a.status) for a in visible))
+    lines = [summary, "", f"  {'Name'.ljust(name_width)}  {'Status'.ljust(status_width)}  Description"]
     for a in visible:
         marker = "  ← this is you" if a.name == self_name_for_marker else ""
         gid = group_state.group_of(a.name)
         folder = "/".join(group_state.path_names(gid)) if gid else ""
         folder_cell = f"  [{folder}]" if folder else ""
-        status = a.status.ljust(status_width) if folder_cell else a.status
+        status = a.status.ljust(status_width)
+        description = a.description or "None"
         lines.append(
-            f"- {a.name.ljust(name_width)}  {status}{folder_cell}{marker}"
+            f"- {a.name.ljust(name_width)}  {status}  {description}{folder_cell}{marker}"
         )
     if hidden:
         lines.append(
@@ -709,7 +812,7 @@ def list_agents(
     return "\n".join(lines)
 
 
-@mcp.tool()
+@interagent_tool
 def message_agent(
     target_name: str,
     message: str,
@@ -1113,7 +1216,7 @@ def message_agent(
     )
 
 
-@mcp.tool()
+@interagent_tool
 def check_inbox() -> str:
     """Read pending inbox messages now, without waiting for a hook to fire.
 
@@ -1169,7 +1272,7 @@ def check_inbox() -> str:
     return rendered
 
 
-@mcp.tool()
+@interagent_tool
 async def monitor_inbox(
     timeout_seconds: int = _DEFAULT_MONITOR_INBOX_TIMEOUT,
 ) -> str:
@@ -1246,7 +1349,7 @@ async def monitor_inbox(
         _write_session_status("working")
 
 
-@mcp.tool()
+@interagent_tool
 def ask_agent(
     target_name: str,
     question: str,
@@ -1345,7 +1448,7 @@ def ask_agent(
     return result.response or f"'{target_name}' returned an empty response."
 
 
-@mcp.tool()
+@interagent_tool
 async def spawn_agent(
     instruction: str,
     name: str = "",

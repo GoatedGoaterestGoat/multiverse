@@ -536,7 +536,11 @@ class CodexAskAgentMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
 
             self.assertFalse(response.isError)
-            self.assertEqual(response.content[0].text, "Codex side answer")
+            self.assertEqual(
+                response.content[0].text.split("\n\n[Multiverse reminder]", 1)[0],
+                "Codex side answer",
+            )
+            self.assertIn("[Multiverse reminder]", response.content[0].text)
             requests = [
                 record["request"]
                 for record in map(json.loads, ask_log.read_text().splitlines())

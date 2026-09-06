@@ -38,7 +38,7 @@ MOCK_PROVIDER = PLUGIN_ROOT / "tests" / "mock-provider.ts"
 MOCK_SERVER = PLUGIN_ROOT / "tests" / "mock_openai_server.py"
 VENV_PYTHON = PLUGIN_ROOT / ".venv" / "bin" / "python"
 
-#: The six tools the extension must expose to the model.
+#: The tools the extension must expose to the model.
 EXPECTED_TOOLS = (
     "list_agents",
     "message_agent",
@@ -46,6 +46,7 @@ EXPECTED_TOOLS = (
     "check_inbox",
     "monitor_inbox",
     "spawn_agent",
+    "set_description",
 )
 
 _PI_TIMEOUT_SECONDS = 90

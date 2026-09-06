@@ -23,8 +23,8 @@ from src import monitor
 
 CWD = "/workspace/project"
 
-NAME, ID, RUNTIME, INBOX, BUILD, STATUS, TOKENS, TOTAL, UPDATED, PREVIEW = (
-    range(10)
+NAME, DESCRIPTION, ID, RUNTIME, INBOX, BUILD, STATUS, TOKENS, TOTAL, UPDATED, PREVIEW = (
+    range(11)
 )
 
 

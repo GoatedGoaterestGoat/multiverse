@@ -313,16 +313,42 @@ export default function multiverse(pi: ExtensionAPI) {
 	//
 	// Only registered under the wrapper. Standalone (`pi --extension …`) the
 	// state dir the tools coordinate through does not exist, so offering them
-	// would just hand the model six tools that always fail.
+	// would just hand the model tools that always fail.
 
 	if (!WRAPPED) return;
+
+	pi.registerTool({
+		name: "set_description",
+		label: "Set description",
+		description:
+			"Set or update YOUR OWN very short, concise agent description. Summarize " +
+			"responsibilities, completed tasks, ongoing implementations, or expertise " +
+			"so other agents and the user can see at first glance what to delegate to you. " +
+			"Hard limit: 60 Unicode characters, one line, no control characters. " +
+			"Over-limit calls fail explicitly and leave the existing description unchanged. " +
+			"Shown in list_agents and the dashboard. Call at your discretion when ready " +
+			"and whenever your work changes to keep it updated. New agents have none. " +
+			"Empty string clears it. You cannot change another agent's description.",
+		promptSnippet: "Keep your short work/role description current for delegation",
+		parameters: Type.Object({
+			description: Type.String({
+				description: "Concise work/role summary, at most 60 characters; empty clears it.",
+			}),
+		}),
+		async execute(_id, params, signal) {
+			return toolText((await mvctl(exec, [
+				"set-description", `--description=${params.description}`,
+			], { signal })).text);
+		},
+	});
 
 	pi.registerTool({
 		name: "list_agents",
 		label: "List agents",
 		description:
 			"List the named agents in your Multiverse workspace — the ones you can " +
-			"reach with message_agent and ask_agent. Shows each agent's status " +
+			"reach with message_agent and ask_agent. Shows each agent's short description " +
+			"(or None when unset), and status " +
 			"(idle / working / listening / ended / retired / dormant). Your own entry is " +
 			"marked. Pass working_directory to list a different workspace instead.",
 		promptSnippet: "Discover other agents you can talk to",

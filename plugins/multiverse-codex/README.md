@@ -63,9 +63,18 @@ add a separate sandbox flag.
 ## Agent discovery
 
 `list_agents()` uses one workspace registry for Claude and Codex sessions, so
-callers from either runtime can discover every named agent. Its text format is
-unchanged from the Claude-only tool: entries include the agent name and status,
-but intentionally do not expose which runtime backs an agent.
+callers from either runtime can discover every named agent. Entries include
+the agent name, status, and Description (`None` when unset), but intentionally
+do not expose which runtime backs an agent.
+
+`set_description(description)` sets only the calling agent's short work/role
+label: at most 60 Unicode characters on one line. It can summarize responsibilities,
+completed tasks, ongoing implementations, or expertise to help others delegate
+at a glance. Agents should update it at their discretion as their work changes.
+Over-limit calls return an explicit error without changing the previous value;
+an empty string clears it. New agents start without a description; resumes retain
+it. While unset, every inter-agent tool result includes a reminder to set one
+when ready. The same description appears in the dashboard's single-line column.
 
 ## Ephemeral questions
 

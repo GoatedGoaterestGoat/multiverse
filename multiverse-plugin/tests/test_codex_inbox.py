@@ -233,11 +233,11 @@ class CodexPluginMcpIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
                     monitored = await session.call_tool("monitor_inbox", {})
                     self.assertFalse(monitored.isError)
-                    self.assertEqual(
-                        monitored.content[0].text,
+                    self.assertTrue(monitored.content[0].text.startswith(
                         "You already have pending inbox messages. Call "
                         "check_inbox to read them.",
-                    )
+                    ))
+                    self.assertIn("[Multiverse reminder]", monitored.content[0].text)
                     self.assertTrue((inbox_dir / "message.json").exists())
 
                     checked = await session.call_tool("check_inbox", {})

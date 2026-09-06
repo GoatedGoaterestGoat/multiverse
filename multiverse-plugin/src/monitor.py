@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from rich.markup import escape
+from rich.text import Text
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -110,6 +111,9 @@ from .tmux_attach import attach_tmux_session
 from . import groups
 from . import web_share
 from . import sb_control
+
+
+DESCRIPTION_COLUMN_WIDTH = 40
 
 
 STATUS_STYLES = {
@@ -3673,8 +3677,10 @@ class MonitorApp(App):
         table = DashboardTable(cursor_type="row", zebra_stripes=True)
         # Name leads so the folder tree's connectors sit flush against the
         # left edge of the dashboard, where a tree reads.
+        table.add_column("Name")
+        table.add_column("Description", width=DESCRIPTION_COLUMN_WIDTH)
         table.add_columns(
-            "Name", "ID", "Runtime", "Inbox", "Build", "Status", "Tokens",
+            "ID", "Runtime", "Inbox", "Build", "Status", "Tokens",
             "Total", "Updated", "Preview",
         )
         yield table
@@ -4142,8 +4148,15 @@ class MonitorApp(App):
             preview = "[dim](empty)[/]"
         label = self._decorate(row, escape(e.name))
         name_cell = f"[dim]{row.prefix}[/]{label}" if row.prefix else label
+        # Plain Text prevents agent-written markup from being interpreted;
+        # no_wrap + fixed column width keeps even wide Unicode on one line.
+        description_cell = Text(
+            e.description or "None", no_wrap=True, overflow="ellipsis",
+            style="" if e.description else "dim",
+        )
+        description_cell.truncate(DESCRIPTION_COLUMN_WIDTH, overflow="ellipsis")
         return (
-            name_cell, id_cell, e.runtime, inbox_cell, build_cell,
+            name_cell, description_cell, id_cell, e.runtime, inbox_cell, build_cell,
             status_cell, tokens_cell, total_cell, updated, preview,
         )
 
@@ -4214,7 +4227,7 @@ class MonitorApp(App):
             preview_cell = ""
 
         return (
-            name_cell, "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
+            name_cell, "", "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
             status_cell, tokens_cell, total_cell, updated, preview_cell,
         )
 
@@ -5172,6 +5185,7 @@ class MonitorApp(App):
         name_cell = f"[dim]{row.prefix}[/]{self._field_cell(draft)}"
         return (
             name_cell,
+            "[dim]None[/]",
             "[dim]—[/]",
             f"[reverse]{draft.runtime}[/]",
             "[dim]·[/]",
