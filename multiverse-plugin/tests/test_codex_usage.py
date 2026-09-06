@@ -246,7 +246,8 @@ class CodexDashboardUsageTests(RolloutTestCase):
                 cells = self.draw()
                 self.assertEqual(len(cells), 10)
                 self.assertEqual(cells[4], "[dim]-[/]")
-                self.assertEqual(cells[6:8], ("125,000", "[dim]580,000[/]"))
+                # Total is 3-sig-fig compact; Tokens stays exact.
+                self.assertEqual(cells[6:8], ("125,000", "[dim]580k[/]"))
 
     def test_redraw_refreshes_both_counters_after_native_update(self) -> None:
         self.append(_event())

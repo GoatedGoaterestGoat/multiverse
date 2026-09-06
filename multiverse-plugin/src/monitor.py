@@ -4103,7 +4103,9 @@ class MonitorApp(App):
         tokens = self._tokens_of(e)
         tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
         total = self._total_of(e)
-        total_cell = f"[dim]{total:,}[/]" if total is not None else "[dim]-[/]"
+        total_cell = (
+            f"[dim]{_fmt_tokens(total)}[/]" if total is not None else "[dim]-[/]"
+        )
         # Both are text the user or the transcript produced — the draft
         # row accepts any name, and a preview is whatever the agent last
         # said — so neither goes into a cell as markup.
@@ -4168,7 +4170,9 @@ class MonitorApp(App):
         grand_total = sum(
             t for t in (self._total_of(a) for a in agents) if t is not None
         )
-        total_cell = f"[dim]{grand_total:,}[/]" if grand_total else "[dim]-[/]"
+        total_cell = (
+            f"[dim]{_fmt_tokens(grand_total)}[/]" if grand_total else "[dim]-[/]"
+        )
 
         latest = max((a.status_ts or 0 for a in agents), default=0)
         updated = _ago(now - latest) if latest else "-"
@@ -6122,6 +6126,37 @@ class MonitorApp(App):
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
+
+
+def _fmt_tokens(n: int) -> str:
+    """Token count at three significant figures: exact, then k, then M.
+
+    Keeps the column a fixed narrow width at any magnitude, so two rows
+    are comparable at a glance instead of by counting digits — the
+    numbers here span four orders of magnitude across a workspace.
+
+    Decimals shrink as the integer part grows to hold three sig figs:
+    5,803 -> 5.80k, 50,300 -> 50.3k, 394,398 -> 394k, 2,308,389 -> 2.31M.
+    Under 1000 is exact, since a rounded small number is less useful than
+    the real one and costs no width.
+    """
+    if n < 1000:
+        return str(n)
+    for div, suffix in ((1_000_000, "M"), (1000, "k")):
+        if n < div:
+            continue
+        v = n / div
+        # Thresholds sit just below each decade so a value that ROUNDS
+        # up crosses with it: 99,999 scales to 99.999, which looks like
+        # it wants 1 dp but would render "100.0" — four sig figs.
+        dp = 2 if v < 9.995 else 1 if v < 99.95 else 0
+        out = f"{v:.{dp}f}"
+        # Rounding can carry past the unit (999,950 would print "1000k").
+        # Promote instead of printing a value the next unit covers.
+        if suffix == "k" and float(out) >= 1000:
+            return _fmt_tokens(1_000_000)
+        return f"{out}{suffix}"
+    return str(n)
 
 
 def _ago(delta: float) -> str:
