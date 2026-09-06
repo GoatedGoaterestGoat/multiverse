@@ -164,8 +164,15 @@ def log_hook_outcome(
 
     Silent on failure — a hook diagnostic that CRASHED the hook would be worse
     than the drop it was trying to explain.
+
+    Also silent when the device isn't enrolled at all: this log exists to explain why
+    an EXPECTED event didn't fire, and with no SB set up here none was expected. An
+    enrolled-but-unexposed workspace still logs, which is the case someone actually
+    investigates (it is how a workspace whose hooks weren't firing was diagnosed).
     """
     try:
+        if not _device_id():
+            return
         line = (
             f"{_now_iso()} {script} agent={agent or '<unset>'} "
             f"cwd={cwd or '<unset>'} outcome={outcome}"
@@ -539,9 +546,16 @@ def record_pending_tool(
     permission hook may later flag it with a ``.perm`` marker; PostToolUse cleans up
     unconditionally. Not seeded-gated at record time: we don't know at PreToolUse whether
     this session's workspace is seeded (env vars can lie for background sessions), and
-    the record is a bounded working set anyway. The gate applies at the SIGNAL writes."""
+    the record is a bounded working set anyway. The gate applies at the SIGNAL writes.
+
+    ENROLMENT is checked, though, which is a different question from seeded/exposed:
+    every consumer of this cache is a SecondBrain path, so with no device identity on
+    this machine nothing can ever read these records and writing them only accumulates
+    residue after a teardown."""
     try:
         if not tool_use_id or not cwd or not agent_name:
+            return
+        if not _device_id():
             return
         d = pending_tools_dir()
         d.mkdir(parents=True, exist_ok=True)
