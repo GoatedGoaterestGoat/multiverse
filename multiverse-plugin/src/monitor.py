@@ -4040,7 +4040,10 @@ class MonitorApp(App):
         Distinct from ``_agent_tokens``, which reports the CURRENT context
         size (what /context shows, and what shrinks when you compact).
         Claude counts uncompacted transcript content in the full jsonl
-        mirror. Codex matches its statusline's cumulative used-tokens:
+        mirror, plus the same structural overhead Tokens includes — so a
+        never-compacted session reads Total == Tokens, and the gap on a
+        compacted one is exactly the history compaction removed. Codex
+        matches its statusline's cumulative used-tokens:
         non-cached input + output from the native rollout usage snapshot.
         These are different measures, not a shared billing metric. Pi has
         no equivalent yet; unmeasured runtimes show "-".
@@ -4049,7 +4052,20 @@ class MonitorApp(App):
             return codex_token_usage_cached(e.session_id).total_tokens
         if e.runtime != RUNTIME_CLAUDE or not e.claude_uuid:
             return None
-        return total_token_count_cached(e.claude_uuid, e.cwd) or None
+        transcript = total_token_count_cached(e.claude_uuid, e.cwd)
+        if not transcript:
+            return None
+        # Structural too, for the same reason Tokens counts it: the model
+        # is charged for the system prompt, tool schemas and memory files
+        # on every turn, so a total that omits them isn't the cost of
+        # anything. Without this, a session that has NEVER been compacted
+        # reported Total below Tokens — its transcript is the same file,
+        # so the whole gap was the missing structural overhead.
+        #
+        # Derived from the live jsonl's last recorded usage, so it reads 0
+        # for a session whose live is gone (an orphan awaiting restore).
+        # Total then under-reports rather than inventing a figure.
+        return transcript + structural_tokens_cached(e.claude_uuid, e.cwd)
 
     def _agent_tokens(self, e: DashboardRow) -> Optional[int]:
         """Token total shown for one agent, or ``None`` when unmeasurable.
