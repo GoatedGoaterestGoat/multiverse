@@ -306,18 +306,40 @@ def _wait_for_response(
 
 
 def _codex_app_server_command() -> list[str]:
+    """Command for the ephemeral Codex app-server backing one ask.
+
+    The three ``--config`` overrides harden the app-server itself (no web
+    search, no MCP servers, no apps) on top of the per-fork restrictions in
+    ``_codex_fork_params``.
+
+    MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES=1 omits them. Needed for a
+    packaged Codex wrapper that injects its OWN provider config as
+    command-line ``-c`` args (an inline ``model_providers.<id>`` table whose
+    base_url is a per-launch local proxy, plus ``model_provider=<id>``): a
+    competing ``-c`` replaces that table, so the session silently falls back
+    to the default ``openai`` provider, whose endpoint such installs cannot
+    reach — every turn then hangs and retries until it times out. Set it in
+    bin/multiverse.local on those hosts.
+
+    ``--disable <feature>`` does not collide with injected config, so the
+    feature denial below always applies; the fork params carry the approval
+    policy, read-only sandbox, and empty MCP/apps/web settings regardless.
+    """
     cmd = [
         os.environ.get("MULTIVERSE_CODEX_BIN") or "codex",
         "app-server",
         "--listen",
         "stdio://",
-        "--config",
-        'web_search="disabled"',
-        "--config",
-        "mcp_servers={}",
-        "--config",
-        "apps._default.enabled=false",
     ]
+    if os.environ.get("MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES") != "1":
+        cmd += [
+            "--config",
+            'web_search="disabled"',
+            "--config",
+            "mcp_servers={}",
+            "--config",
+            "apps._default.enabled=false",
+        ]
     for feature in _CODEX_DISABLED_FEATURES:
         cmd += ["--disable", feature]
     return cmd

@@ -127,6 +127,18 @@ export MULTIVERSE_CODEX_MODEL="${MULTIVERSE_CODEX_MODEL:-gpt-6-astra}"
 # bin/multiverse.local when a machine needs a different tradeoff.
 export MULTIVERSE_CODEX_REASONING_EFFORT="${MULTIVERSE_CODEX_REASONING_EFFORT:-xhigh}"
 
+# Set to 1 to stop ask_agent's Codex side-fork from passing `--config`
+# overrides to its app-server. Only needed for a packaged Codex wrapper that
+# injects its own provider config as command-line `-c` args (an inline
+# `model_providers.<id>` table whose base_url is a per-launch local proxy):
+# a competing `-c` replaces that table, the session silently falls back to
+# the default `openai` provider, and — since such installs cannot reach it —
+# every ask hangs and retries until timeout. Empty default keeps the extra
+# app-server hardening for everyone else; the fork's own approval policy,
+# read-only sandbox, and feature denial apply either way. Set in
+# bin/multiverse.local on affected hosts.
+export MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES="${MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES:-}"
+
 # Extra env var NAMES (space-separated) to forward into every tmux-spawned
 # session, on top of the fixed base set in sessions.py's create_session.
 # Lets a machine propagate environment-specific auth/config vars (e.g. a

@@ -1930,7 +1930,12 @@ def create_session(
         "CLAUDE_CONFIG_DIR", "CLAUDE_LOCAL_DATA_DIR", "CODEX_HOME", "PATH",
         "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
         "MULTIVERSE_CODEX_BIN", "MULTIVERSE_CODEX_MODEL",
-        "MULTIVERSE_CODEX_REASONING_EFFORT", "MULTIVERSE_PI_BIN",
+        "MULTIVERSE_CODEX_REASONING_EFFORT",
+        # ask_agent's Codex side-fork reads this in whichever process makes
+        # the call — the monitor OR an agent's own MCP server — so it has to
+        # reach spawned sessions too, not just the monitor.
+        "MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES",
+        "MULTIVERSE_PI_BIN",
         "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR",
         # Rate-limit retry tuning — see bin/multiverse for defaults +
         # rationale. Propagated so interactive claude sessions inside tmux
