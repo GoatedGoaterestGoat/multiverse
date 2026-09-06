@@ -244,26 +244,26 @@ class CodexDashboardUsageTests(RolloutTestCase):
                     runtime=monitor.RUNTIME_CODEX, codex_session_id="thread",
                 )
                 cells = self.draw()
-                self.assertEqual(len(cells), 11)
-                self.assertEqual(cells[5], "[dim]-[/]")
+                self.assertEqual(len(cells), 10)
+                self.assertEqual(cells[4], "[dim]-[/]")
                 # Total is 3-sig-fig compact; Tokens stays exact.
-                self.assertEqual(cells[7:9], ("125,000", "[dim]580k[/]"))
+                self.assertEqual(cells[6:8], ("125,000", "[dim]580k[/]"))
 
     def test_redraw_refreshes_both_counters_after_native_update(self) -> None:
         self.append(_event())
-        self.assertEqual(self.draw()[7:9], ("250", "[dim]480[/]"))
+        self.assertEqual(self.draw()[6:8], ("250", "[dim]480[/]"))
         self.append(_event(100, 2000, 1500, 100))
-        self.assertEqual(self.draw()[7:9], ("100", "[dim]600[/]"))
+        self.assertEqual(self.draw()[6:8], ("100", "[dim]600[/]"))
 
     def test_unmeasured_threads_show_dashes(self) -> None:
-        self.assertEqual(self.draw()[7:9], ("[dim]-[/]", "[dim]-[/]"))
+        self.assertEqual(self.draw()[6:8], ("[dim]-[/]", "[dim]-[/]"))
         self.row.session_id = None
-        self.assertEqual(self.draw()[7:9], ("[dim]-[/]", "[dim]-[/]"))
+        self.assertEqual(self.draw()[6:8], ("[dim]-[/]", "[dim]-[/]"))
 
     def test_pi_stays_unknown_and_claude_keeps_its_own_sources(self) -> None:
         self.append(_event())
         self.row.runtime = monitor.RUNTIME_PI
-        self.assertEqual(self.draw()[7:9], ("[dim]-[/]", "[dim]-[/]"))
+        self.assertEqual(self.draw()[6:8], ("[dim]-[/]", "[dim]-[/]"))
         self.row.runtime = monitor.RUNTIME_CLAUDE
         self.row.claude_uuid = "claude-id"
         with (
@@ -300,7 +300,7 @@ class CodexDashboardUsageTests(RolloutTestCase):
             patch.object(monitor, "total_token_count_cached", return_value=200),
         ):
             cells = self.app._group_cells(rows[0], 2)
-        self.assertEqual(cells[7:9], ("[dim]350[/]", "[dim]680[/]"))
+        self.assertEqual(cells[6:8], ("[dim]350[/]", "[dim]680[/]"))
 
 
 if __name__ == "__main__":

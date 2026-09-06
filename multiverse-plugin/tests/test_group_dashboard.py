@@ -23,8 +23,8 @@ from src import monitor
 
 CWD = "/workspace/project"
 
-NAME, DESCRIPTION, ID, RUNTIME, INBOX, BUILD, STATUS, TOKENS, TOTAL, UPDATED, PREVIEW = (
-    range(11)
+NAME, DESCRIPTION, RUNTIME, INBOX, BUILD, STATUS, TOKENS, TOTAL, UPDATED, PREVIEW = (
+    range(10)
 )
 
 
@@ -148,11 +148,11 @@ class FolderRenderingTests(DashboardFolderTestCase):
         self.assertIn("└─ ", drawn[2][NAME])
         self.assertEqual(drawn[3][NAME], "quiet-fox")
 
-    def test_a_folder_header_has_no_session_id_runtime_or_build_cell(self) -> None:
+    def test_a_folder_header_has_no_description_runtime_or_build_cell(self) -> None:
         group = groups.create_group(CWD, "backend")
         groups.assign_agent(CWD, "swift-otter", group.id)
         header = self._draw([_row("swift-otter")])[0]
-        self.assertEqual(header[ID], "")
+        self.assertEqual(header[DESCRIPTION], "")
         self.assertEqual(header[RUNTIME], "[dim]-[/]")
         self.assertEqual(header[BUILD], "[dim]-[/]")
 
@@ -258,6 +258,31 @@ class MarkupSafetyTests(DashboardFolderTestCase):
 
         self._assert_renders(drawn)
         self.assertIn("wrote [/] to", Text.from_markup(drawn[0][PREVIEW]).plain)
+
+    def test_agent_previews_are_capped_at_50_terminal_cells(self) -> None:
+        for preview in ("x" * 50, "x" * 60, "[red]" + "界" * 30):
+            with self.subTest(preview=preview):
+                row = _row("swift-otter")
+                row.preview = preview
+                cell = Text.from_markup(self._draw([row])[0][PREVIEW])
+                self.assertLessEqual(cell.cell_len, 50)
+                self.assertEqual(row.preview, preview)
+                if Text(preview).cell_len > 50:
+                    self.assertTrue(cell.plain.endswith("…"))
+                else:
+                    self.assertEqual(cell.plain, preview)
+
+    def test_collapsed_folder_previews_have_the_same_terminal_cell_cap(self) -> None:
+        group = groups.create_group(CWD, "backend")
+        name = "[red]" + "界" * 30
+        groups.assign_agent(CWD, name, group.id)
+        groups.set_collapsed(CWD, group.id, True)
+        drawn = self._draw([_row(name)])
+        self.assertEqual(len(drawn[0]), 10)
+        cell = Text.from_markup(drawn[0][PREVIEW])
+        self.assertLessEqual(cell.cell_len, 50)
+        self.assertTrue(cell.plain.startswith("[red]"))
+        self.assertTrue(cell.plain.endswith("…"))
 
     def test_a_collapsed_folder_preview_of_such_names_still_renders(self) -> None:
         group = groups.create_group(CWD, "backend")

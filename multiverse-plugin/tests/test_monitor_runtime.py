@@ -38,7 +38,7 @@ class DashboardRuntimeRenderingTests(unittest.TestCase):
             app._redraw_table()
 
         build_enabled.assert_not_called()
-        self.assertEqual(table.add_row.call_args.args[5], "[dim]-[/]")
+        self.assertEqual(table.add_row.call_args.args[4], "[dim]-[/]")
 
 
 class DashboardEndingTests(unittest.TestCase):

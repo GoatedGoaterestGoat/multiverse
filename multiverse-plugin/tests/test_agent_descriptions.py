@@ -284,15 +284,20 @@ class DescriptionLifecycleTests(DescriptionFixture, unittest.TestCase):
 
 
 class DescriptionDashboardTests(DescriptionFixture, unittest.IsolatedAsyncioTestCase):
-    async def test_description_column_is_single_line_and_literal(self) -> None:
+    async def test_description_column_fits_current_longest_row_without_truncation(self) -> None:
         row = monitor.DashboardRow(name="agent", cwd=self.cwd, status="idle", status_ts=1,
+                                   session_id="thread-agent",
                                    description="[red]" + "界" * 45)
+        other = monitor.DashboardRow(name="other", cwd=self.cwd, status="idle", status_ts=1,
+                                     session_id="thread-other",
+                                     description="Protocol implementation")
+        entries = [row, other]
 
         app = monitor.MonitorApp([])
         app.monitor_cwd = self.cwd
 
         def refresh():
-            app.entries = [row]
+            app.entries = entries
             app._redraw_table()
 
         with (
@@ -301,28 +306,47 @@ class DescriptionDashboardTests(DescriptionFixture, unittest.IsolatedAsyncioTest
             patch.object(app, "refresh_sessions", side_effect=refresh),
             patch.object(app, "_recover_ending_sessions"),
         ):
-            async with app.run_test(size=(110, 16)):
+            async with app.run_test(size=(110, 16)) as pilot:
                 table = app.query_one(DataTable)
-                self.assertEqual(len(table.columns), 11)
-                column = list(table.columns.values())[1]
+                self.assertEqual([str(c.label) for c in table.ordered_columns], [
+                    "Name", "Description", "Runtime", "Inbox", "Build", "Status",
+                    "Tokens", "Total", "Updated", "Preview",
+                ])
+                column = table.columns["description"]
                 self.assertEqual(str(column.label), "Description")
-                self.assertEqual(column.width, 40)
+                self.assertTrue(column.auto_width)
+                self.assertEqual(column.content_width, 95)
                 cell = table.get_row_at(0)[1]
                 self.assertIsInstance(cell, Text)
-                self.assertTrue(cell.plain.startswith("[red]"))
-                self.assertLessEqual(cell.cell_len, 40)
-                self.assertEqual(row.description, "[red]" + "界" * 45)
+                self.assertEqual(cell.plain, row.description)
+                self.assertEqual(cell.cell_len, 95)
                 self.assertTrue(cell.no_wrap)
                 self.assertEqual(next(iter(table.rows.values())).height, 1)
-                console = Console(width=40, record=True, file=io.StringIO())
+                console = Console(width=column.content_width, record=True, file=io.StringIO())
                 console.print(cell)
                 rendered = console.export_text().rstrip("\n")
-                self.assertNotIn("\n", rendered)
-                self.assertTrue(rendered.startswith("[red]"))
-                self.assertTrue(rendered.endswith("…"))
+                self.assertEqual(rendered, row.description)
+                # Clearing the longest leaves the other row in charge, not
+                # the historical width retained by DataTable.clear().
                 row.description = None
                 refresh()
+                await pilot.pause()
+                self.assertEqual(column.content_width, len(other.description))
                 self.assertEqual(table.get_row_at(0)[1].plain, "None")
+                entries.remove(other)
+                refresh()
+                await pilot.pause()
+                self.assertEqual(column.content_width, len("Description"))
+                # Grow and shrink again; wide characters need more terminal
+                # cells than code points, even beyond the viewport width.
+                for description in ("x" * 60, "界" * 60, "MCP tools", None):
+                    row.description = description
+                    refresh()
+                    await pilot.pause()
+                    cell = table.get_row_at(0)[1]
+                    self.assertEqual(cell.plain, description or "None")
+                    self.assertEqual(column.content_width, max(len("Description"), cell.cell_len))
+                    self.assertEqual(next(iter(table.rows.values())).height, 1)
 
 
 if __name__ == "__main__":

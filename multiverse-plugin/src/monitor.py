@@ -113,7 +113,7 @@ from . import web_share
 from . import sb_control
 
 
-DESCRIPTION_COLUMN_WIDTH = 40
+PREVIEW_MAX_WIDTH = 50
 
 
 STATUS_STYLES = {
@@ -3678,9 +3678,9 @@ class MonitorApp(App):
         # Name leads so the folder tree's connectors sit flush against the
         # left edge of the dashboard, where a tree reads.
         table.add_column("Name")
-        table.add_column("Description", width=DESCRIPTION_COLUMN_WIDTH)
+        table.add_column("Description", key="description")
         table.add_columns(
-            "ID", "Runtime", "Inbox", "Build", "Status", "Tokens",
+            "Runtime", "Inbox", "Build", "Status", "Tokens",
             "Total", "Updated", "Preview",
         )
         yield table
@@ -4117,11 +4117,6 @@ class MonitorApp(App):
         style = STATUS_STYLES.get(e.status, "dim")
         status_cell = f"[{style}]{e.status}[/]"
         updated = _ago(now - e.status_ts) if e.status_ts else "-"
-        if e.session is not None:
-            id_cell = escape(e.session.id)
-        else:
-            session_id = e.session_id or ""
-            id_cell = f"[dim]{escape(session_id[:8])}[/]"
         pending = self._pending_inbox(e)
         inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
         if e.runtime != RUNTIME_CLAUDE:
@@ -4142,21 +4137,22 @@ class MonitorApp(App):
         if e.preview:
             # Truncate first, escape second: the other way round can slice
             # an escape sequence in half.
-            preview = e.preview[:59] + "…" if len(e.preview) > 60 else e.preview
-            preview = escape(preview)
+            preview_text = Text(e.preview)
+            preview_text.truncate(PREVIEW_MAX_WIDTH, overflow="ellipsis")
+            preview = escape(preview_text.plain)
         else:
             preview = "[dim](empty)[/]"
         label = self._decorate(row, escape(e.name))
         name_cell = f"[dim]{row.prefix}[/]{label}" if row.prefix else label
-        # Plain Text prevents agent-written markup from being interpreted;
-        # no_wrap + fixed column width keeps even wide Unicode on one line.
+        # Plain Text prevents agent-written markup from being interpreted.
+        # The auto-width column measures the full text in terminal cells,
+        # including wide Unicode, without truncating or wrapping it.
         description_cell = Text(
             e.description or "None", no_wrap=True, overflow="ellipsis",
             style="" if e.description else "dim",
         )
-        description_cell.truncate(DESCRIPTION_COLUMN_WIDTH, overflow="ellipsis")
         return (
-            name_cell, description_cell, id_cell, e.runtime, inbox_cell, build_cell,
+            name_cell, description_cell, e.runtime, inbox_cell, build_cell,
             status_cell, tokens_cell, total_cell, updated, preview,
         )
 
@@ -4220,14 +4216,14 @@ class MonitorApp(App):
             shown = [a.name for a in agents[:3]]
             rest = len(agents) - len(shown)
             preview = ", ".join(shown) + (f", +{rest}" if rest > 0 else "")
-            if len(preview) > 60:
-                preview = preview[:59] + "…"
-            preview_cell = f"[dim]{escape(preview)}[/]"
+            preview_text = Text(preview)
+            preview_text.truncate(PREVIEW_MAX_WIDTH, overflow="ellipsis")
+            preview_cell = f"[dim]{escape(preview_text.plain)}[/]"
         else:
             preview_cell = ""
 
         return (
-            name_cell, "", "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
+            name_cell, "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
             status_cell, tokens_cell, total_cell, updated, preview_cell,
         )
 
@@ -4236,6 +4232,10 @@ class MonitorApp(App):
         prev_key = self._cursor_row_key()
         prev_cursor = table.cursor_row
         table.clear()
+        # DataTable retains auto-width measurements across clear(). Reset
+        # this column so it also shrinks when descriptions change or vanish.
+        description_column = table.columns["description"]
+        description_column.content_width = description_column.label.cell_len
         now = time.time()
         # One pass, one answer per agent: a folder header rolls up every
         # agent beneath it at any depth, so without this an agent nested
@@ -5186,7 +5186,6 @@ class MonitorApp(App):
         return (
             name_cell,
             "[dim]None[/]",
-            "[dim]—[/]",
             f"[reverse]{draft.runtime}[/]",
             "[dim]·[/]",
             "[dim]-[/]",
