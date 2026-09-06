@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from src import compact_runner, monitor, server, sessions
+from src import compact_runner, groups, monitor, server, sessions
 from src.ask_agents import AskResult
 
 
@@ -90,6 +91,21 @@ class RetiredDashboardTests(unittest.TestCase):
 
 
 class DashboardHandoffTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A successor is filed into the workspace's group store, so keep
+        # that off the real ~/.multiverse when this file runs on its own.
+        self._tmp = tempfile.TemporaryDirectory()
+        self._prev_root = os.environ.get("MULTIVERSE_ROOT")
+        os.environ["MULTIVERSE_ROOT"] = self._tmp.name
+        self.addCleanup(self._restore_root)
+
+    def _restore_root(self) -> None:
+        if self._prev_root is None:
+            os.environ.pop("MULTIVERSE_ROOT", None)
+        else:
+            os.environ["MULTIVERSE_ROOT"] = self._prev_root
+        self._tmp.cleanup()
+
     def _dormant(self, *, status: str = "dormant") -> monitor.DashboardRow:
         return monitor.DashboardRow(
             name="predecessor",
@@ -201,10 +217,8 @@ class DashboardHandoffTests(unittest.TestCase):
             'ask_agent(target_name="predecessor", question="...")', prompt
         )
 
-    def test_the_successor_is_filed_into_the_predecessors_folder(self) -> None:
-        # A handoff keeps the lineage together the same way a spawn does.
-        app = monitor.MonitorApp([])
-        target = self._dormant()
+    def _hand_off(self, app, target):
+        """Run a hand-off through to a created successor."""
         result = AskResult(target.name, "handoff", None, "fork", 1)
         session = sessions.Session(
             id="successor-session", cwd=target.cwd, created_at=1,
@@ -216,14 +230,57 @@ class DashboardHandoffTests(unittest.TestCase):
             patch.object(monitor, "sync_full"),
             patch.object(monitor, "create_retired_session_record"),
             patch.object(monitor, "create_session", return_value=session),
-            patch.object(
-                app.group_state, "group_of", return_value="g-predecessor"
-            ),
-            patch.object(monitor.groups, "assign_agent") as assign,
         ):
             self._name_successor(app, target, result)
 
-        assign.assert_called_once_with(app.monitor_cwd, "successor", "g-predecessor")
+    def test_a_successor_joins_the_folder_its_predecessor_was_in(self) -> None:
+        # Filed exactly like a spawn: the folder already exists, so the
+        # successor joins it rather than starting a second one.
+        app = monitor.MonitorApp([])
+        app.monitor_cwd = "/workspace"
+        target = self._dormant()
+        folder = groups.create_group(app.monitor_cwd, "review-crew")
+        groups.assign_agent(app.monitor_cwd, target.name, folder.id)
+        app.group_state = groups.load(app.monitor_cwd)
+
+        self._hand_off(app, target)
+
+        state = groups.load(app.monitor_cwd)
+        self.assertEqual(list(state.groups), [folder.id])
+        self.assertEqual(state.group_of("successor"), folder.id)
+        self.assertEqual(state.group_of(target.name), folder.id)
+
+    def test_a_loose_predecessor_gets_a_folder_holding_the_pair(self) -> None:
+        # No folder yet, so the succession makes one — named after the
+        # predecessor, with the retired agent and its successor inside.
+        app = monitor.MonitorApp([])
+        app.monitor_cwd = "/workspace"
+        target = self._dormant()
+
+        self._hand_off(app, target)
+
+        state = groups.load(app.monitor_cwd)
+        self.assertEqual(len(state.groups), 1)
+        gid = next(iter(state.groups))
+        self.assertEqual(state.groups[gid].name, "predecessor")
+        self.assertEqual(state.group_of("predecessor"), gid)
+        self.assertEqual(state.group_of("successor"), gid)
+
+    def test_a_cancelled_handoff_files_nothing(self) -> None:
+        app = monitor.MonitorApp([])
+        app.monitor_cwd = "/workspace"
+        target = self._dormant()
+        result = AskResult(target.name, "handoff", None, "fork", 1)
+
+        with (
+            patch.object(app, "notify"),
+            patch.object(monitor, "create_session"),
+            patch.object(monitor, "create_retired_session_record"),
+            patch.object(monitor, "sync_full"),
+        ):
+            self._name_successor(app, target, result, cancel=True)
+
+        self.assertEqual(groups.load(app.monitor_cwd).groups, {})
 
     def test_the_modal_shows_the_report_and_the_next_name_in_the_line(self) -> None:
         # The report is the successor's whole inherited memory, so it is on

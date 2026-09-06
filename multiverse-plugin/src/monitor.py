@@ -5316,8 +5316,6 @@ class MonitorApp(App):
             )
             return session
 
-        folder_id = self.group_state.group_of(target.name)
-
         def on_close(chosen: Optional[tuple[str, str]]) -> None:
             if chosen is None:
                 self.notify(
@@ -5329,15 +5327,18 @@ class MonitorApp(App):
             if session is None:
                 self.refresh_sessions()
                 return
-            # The successor lands in the predecessor's folder, so a
-            # hand-off keeps the lineage together the way a spawn does.
-            if folder_id is not None:
-                try:
-                    groups.assign_agent(
-                        self.monitor_cwd, successor_name, folder_id
-                    )
-                except (ValueError, OSError):
-                    pass  # the session exists; filing it is a nicety
+            # Filed exactly like a spawn, because that is what it is: the
+            # predecessor's folder if it has one, otherwise a new folder
+            # named after it holding both. A succession is a lineage the
+            # same way a delegation is, and the retired agent stays on
+            # screen — so the pair belongs together rather than the
+            # successor appearing loose at the top level.
+            try:
+                groups.auto_group_spawn(
+                    self.monitor_cwd, target.name, successor_name
+                )
+            except (OSError, ValueError):
+                pass  # the session exists; filing it is a nicety
             self.refresh_sessions()
             self._move_cursor_to_key(f"mv:{session.id}")
 
