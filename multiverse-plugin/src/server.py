@@ -72,6 +72,7 @@ from src.spawn_requests import (
     cleanup_request,
     new_request_id,
     read_resolution,
+    write_outcome,
     write_spawn_request,
 )
 from src.sb_actions import (
@@ -1495,12 +1496,25 @@ async def spawn_agent(
 
         chosen = (res.get("name") or "").strip()
         if not chosen:
+            write_outcome(
+                req_id,
+                cwd=cwd,
+                created=False,
+                error="resolution contained an empty name",
+            )
             return "Error: resolution contained an empty name — no subagent created."
         try:
             child_runtime = normalize_runtime(
                 res.get("runtime") or caller_runtime
             )
         except ValueError as e:
+            write_outcome(
+                req_id,
+                cwd=cwd,
+                created=False,
+                name=chosen,
+                error=f"invalid runtime: {e}",
+            )
             return f"Error: resolution contained an invalid runtime: {e}"
 
         try:
@@ -1519,7 +1533,19 @@ async def spawn_agent(
                 initial_prompt=instruction,
             )
         except (subprocess.CalledProcessError, ValueError, RuntimeError) as e:
+            # The monitor is holding this approval open waiting for the
+            # agent to appear; tell it that it never will, so it doesn't
+            # sit on a folder for a session that was never created.
+            write_outcome(
+                req_id,
+                cwd=cwd,
+                created=False,
+                name=chosen,
+                error=f"failed to create session: {e}",
+            )
             return f"Error: failed to create session: {e}"
+
+        write_outcome(req_id, cwd=cwd, created=True, name=chosen)
 
         # File the new agent in the monitor's folder tree next to whoever
         # spawned it, so a delegation lineage shows up as a folder instead

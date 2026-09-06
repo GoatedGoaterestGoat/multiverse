@@ -16,10 +16,11 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from typing import Optional
 from unittest.mock import patch
 
-from src import groups, monitor, server, sessions
+from src import groups, monitor, server, sessions, spawn_requests
 from src.sessions import DashboardRow
 
 
@@ -260,6 +261,13 @@ class MonitorSideFilingTests(unittest.TestCase):
         self._prev = os.environ.get("MULTIVERSE_ROOT")
         os.environ["MULTIVERSE_ROOT"] = self._tmp.name
         self.addCleanup(self._restore)
+        requests_dir = patch.object(
+            spawn_requests,
+            "SPAWN_REQUESTS_DIR",
+            Path(self._tmp.name) / "spawn_requests",
+        )
+        requests_dir.start()
+        self.addCleanup(requests_dir.stop)
         self.app = monitor.MonitorApp([])
         self.app.monitor_cwd = CWD
         self.req = {
@@ -387,6 +395,83 @@ class MonitorSideFilingTests(unittest.TestCase):
 
         self.assertEqual(groups.load(CWD).groups, {})
         self.assertEqual(groups.load(CWD).members, {})
+
+    def _report_outcome(self, rid, *, created, name=None):
+        """What the requesting tool leaves behind for the monitor."""
+        spawn_requests.write_outcome(rid, cwd=CWD, created=created, name=name)
+
+    def test_a_failed_spawn_ends_the_pending_filing_at_once(self) -> None:
+        # The tool reports the failure, so the monitor doesn't sit on the
+        # pairing until a timeout — and can't file a recycled name under
+        # the wrong parent in the meantime.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._report_outcome("req-1", created=False, name="brave-mole")
+
+        self._arrive("swift-otter")
+
+        self.assertEqual(groups.load(CWD).groups, {})
+        self.assertEqual(self.app._pending_group_spawns, {})
+        # Consumed, not left for the next monitor to re-read.
+        self.assertIsNone(spawn_requests.read_outcome("req-1"))
+
+    def test_a_failed_spawn_is_dropped_even_if_the_name_shows_up(self) -> None:
+        # Whatever is wearing that name now, it isn't the child that was
+        # approved — that one was never created.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._report_outcome("req-1", created=False, name="brave-mole")
+
+        self._arrive("swift-otter", "brave-mole")
+
+        self.assertEqual(groups.load(CWD).groups, {})
+        self.assertIsNone(groups.load(CWD).group_of("brave-mole"))
+
+    def test_a_reported_success_files_without_waiting_for_the_row(self) -> None:
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._report_outcome("req-1", created=True, name="brave-mole")
+
+        self._arrive("swift-otter")  # the child hasn't been scanned yet
+
+        state = groups.load(CWD)
+        self.assertEqual(state.group_of("brave-mole"), state.group_of("swift-otter"))
+        self.assertIsNone(spawn_requests.read_outcome("req-1"))
+
+    def test_the_name_the_session_was_created_under_is_the_one_filed(self) -> None:
+        # The user renames the child in the approval widget; the outcome
+        # carries what was actually created, and that is what gets filed.
+        self._decide(
+            monitor.SpawnDecision(
+                accepted=True,
+                name="brave-mole",
+                runtime=sessions.RUNTIME_CLAUDE,
+            )
+        )
+        self._report_outcome("req-1", created=True, name="renamed-child")
+
+        self._arrive("swift-otter", "renamed-child")
+
+        state = groups.load(CWD)
+        self.assertEqual(
+            state.group_of("renamed-child"), state.group_of("swift-otter")
+        )
+        self.assertIsNone(state.group_of("brave-mole"))
 
     def test_an_approval_that_never_becomes_a_session_expires(self) -> None:
         # The name goes back into the pool when the request does, so a

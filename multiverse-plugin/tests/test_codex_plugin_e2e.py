@@ -423,9 +423,22 @@ class WrappedCodexPluginEndToEndTests(unittest.TestCase):
                 (child_dir / "initial_prompt.txt").read_text(),
                 "Run the isolated wrapped spawn task.",
             )
-            self.assertEqual(
-                list((state_root / "spawn_requests").glob("*.json")), []
+            # The request and its resolution are cleaned up by the tool.
+            # What is left is the outcome record: the monitor needs to know
+            # the approval actually became a session — and under which name
+            # — before it files the pair, so that one outlives the request
+            # and is deleted by whoever reads it.
+            leftovers = sorted(
+                p.name for p in (state_root / "spawn_requests").glob("*.json")
             )
+            self.assertEqual(
+                [n.split(".", 1)[1] for n in leftovers], ["outcome.json"]
+            )
+            outcome = json.loads(
+                (state_root / "spawn_requests" / leftovers[0]).read_text()
+            )
+            self.assertTrue(outcome["created"])
+            self.assertEqual(outcome["name"], "e2e-child")
             self.assertIn("new-session", tmux_log.read_text())
 
 

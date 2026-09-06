@@ -101,6 +101,105 @@ class SpawnRequestRuntimeProtocolTests(unittest.TestCase):
             self.assertFalse(request_path.exists())
 
 
+class SpawnOutcomeProtocolTests(unittest.TestCase):
+    """An approved request is not a created agent, and the tool says which.
+
+    The monitor holds an approval open until the child appears; without a
+    record of the failure it would sit on that pairing until a timeout, and
+    a recycled name in the meantime would be filed under the wrong parent.
+    """
+
+    def _dir(self):
+        raw = tempfile.TemporaryDirectory()
+        self.addCleanup(raw.cleanup)
+        return patch.object(spawn_requests, "SPAWN_REQUESTS_DIR", Path(raw.name))
+
+    def test_an_outcome_records_the_name_actually_created(self) -> None:
+        with self._dir():
+            # The user can type a different name into the widget than the
+            # requesting agent proposed, and that is the one that matters.
+            spawn_requests.write_outcome(
+                "req-1", cwd="/workspace", created=True, name="user-chosen"
+            )
+            outcome = spawn_requests.read_outcome("req-1")
+
+        self.assertTrue(outcome["created"])
+        self.assertEqual(outcome["name"], "user-chosen")
+        self.assertEqual(outcome["cwd"], "/workspace")
+
+    def test_a_failure_is_recorded_with_its_reason(self) -> None:
+        with self._dir():
+            spawn_requests.write_outcome(
+                "req-1",
+                cwd="/workspace",
+                created=False,
+                name="child",
+                error="failed to create session: boom",
+            )
+            outcome = spawn_requests.read_outcome("req-1")
+
+        self.assertFalse(outcome["created"])
+        self.assertIn("boom", outcome["error"])
+
+    def test_clearing_an_outcome_removes_it(self) -> None:
+        with self._dir():
+            spawn_requests.write_outcome("req-1", cwd="/workspace", created=True)
+            spawn_requests.clear_outcome("req-1")
+            self.assertIsNone(spawn_requests.read_outcome("req-1"))
+            spawn_requests.clear_outcome("req-1")  # idempotent
+
+    def test_an_outcome_is_not_mistaken_for_a_pending_request(self) -> None:
+        with self._dir(), patch.object(
+            spawn_requests.sb_notify, "record_spawn_request"
+        ):
+            spawn_requests.write_outcome(
+                "req-1", cwd="/workspace", created=True, name="child"
+            )
+            self.assertEqual(
+                spawn_requests.list_pending_requests("/workspace"), []
+            )
+            # And the scan leaves a fresh one alone for the monitor to read.
+            self.assertIsNotNone(spawn_requests.read_outcome("req-1"))
+
+    def test_an_outcome_no_monitor_read_is_swept(self) -> None:
+        with self._dir():
+            path = spawn_requests.write_outcome(
+                "req-1", cwd="/workspace", created=True, name="child"
+            )
+            stale = json.loads(path.read_text())
+            stale["ts"] = 0
+            path.write_text(json.dumps(stale))
+
+            spawn_requests.list_pending_requests("/workspace")
+
+            self.assertFalse(path.exists())
+
+    def test_a_dead_callers_outcome_goes_with_its_request(self) -> None:
+        with self._dir(), patch.object(
+            spawn_requests.sb_notify, "record_spawn_request"
+        ), patch.object(
+            spawn_requests.subprocess,
+            "run",
+            return_value=subprocess.CompletedProcess([], 1),
+        ):
+            spawn_requests.write_spawn_request(
+                req_id="orphan-id",
+                from_name="caller",
+                cwd="/workspace",
+                instruction="No caller remains.",
+                default_name="orphan-child",
+                caller_tmux_session="multiverse-dead-caller",
+                caller_runtime=sessions.RUNTIME_CLAUDE,
+            )
+            outcome = spawn_requests.write_outcome(
+                "orphan-id", cwd="/workspace", created=False, error="died"
+            )
+
+            spawn_requests.list_pending_requests("/workspace")
+
+            self.assertFalse(outcome.exists())
+
+
 class SpawnAgentRuntimeTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         # spawn_agent files the new agent into the workspace's folder tree,

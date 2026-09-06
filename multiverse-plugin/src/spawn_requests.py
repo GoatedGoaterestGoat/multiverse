@@ -9,15 +9,26 @@ On-disk layout (under ``~/.multiverse/spawn_requests/``):
 
   <req-id>.json           — the request (written atomically by the tool)
   <req-id>.resolved.json  — the resolution (written atomically, O_EXCL)
+  <req-id>.outcome.json   — what the tool actually did with it
 
 Both live in the same directory so the monitor and the tool only have to
 watch one place. Resolutions are ``O_EXCL``-atomic so two monitors racing
 on the same request can't double-resolve — first writer wins, losers peek
 at the resolved file to learn the actual outcome.
 
-Requests have no timeout. The tool cleans up both files on return; if the
-caller is hard-killed before its ``finally`` runs, ``list_pending_requests``
-deletes the orphan once the caller's tmux session is gone.
+Requests have no timeout. The tool cleans up the request and resolution on
+return; if the caller is hard-killed before its ``finally`` runs,
+``list_pending_requests`` deletes the orphan once the caller's tmux session
+is gone.
+
+The outcome record deliberately outlives that cleanup. An approved request
+is not a created agent — ``create_session`` can still fail, or the caller
+can die between the two — and the monitor has no other way to tell the
+difference, since a request file disappears either way. So the tool says
+which happened, and under what name the session was actually created (the
+user can rename it in the widget, and that name is the one that matters).
+Whoever consumes an outcome deletes it; ``list_pending_requests`` sweeps
+any that no monitor was around to read.
 """
 
 from __future__ import annotations
@@ -71,6 +82,10 @@ def resolution_path(req_id: str) -> Path:
     return SPAWN_REQUESTS_DIR / f"{req_id}.resolved.json"
 
 
+def outcome_path(req_id: str) -> Path:
+    return SPAWN_REQUESTS_DIR / f"{req_id}.outcome.json"
+
+
 def write_spawn_request(
     req_id: str,
     from_name: str,
@@ -100,6 +115,28 @@ def write_spawn_request(
     return path
 
 
+# How long an unread outcome record sticks around. It only exists to tell
+# a monitor what happened; with no monitor running there is nobody to tell,
+# and the group filing it would have driven is long past mattering.
+_OUTCOME_TTL_SECONDS = 3600.0
+
+
+def _sweep_stale_outcome(path: Path, cwd: str) -> None:
+    """Delete an outcome nobody was around to read. Swallows errors."""
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        data = {}
+    if data.get("cwd") not in (None, cwd):
+        return
+    if time.time() - float(data.get("ts") or 0) <= _OUTCOME_TTL_SECONDS:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def list_pending_requests(cwd: str) -> list[dict]:
     """Unresolved requests matching ``cwd``, sorted oldest first.
 
@@ -121,6 +158,9 @@ def list_pending_requests(cwd: str) -> list[dict]:
             continue
         if name.endswith(".resolved.json") or name.endswith(".tmp"):
             continue
+        if name.endswith(".outcome.json"):
+            _sweep_stale_outcome(path, cwd)
+            continue
         try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
@@ -131,6 +171,7 @@ def list_pending_requests(cwd: str) -> list[dict]:
             orphan_paths = (
                 path,
                 path.with_name(f"{path.stem}.resolved.json"),
+                path.with_name(f"{path.stem}.outcome.json"),
             )
             for orphan_path in orphan_paths:
                 try:
@@ -143,6 +184,55 @@ def list_pending_requests(cwd: str) -> list[dict]:
         out.append(data)
     out.sort(key=lambda d: d.get("ts", 0))
     return out
+
+
+def write_outcome(
+    req_id: str,
+    *,
+    cwd: str,
+    created: bool,
+    name: Optional[str] = None,
+    error: Optional[str] = None,
+) -> Path:
+    """Record what became of an approved request.
+
+    ``name`` is the name the session was actually created under, which is
+    what the monitor files — not the default the requesting agent asked
+    for, and not necessarily the one it expected, because the user can
+    type a different one into the approval widget.
+    """
+    SPAWN_REQUESTS_DIR.mkdir(parents=True, exist_ok=True)
+    path = outcome_path(req_id)
+    atomic_write_json(
+        path,
+        {
+            "id": req_id,
+            "cwd": cwd,
+            "created": bool(created),
+            "name": name,
+            "error": error,
+            "ts": time.time(),
+        },
+    )
+    return path
+
+
+def read_outcome(req_id: str) -> Optional[dict]:
+    path = outcome_path(req_id)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def clear_outcome(req_id: str) -> None:
+    """Drop an outcome once it has been acted on. Swallows errors."""
+    try:
+        outcome_path(req_id).unlink()
+    except OSError:
+        pass
 
 
 def read_resolution(req_id: str) -> Optional[dict]:
