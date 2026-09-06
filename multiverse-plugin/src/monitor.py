@@ -4045,8 +4045,16 @@ class MonitorApp(App):
         compacted one is exactly the history compaction removed. Codex
         matches its statusline's cumulative used-tokens:
         non-cached input + output from the native rollout usage snapshot.
-        These are different measures, not a shared billing metric. Pi has
-        no equivalent yet; unmeasured runtimes show "-".
+        These are different measures, not a shared billing metric, and the
+        difference has a consequence worth stating: on Codex, Total can
+        sit BELOW Tokens, because cached input counts toward the current
+        context but not toward cumulative used-tokens. That is not the
+        Claude failure it resembles (Total once omitted structural, so a
+        never-compacted session read low) and it is not a bug — adding
+        anything to close it would break the statusline parity Codex
+        Total exists to provide.
+
+        Pi has no equivalent yet; unmeasured runtimes show "-".
         """
         if e.runtime == RUNTIME_CODEX:
             return codex_token_usage_cached(e.session_id).total_tokens
