@@ -47,6 +47,14 @@ CODEX_CONFIG_ARGS=(
   -c "hooks.PostToolUse=[{matcher=\".*\",hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "hooks.Stop=[{hooks=[{type=\"command\",command=$HOOK_COMMAND}]}]"
   -c "mcp_servers.multiverse.command=$MCP_COMMAND"
+  # Codex >= 0.153 REQUIRES an explicit transport on every mcp_servers entry.
+  # Without it, config loading fails with `invalid transport in
+  # mcp_servers.multiverse`. The launched session survives (its config was
+  # already parsed), but anything that RE-loads configuration dies — notably
+  # thread/fork (the TUI's /btw side conversation and ask_agent's ephemeral
+  # fork) and thread/start (thread recap). Older codex defaulted to stdio,
+  # which is why this only began failing after a codex upgrade.
+  -c "mcp_servers.multiverse.transport=\"stdio\""
 )
 
 # Codex launches stdio MCP servers with a sanitized environment. Explicitly

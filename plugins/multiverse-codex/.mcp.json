@@ -1,7 +1,8 @@
 {
   "mcpServers": {
     "multiverse": {
-      "command": "${PLUGIN_ROOT}/scripts/mcp-server"
+      "command": "${PLUGIN_ROOT}/scripts/mcp-server",
+      "transport": "stdio"
     }
   }
 }
