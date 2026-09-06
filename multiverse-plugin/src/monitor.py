@@ -51,6 +51,7 @@ from .ask_agents import AskResult, AskTarget, ask_all, ask_one
 from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_toggle
 from .compact_runner import CompactRunner, State as CompactState
 from .compact_state import acquire_lock, release_lock
+from .codex_usage import token_usage_cached as codex_token_usage_cached
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
@@ -4034,21 +4035,18 @@ class MonitorApp(App):
         return self._total_cache[key]
 
     def _agent_total(self, e: DashboardRow) -> Optional[int]:
-        """Uncompacted lifetime tokens for one agent, or None if unknown.
+        """Runtime-native lifetime tokens for one agent, or None if unknown.
 
         Distinct from ``_agent_tokens``, which reports the CURRENT context
         size (what /context shows, and what shrinks when you compact).
-        This is every token the session has ever accumulated, read from
-        the full jsonl mirror — so it only grows, and compaction doesn't
-        move it. The pair answers "how big is the context" and "how much
-        history is behind it", which is the question compaction is
-        weighing up.
-
-        Claude only for now: the mirror is claude-specific (keyed by
-        claude_uuid, written by our mirror hook). Codex is Ed's to fill
-        in; pi has no equivalent yet. Both show "-" rather than 0, so an
-        unmeasured runtime never reads as an empty session.
+        Claude counts uncompacted transcript content in the full jsonl
+        mirror. Codex matches its statusline's cumulative used-tokens:
+        non-cached input + output from the native rollout usage snapshot.
+        These are different measures, not a shared billing metric. Pi has
+        no equivalent yet; unmeasured runtimes show "-".
         """
+        if e.runtime == RUNTIME_CODEX:
+            return codex_token_usage_cached(e.session_id).total_tokens
         if e.runtime != RUNTIME_CLAUDE or not e.claude_uuid:
             return None
         return total_token_count_cached(e.claude_uuid, e.cwd) or None
@@ -4056,7 +4054,10 @@ class MonitorApp(App):
     def _agent_tokens(self, e: DashboardRow) -> Optional[int]:
         """Token total shown for one agent, or ``None`` when unmeasurable.
 
-        Displayed = transcript tokens + structural (derived from the last
+        Codex uses last_token_usage.total_tokens, the native context-size
+        snapshot, including post-compaction estimates.
+
+        Claude: displayed = transcript tokens + structural (derived from the last
         recorded API call's usage). Matches claude's own /clear / /context
         total to a few tokens. Falls back to just the transcript number
         when structural isn't measurable yet (freshly-compacted session
@@ -4070,7 +4071,9 @@ class MonitorApp(App):
         no recorded API call yet (freshly-compacted before first turn,
         brand-new session).
         """
-        if not e.claude_uuid:
+        if e.runtime == RUNTIME_CODEX:
+            return codex_token_usage_cached(e.session_id).live_tokens
+        if e.runtime != RUNTIME_CLAUDE or not e.claude_uuid:
             return None
         last_usage = last_real_usage_total_cached(e.claude_uuid, e.cwd)
         if last_usage:
