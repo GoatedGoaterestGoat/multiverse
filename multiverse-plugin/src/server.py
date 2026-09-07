@@ -73,6 +73,7 @@ from src.interagent_log import (
     log_notification_routed,
 )
 from src.compact_state import is_locked
+from src.paths import encode_cwd
 from src import wake_relay
 from src import groups
 from src import codex_control
@@ -166,6 +167,59 @@ _LISTENING_STATUS = "listening"
 #: Minimum mtime gap between the freshest transcript and the runner-up before
 #: ``_resolve_self_identity`` will trust the freshest one as its own.
 _IDENTITY_RACE_MARGIN_S = 0.25
+# How recently a transcript must have been appended to for its session to
+# count as "currently writing" for identity purposes.
+_IDENTITY_WINDOW_S = 10.0
+
+
+def _env_session_wrote_recently(
+    env_name: str, env_cwd: str, projects: Path, now: float
+) -> bool:
+    """True if the session the env vars name has ITSELF appended to its
+    transcript inside the identity window.
+
+    This is the plausibility test that gates transcript discovery. The
+    bg-pty-host failure is precisely "the env-named session is not the one
+    writing" — a frozen daemon's owner is elsewhere and silent. So if that
+    session is demonstrably writing right now, the env vars are fine and
+    must be left alone.
+    """
+    mv_root = Path(
+        os.environ.get("MULTIVERSE_ROOT") or os.path.expanduser("~/.multiverse")
+    )
+    sid_env = os.environ.get("MULTIVERSE_SESSION_ID")
+    try:
+        sess_dirs = list((mv_root / "sessions").iterdir())
+    except OSError:
+        return False
+    for sess_dir in sess_dirs:
+        if not sess_dir.is_dir():
+            continue
+        # MULTIVERSE_SESSION_ID pins the dir directly when present; fall back
+        # to matching name+cwd for wrappers that predate it.
+        if sid_env:
+            if sess_dir.name != sid_env:
+                continue
+        else:
+            try:
+                meta = json.loads((sess_dir / "meta.json").read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if meta.get("name") != env_name or meta.get("cwd") != env_cwd:
+                continue
+        try:
+            uuid = (sess_dir / "claude_uuid").read_text().strip()
+        except OSError:
+            continue
+        if not uuid:
+            continue
+        try:
+            mt = (projects / encode_cwd(env_cwd) / f"{uuid}.jsonl").stat().st_mtime
+        except OSError:
+            continue
+        if now - mt <= _IDENTITY_WINDOW_S:
+            return True
+    return False
 
 
 def _resolve_self_identity() -> tuple[str | None, str | None]:
@@ -222,10 +276,29 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
         projects = cfg / "projects"
         if not projects.is_dir():
             return env_name, env_cwd
+        now = time.time()
+        # Trust the env vars whenever the session they name is itself
+        # writing. Discovery below picks the globally freshest transcript
+        # and ASSUMES it belongs to this caller, verifying nothing about the
+        # winner — so any other agent working harder than the caller wins it.
+        # Observed: toolsmith (SecondBrain) resolved to Aris (Multiverse)
+        # whenever Aris was `working`, and correctly to itself the moment
+        # Aris went `idle`. Outgoing messages were then stamped `From agent:
+        # Aris`, and messaging Aris failed with "cannot message yourself".
+        #
+        # The 0.25s race margin cannot catch that: it only fires when the top
+        # two writes are near-simultaneous, whereas a continuously-working
+        # agent beats an idle-but-correct caller by far more than 0.25s.
+        #
+        # So invert the trust. Discovery is a repair for one specific fault —
+        # a frozen bg-pty-host daemon, whose signature is that the env-named
+        # session is NOT writing — and it only runs once we have evidence of
+        # that fault.
+        if _env_session_wrote_recently(env_name, env_cwd, projects, now):
+            return env_name, env_cwd
         # Freshest JSONL across all project dirs. tool_use is written
         # to disk before dispatch to the MCP server, so at call time
         # OUR jsonl should have mtime within a second or two of now.
-        now = time.time()
         recent: list[tuple[float, Path]] = []
         for pd in projects.iterdir():
             if not pd.is_dir():
@@ -239,9 +312,9 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
                     mt = j.stat().st_mtime
                 except OSError:
                     continue
-                # 10s window is generous: it comfortably includes the
+                # Generous window: it comfortably includes the
                 # write-then-dispatch latency and any small clock skew.
-                if now - mt > 10:
+                if now - mt > _IDENTITY_WINDOW_S:
                     continue
                 recent.append((mt, j))
         if not recent:
@@ -763,12 +836,18 @@ def list_agents(
 
     Status values:
       - idle / working / waiting / starting — currently running
+      - listening — parked in monitor_inbox, waiting on an inter-agent
+                   message (running, but not on a user turn)
+      - compacting — a compaction holds this session; it is not
+                   interactive and cannot be attached, resumed or killed
+                   until that finishes
       - ending   — runtime teardown is in progress (not interactive)
       - retiring — handoff is pending (not running or interactive)
       - ended    — was running, now stopped (still resumable)
       - retired  — permanently stopped after handing off to a successor
       - dormant  — never wrapped by multiverse this run, but the underlying
                    transcript exists and is named
+      - unknown  — status file unreadable or not yet written
 
     Agents the user has filed into a monitor folder show it in square
     brackets (nested folders as ``parent/child``). Agents you spawn are
