@@ -263,6 +263,73 @@ class ForeignSessionTests(SessionHostTestCase):
         self.assertIsNotNone(hosts.heartbeat_age(mine.dir))
 
 
+class SingleInstanceTests(SessionHostTestCase):
+    """Exactly one wrapper per agent, across every remote sharing the root.
+
+    Two agents on two remotes can message the same dormant agent at the same
+    moment, and each auto-resume runs on its own sender's machine. Nothing
+    about tmux or PIDs can arbitrate that, so the exclusion has to live in the
+    shared filesystem itself.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+    def claim(self, session_id: str, *, name: str, native: str, host: str) -> None:
+        """What create_session does before it spawns anything."""
+        with patch.object(sessions, "current_host", return_value=host):
+            (self.state / session_id).mkdir(parents=True, exist_ok=True)
+            (self.state / session_id / "meta.json").write_text(json.dumps({
+                "cwd": "/workspace", "created_at": time.time(),
+                "runtime": "claude", "name": name, "host": host,
+                "resumed_from": native,
+            }))
+            for kind, value in sessions._session_claim_specs(
+                "/workspace", "claude", name, native
+            ):
+                sessions._acquire_claim(sessions._claim_path(kind, value), session_id)
+            sessions._assert_no_existing_wrapper_claim(
+                session_id, "/workspace", "claude", name, native
+            )
+
+    def test_a_second_remote_cannot_resume_the_same_agent(self) -> None:
+        self.claim("on-host-a", name="agent", native="uuid-1", host=LOCAL)
+        with self.assertRaises(RuntimeError) as caught:
+            self.claim("on-host-b", name="agent", native="uuid-1", host=REMOTE)
+        self.assertIn("claimed", str(caught.exception))
+
+    def test_the_native_transcript_is_claimed_even_under_a_new_name(self) -> None:
+        # Same underlying conversation, different agent name: two writers on
+        # one transcript would interleave turns irrecoverably.
+        self.claim("on-host-a", name="agent", native="uuid-1", host=LOCAL)
+        with self.assertRaises(RuntimeError):
+            self.claim("on-host-b", name="different-name", native="uuid-1", host=REMOTE)
+
+    def test_the_name_is_claimed_even_for_a_different_transcript(self) -> None:
+        self.claim("on-host-a", name="agent", native="uuid-1", host=LOCAL)
+        with self.assertRaises(RuntimeError):
+            self.claim("on-host-b", name="agent", native="uuid-2", host=REMOTE)
+
+    def test_claims_live_on_the_shared_mount_not_per_host(self) -> None:
+        # The whole guarantee rests on this: a claim another remote can't see
+        # is not a claim at all.
+        self.claim("on-host-a", name="agent", native="uuid-1", host=LOCAL)
+        claim_dir = self.state.parent / sessions._CLAIM_DIR_NAME
+        self.assertTrue(any(claim_dir.iterdir()))
+        for path in claim_dir.iterdir():
+            # A symlink, because its creation is atomic: two remotes racing
+            # cannot both believe they won.
+            self.assertTrue(path.is_symlink())
+            self.assertEqual(os.readlink(path), "on-host-a")
+
+    def test_a_released_claim_frees_the_agent_for_another_remote(self) -> None:
+        self.claim("on-host-a", name="agent", native="uuid-1", host=LOCAL)
+        session = sessions.load_session("on-host-a")
+        assert session is not None
+        with patch.object(sessions, "current_host", return_value=LOCAL):
+            sessions.kill_session(session)
+        self.claim("on-host-b", name="agent", native="uuid-1", host=REMOTE)
+
+
 class SpawnRequestHostTests(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory()
