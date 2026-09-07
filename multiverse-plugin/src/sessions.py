@@ -39,6 +39,7 @@ from .agent_descriptions import read_description, write_description
 from .compact_state import list_locked
 from .hosts import (
     HOST_FOREIGN,
+    another_host_vouches_for,
     HOST_FOREIGN_STALE,
     HOST_LOCAL,
     current_host,
@@ -1002,16 +1003,56 @@ def ending_was_forced(s: Session) -> bool:
         return False
 
 
+def may_declare_dead(s: Session) -> bool:
+    """Whether THIS machine is entitled to write ``ended`` for ``s``.
+
+    Liveness correction rests on a single local observation — ``tmux
+    has-session`` — and that observation only ever means "not on this
+    machine". Where a ``MULTIVERSE_ROOT`` is shared between remotes, a
+    dashboard sees every session in the workspace but can see only its own
+    tmux server, so "I cannot find it" is the normal, expected state for every
+    session belonging to another remote. Writing ``ended`` on that basis
+    reaches across the mount and marks a running agent dead, and because
+    ``ended`` is terminal the damage does not heal when the real host comes
+    back: its own hooks are refused, and the user is left resuming a session
+    that never stopped.
+
+    So death is declared only from evidence that this machine actually has:
+
+    * **An unstamped session is never ours to bury.** A missing ``host`` means
+      ownership was never recorded, not that it is ours by default — and the
+      default is the one that reaches across the mount.
+    * **A session recorded to another host is never ours to bury**, which is
+      the case ``is_foreign_host`` already covered.
+    * **A session another machine is actively vouching for is never ours to
+      bury**, even when the recorded host matches. Two remotes can report the
+      same hostname (containers routinely do), and then the recorded host
+      cannot tell them apart; a heartbeat signed by a different id and still
+      fresh can.
+
+    What this gives up is the ability to auto-reap a crashed session that was
+    never stamped with a host. That row keeps its last status until the user
+    force-kills it — a visible, recoverable annoyance, where the alternative
+    is silent data loss on a machine we cannot see.
+    """
+    if not s.host:
+        return False
+    if is_foreign_host(s):
+        return False
+    return not another_host_vouches_for(s.dir)
+
+
 def _correct_local_liveness(s: Session) -> bool:
     """Persist ``ended`` when local process evidence proves a row is stale.
 
-    A foreign host's tmux server is intentionally unobservable here, so its
-    durable status remains authoritative. New sessions also receive a short
-    grace period between reserving their state directory and creating tmux.
-    Codex runners record the foreground Codex PID, allowing correction even
-    when an abnormal wrapper leaves its tmux pane behind.
+    Only ever for a session this host is entitled to bury — see
+    ``may_declare_dead``; a foreign host's tmux server is unobservable here,
+    so its durable status remains authoritative. New sessions also receive a
+    short grace period between reserving their state directory and creating
+    tmux. Codex runners record the foreground Codex PID, allowing correction
+    even when an abnormal wrapper leaves its tmux pane behind.
     """
-    if s.status in ("ended", "retiring", "retired") or is_foreign_host(s):
+    if s.status in ("ended", "retiring", "retired") or not may_declare_dead(s):
         return False
 
     within_startup_grace = (

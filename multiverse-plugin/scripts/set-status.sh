@@ -15,7 +15,11 @@ TS=$(date +%s)
 # tmux server and so have no other way to tell "alive on a remote" from
 # "that remote is gone". Touched before every guard below, because a session
 # still firing hooks is still alive whatever those guards decide to write.
-touch "$(dirname "$MULTIVERSE_STATUS")/heartbeat" 2>/dev/null || true
+# The contents name the machine, so a dashboard elsewhere can tell a claim it
+# made itself from one made by a host it cannot see. Same identity rule as
+# hosts.current_host(); see its docstring.
+printf '%s' "${MULTIVERSE_HOST_ID:-$(hostname)}" \
+  > "$(dirname "$MULTIVERSE_STATUS")/heartbeat" 2>/dev/null || true
 
 # A dashboard kill owns the lifecycle state until runtime and tmux teardown
 # finish. Hooks may still fire while the runtime handles SIGTERM; do not let

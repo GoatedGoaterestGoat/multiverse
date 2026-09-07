@@ -3788,7 +3788,16 @@ class MonitorApp(App):
         even when the share is unwritable.
         """
         for session in self.sessions:
-            if session.status not in _TEARDOWN_STATUSES and not is_foreign_host(session):
+            # Gated on OUR tmux actually having the session. A heartbeat is a
+            # claim that a machine can see this agent running, and only a
+            # machine that can see it may make one — vouching for a row we
+            # merely have on disk would sign for another remote's session and
+            # turn the one cross-host liveness signal into noise.
+            if (
+                session.status not in _TEARDOWN_STATUSES
+                and not is_foreign_host(session)
+                and tmux_session_exists(session.tmux_name)
+            ):
                 touch_heartbeat_throttled(session.dir)
         try:
             wake_relay.gc()
