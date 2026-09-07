@@ -44,6 +44,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -71,6 +72,7 @@ from .atomic_files import (  # noqa: E402
     atomic_write_json,
     exclusive_file_lock,
 )
+from .hosts import current_host
 from .paths import multiverse_dir  # noqa: E402
 
 log = logging.getLogger("sb_connector")
@@ -221,9 +223,10 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
-def current_host() -> str:
-    """Host identity for the singleton lock (shared-MULTIVERSE_ROOT deployments)."""
-    return socket.gethostname()
+# Host identity comes from `hosts` so this file agrees with the rest of Multiverse
+# about which machine it is on. It previously had its own socket.gethostname() copy,
+# which ignored MULTIVERSE_HOST_ID -- so with the override set, the lock and status
+# recorded one identity while the delivery guard compared against another.
 
 
 # --------------------------------------------------------------------------------------
@@ -232,7 +235,23 @@ def current_host() -> str:
 
 
 def sb_dir() -> Path:
-    """The connector's state directory. Created lazily; 0700."""
+    """The connector's state directory. Created lazily; 0700.
+
+    Deliberately SHARED across hosts, not keyed on host id, even though several
+    machines can mount one MULTIVERSE_ROOT. Two things depend on that:
+
+    * The event substrate is host-independent. Hooks on every remote write their
+      signals here, and a daemon draining them never asks which machine produced
+      one -- so a single connector delivers events for the whole workspace, whichever
+      remote it happens to run on. Splitting this directory per host would strand
+      each remote's events where no running daemon looks for them.
+    * ``connector.lock`` lives here, so it is one lock for the whole filesystem and
+      exactly one daemon can hold it. One daemon means one ``device_id``, one ``seq``
+      cursor and one outbox -- which is what keeps SB's replay coherent.
+
+    The cost is that ACTIONS are still host-bound: a daemon can only drive a tmux
+    pane on its own machine. That is handled per-verb at the delivery sites, not here.
+    """
     d = multiverse_dir() / "secondbrain"
     d.mkdir(parents=True, exist_ok=True)
     try:
