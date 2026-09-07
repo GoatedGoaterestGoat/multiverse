@@ -182,7 +182,7 @@ class ActionsAreHostBoundTests(unittest.TestCase):
                 self._as("remote-b"):
             code, _, msg = conn._deliver_permission_blocking(
                 "/ws", "Alice", "t1", "deny", None)
-        self.assertEqual(code, "foreign_host")
+        self.assertEqual(code, "deliver_failed")
         self.assertIn("remote-a", msg)
         self.assertEqual(self.calls, [], "must not drive a pane it cannot reach")
 
@@ -191,7 +191,7 @@ class ActionsAreHostBoundTests(unittest.TestCase):
         with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
                 self._as("remote-b"):
             kind, payload = sb_queries.peek_agent("/ws", "Alice")
-        self.assertEqual(kind, "foreign_host")
+        self.assertEqual(kind, "deliver_failed")
         self.assertIn("remote-a", payload["message"])
         self.assertNotIn("no live tmux", payload["message"])
 
@@ -202,7 +202,7 @@ class ActionsAreHostBoundTests(unittest.TestCase):
         with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
                 self._as("remote-b"):
             kind, payload = sb_queries.peek_agent("/ws", "Alice")
-        self.assertEqual(kind, "foreign_host")
+        self.assertEqual(kind, "deliver_failed")
         self.assertIn("not checked in", payload["message"])
         for terminal in ("ended", "dead", "gone forever"):
             self.assertNotIn(terminal, payload["message"].replace("may be gone", ""))
@@ -214,6 +214,82 @@ class ActionsAreHostBoundTests(unittest.TestCase):
                 patch.object(sessions, "tmux_session_exists", lambda n: False):
             kind, _ = sb_queries.peek_agent("/ws", "Alice")
         self.assertEqual(kind, "not_running", "local rows keep their existing path")
+
+
+class HostReportingTests(unittest.TestCase):
+    """SB must be able to say WHERE an agent is, not just how it is.
+
+    Without this a row reads ``working``, SB tells the user the agent is working, and
+    then an action fails with "running on host X" that SB could neither anticipate nor
+    explain. The worse case is a remote that died: nothing corrects the row, so SB
+    would keep reporting ``working`` for a machine that no longer exists.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.enterContext(patch.dict(os.environ, {"MULTIVERSE_ROOT": self.temp.name}))
+
+    def _row(self, *, host: str | None, fresh: bool = True, status: str = "working"):
+        sess = None
+        if host is not None:
+            sess = sessions.Session(
+                id=f"s-{uuid.uuid4().hex[:8]}", cwd="/ws", created_at=1, status=status,
+                status_ts=1, name="Alice", runtime=sessions.RUNTIME_CLAUDE, host=host,
+            )
+            if fresh:
+                sess.dir.mkdir(parents=True, exist_ok=True)
+                hosts.touch_heartbeat(sess.dir)
+        return sessions.DashboardRow(
+            name="Alice", cwd="/ws", status=status, status_ts=1, session=sess,
+            claude_uuid=None, preview="", is_ghost=False, folded_at=None,
+        )
+
+    def _report(self, row) -> dict:
+        with patch.object(sb_queries, "_supported_rows", lambda cwd: [row]), \
+                patch.object(sessions, "tmux_session_exists", lambda n: True):
+            return sb_queries.list_agents("/ws")[0]
+
+    def test_a_local_agent_is_reported_local(self) -> None:
+        with patch.dict(os.environ, {"MULTIVERSE_HOST_ID": "remote-a"}):
+            row = self._report(self._row(host="remote-a"))
+        self.assertEqual(row["host_id"], "remote-a")
+        self.assertEqual(row["host_state"], hosts.HOST_LOCAL)
+
+    def test_an_agent_on_another_remote_names_that_remote(self) -> None:
+        row = self._row(host="remote-a")
+        with patch.dict(os.environ, {"MULTIVERSE_HOST_ID": "remote-b"}):
+            out = self._report(row)
+        self.assertEqual(out["host_id"], "remote-a")
+        self.assertEqual(out["host_state"], hosts.HOST_FOREIGN)
+
+    def test_a_remote_that_stopped_checking_in_is_flagged(self) -> None:
+        row = self._row(host="remote-a", fresh=False)
+        with patch.dict(os.environ, {"MULTIVERSE_HOST_ID": "remote-b"}):
+            out = self._report(row)
+        self.assertEqual(out["host_state"], hosts.HOST_FOREIGN_STALE)
+
+    def test_status_still_means_status_for_a_foreign_agent(self) -> None:
+        # The contract point: working on another machine IS working. Folding host into
+        # status would destroy the distinction needed to explain a refused action.
+        row = self._row(host="remote-a", status="working")
+        with patch.dict(os.environ, {"MULTIVERSE_HOST_ID": "remote-b"}):
+            out = self._report(row)
+        self.assertEqual(out["status"], "working")
+
+    def test_a_row_with_no_session_claims_no_host(self) -> None:
+        out = self._report(self._row(host=None, status="dormant"))
+        self.assertEqual(out["host_id"], "")
+        self.assertEqual(out["host_state"], hosts.HOST_LOCAL, "startable here")
+
+    def test_the_dashboard_shape_carries_it_too(self) -> None:
+        row = self._row(host="remote-a")
+        with patch.object(sb_queries, "_supported_rows", lambda cwd: [row]), \
+                patch.object(sessions, "tmux_session_exists", lambda n: True), \
+                patch.dict(os.environ, {"MULTIVERSE_HOST_ID": "remote-b"}):
+            out = sb_queries.dashboard("/ws")[0]
+        self.assertEqual(out["host_id"], "remote-a")
+        self.assertEqual(out["host_state"], hosts.HOST_FOREIGN)
 
 
 if __name__ == "__main__":

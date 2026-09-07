@@ -154,6 +154,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                         "build": "on",
                         "updated": "2024-07-17T16:42:47Z",
                         "preview": "Claude preview",
+                        "host_id": "",
+                        "host_state": "local",
                     },
                     {
                         "id": "mv-codex",
@@ -164,6 +166,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                         "build": "off",
                         "updated": "2024-07-17T16:42:48Z",
                         "preview": "Codex live preview",
+                        "host_id": "",
+                        "host_state": "local",
                     },
                     {
                         "id": "mv-ended",
@@ -174,6 +178,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                         "build": "off",
                         "updated": "2024-07-17T16:42:49Z",
                         "preview": "Codex ended preview",
+                        "host_id": "",
+                        "host_state": "local",
                     },
                     {
                         "id": "codex-do",
@@ -184,6 +190,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                         "build": "off",
                         "updated": "2024-07-17T16:42:50Z",
                         "preview": "Codex dormant preview",
+                        "host_id": "",
+                        "host_state": "local",
                     },
                 ]
             },
@@ -227,6 +235,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                 "inbox": 0,
                 "tokens": "-",
                 "last_updated": "2024-07-17T16:42:51Z",
+                "host_id": "",
+                "host_state": "local",
             },
         )
 
@@ -242,6 +252,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                 "inbox": 2,
                 "tokens": "-",
                 "last_updated": "2024-07-17T16:42:48Z",
+                "host_id": "",
+                "host_state": "local",
             },
         )
         self.assertEqual(wire.result["agents"][2]["status"], "ended")
@@ -264,6 +276,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                 "inbox": 4,
                 "tokens": "-",
                 "last_updated": "2024-07-17T16:42:50Z",
+                "host_id": "",
+                "host_state": "local",
             },
         )
         self.assertNotIn("runtime", found.result)
@@ -294,6 +308,8 @@ class SecondBrainCodexQueryTests(unittest.IsolatedAsyncioTestCase):
                 "inbox": 0,
                 "tokens": "-",
                 "last_updated": "2024-07-17T16:42:51Z",
+                "host_id": "",
+                "host_state": "local",
             },
         )
 

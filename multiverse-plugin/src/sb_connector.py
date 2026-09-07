@@ -3010,7 +3010,7 @@ class SBConnector:
         # foreign target is false and hides the real reason.
         if target.session is not None and session_host_state(target.session) != HOST_LOCAL:
             return (
-                "foreign_host", "",
+                "deliver_failed", "",
                 f"'{agent_name}' is running on host '{target.session.host}', not this "
                 "host, so its permission prompt can only be answered there",
             )

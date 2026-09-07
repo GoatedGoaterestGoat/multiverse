@@ -87,6 +87,36 @@ def _tokens(row) -> int | str | None:  # noqa: ANN001 - DashboardRow
     return live_toks + structural_tokens_cached(uuid, row.cwd)
 
 
+def _host_fields(row) -> dict:  # noqa: ANN001 - DashboardRow
+    """Which machine owns this row, and how far it can be believed.
+
+    SB needs both, and they answer different questions. ``host`` is provenance;
+    ``host_state`` is whether the row can be acted on and whether its ``status`` is
+    still worth believing. Kept separate from ``status`` on purpose: an agent working
+    on another remote IS working, and collapsing the two would lose exactly the
+    distinction needed to explain why an action was refused.
+
+    Named ``host_id`` rather than ``host`` to match the seam's convention -- every
+    identifier crossing it is ``<thing>_id`` (``event_id``, ``workspace_id``,
+    ``tool_use_id``) and bare nouns are content. It also avoids a real collision on
+    SB's side, where ``host`` already means the SB Host object.
+
+    ``host_state`` is computed by the core (``sessions.session_host_state``) rather
+    than by comparing ids here, because host ids are not stable identifiers -- a
+    container renames itself, macOS renames per network -- so a local string compare
+    would be wrong in precisely the cases that matter.
+
+    A row with no session record has no owning machine yet. It reports ``local``,
+    since it can be started here; ``host`` stays "" rather than guessing.
+    """
+    if row.session is None:
+        return {"host_id": "", "host_state": HOST_LOCAL}
+    return {
+        "host_id": row.session.host or "",
+        "host_state": session_host_state(row.session),
+    }
+
+
 def _agent_row(row) -> dict:  # noqa: ANN001 - DashboardRow
     return {
         "name": row.name,
@@ -94,6 +124,7 @@ def _agent_row(row) -> dict:  # noqa: ANN001 - DashboardRow
         "inbox": pending_inbox_count(row.cwd, row.name),  # count only, not content
         "tokens": _tokens(row),
         "last_updated": _iso(row.status_ts),
+        **_host_fields(row),
     }
 
 
@@ -119,6 +150,7 @@ def _dashboard_row(row) -> dict:  # noqa: ANN001 - DashboardRow
         ),
         "updated": _iso(row.status_ts),
         "preview": row.preview,
+        **_host_fields(row),
     }
 
 
@@ -164,7 +196,8 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
     * ``("not_found", {message})`` — no agent by that name in the workspace.
     * ``("not_running", {message})`` — dormant/ended/no-tmux; there IS no screen.
     * ``("locked", {message})`` — session is compacting; the pane is torn down.
-    * ``("foreign_host", {message})`` — alive, but on another remote: no pane here.
+    * ``("deliver_failed", {message})`` — includes "alive, but on another remote":
+      the message names the host, since no pane exists here to capture.
     * ``("deliver_failed", {message})`` — tmux subprocess failure (rare).
 
     Contract with the SB ``toolsmith`` agent (2026-08-09):
@@ -206,7 +239,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
                 if hstate == HOST_FOREIGN_STALE
                 else "so its screen can only be captured there"
             )
-            return "foreign_host", {
+            return "deliver_failed", {
                 "message": f"'{agent_name}' is running on host "
                            f"'{target.session.host}', {tail}",
             }
