@@ -69,6 +69,10 @@ CODEX_CONFIG_ARGS=(
   # fork) and thread/start (thread recap). Older codex defaulted to stdio,
   # which is why this only began failing after a codex upgrade.
   -c "mcp_servers.multiverse.transport=\"stdio\""
+  # 100 years (365 days/year): leave long inbox/spawn waits under the tool's
+  # own deadline and user cancellation, not Codex's short MCP client timeout.
+  # This applies to all tools in the existing multiverse namespace.
+  -c "mcp_servers.multiverse.tool_timeout_sec=3153600000"
 )
 
 # Codex launches stdio MCP servers with a sanitized environment. Explicitly

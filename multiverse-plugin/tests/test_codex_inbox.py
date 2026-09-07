@@ -156,6 +156,26 @@ class CodexMonitorInboxTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(statuses, ["listening", "working"])
 
+    async def test_requested_wait_is_not_capped_at_300_seconds(self) -> None:
+        with (
+            patch.object(
+                server, "_resolve_self_identity", return_value=("agent", "/tmp/ws")
+            ),
+            patch.object(server, "pending_inbox_count", side_effect=[0, 1]),
+            patch.object(server.time, "time", side_effect=[0, 301]),
+            patch.object(server.asyncio, "sleep", new_callable=AsyncMock),
+            patch.object(server, "_write_session_status") as write_status,
+        ):
+            result = await server.monitor_inbox(timeout_seconds=86400)
+
+        self.assertEqual(
+            result, "You have a new inbox message. Call check_inbox to read it."
+        )
+        self.assertEqual(
+            [call.args[0] for call in write_status.call_args_list],
+            ["listening", "working"],
+        )
+
     async def test_cancellation_restores_working_status(self) -> None:
         statuses: list[str] = []
         with (

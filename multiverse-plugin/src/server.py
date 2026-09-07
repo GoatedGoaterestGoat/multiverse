@@ -1493,9 +1493,10 @@ async def monitor_inbox(
     call ends and your turn resumes with their input.
 
     Args:
-        timeout_seconds: Max seconds to wait. Default 300 (5 minutes). On
-            timeout, returns a "no new messages" notice — you can call
-            again to keep waiting, or move on.
+        timeout_seconds: Max seconds to wait for this call. Default 300
+            (5 minutes), not a cap: choose a larger value when desired,
+            e.g. 86400 for one day. On timeout, returns a "no new messages"
+            notice — you can call again to keep waiting, or move on.
     """
     name, cwd = _resolve_self_identity()
     if not cwd or not name:

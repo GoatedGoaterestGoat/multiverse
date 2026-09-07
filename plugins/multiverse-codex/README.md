@@ -29,6 +29,13 @@ do not consume or inject them.
   without consuming it. The Multiverse dashboard reports `listening` during
   the wait. When it returns, call `check_inbox()` to read the message.
 
+All tools in the existing `multiverse` MCP namespace use a Codex client timeout
+of `3153600000` seconds (100 years at 365 days/year), in both the bundled MCP
+configuration and fresh/resumed wrapper launches. Tool-specific deadlines still
+apply: `monitor_inbox` defaults to 300 seconds but accepts longer waits, such as
+`monitor_inbox(timeout_seconds=86400)` for one day. User cancellation is unchanged.
+Restart/resume an existing managed Codex session to pick up the client timeout.
+
 Every `message_agent(...)` call uses active delivery. An unattended live Codex
 terminal is prompted to call `check_inbox` only when its input composer is
 focused. A typed-but-unsent draft is saved, cleared, and restored around that

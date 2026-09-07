@@ -2,7 +2,8 @@
   "mcpServers": {
     "multiverse": {
       "command": "${PLUGIN_ROOT}/scripts/mcp-server",
-      "transport": "stdio"
+      "transport": "stdio",
+      "tool_timeout_sec": 3153600000
     }
   }
 }

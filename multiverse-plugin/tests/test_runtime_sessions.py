@@ -1233,6 +1233,16 @@ class CodexHookTests(unittest.TestCase):
             self.assertEqual(json.loads(status.read_text())["status"], "ending")
 
 class CodexRunnerTests(unittest.TestCase):
+    def test_plugin_bundle_uses_100_year_multiverse_tool_timeout(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        config = json.loads(
+            (repo_root / "plugins" / "multiverse-codex" / ".mcp.json").read_text()
+        )
+        self.assertEqual(set(config["mcpServers"]), {"multiverse"})
+        self.assertEqual(
+            config["mcpServers"]["multiverse"]["tool_timeout_sec"], 3153600000
+        )
+
     def test_runner_cleanup_preserves_dashboard_ending_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         runner = repo_root / "multiverse-plugin" / "bin" / "multiverse-codex-session"
@@ -1347,6 +1357,10 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(startup["tmux_name"], "multiverse-wrapper-id")
             self.assertEqual(startup["prompt"], "Do the spawned work.")
             self.assertNotIn("Do the spawned work.", codex_args_capture.read_text())
+            self.assertIn(
+                "mcp_servers.multiverse.tool_timeout_sec=3153600000",
+                codex_args_capture.read_text().splitlines(),
+            )
 
     def test_runner_injects_plugin_config_before_resume_command(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -1406,6 +1420,10 @@ class CodexRunnerTests(unittest.TestCase):
             resume_index = args.index("resume")
             self.assertGreater(resume_index, args.index("-c"))
             self.assertLess(args.index("--approve-for-me"), resume_index)
+            self.assertLess(
+                args.index("mcp_servers.multiverse.tool_timeout_sec=3153600000"),
+                resume_index,
+            )
             self.assertEqual(
                 args[resume_index : resume_index + 2],
                 ["resume", "codex-thread"],

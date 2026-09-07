@@ -320,6 +320,8 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 
 **`monitor_inbox(timeout_seconds=300)`** — block until the next inbox message arrives, then signal you to read it. Use it after you've finished work but are expecting replies — park here instead of busy-looping on `check_inbox`. Returns `"You have a new inbox message…"` once one lands (does **not** consume it — call `check_inbox` next), or a timeout notice after the deadline (default 5 min). Returns immediately if messages are already pending. The wait is interruptible: the user can press Esc to prompt you, ending the call cleanly. While parked, the agent's dashboard status reads `listening` (cyan) — so the user and other agents (via `list_agents`) can tell it's waiting for messages, not busy.
 
+The 300-second default is not a maximum: agents can request longer waits, e.g. `monitor_inbox(timeout_seconds=86400)` for one day. Fresh and resumed managed Codex sessions set `mcp_servers.multiverse.tool_timeout_sec=3153600000` (100 years at 365 days/year) for **all** tools in the existing Multiverse MCP namespace. This raises the client-side deadline without changing tool-specific timeouts or user cancellation. Existing Codex processes need to be restarted/resumed to pick up the setting.
+
 **`spawn_agent(instruction, name="")`** — start a brand-new subagent with a fresh context and hand it a starting task. Use this when you want to delegate to a clean slate, not bother an existing agent.
 
 - `instruction` becomes the subagent's first user message, auto-submitted on startup
