@@ -440,16 +440,18 @@ has-session`, which answers "not on this machine" — so on a shared root every 
 belonging to another remote looks missing, and writing `ended` on that basis kills a running
 agent for good (`ended` is terminal, so the real host's own hooks are refused afterwards).
 A host may therefore mark a session ended only when it is provably its own: the session's
-recorded host must match, an *unstamped* session is never assumed to be ours, and no other
-machine may be vouching for it. The cost is that a crashed session with no recorded host
+recorded host must match, an *unstamped* session is never assumed to be ours, and nothing may
+be vouching for it that this host cannot account for. The cost is that a crashed session with no recorded host
 keeps its last status until you force-kill it — visible and recoverable, unlike the silent
 alternative.
 
-**Proof of life.** Each host publishes a heartbeat for the sessions it can actually see, and
-signs it with its host id, so a dashboard can tell a claim it made itself from one made by a
-machine it cannot reach. That signature is what protects two remotes that report the *same*
-hostname. A foreign row that has gone quiet is marked `@host?` — meaning *do not believe this
-row*, not *this agent is dead*. Nothing acts on it automatically: a quiet share and a dead machine
+**Proof of life.** Only a machine that can *see* a session running publishes its heartbeat —
+its own tmux holds it, or its own wrapper process is it. A dashboard reaches the burial
+decision only after its own tmux has come up empty, which already establishes that it is not
+the one keeping that heartbeat warm, so a fresh heartbeat is somebody else's regardless of
+what host id it carries. That is what makes this work between two containers reporting the
+*same* hostname, where no comparison of ids can tell them apart. A foreign row that has gone
+quiet is marked `@host?` — meaning *do not believe this row*, not *this agent is dead*. Nothing acts on it automatically: a quiet share and a dead machine
 look identical from here, so declaring one gone stays your call, via force-kill. A remote
 running no dashboard whose agents are all idle publishes nothing, and its rows will read
 that way even though they are fine.

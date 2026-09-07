@@ -154,45 +154,59 @@ class ForeignSessionTests(SessionHostTestCase):
 
     def test_a_dashboard_never_buries_a_session_it_cannot_find(self) -> None:
         """The reported bug: a dashboard on a second remote sees every session
-        in the shared workspace but only its own tmux, so every session on
+        under the shared root but only its own tmux, so every session on
         another remote looks missing — and ``ended`` is terminal, so writing
         it reaches across the mount and kills a running agent for good."""
         elsewhere = self.write_session("sid-remote", host=REMOTE, status="working")
         unstamped = self.write_session("sid-legacy", host=None, status="idle")
-        colliding = self.write_session("sid-same", host=LOCAL, status="idle")
-        # A machine that reports the same hostname as ours — containers do
-        # this routinely — but is a different machine, and says so.
-        hosts.heartbeat_path(colliding.dir).write_text("a-different-machine")
+        vouched = self.write_session("sid-vouched", host=LOCAL, status="idle")
+        hosts.touch_heartbeat(vouched.dir)
 
         with patch.object(sessions, "tmux_session_exists", return_value=False):
             found = {s.id: s for s in sessions.list_sessions()}
 
-        for session in (elsewhere, unstamped, colliding):
+        for session in (elsewhere, unstamped, vouched):
             with self.subTest(session=session.id):
                 self.assertNotEqual(found[session.id].status, "ended")
                 persisted = json.loads((session.dir / "status.json").read_text())
                 self.assertNotEqual(persisted["status"], "ended")
 
+    def test_identical_host_ids_do_not_defeat_the_liveness_signal(self) -> None:
+        """Two containers reporting the SAME hostname, which is the shape that
+        broke in production. Every identity comparison collapses — the
+        recorded host matches ours, and the heartbeat carries our own id — so
+        the decision cannot rest on identity at all. What still distinguishes
+        them: this host's tmux does not have the session, so whoever is
+        keeping that heartbeat warm, it is not us."""
+        theirs = self.write_session("sid-twin", host=LOCAL, status="working")
+        with patch.object(hosts, "current_host", return_value=LOCAL):
+            hosts.touch_heartbeat(theirs.dir)
+        self.assertEqual(hosts.heartbeat_host(theirs.dir), LOCAL)  # our own id
+        self.assertFalse(sessions.is_foreign_host(theirs))  # looks local
+        self.assertFalse(sessions.may_declare_dead(theirs, visible_here=False))
+
+        with patch.object(sessions, "tmux_session_exists", return_value=False):
+            found = {s.id: s for s in sessions.list_sessions()}
+        self.assertEqual(found["sid-twin"].status, "working")
+
     def test_our_own_crashed_session_is_still_reaped(self) -> None:
         # The protection must not cost the thing liveness correction is for.
+        # A heartbeat that has aged out is no longer evidence of anything.
         mine = self.write_session("sid-mine", host=LOCAL, status="working")
-        hosts.touch_heartbeat(mine.dir)  # signed by us: an echo, not evidence
-        self.assertTrue(sessions.may_declare_dead(mine))
+        hosts.touch_heartbeat(mine.dir)
+        old = time.time() - hosts.STALE_HEARTBEAT_SECONDS - 1
+        os.utime(hosts.heartbeat_path(mine.dir), (old, old))
+        self.assertTrue(sessions.may_declare_dead(mine, visible_here=False))
         with patch.object(sessions, "tmux_session_exists", return_value=False):
             found = {s.id: s for s in sessions.list_sessions()}
         self.assertEqual(found["sid-mine"].status, "ended")
 
-    def test_a_host_never_signs_over_another_machines_live_claim(self) -> None:
-        session = self.write_session("sid-claimed", host=LOCAL)
-        hosts.heartbeat_path(session.dir).write_text("a-different-machine")
-        hosts.touch_heartbeat(session.dir)
-        self.assertEqual(hosts.heartbeat_host(session.dir), "a-different-machine")
-        # Once that claim goes stale it may be replaced.
-        old = time.time() - hosts.STALE_HEARTBEAT_SECONDS - 1
-        os.utime(hosts.heartbeat_path(session.dir), (old, old))
-        with patch.object(hosts, "current_host", return_value=LOCAL):
-            hosts.touch_heartbeat(session.dir)
-            self.assertEqual(hosts.heartbeat_host(session.dir), LOCAL)
+    def test_a_visible_session_is_judged_on_local_evidence_alone(self) -> None:
+        # We can see it in our own tmux, so the heartbeat is ours and adds
+        # nothing — a Codex runtime whose PID is gone must still be reapable.
+        mine = self.write_session("sid-visible", host=LOCAL, status="working")
+        hosts.touch_heartbeat(mine.dir)
+        self.assertTrue(sessions.may_declare_dead(mine, visible_here=True))
 
     def test_live_foreign_session_is_not_reaped_by_ordinary_teardown(self) -> None:
         foreign = self.write_session()

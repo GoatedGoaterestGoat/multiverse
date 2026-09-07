@@ -12,6 +12,30 @@ if ! command -v "$PI_BIN" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Publish proof of life while this runtime runs, so a dashboard on another
+# remote can tell "alive over there" from "that machine is gone". Only a
+# machine that can see the session may vouch for it, and a wrapper is the
+# session — this covers the case no dashboard here does: a remote with no
+# dashboard open, or one open for a different workspace, while liveness
+# correction on every OTHER remote sweeps this session regardless of cwd.
+# No EXIT trap: these wrappers already install their own teardown traps, and a
+# second one would silently replace the first. The writer stops itself instead,
+# by noticing it has been re-parented once this wrapper is gone.
+# Best-effort: a missing python or script must never stop a session starting.
+_MV_HEARTBEAT_SCRIPT="${MULTIVERSE_PLUGIN_ROOT:-}/scripts/heartbeat.py"
+if [ -f "$_MV_HEARTBEAT_SCRIPT" ]; then
+  _MV_HEARTBEAT_PYTHON="${MULTIVERSE_PLUGIN_ROOT:-}/.venv/bin/python"
+  if [ ! -x "$_MV_HEARTBEAT_PYTHON" ]; then
+    _MV_HEARTBEAT_PYTHON=$(command -v python3 || true)
+  fi
+  if [ -n "$_MV_HEARTBEAT_PYTHON" ]; then
+    # stdout/stderr closed: a background child holding the wrapper's pipes
+    # open keeps anything waiting on them blocked until the runtime exits.
+    "$_MV_HEARTBEAT_PYTHON" "$_MV_HEARTBEAT_SCRIPT" \
+      "$(dirname "$MULTIVERSE_STATUS")" >/dev/null 2>&1 &
+  fi
+fi
+
 EXTENSION="$MULTIVERSE_PLUGIN_ROOT/pi-extension/index.ts"
 if [ ! -r "$EXTENSION" ]; then
   echo "[multiverse-pi-session] pi extension not found: $EXTENSION" >&2

@@ -3755,6 +3755,12 @@ class MonitorApp(App):
         # Scope to the monitor's cwd — other multiverse instances own sessions
         # in other cwds.
         self.sessions = [s for s in all_sessions if s.cwd == self.monitor_cwd]
+        # Vouch for every session THIS machine can see, not just this
+        # workspace's: liveness correction sweeps every session under the
+        # shared root regardless of cwd, so a dashboard open for one workspace
+        # will happily bury another workspace's rows unless somebody has
+        # published proof of life for them.
+        self._vouch_for_visible(all_sessions)
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
         self.entries = build_dashboard_rows(
@@ -3769,36 +3775,35 @@ class MonitorApp(App):
         self._tick_host_liveness()
         self._update_web_indicator()
 
-    def _tick_host_liveness(self) -> None:
-        """Publish proof of life for our sessions; nudge ones asked of us.
+    def _vouch_for_visible(self, sessions: list[Session]) -> None:
+        """Publish proof of life for every session this machine can see.
 
-        Both halves of sharing a ``MULTIVERSE_ROOT`` across remotes are here,
-        and both are things only THIS host can do for its own sessions.
+        The one fact a dashboard on another remote cannot establish for
+        itself: its tmux server is invisible to us and ours to it, so without
+        a published signal a running session and a preempted machine look
+        exactly alike from over there. Only a host whose own tmux holds the
+        session may write one — vouching for a row we merely have on disk
+        would sign for another remote's session and turn the single
+        cross-host liveness signal into noise.
 
-        The heartbeat answers a question no dashboard on another remote can
-        otherwise ask: our tmux server is invisible to them, so without a
-        published signal a session of ours looks identically alive whether
-        this machine is running or has been preempted. Throttled to the write
-        interval, since the mount is network storage.
-
-        The relay answers the other direction. A wake prompt is keystrokes
-        into a local pane, so a sender on another remote cannot deliver one —
-        it leaves a request instead, and we execute it for the sessions we
-        own. Both halves are best-effort: a dashboard must keep rendering
-        even when the share is unwritable.
+        Throttled to the write interval, since the mount is network storage.
         """
-        for session in self.sessions:
-            # Gated on OUR tmux actually having the session. A heartbeat is a
-            # claim that a machine can see this agent running, and only a
-            # machine that can see it may make one — vouching for a row we
-            # merely have on disk would sign for another remote's session and
-            # turn the one cross-host liveness signal into noise.
+        for session in sessions:
             if (
                 session.status not in _TEARDOWN_STATUSES
                 and not is_foreign_host(session)
                 and tmux_session_exists(session.tmux_name)
             ):
                 touch_heartbeat_throttled(session.dir)
+
+    def _tick_host_liveness(self) -> None:
+        """Deliver wakes other remotes asked this host to perform.
+
+        A wake prompt is keystrokes into a local tmux pane, so a sender on
+        another remote cannot deliver one — it leaves a request instead, and
+        we execute it for the sessions we own. Best-effort: a dashboard must
+        keep rendering even when the share is unwritable.
+        """
         try:
             wake_relay.gc()
             wake_relay.relay_pending_wakes(self._deliver_relayed_wake)

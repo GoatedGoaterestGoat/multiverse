@@ -13,9 +13,11 @@ Two questions follow from that, and this module answers both:
 * **Whose is it?** ``current_host()`` — stamped into a session at creation
   and compared later. The answer has to be stable across reboots, networks
   and container restarts, which a hostname is not.
-* **Is it still there?** ``heartbeat_age()`` — a foreign session's own
-  process refreshes a file; nobody else can. A remote that is preempted
-  stops refreshing, and its rows stop looking indefinitely alive.
+* **Is it still there?** ``heartbeat_age()`` — only a machine that can see a
+  session running refreshes its heartbeat, so a fresh one means some machine
+  still can. That answer needs no identity at all, which matters because
+  identity is the part that breaks: two containers routinely report the same
+  hostname, and no comparison of host ids can then tell them apart.
 
 A stale heartbeat is evidence of uncertainty, not permission to act: it
 never authorizes taking over or reaping a foreign session, because "the
@@ -31,10 +33,11 @@ import socket
 import time
 from pathlib import Path
 
-#: How often a session's own host refreshes its heartbeat. Writes are cheap
-#: (one utime) but they land on network storage, so this is a rate limit, not
-#: a schedule: hook fires refresh it too and simply skip when it is fresh.
-HEARTBEAT_INTERVAL_SECONDS = 60.0
+#: How often a machine that can see a session refreshes its heartbeat. Small,
+#: because this interval also bounds the delay before a genuinely dead LOCAL
+#: session can be reaped: until its last heartbeat goes stale, a host cannot
+#: tell its own moments-old signal from another machine's.
+HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 #: Four times the write interval, which tolerates one missed write plus clock
 #: skew between machines sharing the mount. Below that, a slow tick on a busy
@@ -101,22 +104,21 @@ def heartbeat_path(session_dir: Path) -> Path:
 def touch_heartbeat(session_dir: Path) -> None:
     """Record that this session is alive, and WHICH machine can see that.
 
-    The mtime answers "when", and the contents answer "who" — and the second
-    question is the one that makes this safe to act on. A reader that finds a
-    fresh heartbeat signed by a machine other than itself has positive proof
-    that somebody else is watching this session run, which is the only kind of
-    evidence that survives not being able to see another host's tmux.
+    Only a machine that can currently SEE the session running may write one —
+    its own tmux server holds it, or it IS the session's wrapper process. That
+    rule is what gives the file meaning: a fresh heartbeat says "some machine
+    can see this session alive", which is exactly the fact no amount of local
+    tmux inspection can establish about another remote.
 
-    Declines to overwrite another machine's still-fresh signature. A host can
-    only ever vouch for what it can see, which is its own tmux, so writing our
-    name over a live claim would erase the very evidence that stops this
-    session being declared dead from here.
+    The recorded host id is diagnostic only. Reading it to decide whose
+    heartbeat this is does not work: two containers routinely report the same
+    hostname, and then every machine finds its own id in every heartbeat and
+    dismisses real proof of life as its own echo. Ask "can I see this session
+    myself?" instead — if not, the heartbeat is not ours, whatever it says.
 
     Failures are swallowed: a session must never die because its proof of life
     could not be written.
     """
-    if another_host_vouches_for(session_dir):
-        return
     path = heartbeat_path(session_dir)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -132,24 +134,6 @@ def heartbeat_host(session_dir: Path) -> str | None:
     except OSError:
         return None
     return signature or None
-
-
-def another_host_vouches_for(session_dir: Path, *, now: float | None = None) -> bool:
-    """True when a machine that is not this one recently saw this session alive.
-
-    The one signal that crosses a shared mount. ``tmux has-session`` answers
-    "not here", which says nothing about anywhere else; a heartbeat signed by
-    another host and still fresh says "somewhere else, recently, yes" — so a
-    dashboard can decline to declare death without having to guess.
-
-    Our own signature is deliberately not proof: a heartbeat we wrote is an
-    echo, and treating it as evidence would keep a genuinely dead local
-    session looking alive for the whole staleness window.
-    """
-    owner = heartbeat_host(session_dir)
-    if owner is None or owner == current_host():
-        return False
-    return not heartbeat_is_stale(session_dir, now=now)
 
 
 def heartbeat_age(session_dir: Path, *, now: float | None = None) -> float | None:
