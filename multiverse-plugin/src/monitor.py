@@ -84,7 +84,7 @@ from .sessions import (
     all_session_names_in_cwd,
     build_dashboard_rows,
     create_session,
-    create_retired_session_record,
+    create_retiring_session_record,
     current_host,
     delete_codex_thread,
     existing_names_in_cwd,
@@ -94,7 +94,11 @@ from .sessions import (
     list_codex_sessions_in,
     list_sessions,
     mark_session_ending,
+    mark_session_retired,
+    recover_abandoned_handoffs,
     remove_retired_session_record,
+    remove_retiring_session_record,
+    retiring_agent_message,
     strip_fold_suffix,
     tmux_session_exists,
     wrapped_runtime_session_ids,
@@ -123,6 +127,7 @@ STATUS_STYLES = {
     "listening": "bold cyan",
     "starting": "cyan",
     "ending": "bold red",
+    "retiring": "bold blue",
     "ended": "dim strike",
     "retired": "bold blue strike",
     "dormant": "blue",
@@ -144,6 +149,7 @@ _GROUP_STATUS_RANK = {
     "listening": 3,
     "starting": 4,
     "ending": 5,
+    "retiring": 5,
     "idle": 6,
     "dormant": 7,
     "ended": 8,
@@ -3671,6 +3677,7 @@ class MonitorApp(App):
             str, tuple[Optional[str], str, float]
         ] = {}
         self._handoff_in_progress = False
+        self._handoff_session: Optional[Session] = None
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -3690,9 +3697,24 @@ class MonitorApp(App):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         self.title = "Multiverse Monitor"
         self.sub_title = f"cwd: {self.monitor_cwd}"
+        try:
+            recover_abandoned_handoffs(self.monitor_cwd)
+        except OSError as exc:
+            self.notify(f"Could not recover abandoned handoffs: {exc}", severity="error")
         self.refresh_sessions()
         self._recover_ending_sessions()
         self.set_interval(1.0, self.refresh_sessions)
+
+    def on_unmount(self) -> None:
+        # Ephemeral forks can outlive Textual's worker cancellation. Release
+        # the reservation here; late results must not open a successor modal.
+        self._cancel_handoff()
+
+    def _cancel_handoff(self) -> None:
+        if self._handoff_session is not None:
+            remove_retiring_session_record(self._handoff_session)
+        self._handoff_session = None
+        self._handoff_in_progress = False
 
     def _recover_ending_sessions(self) -> None:
         """Resume teardown requests left behind by an exited dashboard."""
@@ -5222,6 +5244,11 @@ class MonitorApp(App):
         if target.is_ghost:
             self.notify("Folded ghost rows cannot be handed off", severity="warning")
             return
+        if target.status == "retiring" or (
+            target.session is not None and target.session.status == "retiring"
+        ):
+            self.notify(retiring_agent_message(), severity="warning")
+            return
         if target.status != "dormant" or target.session is not None:
             self.notify(
                 "Handoff is only available for dormant agents",
@@ -5237,12 +5264,23 @@ class MonitorApp(App):
             )
             return
         if self._handoff_in_progress:
-            self.notify("A handoff context is already being generated", severity="warning")
+            self.notify("A handoff is already in progress", severity="warning")
             return
 
-        self._handoff_in_progress = True
-        self.notify(f"Generating handoff context from '{target.name}'…", markup=False)
-        self._handoff_context_worker(target, native_id)
+        try:
+            self._handoff_session = create_retiring_session_record(
+                cwd=target.cwd, name=target.name, runtime=target.runtime,
+                native_session_id=native_id,
+            )
+            self._handoff_in_progress = True
+            self.refresh_sessions()
+            self._move_cursor_to_key(f"mv:{self._handoff_session.id}")
+            self.notify(f"Generating handoff context from '{target.name}'…", markup=False)
+            self._handoff_context_worker(target, native_id)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._cancel_handoff()
+            self.refresh_sessions()
+            self.notify(f"Could not start handoff: {exc}", severity="error", markup=False)
 
     @work(thread=True, exclusive=True, group="handoff")
     def _handoff_context_worker(
@@ -5269,7 +5307,13 @@ class MonitorApp(App):
                 fork_uuid="",
                 elapsed=0.0,
             )
-        self.call_from_thread(self._handoff_context_ready, target, native_id, result)
+        try:
+            self.call_from_thread(self._handoff_context_ready, target, native_id, result)
+        except RuntimeError:
+            if self.is_running:
+                raise
+            # The dashboard closed while the tool-less fork was finishing.
+            # on_unmount has already released its temporary reservation.
 
     def _handoff_context_ready(
         self,
@@ -5277,8 +5321,11 @@ class MonitorApp(App):
         native_id: str,
         result: AskResult,
     ) -> None:
-        self._handoff_in_progress = False
-        if result.error or not result.response:
+        if self._handoff_session is None:
+            return  # cancelled during dashboard shutdown
+        if result.error or not (result.response or "").strip():
+            self._cancel_handoff()
+            self.refresh_sessions()
             detail = result.error or "the predecessor returned an empty handoff"
             self.notify(
                 f"Could not generate handoff context for '{target.name}': {detail}",
@@ -5299,13 +5346,10 @@ class MonitorApp(App):
                 # future compactions deliberately treat full.jsonl as frozen.
                 if target.runtime == RUNTIME_CLAUDE:
                     sync_full(native_id, target.cwd)
-                retired = create_retired_session_record(
-                    cwd=target.cwd,
-                    name=target.name,
-                    runtime=target.runtime,
-                    native_session_id=native_id,
-                    successor=successor_name,
-                )
+                retired = self._handoff_session
+                if retired is None:
+                    raise RuntimeError("The handoff was cancelled")
+                mark_session_retired(retired, successor_name)
                 runtime_args = (
                     self.claude_args if successor_runtime == RUNTIME_CLAUDE else []
                 )
@@ -5323,12 +5367,16 @@ class MonitorApp(App):
                 # race back to life while its successor starts. If startup
                 # fails, remove only that wrapper record; the native dormant
                 # transcript was never deleted and becomes available again.
-                if retired is not None:
+                if retired is not None and retired.status == "retired":
                     remove_retired_session_record(retired)
+                    self._handoff_session = None
+                self._cancel_handoff()
                 self.refresh_sessions()
                 self.notify(f"Handoff failed: {exc}", severity="error", markup=False)
                 return None
 
+            self._handoff_session = None
+            self._handoff_in_progress = False
             self.notify(
                 f"Retired '{target.name}' and spawned successor "
                 f"'{successor_name}' ({successor_runtime})",
@@ -5338,6 +5386,8 @@ class MonitorApp(App):
 
         def on_close(chosen: Optional[tuple[str, str]]) -> None:
             if chosen is None:
+                self._cancel_handoff()
+                self.refresh_sessions()
                 self.notify(
                     f"Handoff from '{target.name}' cancelled", markup=False
                 )
@@ -5432,7 +5482,7 @@ class MonitorApp(App):
             None,
         )
         if session is not None and (
-            session.status in ("ending", "retired")
+            session.status in ("ending", "retiring", "retired")
             or session.ending_marker_path.is_file()
         ):
             state = session.status
@@ -5502,6 +5552,12 @@ class MonitorApp(App):
             return
         e = self._current_entry()
         if e is None:
+            return
+
+        if e.status == "retiring" or (
+            e.session is not None and e.session.status == "retiring"
+        ):
+            self.notify(retiring_agent_message(), severity="warning")
             return
 
         if e.status == "compacting":
@@ -5724,6 +5780,9 @@ class MonitorApp(App):
                 f"Finished teardown for {e.session.id}",
                 delay=0.0,
             )
+            return
+        if e.status == "retiring":
+            self.notify(retiring_agent_message(), severity="warning")
             return
         if e.status == "retired":
             self.notify(
@@ -6048,6 +6107,9 @@ class MonitorApp(App):
                 "Cannot toggle auto-build on a folded ghost row",
                 severity="warning",
             )
+            return
+        if e.status == "retiring":
+            self.notify(retiring_agent_message(), severity="warning")
             return
         if e.status == "retired":
             self.notify(

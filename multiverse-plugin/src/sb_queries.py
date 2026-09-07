@@ -50,6 +50,11 @@ def _iso(ts: float) -> str:
 def _corrected_status(row) -> str:  # noqa: ANN001 - DashboardRow
     """The dashboard's displayed status.
 
+    Lifecycle states (``ended`` / ``retired`` / ``retiring``) are left alone: they are
+    non-running by definition, so "its tmux is gone" says nothing new. A ``retiring``
+    row is a dormant transcript reserved for context generation; rewriting it to
+    ``ended`` would hide that reservation from every SB read path at once.
+
     A live-looking row whose tmux session is gone **on this host** is reported ``ended`` —
     the monitor's own liveness correction. It stays host-aware (``s.host``): a session
     alive on another host in a shared ``MULTIVERSE_ROOT`` deployment is invisible to local
@@ -58,7 +63,7 @@ def _corrected_status(row) -> str:  # noqa: ANN001 - DashboardRow
     s = row.session
     if (
         s is not None
-        and row.status not in ("ended", "retired")
+        and row.status not in ("ended", "retired", "retiring")
         and (not s.host or s.host == current_host())
         and not tmux_session_exists(s.tmux_name)
     ):
@@ -180,7 +185,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
 
     status = _corrected_status(target)
 
-    if status in ("dormant", "ended", "retired"):
+    if status in ("dormant", "ended", "retired", "retiring"):
         return "not_running", {"message": f"'{agent_name}' is {status}"}
 
     if target.claude_uuid and is_locked(target.claude_uuid):

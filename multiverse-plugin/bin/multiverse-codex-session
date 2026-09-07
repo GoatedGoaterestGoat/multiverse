@@ -111,7 +111,7 @@ write_status() {
   fi
   if [ "$status" != "retired" ] \
     && [ -f "$MULTIVERSE_STATUS" ] \
-    && grep -Eq '"status"[[:space:]]*:[[:space:]]*"retired"' "$MULTIVERSE_STATUS"; then
+    && grep -Eq '"status"[[:space:]]*:[[:space:]]*"(retiring|retired)"' "$MULTIVERSE_STATUS"; then
     return 0
   fi
   ts=$(date +%s)

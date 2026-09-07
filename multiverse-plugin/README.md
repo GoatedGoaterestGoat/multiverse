@@ -122,7 +122,7 @@ Run `multiverse` in your project directory. The TUI lists every managed session 
 | `x` | Restore a lost session from an orphan full JSONL — one whose live counterpart Claude Code has reaped (`cleanupPeriodDays`) but whose mirror survived. Picks from orphans in this workspace and feeds the choice through the normal compaction flow, rendering a fresh live JSONL at the chosen budget. |
 | `w` | Toggle the web share for this workspace — an ephemeral ttyd bound to loopback serving a dedicated monitor for this cwd, exposed through the configured tunnel and auth. Workspace-level, so row selection doesn't matter. See [Remote access](#remote-access-web-share). |
 | `S` | Open the SecondBrain panel — enroll/connect this workspace, disconnect, re-enroll, reload or stop the device daemon. See [SecondBrain connector](#secondbrain-connector). |
-| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
+| `Enter` | Live rows → attach (drops into the tmux session); ended/dormant rows → resume in place; retiring/retired rows refuse attach/resume. On a folder header → fold/unfold it. On a `compacting` row: re-opens that compaction screen if you detached it with `d`, otherwise refused (it's held by another monitor) |
 | `k` | Live/ended session → kill (tmux kill + remove state dir), no prompt. Dormant session → confirm dialog, then deletes its JSONL from disk. On a folder header → remove the folder, keeping the agents (an empty folder goes without a prompt). Refused while the row is `compacting` |
 | `→` | On an agent: wrap it in a new folder, with the name live for editing in the row (`esc` aborts and puts everything back). On a folder: open it, then step inside. With a shift-selection: wrap the whole selection in one folder |
 | `←` | On an open folder: close it. On a closed one: jump to its parent (a closed top-level folder has nowhere to go, so nothing happens). On an agent (or a selection): lift it one level out of its folder |
@@ -289,8 +289,9 @@ Descriptions are stored atomically under `~/.multiverse/agent_descriptions/`, sc
 | waiting (blocked on a permission/input prompt) | Not woken — a terminal ping can't reach a blocked pane. The message remains queued until the user resolves the prompt. |
 | compacting (locked) | Not woken — the pane is killed for the duration. The message remains queued until compaction finishes and the session resumes. |
 | retired | Rejected without writing to the inbox. The result identifies the successor agent to message instead. |
+| retiring | Rejected without writing to the inbox: `This agent is being retired, please try again later`. |
 
-Except for `retired`, states that can't be woken still receive the message through their normal delivery path (Claude hooks, Codex `check_inbox`, or the pi extension). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
+Except for `retiring` and `retired`, states that can't be woken still receive the message through their normal delivery path (Claude hooks, Codex `check_inbox`, or the pi extension). The tool result reports exactly which path was taken (woke a dormant agent, pinged a live one, left it queued and why, etc.).
 
 **At most one outstanding prompt.** Reading an inbox drains *all* of it, so a second "check your inbox" prompt sent before the agent acted on the first is wasted — it burns a turn to arrive at an empty inbox. A marker under `~/.multiverse/wake_pending/<encoded-cwd>/<name>` records that a prompt was accepted by the target's composer and not yet acted on; while it's set, further messages are queued without typing anything (route `skipped_wake_outstanding`).
 
@@ -328,6 +329,17 @@ Net effect: a burst of five messages to a busy agent costs it one interruption, 
 **TUI: `a` — ask all agents.** Press `a` in the monitor to fan out a single question to every named agent in the workspace. Same mechanism as `ask_agent` but multi-target. Useful for broadcast discovery: "did anyone work on the auth refactor?".
 
 **TUI: `h` — hand off a dormant agent.** Handoff is available only on a true dormant row (a named native transcript with no Multiverse wrapper). Multiverse asks a single ephemeral, tool-less fork of that transcript for a concise handoff covering project background, completed and open responsibilities, important absolute paths, and lessons learned. Once the fork answers, a handoff widget opens showing the report in full — it becomes the successor's entire inherited memory, so it is reviewable before anything is retired — alongside a name field and a Claude/Codex/pi selector defaulting to the predecessor's runtime. The name defaults to the next generation of the same lineage: `Quasar` hands off to `Quasar II`, which hands off to `Quasar III`, skipping any generation the workspace is still using. Accepting it freezes a Claude predecessor's full JSONL, persists the predecessor as `retired` with the chosen successor name, and starts the successor with the approved handoff prompt as its first user message. Cancelling the widget leaves the predecessor dormant and creates nothing. The successor is filed exactly the way a spawned agent is: into the predecessor's folder if it has one, and otherwise into a new folder named after the predecessor which both of them move into — so a lineage collects itself in one place, retired generations included. If successor startup fails, the retired wrapper record is rolled back so the predecessor is dormant again.
+
+While context is being generated and while the successor widget is open, the
+predecessor has a persisted `retiring` status, visible to every dashboard and
+tool. It is not running and cannot be attached, resumed, handed off again,
+killed, compacted, messaged, or prompted through SecondBrain. Both messaging
+channels reject it with `This agent is being retired, please try again later`;
+tool-less `ask_agent` consultations remain available. Cancellation, generation
+failure, or closing the dashboard releases the reservation and restores the
+dormant row. A newly opened dashboard also releases reservations left by a dead
+local dashboard process. Handoff reports and successor dialogs are not resumed
+after dashboard exit; a finishing ephemeral fork's result is discarded.
 
 When to pick which:
 
@@ -436,7 +448,7 @@ The inter-agent tools require `MULTIVERSE_SESSION_NAME` and `MULTIVERSE_SESSION_
 │   ├── meta.json       — cwd, created_at, runtime, <runtime>_args, name, host,
 │   │                     optional resumed_from, successor (when retired)
 │   ├── status.json     — {"status": "starting"|"idle"|"working"|"waiting"|
-│   │                     "listening"|"ending"|"ended"|"retired", "ts": …}
+│   │                     "listening"|"ending"|"ended"|"retiring"|"retired", "ts": …}
 │   ├── status.json.lock — flock guard; the status guards are read-then-write,
 │   │                     so the check and the write are held together
 │   ├── ending          — teardown marker; while present, runtime hooks cannot
@@ -672,7 +684,7 @@ If the user presses Esc during the running phase, the runner sets a cancellation
 5. A Codex recipient calls `check_inbox`, which atomically claims the same files and returns their contents as the tool result. Push and resume prompts cause that call; without a push, the agent or user can request it explicitly.
 6. The recipient may use tools to act on the message and reply via `message_agent` back at the sender.
 
-Retired recipients are the exception: `message_agent` refuses before creating an inbox file and points the caller to the successor saved in the retired wrapper's metadata. `ask_agent` remains available because its ephemeral fork cannot mutate the retired main session.
+Retiring and retired recipients are the exceptions: `message_agent` refuses before creating an inbox file. During retirement it asks the caller to try again later; after retirement it points to the successor saved in the wrapper's metadata. `ask_agent` remains available because its ephemeral fork cannot mutate the main session.
 
 **Wakeup on resume.** SessionStart's `additionalContext` is buffered in claude's REPL but doesn't autonomously trigger an API call — without intervention the model wouldn't engage with the message until a human attached and typed something. To bridge that gap, `bin/multiverse-session` checks the inbox at the top of every loop iteration and, if non-empty, appends a positional-arg prompt (`"You have N pending inbox messages…"`) to the interactive `claude` launch. claude auto-submits a positional arg as its first user message, so the model engages with the just-delivered inbox `additionalContext` immediately, inside the interactive session — permission prompts surface normally and an attaching user can grant them. (This replaced an earlier print-mode prime call, `claude -p … --resume`: print mode is headless, so a model that tried to call a tool while processing the inbox would block on a permission prompt with no way to answer it, hanging the whole wrapper.) Applies uniformly across every resume path: user-initiated Enter on a dormant row and `message_agent` auto-resume.
 

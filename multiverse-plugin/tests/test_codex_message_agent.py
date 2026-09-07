@@ -280,6 +280,28 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         sent.assert_not_called()
         routed.assert_not_called()
 
+    def test_retiring_agent_rejects_messages_without_queueing_or_waking(self) -> None:
+        for runtime in ("claude", "codex", "pi"):
+            for status in ("retiring", "compacting"):
+                with self.subTest(runtime=runtime, status=status):
+                    target = self._target(status=status)
+                    target.runtime = runtime
+                    target.session.runtime = runtime
+                    target.session.status = "retiring"
+                    with (
+                        patch.object(server, "_wake_via_tmux") as wake,
+                        patch.object(server, "_auto_resume") as resume,
+                    ):
+                        result, sent, routed = self._message(target)
+                    self.assertEqual(
+                        result, "This agent is being retired, please try again later"
+                    )
+                    self.assertEqual(inbox.pending_inbox_count(self.cwd, target.name), 0)
+                    wake.assert_not_called()
+                    resume.assert_not_called()
+                    sent.assert_not_called()
+                    routed.assert_not_called()
+
     def test_starting_and_waiting_codex_are_always_left_queued(self) -> None:
         for status in ("starting", "waiting"):
             with self.subTest(status=status):

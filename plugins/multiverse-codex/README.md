@@ -41,6 +41,9 @@ attachment by itself does not prevent delivery.
 A retired agent is permanently stopped after handing off to a saved successor.
 `message_agent` rejects it without writing an inbox file and names that successor;
 `ask_agent` remains available through its read-only ephemeral native-thread fork.
+While its handoff is pending, an agent is `retiring` and cannot receive messages
+or new prompts either. `message_agent` rejects it without queueing anything:
+`This agent is being retired, please try again later`.
 
 The same durable inbox supports Codex-to-Codex, Codex-to-Claude, and
 Claude-to-Codex messages. Cross-workspace messages retain the sender workspace

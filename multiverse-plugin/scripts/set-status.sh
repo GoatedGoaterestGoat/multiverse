@@ -3,7 +3,7 @@
 # Called by Claude Code hooks inside a multiverse session.
 #
 # Usage: set-status.sh <status>
-#   <status> is a short token: idle | working | waiting | ended | retired
+#   <status> is a short token: idle | working | waiting | ended | retiring | retired
 
 # Not running under the monitor → do nothing
 [ -z "${MULTIVERSE_STATUS:-}" ] && exit 0
@@ -23,7 +23,7 @@ fi
 # never make the handed-off agent look live or ordinarily resumable again.
 if [ "$STATUS" != "retired" ] \
    && [ -f "$MULTIVERSE_STATUS" ] \
-   && grep -Eq '"status"[[:space:]]*:[[:space:]]*"retired"' "$MULTIVERSE_STATUS"; then
+   && grep -Eq '"status"[[:space:]]*:[[:space:]]*"(retiring|retired)"' "$MULTIVERSE_STATUS"; then
   exit 0
 fi
 

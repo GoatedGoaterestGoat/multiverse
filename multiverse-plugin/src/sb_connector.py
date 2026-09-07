@@ -2011,10 +2011,12 @@ class SBConnector:
           dormant/ended                  → create_session(initial_prompt=text) — auto-submits
                                             as the first user turn via the runtime wrapper
           retired                       → refuse permanently and name its successor
+          retiring                      → refuse while its transcript is reserved
           starting                       → wait bounded for ready, then send-keys
           compacting/ending (locked)     → refuse with a specific message; SB retries later
 
-        Errors: not_found | forbidden | retired | locked | deliver_failed. All ActionResults are
+        Errors: not_found | forbidden | retired | retiring | locked | deliver_failed. All
+        ActionResults are
         cached in ``self.dedup`` so a retry with the same action_id returns the cached
         outcome and never re-executes (§8.2).
         """
@@ -2106,6 +2108,7 @@ class SBConnector:
             current_host,
             find_agent_by_name,
             retired_agent_message,
+            retiring_agent_message,
             tmux_session_exists,
         )
 
@@ -2132,6 +2135,19 @@ class SBConnector:
                     target.session.successor if target.session is not None else None,
                 ),
             )
+
+        # ``retiring`` reserves an ALREADY-DORMANT transcript while context is
+        # generated from it. Nothing is running, so the danger isn't that a prompt
+        # fails -- it's that the routes below succeed: the dormant route RESUMES the
+        # session, disturbing the very transcript being read, and pi's route queues a
+        # prompt durably against it. Refuse ahead of both. The refusal is transient
+        # ("try again later") because the reservation is, unlike ``retired``.
+        # Same dual read as ``retired``: a compaction lock overlays the row status,
+        # so consult the persisted Session too.
+        if target.status == "retiring" or (
+            target.session is not None and target.session.status == "retiring"
+        ):
+            return ("retiring", "", retiring_agent_message())
 
         # The status is part of the durable roster and must be sufficient on
         # its own. The lock remains an authoritative second source for the

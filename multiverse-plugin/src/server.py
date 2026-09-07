@@ -52,6 +52,7 @@ from src.sessions import (
     list_named_agents_in_cwd,
     normalize_runtime,
     retired_agent_message,
+    retiring_agent_message,
     write_status_path,
 )
 from src.inbox import (
@@ -617,6 +618,7 @@ _STATUS_PRIORITY = {
     "starting": 1,
     "idle": 1,
     "ending": 1,
+    "retiring": 1,
     "unknown": 2,
     "ended": 3,
     "retired": 3,
@@ -679,6 +681,7 @@ def list_agents(
     Status values:
       - idle / working / waiting / starting — currently running
       - ending   — runtime teardown is in progress (not interactive)
+      - retiring — handoff is pending (not running or interactive)
       - ended    — was running, now stopped (still resumable)
       - retired  — permanently stopped after handing off to a successor
       - dormant  — never wrapped by multiverse this run, but the underlying
@@ -756,7 +759,8 @@ def list_agents(
 
     total = len(agents)
     live_count = sum(
-        1 for a in agents if a.status not in ("ended", "retired", "dormant")
+        1 for a in agents if a.status not in ("ended", "retiring", "retired", "dormant")
+        and (a.session is None or a.session.status not in ("retiring", "retired"))
     )
     cap = max(1, int(max_agents))
 
@@ -870,11 +874,11 @@ def message_agent(
         or auto-resumed; the message stays queued for the next resume.
       - retired → rejected without writing to the inbox; the result names the
         successor that should be messaged instead.
+      - retiring → rejected without writing to the inbox; try again later.
 
-    Except for retired recipients, the message is queued in the inbox before
-    delivery is attempted, so states that can't be woken still receive it
-    through their normal path. Retired recipients are rejected before any
-    inbox write. The tool result tells you exactly what happened.
+    Except for retiring/retired recipients, the message is queued in the inbox
+    before delivery is attempted, so states that can't be woken still receive
+    it through their normal path. The tool result tells you exactly what happened.
 
     At most one outstanding prompt: if the recipient was already asked to
     check its inbox and hasn't done so yet, no second prompt is sent. Your
@@ -930,6 +934,11 @@ def message_agent(
             f"Call list_agents(working_directory='{cwd}') to see who's "
             "available."
         )
+
+    if target.status == "retiring" or (
+        target.session is not None and target.session.status == "retiring"
+    ):
+        return retiring_agent_message()
 
     # Retirement is permanent and differs from ended/dormant: the native
     # transcript remains available to ask_agent and compaction, but no new

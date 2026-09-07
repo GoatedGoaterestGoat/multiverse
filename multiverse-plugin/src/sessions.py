@@ -628,7 +628,12 @@ class DashboardRow:
 
     @property
     def is_live(self) -> bool:
-        return self.session is not None and self.status not in ("ended", "retired")
+        stopped = ("ended", "retiring", "retired")
+        return (
+            self.session is not None
+            and self.status not in stopped
+            and self.session.status not in stopped
+        )
 
     @property
     def row_key(self) -> str:
@@ -652,7 +657,7 @@ def _read_text_stripped(path: Path) -> Optional[str]:
         return None
 
 
-_TERMINAL_STATUSES = ("ended", "ending", "retired")
+_TERMINAL_STATUSES = ("ended", "ending", "retiring", "retired")
 
 
 def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> None:
@@ -695,6 +700,10 @@ def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> No
         # rendered as ``compacting`` from the external lock, without changing
         # this durable value.
         if status != "retired" and _status_is(path, "retired"):
+            return
+        # Only the handoff owner may finish retirement. Cancellation removes
+        # this temporary wrapper instead of reviving it with a status write.
+        if status not in ("retiring", "retired") and _status_is(path, "retiring"):
             return
         # ``ended`` is terminal with respect to live states. A session whose
         # status.json says ended never goes live again — resuming builds a new
@@ -973,7 +982,7 @@ def _correct_local_liveness(s: Session) -> bool:
     Codex runners record the foreground Codex PID, allowing correction even
     when an abnormal wrapper leaves its tmux pane behind.
     """
-    if s.status in ("ended", "retired") or (s.host and s.host != current_host()):
+    if s.status in ("ended", "retiring", "retired") or (s.host and s.host != current_host()):
         return False
 
     within_startup_grace = (
@@ -1091,6 +1100,7 @@ _STATUS_SORT = {
     "starting": 1,
     "idle": 1,
     "ending": 1,
+    "retiring": 1,
     "unknown": 2,
     "ended": 3,
     "dormant": 4,
@@ -1672,17 +1682,38 @@ def create_retired_session_record(
     hides the same native transcript from dormant discovery, while preserving
     its native ID for ask_agent and Claude compaction.
     """
+    if not successor.strip():
+        raise ValueError("A retired agent must have a successor")
+    return _create_handoff_session_record(
+        cwd, name, runtime, native_session_id, "retired", successor.strip()
+    )
+
+
+def create_retiring_session_record(
+    cwd: str, name: str, runtime: str, native_session_id: str
+) -> Session:
+    """Reserve a dormant predecessor before starting its ephemeral handoff.
+
+    Name/native claims prevent another dashboard or message wake from resuming
+    it. No runtime is started and no native transcript is modified.
+    """
+    return _create_handoff_session_record(
+        cwd, name, runtime, native_session_id, "retiring", None
+    )
+
+
+def _create_handoff_session_record(
+    cwd: str, name: str, runtime: str, native_session_id: str,
+    status: str, successor: Optional[str],
+) -> Session:
     runtime = normalize_runtime(runtime)
     cwd_abs = str(Path(cwd).expanduser().resolve())
     name = name.strip()
     native_session_id = native_session_id.strip()
-    successor = successor.strip()
     if not name:
-        raise ValueError("A retired agent must have a name")
+        raise ValueError("A handoff agent must have a name")
     if not native_session_id:
-        raise ValueError("A retired agent must have a native session ID")
-    if not successor:
-        raise ValueError("A retired agent must have a successor")
+        raise ValueError("A handoff agent must have a native session ID")
     if name == successor:
         raise ValueError("A retired agent's successor must be a different agent")
 
@@ -1702,6 +1733,9 @@ def create_retired_session_record(
         )
         now = time.time()
         host = current_host()
+        # Readers discover a wrapper through meta.json. Publish its guard
+        # first so nobody observes an interactive/unknown handoff record.
+        write_status_path(directory / "status.json", status, now)
         atomic_write_json(
             directory / "meta.json",
             {
@@ -1712,9 +1746,9 @@ def create_retired_session_record(
                 "name": name,
                 "resumed_from": native_session_id,
                 "successor": successor,
+                "handoff_owner_pid": os.getpid() if status == "retiring" else None,
             },
         )
-        write_status_path(directory / "status.json", "retired", now)
     except Exception:
         for path in claim_paths:
             _release_claim(path, sid)
@@ -1725,7 +1759,7 @@ def create_retired_session_record(
         id=sid,
         cwd=cwd_abs,
         created_at=now,
-        status="retired",
+        status=status,
         status_ts=now,
         resumed_from=native_session_id,
         name=name,
@@ -1744,6 +1778,30 @@ def remove_retired_session_record(session: Session) -> None:
         raise ValueError("Only retired session records can be rolled back")
     shutil.rmtree(session.dir, ignore_errors=True)
     _release_session_claims(session)
+
+
+def remove_retiring_session_record(session: Session) -> None:
+    """Cancel a pending handoff, exposing the untouched dormant transcript."""
+    fresh = load_session(session.id)
+    if fresh is None:
+        return
+    if fresh.status != "retiring":
+        raise ValueError("Only retiring session records can be cancelled")
+    shutil.rmtree(session.dir)
+    _release_session_claims(session)
+
+
+def recover_abandoned_handoffs(cwd: str) -> None:
+    """Release reservations left by a dead local dashboard, never another host."""
+    cwd = str(Path(cwd).expanduser().resolve())
+    for session in list_sessions():
+        if (session.cwd != cwd or session.status != "retiring"
+                or session.host != current_host()):
+            continue
+        meta = _read_json(session.meta_path) or {}
+        owner = meta.get("handoff_owner_pid")
+        if isinstance(owner, int) and owner > 0 and not _pid_alive(owner):
+            remove_retiring_session_record(session)
 
 
 def create_session(
@@ -2095,7 +2153,12 @@ def foreign_host_still_reported_live(s: Session) -> bool:
     fresh = load_session(s.id)
     if fresh is None:
         return False  # already reaped by someone else; nothing to protect
-    return fresh.status not in ("ended", "retired")
+    return fresh.status not in ("ended", "retiring", "retired")
+
+
+def retiring_agent_message() -> str:
+    """Shared refusal while a predecessor's handoff is pending."""
+    return "This agent is being retired, please try again later"
 
 
 def retired_agent_message(name: str, successor: Optional[str]) -> str:
@@ -2123,6 +2186,7 @@ def mark_session_retired(s: Session, successor: str) -> None:
     if meta is None:
         raise RuntimeError(f"Session metadata is missing for '{s.name or s.id}'")
     meta["successor"] = successor
+    meta.pop("handoff_owner_pid", None)
     atomic_write_json(s.meta_path, meta)
     now = time.time()
     # Handoff teardown may have used the ordinary dashboard `ending` guard.
