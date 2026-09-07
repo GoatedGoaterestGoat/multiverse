@@ -130,7 +130,23 @@ elif [ -n "$INBOX_PROMPT" ]; then
   PROMPT_ARGS=("$INBOX_PROMPT")
 fi
 
-"$CLAUDE_BIN" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+# Capture Claude's native context capacity for dashboard-only coloring.
+# The launcher uses temporary settings, preserves the user's statusline,
+# and execs Claude with the original argv if instrumentation cannot be set up.
+# Older plugin installs (or a missing Python) keep the existing launch path.
+CLAUDE_LAUNCH=("$CLAUDE_BIN")
+_MV_STATUSLINE_SCRIPT="${MULTIVERSE_PLUGIN_ROOT:-}/scripts/claude-statusline.py"
+if [ -f "$_MV_STATUSLINE_SCRIPT" ]; then
+  _MV_STATUSLINE_PYTHON="${MULTIVERSE_PLUGIN_ROOT:-}/.venv/bin/python"
+  if [ ! -x "$_MV_STATUSLINE_PYTHON" ]; then
+    _MV_STATUSLINE_PYTHON=$(command -v python3 || true)
+  fi
+  if [ -n "$_MV_STATUSLINE_PYTHON" ]; then
+    CLAUDE_LAUNCH=("$_MV_STATUSLINE_PYTHON" "$_MV_STATUSLINE_SCRIPT" launch "$CLAUDE_BIN")
+  fi
+fi
+
+"${CLAUDE_LAUNCH[@]}" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
        ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
        ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
        ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true

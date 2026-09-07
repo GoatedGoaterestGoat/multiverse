@@ -53,6 +53,7 @@ from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_t
 from .compact_runner import CompactRunner, State as CompactState
 from .compact_state import acquire_lock, release_lock
 from .codex_usage import token_usage_cached as codex_token_usage_cached
+from .claude_usage import context_window_cached as claude_context_window_cached
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
@@ -3668,6 +3669,7 @@ class MonitorApp(App):
         self._inbox_cache: dict[tuple[str, str], int] = {}
         self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
         self._total_cache: dict[tuple[str, str], Optional[int]] = {}
+        self._context_window_cache: dict[tuple[str, str], Optional[int]] = {}
         # chosen name → (spawner name, request id, approved at), for
         # spawns approved but not yet created. A ``None`` spawner marks a
         # name two approvals are racing for, which the monitor cannot
@@ -4062,6 +4064,18 @@ class MonitorApp(App):
             self._total_cache[key] = self._agent_total(e)
         return self._total_cache[key]
 
+    def _context_window_of(self, e: DashboardRow) -> Optional[int]:
+        """Runtime-reported context capacity, once per agent per redraw."""
+        key = (e.cwd, e.name)
+        if key not in self._context_window_cache:
+            capacity = None
+            if e.runtime == RUNTIME_CODEX:
+                capacity = codex_token_usage_cached(e.session_id).context_window
+            elif e.runtime == RUNTIME_CLAUDE:
+                capacity = claude_context_window_cached(e.claude_uuid, e.cwd)
+            self._context_window_cache[key] = capacity
+        return self._context_window_cache[key]
+
     def _agent_total(self, e: DashboardRow) -> Optional[int]:
         """Runtime-native lifetime tokens for one agent, or None if unknown.
 
@@ -4148,11 +4162,11 @@ class MonitorApp(App):
         else:
             build_cell = "[dim]off[/]"
         tokens = self._tokens_of(e)
-        tokens_cell = f"{tokens:,}" if tokens is not None else "[dim]-[/]"
-        total = self._total_of(e)
-        total_cell = (
-            f"[dim]{_fmt_tokens(total)}[/]" if total is not None else "[dim]-[/]"
+        tokens_cell = _token_cell(
+            tokens, _context_token_color(tokens, self._context_window_of(e)),
         )
+        total = self._total_of(e)
+        total_cell = _token_cell(total, _total_token_color(total), compact=True)
         # Both are text the user or the transcript produced — the draft
         # row accepts any name, and a preview is whatever the agent last
         # said — so neither goes into a cell as markup.
@@ -4184,7 +4198,7 @@ class MonitorApp(App):
         A collapsed folder has to answer, on its own line, the question its
         hidden rows would have answered: is anything in there waiting on
         me? So the header rolls up the inbox count, the most
-        attention-worthy status, the token total and the freshest
+        attention-worthy status and the freshest
         timestamp of everything beneath it — at any depth.
         """
         group = row.group
@@ -4218,17 +4232,6 @@ class MonitorApp(App):
         else:
             status_cell = "[dim]empty[/]"
 
-        token_total = sum(
-            t for t in (self._tokens_of(a) for a in agents) if t is not None
-        )
-        tokens_cell = f"[dim]{token_total:,}[/]" if token_total else "[dim]-[/]"
-        grand_total = sum(
-            t for t in (self._total_of(a) for a in agents) if t is not None
-        )
-        total_cell = (
-            f"[dim]{_fmt_tokens(grand_total)}[/]" if grand_total else "[dim]-[/]"
-        )
-
         latest = max((a.status_ts or 0 for a in agents), default=0)
         updated = _ago(now - latest) if latest else "-"
 
@@ -4246,7 +4249,7 @@ class MonitorApp(App):
 
         return (
             name_cell, "", "[dim]-[/]", inbox_cell, "[dim]-[/]",
-            status_cell, tokens_cell, total_cell, updated, preview_cell,
+            status_cell, "", "", updated, preview_cell,
         )
 
     def _redraw_table(self) -> None:
@@ -4255,12 +4258,13 @@ class MonitorApp(App):
         prev_cursor = table.cursor_row
         now = time.time()
         # One pass, one answer per agent: a folder header rolls up every
-        # agent beneath it at any depth, so without this an agent nested
-        # d deep is globbed and token-counted d+1 times per redraw — and
+        # agent's inbox beneath it at any depth, so without this an agent
+        # nested d deep is globbed d+1 times per redraw — and
         # typing a folder name redraws on every keystroke.
         self._inbox_cache.clear()
         self._tokens_cache.clear()
         self._total_cache.clear()
+        self._context_window_cache.clear()
         self.display_rows = groups.build_display_rows(
             self.entries,
             self.group_state,
@@ -6233,6 +6237,35 @@ class MonitorApp(App):
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
+
+
+def _context_token_color(tokens: Optional[int], capacity: Optional[int]) -> str:
+    """Dashboard-only context thresholds; unknown capacity stays neutral."""
+    if tokens is None or capacity is None or capacity <= 0:
+        return ""
+    # Integer comparisons keep the exact 60% / 80% boundaries unambiguous.
+    if tokens * 5 >= capacity * 4:
+        return "red"
+    if tokens * 5 >= capacity * 3:
+        return "yellow"
+    return "green"
+
+
+def _total_token_color(tokens: Optional[int]) -> str:
+    if tokens is None:
+        return ""
+    if tokens >= 2_500_000:
+        return "red"
+    if tokens >= 1_500_000:
+        return "yellow"
+    return "green"
+
+
+def _token_cell(tokens: Optional[int], color: str, *, compact: bool = False) -> str:
+    if tokens is None:
+        return "[dim]-[/]"
+    text = _fmt_tokens(tokens) if compact else f"{tokens:,}"
+    return f"[{color}]{text}[/]" if color else text
 
 
 def _fmt_tokens(n: int) -> str:

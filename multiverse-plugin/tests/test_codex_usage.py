@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from src import codex_usage, groups, monitor
 
 
-def _event(live=250, incoming=1000, cached=600, outgoing=80) -> dict:
+def _event(live=250, incoming=1000, cached=600, outgoing=80, context_window=258400) -> dict:
     return {
         "type": "event_msg",
         "payload": {
@@ -31,7 +31,7 @@ def _event(live=250, incoming=1000, cached=600, outgoing=80) -> dict:
                     "reasoning_output_tokens": 50,
                     "total_tokens": incoming + outgoing,
                 },
-                "model_context_window": 258400,
+                "model_context_window": context_window,
             },
         },
     }
@@ -58,13 +58,13 @@ class RolloutTestCase(unittest.TestCase):
 class CodexUsageTests(RolloutTestCase):
     def test_matches_statusline_non_cached_input_plus_output(self) -> None:
         self.append(_event())
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480, 258400))
 
     def test_latest_snapshot_is_not_summed_or_double_counted(self) -> None:
         self.append(_event())
         self.append(_event(300, 2000, 1200, 180))
         self.append(_event(300, 2000, 1200, 180))
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(300, 980))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(300, 980, 258400))
 
     def test_compaction_context_estimate_can_shrink_with_zero_breakdown(self) -> None:
         self.append(_event(200000))
@@ -75,7 +75,7 @@ class CodexUsageTests(RolloutTestCase):
             "input_tokens": 0, "output_tokens": 0, "total_tokens": 12000,
         }
         self.append(event)
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(12000, 480))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(12000, 480, 258400))
 
     def test_rate_limits_and_bad_records_preserve_last_measurement(self) -> None:
         self.append(_event())
@@ -90,7 +90,7 @@ class CodexUsageTests(RolloutTestCase):
             self.append(record)
         with self.path.open("ab") as fh:
             fh.write(b'{"token_count":invalid}\n\xff"token_count"\n')
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480, 258400))
 
     def test_partial_final_record_is_used_only_after_newline(self) -> None:
         self.append(_event())
@@ -103,7 +103,7 @@ class CodexUsageTests(RolloutTestCase):
         self.assertEqual(self.read().live_tokens, 250)
         with self.path.open("ab") as fh:
             fh.write(b"\n")
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(500, 1300))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(500, 1300, 258400))
 
     def test_unknown_until_first_usage_and_measured_zero_context(self) -> None:
         self.path.touch()
@@ -111,11 +111,11 @@ class CodexUsageTests(RolloutTestCase):
         self.append({"type": "session_meta", "payload": {"id": "thread"}})
         self.assertEqual(self.read(), codex_usage.CodexTokenUsage())
         self.append(_event(0, 0, 0, 0))
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(0, None))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(0, None, 258400))
 
     def test_statusline_clamps_negative_usage_components(self) -> None:
         self.append(_event(20, 10, 100, -2))
-        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(20, None))
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(20, None, 258400))
         self.append(_event(20, 10, -2, 4))
         self.assertEqual(self.read().total_tokens, 14)
 
@@ -126,7 +126,7 @@ class CodexUsageTests(RolloutTestCase):
             patch.object(Path, "open", side_effect=AssertionError("unexpected read")),
             patch.object(codex_usage, "find_rollout_path") as discover,
         ):
-            self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480))
+            self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480, 258400))
         discover.assert_not_called()
 
     def test_replacement_same_size_mtime_and_truncation_invalidate_cache(self) -> None:
@@ -191,6 +191,23 @@ class CodexUsageTests(RolloutTestCase):
         self.assertEqual(len(codex_usage._CACHE), 2)
         self.assertNotIn((self.home, "a"), codex_usage._CACHE)
 
+    def test_context_capacity_comes_from_latest_snapshot_not_a_model_default(self) -> None:
+        self.append(_event(context_window=1_000_000))
+        self.assertEqual(self.read().context_window, 1_000_000)
+        self.append(_event(context_window=200_000))
+        self.assertEqual(self.read().context_window, 200_000)
+        # Do not carry an old model's capacity into a snapshot without one.
+        event = _event()
+        del event["payload"]["info"]["model_context_window"]
+        self.append(event)
+        self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480, None))
+
+    def test_invalid_capacity_does_not_hide_valid_counters(self) -> None:
+        for capacity in (None, 0, -1, True, "258400", 258400.0, {}, []):
+            with self.subTest(capacity=capacity):
+                self.append(_event(context_window=capacity))
+                self.assertEqual(self.read(), codex_usage.CodexTokenUsage(250, 480, None))
+
     def test_reverse_reader_handles_chunk_boundaries_crlf_and_large_lines(self) -> None:
         for data in (b"", b"a", b"a\n", b"a\nb", b"a\nb\n", b"a\r\nb\r\n",
                      b"a" * 100 + b"\nb\n" + b"c" * 200 + b"\npartial"):
@@ -247,13 +264,31 @@ class CodexDashboardUsageTests(RolloutTestCase):
                 self.assertEqual(len(cells), 10)
                 self.assertEqual(cells[4], "[dim]-[/]")
                 # Total is 3-sig-fig compact; Tokens stays exact.
-                self.assertEqual(cells[6:8], ("125,000", "[dim]580k[/]"))
+                self.assertEqual(cells[6:8], ("[green]125,000[/]", "[green]580k[/]"))
 
     def test_redraw_refreshes_both_counters_after_native_update(self) -> None:
         self.append(_event())
-        self.assertEqual(self.draw()[6:8], ("250", "[dim]480[/]"))
+        self.assertEqual(self.draw()[6:8], ("[green]250[/]", "[green]480[/]"))
         self.append(_event(100, 2000, 1500, 100))
-        self.assertEqual(self.draw()[6:8], ("100", "[dim]600[/]"))
+        self.assertEqual(self.draw()[6:8], ("[green]100[/]", "[green]600[/]"))
+
+    def test_context_colors_at_exact_thresholds_and_after_capacity_change(self) -> None:
+        for live, color in ((0, "green"), (599, "green"), (600, "yellow"),
+                            (799, "yellow"), (800, "red"), (1000, "red"), (1100, "red")):
+            with self.subTest(live=live):
+                self.append(_event(live=live, context_window=1000))
+                self.assertEqual(self.draw()[6], f"[{color}]{live:,}[/]")
+        self.append(_event(live=1100, context_window=2000))
+        self.assertEqual(self.draw()[6], "[green]1,100[/]")
+        self.append(_event(live=1100, context_window=None))
+        self.assertEqual(self.draw()[6], "1,100")
+
+    def test_total_colors_use_unrounded_native_used_tokens(self) -> None:
+        for total, color in ((1_499_999, "green"), (1_500_000, "yellow"),
+                             (2_499_999, "yellow"), (2_500_000, "red")):
+            with self.subTest(total=total):
+                self.append(_event(incoming=total + 1_000_000, cached=1_000_000, outgoing=0))
+                self.assertEqual(self.draw()[7], f"[{color}]{monitor._fmt_tokens(total)}[/]")
 
     def test_unmeasured_threads_show_dashes(self) -> None:
         self.assertEqual(self.draw()[6:8], ("[dim]-[/]", "[dim]-[/]"))
@@ -275,7 +310,7 @@ class CodexDashboardUsageTests(RolloutTestCase):
         live.assert_called_once_with("claude-id", "/workspace")
         total.assert_called_once_with("claude-id", "/workspace")
 
-    def test_nested_folder_rollup_includes_native_codex_counters(self) -> None:
+    def test_nested_folder_leaves_mixed_runtime_token_columns_blank(self) -> None:
         self.append(_event())
         claude = monitor.DashboardRow(
             name="claude", cwd="/workspace", status="idle", status_ts=1,
@@ -296,11 +331,15 @@ class CodexDashboardUsageTests(RolloutTestCase):
         self.assertEqual(len(rows), 1)
         with (
             patch.object(monitor, "pending_inbox_count", return_value=0),
-            patch.object(monitor, "last_real_usage_total_cached", return_value=100),
-            patch.object(monitor, "total_token_count_cached", return_value=200),
+            patch.object(monitor, "last_real_usage_total_cached") as live,
+            patch.object(monitor, "total_token_count_cached") as total,
+            patch.object(monitor, "codex_token_usage_cached") as codex,
         ):
             cells = self.app._group_cells(rows[0], 2)
-        self.assertEqual(cells[6:8], ("[dim]350[/]", "[dim]680[/]"))
+        self.assertEqual(cells[6:8], ("", ""))
+        live.assert_not_called()
+        total.assert_not_called()
+        codex.assert_not_called()
 
 
 if __name__ == "__main__":

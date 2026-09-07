@@ -5,6 +5,8 @@ Rollout ``event_msg/token_count`` records contain snapshots, not deltas:
 Codex's post-compaction estimates). The statusline's ``used-tokens`` item
 uses ``total_token_usage``'s non-cached input + output, via ``blended_total``.
 Reasoning tokens are already included in output and must not be added again.
+``info.model_context_window`` supplies the session's actual context capacity
+for dashboard coloring; never infer a model limit from the thread name.
 
 See Codex rust-v0.153.4, codex-rs/tui/src/token_usage.rs and
 codex-rs/tui/src/chatwidget/status_surfaces.rs. No transcript tokenization,
@@ -29,6 +31,7 @@ from .paths import codex_home
 class CodexTokenUsage:
     live_tokens: int | None = None
     total_tokens: int | None = None
+    context_window: int | None = None
 
 
 _UNKNOWN = CodexTokenUsage()
@@ -117,7 +120,10 @@ def _usage_from_record(raw: bytes) -> CodexTokenUsage | None:
             used = used or None
     if live is None and used is None:
         return None
-    return CodexTokenUsage(live, used)
+    context_window = _integer(info.get("model_context_window"))
+    if context_window is not None and context_window <= 0:
+        context_window = None
+    return CodexTokenUsage(live, used, context_window)
 
 
 def token_usage_cached(thread_id: str | None, home: Path | None = None) -> CodexTokenUsage:
