@@ -2985,6 +2985,8 @@ class SBConnector:
         """
         from . import sb_actions, sb_notify
         from .compact_state import is_locked
+        from .hosts import HOST_LOCAL
+        from .sessions import session_host_state
         from .sessions import (
             RUNTIME_CODEX,
             RUNTIME_PI,
@@ -3003,6 +3005,16 @@ class SBConnector:
             )
         if target.claude_uuid and is_locked(target.claude_uuid):
             return "locked", "", f"'{agent_name}' is compacting; cannot answer right now"
+        # Answering a modal means typing into a pane, so it needs the owning machine.
+        # Without this the tmux check below reports "no live session", which for a
+        # foreign target is false and hides the real reason.
+        if target.session is not None and session_host_state(target.session) != HOST_LOCAL:
+            return (
+                "foreign_host", "",
+                f"'{agent_name}' is running on host '{target.session.host}', not this "
+                "host, so its permission prompt can only be answered there",
+            )
+
         tmux_name = target.session.tmux_name if target.session else None
         if not tmux_name or not tmux_session_exists(tmux_name):
             return (

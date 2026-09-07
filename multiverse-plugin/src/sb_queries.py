@@ -22,12 +22,14 @@ from pathlib import Path
 from .auto_build import is_enabled as build_enabled
 from .full_jsonl import live_stats_cached, structural_tokens_cached
 from .inbox import pending_inbox_count
+from .hosts import HOST_FOREIGN_STALE, HOST_LOCAL
 from .sessions import (
     RUNTIME_CLAUDE,
     RUNTIME_CODEX,
     RUNTIME_PI,
     current_host,
     list_named_agents_in_cwd,
+    session_host_state,
     tmux_session_exists,
 )
 
@@ -162,6 +164,7 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
     * ``("not_found", {message})`` — no agent by that name in the workspace.
     * ``("not_running", {message})`` — dormant/ended/no-tmux; there IS no screen.
     * ``("locked", {message})`` — session is compacting; the pane is torn down.
+    * ``("foreign_host", {message})`` — alive, but on another remote: no pane here.
     * ``("deliver_failed", {message})`` — tmux subprocess failure (rare).
 
     Contract with the SB ``toolsmith`` agent (2026-08-09):
@@ -190,6 +193,23 @@ def peek_agent(cwd: str, agent_name: str) -> tuple[str, dict]:
 
     if target.claude_uuid and is_locked(target.claude_uuid):
         return "locked", {"message": f"'{agent_name}' is compacting; screen unavailable"}
+
+    # A session pinned to another remote has no pane on this machine. Without this the
+    # tmux check below would report "no live tmux session", which is false and sends the
+    # user after the wrong problem: the agent IS running, just not here. Reported as its
+    # own kind rather than "not_running", which would assert something untrue.
+    if target.session is not None:
+        hstate = session_host_state(target.session)
+        if hstate != HOST_LOCAL:
+            tail = (
+                "and that host has not checked in recently, so it may be gone"
+                if hstate == HOST_FOREIGN_STALE
+                else "so its screen can only be captured there"
+            )
+            return "foreign_host", {
+                "message": f"'{agent_name}' is running on host "
+                           f"'{target.session.host}', {tail}",
+            }
 
     tmux_name = target.session.tmux_name if target.session else None
     if not tmux_name or not tmux_session_exists(tmux_name):

@@ -22,10 +22,11 @@ import json
 import os
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from src import sb_connector, sb_notify
+from src import hosts, sb_actions, sb_connector, sb_notify, sb_queries, sessions
 
 
 class OneConnectionServesEveryRemoteTests(unittest.TestCase):
@@ -134,6 +135,85 @@ class OneConnectionServesEveryRemoteTests(unittest.TestCase):
         for host in ("remote-a", "remote-b"):
             with self.subTest(host=host), self._as_host(host):
                 self.assertIsNone(sb_notify._recordable_workspace_id(other))
+
+
+class ActionsAreHostBoundTests(unittest.TestCase):
+    """Delivery needs the owning machine, and must say so.
+
+    Both verbs here reached tmux with no host check. They still failed for a foreign
+    target -- the pane simply is not on this machine -- but with a reason that was
+    false: "no live tmux session" for an agent that is running perfectly well
+    somewhere else. That sends the user after the wrong problem.
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.enterContext(patch.dict(os.environ, {"MULTIVERSE_ROOT": self.temp.name}))
+        self.calls: list = []
+        self.enterContext(patch.object(
+            sb_actions, "_run_tmux", lambda *a, **k: self.calls.append(a) or (True, "")))
+
+    def _row(self, host: str, *, fresh_heartbeat: bool) -> sessions.DashboardRow:
+        # A unique id per row, because Session.dir resolves MULTIVERSE_ROOT once per
+        # process: a fixed id would make every test share one session directory, and a
+        # heartbeat written by one test would silently make another read the session as
+        # alive. Patching the env cannot prevent that.
+        sess = sessions.Session(
+            id=f"s-{uuid.uuid4().hex[:8]}", cwd="/ws", created_at=1,
+            status="waiting", status_ts=1,
+            name="Alice", runtime=sessions.RUNTIME_CLAUDE, host=host,
+        )
+        if fresh_heartbeat:
+            sess.dir.mkdir(parents=True, exist_ok=True)
+            hosts.touch_heartbeat(sess.dir)
+        return sessions.DashboardRow(
+            name="Alice", cwd="/ws", status="waiting", status_ts=1, session=sess,
+            claude_uuid="u-1", preview="", is_ghost=False, folded_at=None,
+        )
+
+    def _as(self, host: str):
+        return patch.dict(os.environ, {"MULTIVERSE_HOST_ID": host})
+
+    def test_permission_refuses_a_foreign_target_and_types_nothing(self) -> None:
+        row = self._row("remote-a", fresh_heartbeat=True)
+        conn = object.__new__(sb_connector.SBConnector)
+        with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
+                self._as("remote-b"):
+            code, _, msg = conn._deliver_permission_blocking(
+                "/ws", "Alice", "t1", "deny", None)
+        self.assertEqual(code, "foreign_host")
+        self.assertIn("remote-a", msg)
+        self.assertEqual(self.calls, [], "must not drive a pane it cannot reach")
+
+    def test_peek_names_the_host_instead_of_claiming_no_session(self) -> None:
+        row = self._row("remote-a", fresh_heartbeat=True)
+        with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
+                self._as("remote-b"):
+            kind, payload = sb_queries.peek_agent("/ws", "Alice")
+        self.assertEqual(kind, "foreign_host")
+        self.assertIn("remote-a", payload["message"])
+        self.assertNotIn("no live tmux", payload["message"])
+
+    def test_peek_flags_a_remote_that_stopped_checking_in(self) -> None:
+        # foreign_stale is reporting only -- it must never read as terminal, because
+        # recovering a preempted container is the user's explicit force-kill call.
+        row = self._row("remote-a", fresh_heartbeat=False)
+        with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
+                self._as("remote-b"):
+            kind, payload = sb_queries.peek_agent("/ws", "Alice")
+        self.assertEqual(kind, "foreign_host")
+        self.assertIn("not checked in", payload["message"])
+        for terminal in ("ended", "dead", "gone forever"):
+            self.assertNotIn(terminal, payload["message"].replace("may be gone", ""))
+
+    def test_a_local_agent_is_not_refused(self) -> None:
+        row = self._row("remote-a", fresh_heartbeat=True)
+        with patch.object(sessions, "find_agent_by_name", lambda c, n: row), \
+                self._as("remote-a"), \
+                patch.object(sessions, "tmux_session_exists", lambda n: False):
+            kind, _ = sb_queries.peek_agent("/ws", "Alice")
+        self.assertEqual(kind, "not_running", "local rows keep their existing path")
 
 
 if __name__ == "__main__":

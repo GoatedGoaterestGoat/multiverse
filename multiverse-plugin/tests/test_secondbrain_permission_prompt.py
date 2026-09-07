@@ -337,7 +337,10 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
         self.wsid = f"dev:{self.cwd}"
         self.row = sessions.DashboardRow(
             name="Forge", cwd=self.cwd, status="waiting", status_ts=1,
-            session=SimpleNamespace(tmux_name="mv-forge"), claude_uuid="u-1",
+            # host="" is an unstamped session, which reads as local -- these tests
+            # are about the modal, not about which machine owns it.
+            session=SimpleNamespace(tmux_name="mv-forge", host=""),
+            claude_uuid="u-1",
             preview="", is_ghost=False, folded_at=None,
         )
         # The driver's real pacing is irrelevant here and would only slow the suite.
@@ -411,7 +414,7 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
             status="waiting",
             status_ts=1,
             runtime=sessions.RUNTIME_CODEX,
-            session=SimpleNamespace(tmux_name="mv-forge"),
+            session=SimpleNamespace(tmux_name="mv-forge", host=""),
             session_id="thread-1",
         )
         result, fake = await self._run(
@@ -430,7 +433,7 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
             status="waiting",
             status_ts=1,
             runtime=sessions.RUNTIME_CODEX,
-            session=SimpleNamespace(tmux_name="mv-forge"),
+            session=SimpleNamespace(tmux_name="mv-forge", host=""),
             session_id="thread-1",
         )
         fake = FakeCodexTmux(draft="unfinished user draft")
@@ -455,7 +458,7 @@ class PermissionHandlerTests(unittest.IsolatedAsyncioTestCase):
             status="waiting",
             status_ts=1,
             runtime=sessions.RUNTIME_CODEX,
-            session=SimpleNamespace(tmux_name="mv-forge"),
+            session=SimpleNamespace(tmux_name="mv-forge", host=""),
             session_id="thread-1",
         )
         result, fake = await self._run(
@@ -535,7 +538,10 @@ class PromptAgentModalGuardTests(unittest.IsolatedAsyncioTestCase):
     def _target(self) -> sessions.DashboardRow:
         session = sessions.Session(
             id="w1", cwd=self.cwd, created_at=1, status="idle", status_ts=2,
-            name="Forge", runtime=sessions.RUNTIME_CLAUDE, host="local-host",
+            name="Forge", runtime=sessions.RUNTIME_CLAUDE,
+            # Matches the current_host patched below, so the row is local. A session
+            # stamped with any other id is foreign, and the verb refuses those.
+            host="local-host",
         )
         return sessions.DashboardRow(
             name="Forge", cwd=self.cwd, status="idle", status_ts=2,
