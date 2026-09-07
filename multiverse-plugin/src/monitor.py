@@ -71,7 +71,13 @@ from .full_jsonl import (
 )
 from .paths import multiverse_dir
 from .pi_transcript import delete_pi_session, list_pi_sessions_in
-from .inbox import list_pending_messages, pending_inbox_count
+from . import wake_relay
+from .hosts import (
+    HOST_FOREIGN_STALE,
+    HOST_LOCAL,
+    touch_heartbeat_throttled,
+)
+from .inbox import list_pending_messages, mark_wake_sent, pending_inbox_count
 from .names import pick_random_name, successor_name as pick_successor_name
 from .sessions import (
     RUNTIME_CLAUDE,
@@ -87,6 +93,8 @@ from .sessions import (
     create_session,
     create_retiring_session_record,
     current_host,
+    is_foreign_host,
+    session_host_state,
     delete_codex_thread,
     existing_names_in_cwd,
     foreign_host_still_reported_live,
@@ -3219,6 +3227,12 @@ class ConfirmGroupDeleteScreen(ModalScreen[bool]):
         self.dismiss(True)
 
 
+#: Statuses whose sessions have stopped being evidence of anything: they are
+#: being torn down or already gone, so publishing proof of life for them
+#: would keep a dead row looking alive on every other remote.
+_TEARDOWN_STATUSES = ("ended", "ending", "retiring", "retired")
+
+
 class MonitorApp(App):
     CSS = """
     Screen {
@@ -3752,7 +3766,49 @@ class MonitorApp(App):
         self.group_state = groups.load(self.monitor_cwd)
         self._redraw_table()
         self._tick_spawn_requests()
+        self._tick_host_liveness()
         self._update_web_indicator()
+
+    def _tick_host_liveness(self) -> None:
+        """Publish proof of life for our sessions; nudge ones asked of us.
+
+        Both halves of sharing a ``MULTIVERSE_ROOT`` across remotes are here,
+        and both are things only THIS host can do for its own sessions.
+
+        The heartbeat answers a question no dashboard on another remote can
+        otherwise ask: our tmux server is invisible to them, so without a
+        published signal a session of ours looks identically alive whether
+        this machine is running or has been preempted. Throttled to the write
+        interval, since the mount is network storage.
+
+        The relay answers the other direction. A wake prompt is keystrokes
+        into a local pane, so a sender on another remote cannot deliver one —
+        it leaves a request instead, and we execute it for the sessions we
+        own. Both halves are best-effort: a dashboard must keep rendering
+        even when the share is unwritable.
+        """
+        for session in self.sessions:
+            if session.status not in _TEARDOWN_STATUSES and not is_foreign_host(session):
+                touch_heartbeat_throttled(session.dir)
+        try:
+            wake_relay.gc()
+            wake_relay.relay_pending_wakes(self._deliver_relayed_wake)
+        except Exception:  # noqa: BLE001 — never let the share break a redraw
+            pass
+
+    def _deliver_relayed_wake(self, request) -> bool:
+        """Type the wake prompt for a session another remote asked us to nudge.
+
+        Imported lazily: the wake keystrokes live in the MCP server module,
+        which pulls the whole MCP stack, and a dashboard that never relays a
+        wake should never pay for it.
+        """
+        from .server import _wake_via_tmux
+
+        if not _wake_via_tmux(request.tmux_name, runtime=request.runtime):
+            return False
+        mark_wake_sent(request.cwd, request.name)
+        return True
 
     def _reload_groups_and_redraw(self) -> None:
         """Redraw for a change that is only about the tree.
@@ -4151,7 +4207,7 @@ class MonitorApp(App):
     def _agent_cells(self, row: groups.DisplayRow, now: float) -> tuple:
         e = row.entry
         style = STATUS_STYLES.get(e.status, "dim")
-        status_cell = f"[{style}]{e.status}[/]"
+        status_cell = f"[{style}]{e.status}[/]{_host_note(e.session)}"
         updated = _ago(now - e.status_ts) if e.status_ts else "-"
         pending = self._pending_inbox(e)
         inbox_cell = f"[bold yellow]📩 {pending}[/]" if pending > 0 else "[dim]·[/]"
@@ -5593,6 +5649,22 @@ class MonitorApp(App):
 
         # Live multiverse → attach.
         if e.is_live and e.session is not None:
+            if is_foreign_host(e.session):
+                # Its tmux server is on another machine, so there is nothing
+                # here to attach to. Saying "not running" would be a lie the
+                # user could act on — it reads as "safe to resume", which is
+                # how a second writer gets pointed at a live agent's session.
+                stale = session_host_state(e.session) == HOST_FOREIGN_STALE
+                suffix = (
+                    " (which has gone quiet — force-kill from k if that host "
+                    "is gone)" if stale else ""
+                )
+                self.notify(
+                    f"'{e.name}' is running on host {e.session.host}{suffix}. "
+                    "Attach from a dashboard there.",
+                    severity="warning",
+                )
+                return
             if not tmux_session_exists(e.session.tmux_name):
                 self.notify(f"Session {e.session.id} is not running", severity="warning")
                 return
@@ -5863,6 +5935,7 @@ class MonitorApp(App):
                     session,
                     f"Force-killed '{display_name}' "
                     f"(was on host {session.host})",
+                    force=True,
                 )
 
             self.push_screen(
@@ -5877,10 +5950,16 @@ class MonitorApp(App):
 
         self._begin_session_kill(e.session, f"Killed {e.session.id}")
 
-    def _begin_session_kill(self, session: Session, success_message: str) -> None:
-        """Persist ``ending`` and hand teardown to a dashboard-independent process."""
+    def _begin_session_kill(
+        self, session: Session, success_message: str, *, force: bool = False
+    ) -> None:
+        """Persist ``ending`` and hand teardown to a dashboard-independent process.
+
+        ``force`` carries the user's "that remote is gone" decision into the
+        marker, because the teardown that acts on it runs in another process.
+        """
         try:
-            mark_session_ending(session)
+            mark_session_ending(session, force=force)
         except OSError as exc:
             self.notify(f"Could not mark session as ending: {exc}", severity="error")
             return
@@ -6237,6 +6316,35 @@ class MonitorApp(App):
 
     def action_refresh(self) -> None:
         self.refresh_sessions()
+
+
+def _host_note(session: Optional[Session]) -> str:
+    """Whose machine a row lives on, when it is not this one.
+
+    Local rows say nothing — that is the common case and the column has no
+    width to spare. A foreign row has to say something, because every action
+    on it behaves differently and a status with no host attached invites the
+    user to try one. ``?`` marks a row whose host has stopped publishing proof
+    of life: its status is then the last thing a machine we cannot reach
+    happened to write, which is a claim to distrust rather than a death to
+    act on.
+
+    A row that ENDED keeps the host but never the ``?``. Host state is
+    computed from the heartbeat alone, so a finished agent on a switched-off
+    remote reads stale like any other — but there is nothing uncertain about
+    it: its own ``SessionEnd`` hook wrote that status, wherever it ran.
+    Marking it doubtful would suggest the agent might still be alive exactly
+    when we have first-hand evidence that it is not.
+    """
+    if session is None:
+        return ""
+    state = session_host_state(session)
+    if state == HOST_LOCAL:
+        return ""
+    label = escape(session.host or "?")
+    if state == HOST_FOREIGN_STALE and session.status not in _TEARDOWN_STATUSES:
+        return f" [yellow]@{label}?[/]"
+    return f" [dim]@{label}[/]"
 
 
 def _context_token_color(tokens: Optional[int], capacity: Optional[int]) -> str:

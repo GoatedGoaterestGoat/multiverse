@@ -42,20 +42,31 @@ from typing import Optional
 
 from . import sb_notify
 from .atomic_files import atomic_create_json, atomic_write_json
+from .hosts import current_host
 from .inbox import MULTIVERSE_DIR
 
 
 SPAWN_REQUESTS_DIR = MULTIVERSE_DIR / "spawn_requests"
 
 
-def _caller_alive(caller_tmux_session: str) -> bool:
+def _caller_alive(caller_tmux_session: str, caller_host: str = "") -> bool:
     """True if the request's caller is still running (its tmux session
     exists). A spawn request has no timeout — it waits until the user
     resolves it — so orphan requests (from a caller that was hard-killed
     without cleaning up) are reaped by this liveness check instead. On any
     uncertainty (no session name recorded, tmux missing/erroring) we return
     True so a legitimate pending request is never dropped by mistake.
+
+    ``tmux has-session`` only ever sees this host's tmux server, so a caller
+    on another host in a shared-``MULTIVERSE_ROOT`` deployment always looks
+    dead from here — and being "reaped" means its request file is DELETED
+    while the caller sits blocked on it forever, waiting for an answer no
+    monitor will ever be asked for. A recorded host that isn't ours is
+    therefore uncertainty, not death, and takes the same benefit of the
+    doubt as an unreadable tmux.
     """
+    if caller_host and caller_host != current_host():
+        return True
     if not caller_tmux_session:
         return True
     try:
@@ -167,7 +178,9 @@ def list_pending_requests(cwd: str) -> list[dict]:
             continue
         if data.get("cwd") != cwd:
             continue
-        if not _caller_alive(data.get("caller_tmux_session", "")):
+        if not _caller_alive(
+            data.get("caller_tmux_session", ""), data.get("caller_host", "")
+        ):
             orphan_paths = (
                 path,
                 path.with_name(f"{path.stem}.resolved.json"),

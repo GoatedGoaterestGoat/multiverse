@@ -48,6 +48,7 @@ from src.sessions import (
     create_session,
     find_agent_by_name,
     foreign_host_still_reported_live,
+    is_foreign_host,
     kill_session,
     list_named_agents_in_cwd,
     normalize_runtime,
@@ -72,7 +73,9 @@ from src.interagent_log import (
     log_notification_routed,
 )
 from src.compact_state import is_locked
+from src import wake_relay
 from src import groups
+from src import codex_control
 from src.ask_agents import AskTarget, ask_one
 from src.names import pick_random_name
 from src.agent_descriptions import write_description
@@ -361,6 +364,8 @@ def _codex_wake_prompt_state(tmux_name: str) -> bool | None:
     ``None`` means the pane could not be captured; the caller must not treat a transient
     capture failure as either validation or submission acknowledgement.
     """
+    if codex_control.local_session(tmux_name) is None:
+        return None
     ok, pane = capture_pane(
         tmux_name,
         join_wrapped=True,
@@ -380,7 +385,10 @@ def _wait_for_codex_wake_prompt_to_clear(tmux_name: str) -> bool:
     """Whether Codex acknowledged submission by clearing the wake composer."""
     deadline = time.monotonic() + _CODEX_WAKE_SUBMIT_ACK_TIMEOUT_S
     while True:
-        if _codex_wake_prompt_state(tmux_name) is False:
+        if codex_control.local_session(tmux_name) is None:
+            return False
+        ok, draft, _ = capture_focused_codex_composer_draft(tmux_name)
+        if ok and not draft:
             return True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -398,6 +406,12 @@ def _submit_codex_wake_prompt(tmux_name: str) -> bool:
     the exact validated prompt remains in the composer.
     """
     for _ in range(_CODEX_WAKE_SUBMIT_ATTEMPTS):
+        # A user may type (or ownership may change) between retries. Never
+        # submit a composer merely because our previous paste was validated.
+        if not _codex_wake_prompt_ready(tmux_name):
+            return False
+        if codex_control.local_session(tmux_name) is None:
+            return False
         subprocess.run(
             ["tmux", "send-keys", "-t", tmux_name, "Enter"],
             stdout=subprocess.DEVNULL,
@@ -414,6 +428,8 @@ def _wait_for_codex_composer_text(tmux_name: str, expected: str) -> bool:
     """Wait for a focused Codex composer to contain exactly ``expected``."""
     deadline = time.monotonic() + _CODEX_WAKE_DRAFT_TIMEOUT_S
     while True:
+        if codex_control.local_session(tmux_name) is None:
+            return False
         ok, draft, _ = capture_focused_codex_composer_draft(tmux_name)
         if ok and (
             draft == expected
@@ -432,14 +448,25 @@ def _replace_codex_composer_text(
     replacement: str,
 ) -> bool:
     """Atomically-as-possible replace a known focused Codex draft."""
+    if codex_control.local_session(tmux_name) is None:
+        return False
     ok, actual, _ = capture_focused_codex_composer_draft(tmux_name)
     if not ok or actual != current:
         return False
     if current:
+        if codex_control.local_session(tmux_name) is None:
+            return False
         ok, _ = clear_composer_text_via_tmux(tmux_name, current)
         if not ok or not _wait_for_codex_composer_text(tmux_name, ""):
             return False
     if replacement:
+        if codex_control.local_session(tmux_name) is None:
+            return False
+        ok, actual, _ = capture_focused_codex_composer_draft(tmux_name)
+        if not ok or actual:
+            return False
+        if codex_control.local_session(tmux_name) is None:
+            return False
         ok, _ = paste_text_via_tmux(tmux_name, replacement)
         if not ok or not _wait_for_codex_composer_text(tmux_name, replacement):
             return False
@@ -450,10 +477,16 @@ def _restore_codex_composer_text(tmux_name: str, saved: str) -> bool:
     """Best-effort rollback/restore after a Codex wake attempt."""
     deadline = time.monotonic() + _CODEX_WAKE_DRAFT_TIMEOUT_S
     while True:
+        if codex_control.local_session(tmux_name) is None:
+            return False
         ok, current, _ = capture_focused_codex_composer_draft(tmux_name)
         if ok:
             if current == saved:
                 return True
+            if current and not _codex_wake_prompt_matches(current):
+                # This is newly typed user content, not ours to erase. The
+                # displaced draft remains in its recovery file for a retry.
+                return False
             if _replace_codex_composer_text(tmux_name, current, saved):
                 return True
         remaining = deadline - time.monotonic()
@@ -464,20 +497,43 @@ def _restore_codex_composer_text(tmux_name: str, saved: str) -> bool:
 
 def _wake_codex_via_tmux(tmux_name: str) -> bool:
     """Wake Codex without losing a detached session's partial draft."""
+    session = codex_control.local_session(tmux_name)
+    if session is None:
+        return False
+    try:
+        pending = codex_control.pending_draft(session)
+        if pending is not None:
+            if not _restore_codex_composer_text(tmux_name, pending["text"]):
+                return False
+            if codex_control.local_session(tmux_name) is None:
+                return False
+            codex_control.clear_draft(session)
+            # If the earlier wake was accepted, do not submit it a second time
+            # just because restoration had to wait for the composer to clear.
+            return pending["submitted"]
+    except (OSError, ValueError):
+        return False
     ok, saved, _ = capture_focused_codex_composer_draft(tmux_name)
     if not ok:
         return False
-
-    if saved and not _replace_codex_composer_text(tmux_name, saved, ""):
-        _restore_codex_composer_text(tmux_name, saved)
+    try:
+        if codex_control.local_session(tmux_name) is None:
+            return False
+        if saved and not codex_control.save_draft(session, saved):
+            return False
+        submitted = False
+        if (not saved or _replace_codex_composer_text(tmux_name, saved, "")):
+            if _replace_codex_composer_text(tmux_name, "", _WAKE_PROMPT):
+                submitted = _submit_codex_wake_prompt(tmux_name)
+                if submitted and saved and codex_control.local_session(tmux_name):
+                    codex_control.mark_draft_submitted(session)
+        restored = _restore_codex_composer_text(tmux_name, saved)
+        if restored and saved and codex_control.local_session(tmux_name):
+            codex_control.clear_draft(session)
+        return submitted and restored
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # Keep the durable draft if a terminal operation failed mid-sequence.
         return False
-    if not _replace_codex_composer_text(tmux_name, "", _WAKE_PROMPT):
-        _restore_codex_composer_text(tmux_name, saved)
-        return False
-    if not _submit_codex_wake_prompt(tmux_name):
-        _restore_codex_composer_text(tmux_name, saved)
-        return False
-    return _restore_codex_composer_text(tmux_name, saved)
 
 
 # How long to wait for Claude's TUI to render after a submit before deciding
@@ -591,21 +647,48 @@ def _auto_resume(target, cwd: str) -> None:
     )
 
 
-def _queued_next_step(runtime: str, *, dormant: bool = False) -> str:
-    """Describe how an inbox-only message will reach the target."""
+def _queued_next_step(
+    runtime: str, *, dormant: bool = False, host: str | None = None
+) -> str:
+    """Describe how an inbox-only message will reach the target.
+
+    ``host`` names the machine the recipient is running on when that is not
+    this one. A cross-host message is still delivered — the inbox is a file on
+    the shared mount and the recipient's own hooks collect it over there — so
+    the caller is told where it landed rather than being told it failed.
+    """
     if runtime == RUNTIME_CODEX:
         if dormant:
             return (
                 "It will remain queued until the user resumes that session; "
                 "the Codex wrapper will then prompt it to call check_inbox."
             )
+        if host:
+            return (
+                f"It will remain queued until Codex calls check_inbox on host '{host}'. "
+                "A dashboard running on that host can relay the wake request; "
+                "no terminal ping was sent from this host."
+            )
         return "It will remain queued until Codex calls check_inbox."
     if runtime == RUNTIME_PI:
         if dormant:
             return "The pi extension will deliver it when the session resumes."
+        if host:
+            return (
+                f"Its pi extension on {host} will deliver it from the durable "
+                "inbox."
+            )
         return "The pi extension will deliver it directly from the durable inbox."
     if dormant:
         return "It will be delivered when the user next resumes that session."
+    if host:
+        # Deliberately does not promise the nudge: the relay only fires if a
+        # dashboard is running on that host, and the honest floor is what the
+        # recipient's own hooks guarantee.
+        return (
+            f"Its own hooks on {host} will deliver it on its next turn, and a "
+            "dashboard running there will prompt it to check sooner."
+        )
     return "It will be delivered on the recipient's next turn."
 
 
@@ -1078,6 +1161,31 @@ def message_agent(
         return (
             f"Message queued for '{target_name}' — it was already listening "
             "on its inbox and will detect it within a second." + reply_hint
+        )
+
+    # A recipient on another host cannot be typed into from here: tmux servers
+    # are per-machine, so send-keys would go nowhere (or, worse, into a local
+    # session that happened to reuse the name). The message is already in the
+    # shared inbox and the recipient's own hooks will collect it; what cannot
+    # cross is the nudge that makes an idle agent look now rather than on its
+    # next turn. File that as a request for the dashboard on its host.
+    #
+    # Placed ahead of the starting/waiting branch on purpose. Those states are
+    # transient, and a message arriving during one would otherwise never get a
+    # request filed at all — the agent becomes idle later with nothing pending
+    # to nudge it. The relay holds the request until that host can act, and
+    # declines to type until the session is actually in a state to receive it.
+    # ``listening`` is handled above and needs nothing: an agent polling its
+    # inbox reads files, which already crosses hosts.
+    if is_foreign_host(target.session):
+        relayed = wake_relay.request_wake(target.session, requested_by=self_name)
+        log_route("wake_relay_requested" if relayed else "wake_relay_pending")
+        host = target.session.host or "another host"
+        return (
+            f"Message queued for '{target_name}' — it is running on host "
+            f"{host}, which this host cannot type into. "
+            + _queued_next_step(target.runtime, host=host)
+            + reply_hint
         )
 
     if status in ("starting", "waiting"):

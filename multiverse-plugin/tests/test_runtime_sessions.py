@@ -1372,6 +1372,7 @@ class CodexRunnerTests(unittest.TestCase):
                 "MULTIVERSE_PLUGIN_ROOT": str(repo_root / "multiverse-plugin"),
                 "MULTIVERSE_STATUS": str(status),
                 "MULTIVERSE_ROOT": str(temp_dir / "multiverse-state"),
+                "MULTIVERSE_HOST_ID": "stable-host-a",
                 "MULTIVERSE_SESSION_ID": "wrapper-id",
                 "MULTIVERSE_SESSION_CWD": str(temp_dir),
                 "MULTIVERSE_SESSION_NAME": "codex-agent",
@@ -1417,6 +1418,11 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertIn(
                 "mcp_servers.multiverse.env.MULTIVERSE_SESSION_NAME="
                 + json.dumps("codex-agent"),
+                args,
+            )
+            self.assertIn(
+                "mcp_servers.multiverse.env.MULTIVERSE_HOST_ID="
+                + json.dumps("stable-host-a"),
                 args,
             )
             self.assertIn(

@@ -11,6 +11,12 @@
 STATUS="${1:-unknown}"
 TS=$(date +%s)
 
+# Proof of life for dashboards on OTHER hosts, which cannot see this host's
+# tmux server and so have no other way to tell "alive on a remote" from
+# "that remote is gone". Touched before every guard below, because a session
+# still firing hooks is still alive whatever those guards decide to write.
+touch "$(dirname "$MULTIVERSE_STATUS")/heartbeat" 2>/dev/null || true
+
 # A dashboard kill owns the lifecycle state until runtime and tmux teardown
 # finish. Hooks may still fire while the runtime handles SIGTERM; do not let
 # those late writes replace the visible `ending` state.

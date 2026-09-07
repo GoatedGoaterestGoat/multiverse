@@ -13,6 +13,20 @@ fi
 : "${MULTIVERSE_STATUS:?multiverse-codex-session must be launched by the monitor}"
 : "${MULTIVERSE_CODEX_PLUGIN_ROOT:?Codex plugin root is not configured}"
 
+session_owned_here() {
+  local meta_path recorded_host
+  meta_path="$(dirname "$MULTIVERSE_STATUS")/meta.json"
+  [ -f "$meta_path" ] || return 0  # legacy/unwrapped invocations
+  recorded_host=$(jq -er '.host // ""' "$meta_path" 2>/dev/null) || return 1
+  [ -z "$recorded_host" ] \
+    || [ "$recorded_host" = "${MULTIVERSE_HOST_ID:-$(hostname)}" ]
+}
+
+if ! session_owned_here; then
+  echo "[multiverse-codex-session] refusing to launch a session owned by another host" >&2
+  exit 1
+fi
+
 HOOK_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/session-hook.py"
 MCP_SCRIPT="$MULTIVERSE_CODEX_PLUGIN_ROOT/scripts/mcp-server"
 if [ ! -x "$HOOK_SCRIPT" ] || [ ! -x "$MCP_SCRIPT" ]; then
@@ -73,6 +87,7 @@ add_mcp_env_override() {
 
 for MCP_ENV_NAME in \
   MULTIVERSE_ROOT \
+  MULTIVERSE_HOST_ID \
   MULTIVERSE_SESSION_ID \
   MULTIVERSE_SESSION_CWD \
   MULTIVERSE_SESSION_NAME \
@@ -105,6 +120,7 @@ RUNTIME_PID=""
 
 write_status() {
   local status="$1" ts tmp
+  session_owned_here || return 0
   if [ "$status" != "ending" ] \
     && [ -e "$(dirname "$MULTIVERSE_STATUS")/ending" ]; then
     return 0
@@ -249,6 +265,9 @@ mark_idle_when_codex_is_ready() {
   local attempt=0 current footer
   while [ "$attempt" -lt 2400 ]; do
     attempt=$((attempt + 1))
+    # A delayed watcher must not inspect a foreign pane after explicit
+    # recovery/reassignment of the shared wrapper state.
+    session_owned_here || return 0
     current=$(jq -r '.status // empty' "$MULTIVERSE_STATUS" 2>/dev/null || true)
     [ "$current" != "starting" ] && return 0
     if [ -n "$id_path" ] && [ -s "$id_path" ]; then
@@ -284,7 +303,7 @@ READY_WATCHER_PID=$!
   ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} <&0 &
 RUNTIME_PID=$!
 RUNTIME_PID_TMP="${RUNTIME_PID_PATH}.$$.$RANDOM.tmp"
-if printf '%s\n' "$RUNTIME_PID" > "$RUNTIME_PID_TMP"; then
+if session_owned_here && printf '%s\n' "$RUNTIME_PID" > "$RUNTIME_PID_TMP"; then
   mv -f "$RUNTIME_PID_TMP" "$RUNTIME_PID_PATH"
 else
   rm -f "$RUNTIME_PID_TMP" 2>/dev/null || true

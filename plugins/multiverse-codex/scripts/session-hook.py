@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import sys
 import tempfile
 import time
@@ -20,6 +21,36 @@ STATUS_BY_EVENT = {
     "Stop": "idle",
 }
 _SCRIPT = "codex-session-hook"
+
+
+def _is_local_owner(status_path: Path) -> bool:
+    """A hook must not update a shared session explicitly owned elsewhere."""
+    try:
+        meta = json.loads((status_path.parent / "meta.json").read_text())
+    except FileNotFoundError:
+        return True  # legacy/unwrapped hook state
+    except (OSError, ValueError):
+        return False
+    if not isinstance(meta, dict):
+        return False
+    host = meta.get("host")
+    local = os.environ.get("MULTIVERSE_HOST_ID", "").strip() or socket.gethostname()
+    return not host or host == local
+
+
+def _touch_heartbeat(status_path: Path) -> None:
+    """Publish activity even when the owning host has no dashboard open."""
+    plugin_root = os.environ.get("MULTIVERSE_PLUGIN_ROOT")
+    if not plugin_root:
+        return
+    if plugin_root not in sys.path:
+        sys.path.insert(0, plugin_root)
+    try:
+        from src.hosts import touch_heartbeat_throttled
+        if _is_local_owner(status_path):
+            touch_heartbeat_throttled(status_path.parent)
+    except Exception:  # hooks must work with older/incomplete plugin installs
+        pass
 
 
 def _write_status(status_path: Path, status: str) -> None:
@@ -283,6 +314,9 @@ def _run_hook() -> None:
     if not status_value:
         return
     status_path = Path(status_value)
+    if not _is_local_owner(status_path):
+        return
+    _touch_heartbeat(status_path)
     event_name = event.get("hook_event_name")
     if event_name == "SessionStart":
         session_id = event.get("session_id")

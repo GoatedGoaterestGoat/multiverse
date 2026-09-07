@@ -97,7 +97,7 @@ class DashboardEndingTests(unittest.TestCase):
         proc = MagicMock()
         app = monitor.MonitorApp([])
 
-        def mark(_session):
+        def mark(_session, *, force=False):
             events.append("mark")
 
         def refresh():
@@ -240,7 +240,7 @@ class DashboardEndingAsyncTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
 
-        def mark_ending(current):
+        def mark_ending(current, *, force=False):
             current.status = "ending"
             current.status_ts = 2
 

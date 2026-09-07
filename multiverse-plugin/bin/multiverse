@@ -139,6 +139,15 @@ export MULTIVERSE_CODEX_REASONING_EFFORT="${MULTIVERSE_CODEX_REASONING_EFFORT:-x
 # bin/multiverse.local on affected hosts.
 export MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES="${MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES:-}"
 
+# Stable identity for THIS machine, used to tell "my session" from "a session
+# on another remote" when several hosts share one $MULTIVERSE_ROOT over network
+# storage. Empty default => fall back to `hostname`, which is fine on a single
+# machine but a poor identity across remotes: macOS renames itself per network
+# and containers get a fresh random name each start, so a session can look
+# foreign on the very box running it. Set one stable value per machine in
+# bin/multiverse.local (e.g. export MULTIVERSE_HOST_ID="gpu-node-3").
+export MULTIVERSE_HOST_ID="${MULTIVERSE_HOST_ID:-}"
+
 # Extra env var NAMES (space-separated) to forward into every tmux-spawned
 # session, on top of the fixed base set in sessions.py's create_session.
 # Lets a machine propagate environment-specific auth/config vars (e.g. a

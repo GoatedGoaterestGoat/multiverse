@@ -25,7 +25,9 @@ def finish_ending_session(session_id: str, delay: float = 0.0) -> int:
         error_path = session.dir / "ending_error.json"
         error_path.unlink(missing_ok=True)
         try:
-            sessions.kill_session(session)
+            sessions.kill_session(
+                session, force=sessions.ending_was_forced(session)
+            )
         except Exception as exc:  # noqa: BLE001 - persist failure for the monitor
             atomic_write_json(
                 error_path,

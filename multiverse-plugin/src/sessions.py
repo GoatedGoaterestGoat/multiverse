@@ -25,7 +25,6 @@ import secrets
 import shlex
 import shutil
 import signal
-import socket
 import subprocess
 import time
 from contextlib import ExitStack
@@ -38,6 +37,15 @@ from . import forks
 from .atomic_files import atomic_write_json, exclusive_file_lock
 from .agent_descriptions import read_description, write_description
 from .compact_state import list_locked
+from .hosts import (
+    HOST_FOREIGN,
+    HOST_FOREIGN_STALE,
+    HOST_LOCAL,
+    current_host,
+    heartbeat_is_stale,
+    touch_heartbeat,
+    touch_heartbeat_throttled,
+)
 from .paths import (
     claude_projects_dir,
     codex_home,
@@ -686,6 +694,11 @@ def write_status_path(path: Path, status: str, ts: Optional[float] = None) -> No
             )
         except OSError:
             pass  # unlocked fallback — see above
+        # Proof of life for readers on other hosts, recorded before the
+        # guards below can return early: reaching this function at all means
+        # this session's own process is running, which is exactly what a
+        # dashboard that cannot see this host's tmux needs to know.
+        touch_heartbeat(path.parent)
         # Dashboard-initiated teardown owns the status until tmux is gone.
         # Runtime hooks can still fire while SIGTERM is being handled; without
         # this marker a Stop/SessionEnd hook could replace ``ending`` with
@@ -777,7 +790,7 @@ def _codex_runtime_pid_matches(s: Session, pid: int) -> bool:
     """
     if s.runtime != RUNTIME_CODEX:
         return False
-    if s.host and s.host != current_host():
+    if is_foreign_host(s):
         return False
     if not _pid_alive(pid):
         return False
@@ -952,15 +965,23 @@ def _mark_session_ended(s: Session) -> None:
     s.status_ts = now
 
 
-def mark_session_ending(s: Session) -> None:
+def mark_session_ending(s: Session, *, force: bool = False) -> None:
     """Persist the non-interactive state used during dashboard teardown.
 
     The marker is created before the status write so a racing runtime hook
     either wins before us (and is immediately overwritten by ``ending``) or
     sees the marker and leaves the teardown-owned status alone.
+
+    ``force`` records the user's explicit force-kill decision IN the marker,
+    because the process that acts on it is not this one: teardown runs
+    detached, so an intent held only in memory here would be lost by the time
+    ``kill_session`` needs it, and a foreign force-kill would refuse itself.
     """
     now = time.time()
-    s.ending_marker_path.touch(exist_ok=True)
+    if force:
+        s.ending_marker_path.write_text("force\n")
+    else:
+        s.ending_marker_path.touch(exist_ok=True)
     try:
         write_status_path(s.status_path, "ending", now)
     except Exception:
@@ -973,6 +994,14 @@ def mark_session_ending(s: Session) -> None:
     s.status_ts = now
 
 
+def ending_was_forced(s: Session) -> bool:
+    """True when the pending teardown carries an explicit force-kill decision."""
+    try:
+        return s.ending_marker_path.read_text().strip() == "force"
+    except OSError:
+        return False
+
+
 def _correct_local_liveness(s: Session) -> bool:
     """Persist ``ended`` when local process evidence proves a row is stale.
 
@@ -982,7 +1011,7 @@ def _correct_local_liveness(s: Session) -> bool:
     Codex runners record the foreground Codex PID, allowing correction even
     when an abnormal wrapper leaves its tmux pane behind.
     """
-    if s.status in ("ended", "retiring", "retired") or (s.host and s.host != current_host()):
+    if s.status in ("ended", "retiring", "retired") or is_foreign_host(s):
         return False
 
     within_startup_grace = (
@@ -1963,6 +1992,7 @@ def create_session(
         "-e", f"MULTIVERSE_SESSION_CWD={cwd_abs}",
         "-e", f"MULTIVERSE_STATUS={d / 'status.json'}",
         "-e", f"MULTIVERSE_RUNTIME={runtime}",
+        "-e", f"MULTIVERSE_HOST_ID={meta['host']}",
         "-e", f"MULTIVERSE_PLUGIN_ROOT={plugin_root}",
     ]
 
@@ -2095,8 +2125,27 @@ def create_session(
     )
 
 
-def current_host() -> str:
-    return socket.gethostname()
+def is_foreign_host(s: Session) -> bool:
+    """True when ``s`` was created on a different machine than this one.
+
+    Says nothing about whether it is still alive over there — see
+    ``foreign_host_still_reported_live`` and ``hosts.heartbeat_is_stale``.
+
+    Compares against this module's ``current_host`` rather than delegating to
+    ``hosts.host_is_foreign``, so that patching ``sessions.current_host``
+    still governs every host decision made in this module. Delegating reads
+    the name from the other module's globals, where such a patch is invisible
+    — and a host guard that silently ignores the identity it was given is
+    both untestable and the exact shape of bug this file exists to prevent.
+    """
+    return bool(s.host) and s.host != current_host()
+
+
+def session_host_state(s: Session) -> str:
+    """Shared vocabulary for a session: local / foreign / foreign_stale."""
+    if not is_foreign_host(s):
+        return HOST_LOCAL
+    return HOST_FOREIGN_STALE if heartbeat_is_stale(s.dir) else HOST_FOREIGN
 
 
 def foreign_host_still_reported_live(s: Session) -> bool:
@@ -2146,7 +2195,7 @@ def foreign_host_still_reported_live(s: Session) -> bool:
     shared-``MULTIVERSE_ROOT`` case the guard exists for: a session
     spawned on host A never shows up in host B's tmux.
     """
-    if not s.host or s.host == current_host():
+    if not is_foreign_host(s):
         return False
     if tmux_session_exists(s.tmux_name):
         return False
@@ -2199,10 +2248,43 @@ def mark_session_retired(s: Session, successor: str) -> None:
     s.successor = successor
 
 
+def _require_dormant_codex_thread(thread_id: str) -> None:
+    """Do not delete a shared rollout while any tracked writer may own it.
+
+    Read persisted sessions directly, without correcting liveness or trusting
+    this host's tmux/PIDs as evidence about a different host.
+    """
+    try:
+        directories = list(STATE_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        session = load_session(directory.name)
+        if (session is None or session.runtime != RUNTIME_CODEX
+                or session.runtime_session_id != thread_id):
+            continue
+        active = session.status not in ("ended", "retired")
+        if not is_foreign_host(session):
+            pid = _runtime_pid(session)
+            active = active or tmux_session_exists(session.tmux_name) or bool(
+                pid and _codex_runtime_pid_matches(session, pid)
+            )
+        if active:
+            raise RuntimeError(
+                f"Cannot delete Codex thread '{thread_id}': session "
+                f"'{session.name or session.id}' on host "
+                f"'{session.host or current_host()}' may still be running "
+                f"(status: {session.status}). Stop it on its owning host first."
+            )
+
+
 def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
     """Permanently delete a dormant Codex thread through the app server."""
     if not thread_id:
         raise ValueError("Codex thread ID is required")
+    _require_dormant_codex_thread(thread_id)
     # Reuse the interactive protocol client that powers Codex ask_agent.
     # Closing stdin immediately after a batch write can make the real app
     # server exit before it processes thread/delete.
@@ -2233,6 +2315,9 @@ def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
         )
         _wait_for_response(client, 1, deadline)
         client.send({"method": "initialized"})
+        # App-server startup can take time; a remote may have resumed the
+        # thread after the first check. Recheck just before the destructive RPC.
+        _require_dormant_codex_thread(thread_id)
         client.send(
             {
                 "id": 2,
@@ -2253,8 +2338,36 @@ def delete_codex_thread(thread_id: str, timeout_seconds: float = 12.0) -> None:
     _CODEX_DISCOVERY_CACHE.clear()
 
 
-def kill_session(s: Session) -> None:
-    """Tear down the owned runtime first, then tmux, then release state."""
+def kill_session(s: Session, *, force: bool = False) -> None:
+    """Tear down the owned runtime first, then tmux, then release state.
+
+    A session belonging to another host is reaped as STATE ONLY: its state
+    directory and name claims are released, and nothing local is signalled.
+    Its recorded PID and tmux name describe processes on a machine we cannot
+    reach, and a PID number is reusable — signalling one here would kill
+    whatever local process happens to hold that number now. Local tmux cannot
+    see a foreign session either, so there is nothing of its to kill here even
+    in principle.
+
+    ``force`` is the user's explicit "that remote is gone" decision, taken in
+    the dashboard's force-kill confirmation. Without it, a foreign session
+    whose durable status still reports it alive is refused rather than reaped,
+    because its state dir is the only thing keeping a still-running remote
+    agent visible — and reaping it while a replacement is created under the
+    same name is exactly how an invisible zombie sharing one inbox is made.
+    A foreign session whose own ``SessionEnd`` hook already wrote ``ended``
+    needs no force: it really is over, wherever it ran.
+    """
+    if is_foreign_host(s):
+        if not force and foreign_host_still_reported_live(s):
+            raise RuntimeError(
+                f"session {s.id} belongs to host {s.host} and its status there "
+                "does not say ended; refusing to reap it from this host"
+            )
+        shutil.rmtree(s.dir, ignore_errors=True)
+        _release_session_claims(s)
+        return
+
     tmux_exists = tmux_session_exists(s.tmux_name)
     pane_runtime = _tmux_pane_runtime_group(s) if tmux_exists else None
     runtime_pid: Optional[int] = None

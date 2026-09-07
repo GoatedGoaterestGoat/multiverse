@@ -10,6 +10,13 @@ from src import codex_startup_input
 
 
 class CodexStartupInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # These tests isolate TUI protocol details; real ownership checks are
+        # covered by test_codex_multi_host with on-disk foreign metadata.
+        local = patch.object(codex_startup_input, "_is_local", return_value=True)
+        local.start()
+        self.addCleanup(local.stop)
+
     def test_names_live_tui_before_delivering_initial_prompt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -64,7 +71,6 @@ class CodexStartupInputTests(unittest.TestCase):
             native_id_path,
             root / "codex-home" / "session_index.jsonl",
             "named-child",
-            index_offset=0,
         )
         self.assertFalse(prompt_exists)
 
@@ -151,6 +157,8 @@ class CodexStartupInputTests(unittest.TestCase):
         states = iter(
             [
                 ("exact", ""),
+                ("exact", ""),
+                ("exact", ""),
                 ("empty", ""),
             ]
         )
@@ -204,7 +212,7 @@ class CodexStartupInputTests(unittest.TestCase):
                 )
             )
 
-    def test_wait_for_native_name_uses_only_new_index_rows_as_id_fallback(
+    def test_wait_for_native_name_never_claims_another_hosts_matching_name(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -215,7 +223,6 @@ class CodexStartupInputTests(unittest.TestCase):
                 {"id": "old-thread", "thread_name": "named-child"}
             ) + "\n"
             index_path.write_text(old)
-            offset = index_path.stat().st_size
             with index_path.open("a") as handle:
                 handle.write(
                     json.dumps(
@@ -224,17 +231,15 @@ class CodexStartupInputTests(unittest.TestCase):
                     + "\n"
                 )
 
-            self.assertTrue(
-                codex_startup_input._wait_for_native_name(
-                    native_id_path,
-                    index_path,
-                    "named-child",
-                    index_offset=offset,
+            with patch.object(codex_startup_input, "_NAME_ACK_TIMEOUT_S", 0.01):
+                self.assertFalse(
+                    codex_startup_input._wait_for_native_name(
+                        native_id_path,
+                        index_path,
+                        "named-child",
+                    )
                 )
-            )
-            recorded_id = native_id_path.read_text()
-
-        self.assertEqual(recorded_id, "new-thread\n")
+            self.assertFalse(native_id_path.exists())
 
 
 if __name__ == "__main__":

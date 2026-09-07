@@ -39,6 +39,17 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
         )
         self.inbox_patch.start()
         self.addCleanup(self.inbox_patch.stop)
+        state_patch = patch.object(sessions, "STATE_DIR", self.state_root / "sessions")
+        state_patch.start()
+        self.addCleanup(state_patch.stop)
+        # Real local ownership for the isolated Codex TUI helper tests below.
+        target_dir = sessions.STATE_DIR / "target"
+        target_dir.mkdir(parents=True)
+        (target_dir / "meta.json").write_text(json.dumps({
+            "cwd": self.cwd, "name": "receiver", "runtime": "codex",
+            "created_at": 1, "host": sessions.current_host(),
+        }))
+        (target_dir / "status.json").write_text('{"status":"idle"}')
 
     def _target(
         self,
@@ -449,6 +460,19 @@ class MixedRuntimeMessageAgentTests(unittest.TestCase):
 
 
 class CodexMessageRoutingHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        state = patch.object(sessions, "STATE_DIR", Path(root.name))
+        state.start()
+        self.addCleanup(state.stop)
+        target = sessions.STATE_DIR / "target"
+        target.mkdir()
+        (target / "meta.json").write_text(json.dumps({
+            "runtime": "codex", "created_at": 1, "host": sessions.current_host(),
+        }))
+        (target / "status.json").write_text('{"status":"idle"}')
+
     def test_auto_resume_uses_codex_resume_command(self) -> None:
         target = sessions.DashboardRow(
             name="receiver",
@@ -619,6 +643,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
 
         with (
+            patch.object(server, "_codex_wake_prompt_ready", return_value=True),
             patch.object(server.subprocess, "run", side_effect=fake_run),
             patch.object(
                 server,
@@ -640,6 +665,7 @@ class CodexMessageRoutingHelperTests(unittest.TestCase):
 
     def test_codex_tmux_wake_fails_if_enter_never_clears_composer(self) -> None:
         with (
+            patch.object(server, "_codex_wake_prompt_ready", return_value=True),
             patch.object(
                 server.subprocess,
                 "run",

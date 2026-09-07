@@ -407,8 +407,50 @@ auth configured in `bin/multiverse.local`, and a second press (or quitting the m
 tears the whole stack down.
 
 Every coordination primitive is local — tmux plus files under one `$MULTIVERSE_ROOT` — so
-the share makes a workspace on *this* box reachable from a browser. It cannot drive
-sessions on a different host.
+the share makes a workspace on *this* box reachable from a browser. It cannot drive sessions
+running on a different host; for those, run a dashboard there and share that one (see
+[Several remotes, one workspace](#several-remotes-one-workspace)).
+
+### Several remotes, one workspace
+
+`$MULTIVERSE_ROOT`, the transcripts and the repo can all live on shared storage mounted by
+several machines at once, which is the normal shape of working on remote boxes. Multiverse
+supports that directly: **files are shared, tmux servers are not**. Every agent's live
+session stays pinned to the remote that started it, and each remote runs its own dashboard.
+
+What that means per action, from a dashboard on remote A looking at an agent live on B:
+
+| | |
+|---|---|
+| **Message it** | Works. The inbox is files, and B's own hooks deliver them. If A cannot type into it, A files a *wake request* and the dashboard on B performs the nudge — see below. |
+| **`ask_agent` it** | Works. An ephemeral fork reads the transcript off the shared mount and never touches B's tmux. |
+| **See it** | Works. Its row shows `@host-b`, or `@host-b?` when B has stopped reporting in. |
+| **Attach / kill / compact it** | Refused, by name: "running on host host-b". Those are keystrokes and signals, and neither crosses. Do them from a dashboard on B. |
+| **Resume it once ended** | Works, and starts it *here*. A session that wrote `ended` really is over, wherever it ran, so A may claim its name and give it a session on A. |
+| **Force-kill it** | Yours to decide (`k` on a foreign row asks first). This is the escape hatch for a preempted container whose agents never got to write `ended`; it reaps their state so you can restart them elsewhere. It only ever removes state — it never signals a local PID or tmux name, which on another machine would belong to something else entirely. |
+
+**Host identity — set `MULTIVERSE_HOST_ID`.** Everything above turns on "is this row mine?",
+and a bare hostname answers that badly: macOS renames itself per network, and containers get
+a fresh random name on every start. Left to `hostname`, a session can look foreign on the
+very machine running it, or two remotes can look like one. Pin one stable id per machine in
+`bin/multiverse.local`; it is stamped into each session and forwarded into its environment.
+
+**Proof of life.** A dashboard cannot see another machine's tmux, so each host publishes a
+heartbeat for its own live sessions (from its dashboard tick, its status hooks, or both).
+A foreign row that has gone quiet is marked `@host?` — meaning *do not believe this row*,
+not *this agent is dead*. Nothing acts on it automatically: a quiet share and a dead machine
+look identical from here, so declaring one gone stays your call, via force-kill. A remote
+running no dashboard whose agents are all idle publishes nothing, and its rows will read
+that way even though they are fine.
+
+**Wake requests.** Messaging an agent that is idle on another remote leaves it unread until
+that agent next takes a turn, because the nudge that normally makes it look — a wake prompt
+typed into its pane — cannot cross. So the sender writes a request to
+`$MULTIVERSE_ROOT/wake_requests/`, and the dashboard on the owning host executes it on its
+next tick, under the same delivery lock a local ping takes. Requests are durable: a remote
+that is down for an hour keeps its pending nudge and fires it on return. They are also
+re-derived from the session record at delivery, never trusted as written, so a request that
+names a pane since reused can never type into the wrong agent.
 
 ### SecondBrain connector
 
