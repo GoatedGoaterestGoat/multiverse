@@ -9,10 +9,17 @@ dashboard is open. A remote running agents with no dashboard, or with one open
 for a different workspace, would otherwise publish nothing, and another
 remote's dashboard would find those rows unvouched-for and bury them.
 
-Exits on its own if the wrapper disappears without killing it. An orphaned
-heartbeat writer is worse than none at all: it would keep a dead session
-looking alive on every remote, forever, and the row could then only be cleared
-by force-kill.
+Exits on its own once the wrapper is gone. An orphaned heartbeat writer is
+worse than none at all: it would keep a dead session looking alive on every
+remote, forever, and the row could then only be cleared by force-kill.
+
+The wrapper's PID is passed in rather than read here, because reading it here
+is too late. A wrapper that fails between spawning this process and this
+process starting is already gone by the time ``getppid()`` first runs, so the
+answer would be init — recorded as "the wrapper", matching forever, and
+producing exactly the immortal writer this check exists to prevent. Rejecting
+PID 1 instead would be wrong too: in a container a wrapper legitimately is
+PID 1.
 """
 
 from __future__ import annotations
@@ -28,15 +35,20 @@ from src.hosts import HEARTBEAT_INTERVAL_SECONDS, touch_heartbeat  # noqa: E402
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) != 1:
-        sys.stderr.write("usage: heartbeat.py <session-state-dir>\n")
+    if len(argv) != 2:
+        sys.stderr.write("usage: heartbeat.py <session-state-dir> <wrapper-pid>\n")
         return 2
     session_dir = Path(argv[0])
-    wrapper = os.getppid()
+    try:
+        wrapper = int(argv[1])
+    except ValueError:
+        sys.stderr.write(f"heartbeat.py: not a pid: {argv[1]!r}\n")
+        return 2
     while True:
-        # Re-parenting means the wrapper is gone; on Linux the new parent is
-        # init (or a subreaper), on macOS it is 1. Either way it is no longer
-        # the process whose life this heartbeat is reporting.
+        # Checked before the first write as well as every later one: the
+        # wrapper may already have died while this process was starting, and
+        # a heartbeat published on its behalf after that is a lie that only
+        # force-kill can retract.
         if os.getppid() != wrapper:
             return 0
         touch_heartbeat(session_dir)

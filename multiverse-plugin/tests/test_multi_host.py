@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -342,6 +344,92 @@ class SingleInstanceTests(SessionHostTestCase):
         with patch.object(sessions, "current_host", return_value=LOCAL):
             sessions.kill_session(session)
         self.claim("on-host-b", name="agent", native="uuid-1", host=REMOTE)
+
+
+def _load_heartbeat_module(path: Path):
+    """Import the standalone writer script for in-process assertions."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("multiverse_heartbeat", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class HeartbeatWriterTests(unittest.TestCase):
+    """The per-session writer, which publishes on behalf of a process it does
+    not control. Everything here is about it refusing to outlive that process:
+    a heartbeat still being written for a dead session is a claim no other
+    remote can disprove, and only force-kill could then clear the row."""
+
+    SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "heartbeat.py"
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+
+    def run_writer(self, *args: str, wait: float = 1.0) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, str(self.SCRIPT), *args],
+            capture_output=True, timeout=30, check=False,
+        )
+
+    def test_writes_while_its_wrapper_is_alive(self) -> None:
+        # Popen makes this test process the parent, which is what the wrapper
+        # would be, so the pid it is told to expect is genuinely correct.
+        proc = subprocess.Popen(
+            [sys.executable, str(self.SCRIPT), str(self.dir), str(os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.kill)
+        deadline = time.time() + 10
+        while time.time() < deadline and not hosts.heartbeat_path(self.dir).exists():
+            time.sleep(0.05)
+        self.assertTrue(hosts.heartbeat_path(self.dir).exists())
+        self.assertEqual(hosts.heartbeat_host(self.dir), hosts.current_host())
+
+    def test_a_wrapper_already_gone_is_never_vouched_for(self) -> None:
+        # The startup race: if the wrapper dies between spawning this writer
+        # and the writer starting, reading getppid() here would record init as
+        # "the wrapper" and match it forever. Being told the pid up front is
+        # what closes that, so a stale expectation must produce no write at
+        # all — not even the first one.
+        result = self.run_writer(str(self.dir), str(os.getpid() + 1))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(hosts.heartbeat_path(self.dir).exists())
+
+    def test_pid_one_is_a_legitimate_wrapper(self) -> None:
+        # Rejecting init by number would break containers, where a wrapper
+        # really can be PID 1. Whether the parent is still THE parent is the
+        # test, not what number it happens to have.
+        module = _load_heartbeat_module(self.SCRIPT)
+        with patch.object(module.os, "getppid", return_value=1), \
+             patch.object(module, "touch_heartbeat") as touched, \
+             patch.object(module.time, "sleep", side_effect=InterruptedError):
+            with self.assertRaises(InterruptedError):
+                module.main([str(self.dir), "1"])
+        touched.assert_called_once_with(self.dir)
+
+    def test_a_wrapper_replaced_after_startup_stops_the_writer(self) -> None:
+        # Ordinary re-parenting: the wrapper was alive when we began and is
+        # gone now. One heartbeat published, then nothing further.
+        module = _load_heartbeat_module(self.SCRIPT)
+        parents = iter([4242, 4242, 1])
+        with patch.object(module.os, "getppid", side_effect=lambda: next(parents)), \
+             patch.object(module, "touch_heartbeat") as touched, \
+             patch.object(module.time, "sleep"):
+            self.assertEqual(module.main([str(self.dir), "4242"]), 0)
+        self.assertEqual(touched.call_count, 2)
+
+    def test_bad_arguments_write_nothing(self) -> None:
+        for args in ([], [str(self.dir)], [str(self.dir), "not-a-pid"]):
+            with self.subTest(args=args):
+                result = self.run_writer(*args)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(hosts.heartbeat_path(self.dir).exists())
 
 
 class SpawnRequestHostTests(unittest.TestCase):
