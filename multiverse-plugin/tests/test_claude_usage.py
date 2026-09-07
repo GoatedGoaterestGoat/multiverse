@@ -132,6 +132,26 @@ class ClaudeUsageTests(unittest.TestCase):
                 self.read(f"{i:08d}-2222-3333-4444-555555555555")
             self.assertEqual(len(claude_usage._CACHE), 2)
 
+    def test_assumes_one_million_until_measured(self) -> None:
+        os.environ.pop("MULTIVERSE_CLAUDE_CONTEXT_WINDOW", None)
+        assumed = lambda: claude_usage.context_window_assumed(SESSION, WORKSPACE)
+        self.assertEqual(assumed(), 1_000_000)
+        self.assertEqual(claude_usage.context_window_assumed(None, WORKSPACE), 1_000_000)
+        claude_statusline.record(_payload(size=200_000))
+        self.assertEqual(assumed(), 200_000)
+        claude_statusline.record_path(SESSION, WORKSPACE).unlink()
+        self.assertEqual(assumed(), 1_000_000)
+        with patch.dict(os.environ, {"MULTIVERSE_CLAUDE_CONTEXT_WINDOW": "200000"}):
+            self.assertEqual(assumed(), 200_000)
+            claude_statusline.record(_payload(size=1_000_000))
+            self.assertEqual(assumed(), 1_000_000)
+            claude_statusline.record_path(SESSION, WORKSPACE).unlink()
+        for bad in ("", "0", "-1", "1e6", "lots", "²", "9" * 5000):
+            with patch.dict(os.environ, {"MULTIVERSE_CLAUDE_CONTEXT_WINDOW": bad}):
+                self.assertEqual(assumed(), 1_000_000, bad)
+        # The exact reader keeps its contract: unknown stays None.
+        self.assertIsNone(self.read())
+
     def test_honors_multiverse_root_for_dormant_rows(self) -> None:
         # Records are durable files keyed by workspace + uuid, so a monitor
         # started later (a different process, an ended session) still sees

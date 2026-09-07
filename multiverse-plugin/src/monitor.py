@@ -53,7 +53,7 @@ from .auto_build import is_enabled as auto_build_enabled, toggle as auto_build_t
 from .compact_runner import CompactRunner, State as CompactState
 from .compact_state import acquire_lock, release_lock
 from .codex_usage import token_usage_cached as codex_token_usage_cached
-from .claude_usage import context_window_cached as claude_context_window_cached
+from .claude_usage import context_window_assumed as claude_context_window_assumed
 from .full_jsonl import (
     full_jsonl_path,
     list_orphan_fulls,
@@ -4065,14 +4065,14 @@ class MonitorApp(App):
         return self._total_cache[key]
 
     def _context_window_of(self, e: DashboardRow) -> Optional[int]:
-        """Runtime-reported context capacity, once per agent per redraw."""
+        """Context capacity (Claude may use a fallback), once per redraw."""
         key = (e.cwd, e.name)
         if key not in self._context_window_cache:
             capacity = None
             if e.runtime == RUNTIME_CODEX:
                 capacity = codex_token_usage_cached(e.session_id).context_window
             elif e.runtime == RUNTIME_CLAUDE:
-                capacity = claude_context_window_cached(e.claude_uuid, e.cwd)
+                capacity = claude_context_window_assumed(e.claude_uuid, e.cwd)
             self._context_window_cache[key] = capacity
         return self._context_window_cache[key]
 

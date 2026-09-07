@@ -3,9 +3,11 @@
 ``context_window_cached`` answers "how big is this session's context
 window?" with the exact ``context_window.context_window_size`` Claude Code
 reported to its statusline (captured by ``claude_statusline``), or None.
-Nothing here infers a capacity from a model name: a bare id in the
+The exact reader never infers a capacity from a model name: a bare id in the
 transcript cannot tell a 200k session from a ``[1m]`` one, and a wrong
 capacity would color a real session wrong. Unknown stays unknown.
+For dashboard coloring, ``context_window_assumed`` instead falls back to
+the explicitly configured assumption (1M by default) until capture arrives.
 
 Records are durable and keyed by workspace slug + session id, so a dormant
 row keeps the capacity it was measured at. The cache mirrors
@@ -23,6 +25,12 @@ from pathlib import Path
 from .claude_statusline import is_session_id, parse_record, record_path
 
 _CACHE_LIMIT = 256
+# What a Claude row is assumed to run under until its statusline has been
+# captured: sessions that predate the launcher shim, dormant rows, or
+# sessions started outside multiverse. bin/multiverse launches Claude as
+# opus[1m] by default, so 1M is the honest expectation; override with
+# MULTIVERSE_CLAUDE_CONTEXT_WINDOW when the default model is not a 1M one.
+ASSUMED_CONTEXT_WINDOW = 1_000_000
 
 
 @dataclass
@@ -36,6 +44,30 @@ _CACHE: OrderedDict[Path, _Entry] = OrderedDict()
 
 def _signature(st: os.stat_result) -> tuple[int, ...]:
     return st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns
+
+
+def assumed_context_window() -> int:
+    """The capacity assumed before a session's statusline is captured."""
+    raw = os.environ.get("MULTIVERSE_CLAUDE_CONTEXT_WINDOW", "").strip()
+    if not raw.isascii() or not raw.isdigit():
+        return ASSUMED_CONTEXT_WINDOW
+    try:
+        value = int(raw)
+    except ValueError:
+        return ASSUMED_CONTEXT_WINDOW
+    return value if value > 0 else ASSUMED_CONTEXT_WINDOW
+
+
+def context_window_assumed(claude_uuid: str | None, cwd: str) -> int:
+    """Exact recorded capacity when known, else ``assumed_context_window()``.
+
+    The dashboard's Claude rows use this: a measured value wins the moment
+    the record appears (the statusline renders at startup, before the first
+    prompt), and until then the row is colored against the assumed window
+    rather than left neutral.
+    """
+    measured = context_window_cached(claude_uuid, cwd)
+    return measured if measured is not None else assumed_context_window()
 
 
 def context_window_cached(claude_uuid: str | None, cwd: str) -> int | None:

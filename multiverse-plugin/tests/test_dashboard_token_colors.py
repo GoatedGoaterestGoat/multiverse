@@ -105,7 +105,7 @@ class RenderedTokenColorTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ClaudeCapturedTokenColorTests(unittest.TestCase):
-    def test_statusline_capacity_drives_claude_colors_without_model_guesses(self) -> None:
+    def test_statusline_capacity_replaces_assumed_claude_window(self) -> None:
         script = Path(__file__).resolve().parents[1] / "scripts" / "claude-statusline.py"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -125,16 +125,23 @@ class ClaudeCapturedTokenColorTests(unittest.TestCase):
             env = {k: v for k, v in os.environ.items() if not k.startswith("MULTIVERSE_")}
             env.update({"MULTIVERSE_ROOT": str(state), "MULTIVERSE_SESSION_CWD": cwd})
             with (
-                patch.dict(os.environ, {"MULTIVERSE_ROOT": str(state)}),
+                patch.dict(os.environ, {
+                    "MULTIVERSE_ROOT": str(state), "MULTIVERSE_CLAUDE_CONTEXT_WINDOW": "",
+                }),
                 patch.object(app, "query_one", return_value=table),
                 patch.object(app, "_pending_inbox", return_value=0),
-                patch.object(app, "_agent_tokens", return_value=600),
+                patch.object(app, "_agent_tokens", return_value=600_000) as live,
                 patch.object(app, "_agent_total", return_value=1_500_000),
                 patch.object(monitor, "auto_build_enabled", return_value=False),
             ):
-                app._redraw_table()
-                self.assertEqual(table.add_row.call_args.args[6:8], ("600", "[yellow]1.50M[/]"))
-                for capacity, color in ((1000, "yellow"), (2000, "green"), (750, "red")):
+                for tokens, color in ((599_999, "green"), (600_000, "yellow"), (800_000, "red")):
+                    live.return_value = tokens
+                    app._redraw_table()
+                    self.assertEqual(table.add_row.call_args.args[6:8], (
+                        f"[{color}]{tokens:,}[/]", "[yellow]1.50M[/]",
+                    ))
+                live.return_value = 600_000
+                for capacity, color in ((1_000_000, "yellow"), (2_000_000, "green"), (750_000, "red")):
                     result = subprocess.run(
                         [sys.executable, str(script), "render"], cwd=workspace, env=env,
                         input=json.dumps({
@@ -146,7 +153,7 @@ class ClaudeCapturedTokenColorTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "")
                     app._redraw_table()
-                    self.assertEqual(table.add_row.call_args.args[6], f"[{color}]600[/]")
+                    self.assertEqual(table.add_row.call_args.args[6], f"[{color}]600,000[/]")
                     self.assertEqual(table.add_row.call_args.args[7], "[yellow]1.50M[/]")
 
 
