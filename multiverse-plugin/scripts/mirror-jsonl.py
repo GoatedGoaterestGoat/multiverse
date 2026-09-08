@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Hook: mirror live JSONL → full JSONL (the always-uncompacted history).
 
-Wired to UserPromptSubmit, Stop, SessionEnd. Each fire walks the live
-JSONL, skips rows up to and including the marker uuid (last row already
-mirrored), and appends every subsequent row to full.jsonl. Bootstraps
-on first call: if full.jsonl is missing, the live JSONL is copied
-verbatim and the marker is set to its last uuid.
+Wired to UserPromptSubmit, Stop, SessionEnd. Appends complete, unconsumed
+records using the shared src.mirror_sync implementation. Its validated byte
+cursor includes UUID-less trailing metadata, preventing repeated hook fires
+from duplicating it. An unchanged live file requires no JSONL reads.
+Bootstraps by copying complete live records verbatim.
 
 Marker is tracked by uuid (not byte offset) so the mirror keeps working
 after compaction has rewritten live.jsonl with a different prefix and
@@ -29,11 +29,7 @@ _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_ROOT))
 
-from src.atomic_files import (  # noqa: E402
-    atomic_write_bytes,
-    atomic_write_text,
-    exclusive_file_lock,
-)
+from src.atomic_files import exclusive_file_lock  # noqa: E402
 
 
 def _multiverse_dir() -> Path:
@@ -82,26 +78,6 @@ def _read_input() -> dict:
         return {}
 
 
-def _last_uuid(path: Path) -> str | None:
-    last = None
-    try:
-        with path.open() as f:
-            for line in f:
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                try:
-                    d = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                u = d.get("uuid")
-                if isinstance(u, str):
-                    last = u
-    except OSError:
-        return None
-    return last
-
-
 def _sync(uuid: str, cwd: str) -> None:
     lock = _full_dir() / f".{uuid}.sync.lock"
     with exclusive_file_lock(lock):
@@ -109,84 +85,8 @@ def _sync(uuid: str, cwd: str) -> None:
 
 
 def _sync_unlocked(uuid: str, cwd: str) -> None:
-    live = _live(uuid, cwd)
-    if not live.is_file():
-        return
-
-    _full_dir().mkdir(parents=True, exist_ok=True)
-    full = _full(uuid)
-
-    if not full.exists():
-        # Bootstrap: copy verbatim, set marker = last uuid.
-        atomic_write_bytes(full, live.read_bytes())
-        last = _last_uuid(full)
-        if last:
-            atomic_write_text(_marker(uuid), last)
-        return
-
-    # Load full's existing uuids so we can detect (and heal)
-    # parentUuid pointers that would otherwise leave full's chain
-    # broken — e.g. across a compaction boundary, where the previous
-    # live tip is a synthetic uuid that never made it into full.
-    full_uuids: set[str] = set()
-    full_last_uuid: str | None = None
-    try:
-        with full.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                u = d.get("uuid")
-                if isinstance(u, str):
-                    full_uuids.add(u)
-                    full_last_uuid = u
-    except OSError:
-        pass
-
-    try:
-        marker = _marker(uuid).read_text().strip() or None
-    except OSError:
-        marker = None
-
-    last_appended = marker
-    found = marker is None
-    with live.open() as src, full.open("a") as dst:
-        for line in src:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if not found:
-                try:
-                    d = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if d.get("uuid") == marker:
-                    found = True
-                continue
-            try:
-                d = json.loads(stripped)
-            except json.JSONDecodeError:
-                # Not JSON — append verbatim and skip parentUuid healing.
-                dst.write(line if line.endswith("\n") else line + "\n")
-                continue
-            # Heal parentUuid: if the parent isn't already in full,
-            # repoint to full's current tail so chain-walking can reach
-            # this row.
-            parent = d.get("parentUuid")
-            if isinstance(parent, str) and parent and parent not in full_uuids:
-                d["parentUuid"] = full_last_uuid
-            u = d.get("uuid")
-            if isinstance(u, str):
-                full_uuids.add(u)
-                full_last_uuid = u
-                last_appended = u
-            dst.write(json.dumps(d) + "\n")
-    if last_appended and last_appended != marker:
-        atomic_write_text(_marker(uuid), last_appended)
+    from src.mirror_sync import sync_mirror
+    sync_mirror(_live(uuid, cwd), _full(uuid), _marker(uuid))
 
 
 def main() -> None:

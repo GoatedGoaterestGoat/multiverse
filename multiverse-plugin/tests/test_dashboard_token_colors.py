@@ -136,6 +136,7 @@ class ClaudeCapturedTokenColorTests(unittest.TestCase):
             ):
                 for tokens, color in ((599_999, "green"), (600_000, "yellow"), (800_000, "red")):
                     live.return_value = tokens
+                    app._usage = app._collect_usage(app.entries)
                     app._redraw_table()
                     self.assertEqual(table.add_row.call_args.args[6:8], (
                         f"[{color}]{tokens:,}[/]", "[yellow]1.50M[/]",
@@ -152,6 +153,7 @@ class ClaudeCapturedTokenColorTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertEqual(result.stdout, "")
+                    app._usage = app._collect_usage(app.entries)
                     app._redraw_table()
                     self.assertEqual(table.add_row.call_args.args[6], f"[{color}]600,000[/]")
                     self.assertEqual(table.add_row.call_args.args[7], "[yellow]1.50M[/]")

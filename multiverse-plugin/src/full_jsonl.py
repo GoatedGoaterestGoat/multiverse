@@ -14,13 +14,16 @@ Each claude session has:
                                              uuid (not byte offset) so the
                                              marker survives compaction
                                              rewriting live.
+  ~/.multiverse/full_jsonls/<uuid>.cursor.json — validated consumed-byte cursor
+                                             including UUID-less metadata.
 
 Mirror sync (incremental):
-  walk live.jsonl → skip rows up to and including <marker_uuid> → append
-  the rest to full.jsonl → set marker = last appended row's uuid.
+  append complete records after the validated cursor; use the UUID marker
+  to re-anchor when compaction rewrites live. Unchanged input is a stat-only
+  fast path. Hooks and compaction share the implementation and file lock.
 
 Bootstrap (legacy support):
-  if full.jsonl is missing, copy live.jsonl verbatim and set
+  if full.jsonl is missing, copy complete live.jsonl records verbatim and set
   marker = last uuid in the copy.
 
 The fast-path mirror that runs as a hook on every UserPromptSubmit / Stop /
@@ -38,7 +41,6 @@ import sys
 from pathlib import Path
 
 from .atomic_files import (
-    atomic_write_bytes,
     atomic_write_text,
     exclusive_file_lock,
 )
@@ -135,82 +137,11 @@ def sync_full(claude_uuid: str, cwd: str) -> int:
 
 
 def _sync_full_unlocked(claude_uuid: str, cwd: str) -> int:
-    full_dir = _full_dir()
-    full_dir.mkdir(parents=True, exist_ok=True)
-
-    live = live_jsonl_path(claude_uuid, cwd)
-    full = full_jsonl_path(claude_uuid)
-
-    if not live.is_file():
-        return 0
-
-    if not full.exists():
-        # Bootstrap: full is identical to live.
-        atomic_write_bytes(full, live.read_bytes())
-        last = _last_uuid_in(full)
-        if last:
-            write_marker(claude_uuid, last)
-        return _row_count(full)
-
-    # Load full's existing uuids so we can detect (and heal) parentUuid
-    # pointers that would otherwise leave full's chain broken — e.g.
-    # across a compaction boundary, where the previous live tip is a
-    # synthetic uuid that never made it into full.
-    full_uuids: set[str] = set()
-    full_last_uuid: str | None = None
-    try:
-        with full.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                u = d.get("uuid")
-                if isinstance(u, str):
-                    full_uuids.add(u)
-                    full_last_uuid = u
-    except OSError:
-        pass
-
-    marker = read_marker(claude_uuid)
-    last_appended = marker
-    found = marker is None
-    appended = 0
-    with live.open() as src, full.open("a") as dst:
-        for line in src:
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if not found:
-                try:
-                    d = json.loads(stripped)
-                except json.JSONDecodeError:
-                    continue
-                if d.get("uuid") == marker:
-                    found = True
-                continue
-            try:
-                d = json.loads(stripped)
-            except json.JSONDecodeError:
-                dst.write(line if line.endswith("\n") else line + "\n")
-                appended += 1
-                continue
-            parent = d.get("parentUuid")
-            if isinstance(parent, str) and parent and parent not in full_uuids:
-                d["parentUuid"] = full_last_uuid
-            u = d.get("uuid")
-            if isinstance(u, str):
-                full_uuids.add(u)
-                full_last_uuid = u
-                last_appended = u
-            dst.write(json.dumps(d) + "\n")
-            appended += 1
-    if last_appended and last_appended != marker:
-        write_marker(claude_uuid, last_appended)
-    return appended
+    from .mirror_sync import sync_mirror
+    return sync_mirror(
+        live_jsonl_path(claude_uuid, cwd), full_jsonl_path(claude_uuid),
+        marker_path(claude_uuid),
+    )
 
 
 def _row_count(path: Path) -> int:
@@ -256,15 +187,15 @@ def total_turn_count(claude_uuid: str, cwd: str) -> int:
     return len(_parse_full(claude_uuid, cwd))
 
 
-_FULL_TOTAL_CACHE: dict[str, tuple[float, int]] = {}
+_FULL_TOTAL_CACHE: dict[str, tuple[tuple[int, ...], int]] = {}
 
 
 def total_token_count_cached(claude_uuid: str, cwd: str) -> int:
-    """mtime-cached ``total_token_count``, keyed on the FULL jsonl.
+    """Read-only dashboard counter, keyed on the FULL jsonl's signature.
 
     The dashboard redraws every second and this parses a file that runs
     to megabytes on a long session, so an uncached call would dominate
-    the tick. Keyed on the full jsonl's mtime rather than the live one:
+    the tick. Keyed on the full jsonl's signature rather than the live one:
     the number is a property of the mirror, and compaction rewrites live
     without changing full, so a live-keyed cache would recompute for a
     value that hadn't moved.
@@ -272,17 +203,30 @@ def total_token_count_cached(claude_uuid: str, cwd: str) -> int:
     Returns 0 when the mirror doesn't exist yet — a session that has
     never had a mirror pass has no uncompacted history to report.
     """
+    from .mirror_sync import signature
     full = full_jsonl_path(claude_uuid)
     try:
-        mtime = full.stat().st_mtime
+        before = signature(full)
     except OSError:
         return 0
     key = str(full)
     cached = _FULL_TOTAL_CACHE.get(key)
-    if cached and cached[0] == mtime:
+    if cached and cached[0] == before:
         return cached[1]
-    result = total_token_count(claude_uuid, cwd)
-    _FULL_TOTAL_CACHE[key] = (mtime, result)
+    # Never sync from a reader: hooks/compaction own mirror writes. Apart from
+    # lock contention, syncing here invalidated our own cache on every redraw.
+    from compaction.parser import parse_session
+    forest = parse_session(str(full))
+    result = sum(
+        (turn.user_prompt.tokens if turn.user_prompt is not None else 0)
+        + sum(leaf.tokens for leaf in turn.leaves)
+        for turn in forest
+    )
+    try:
+        if signature(full) == before:
+            _FULL_TOTAL_CACHE[key] = (before, result)
+    except OSError:
+        pass  # a racing rewrite/delete must be reconsidered on the next call
     return result
 
 

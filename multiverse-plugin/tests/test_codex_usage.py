@@ -240,6 +240,7 @@ class CodexDashboardUsageTests(RolloutTestCase):
 
     def draw(self) -> tuple:
         self.app.entries = [self.row]
+        self.app._usage = self.app._collect_usage(self.app.entries)
         table = MagicMock()
         table.cursor_row = 0
         with (

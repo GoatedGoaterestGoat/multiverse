@@ -25,7 +25,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Optional
 
 from rich.markup import escape
@@ -3233,6 +3233,19 @@ class ConfirmGroupDeleteScreen(ModalScreen[bool]):
 _TEARDOWN_STATUSES = ("ended", "ending", "retiring", "retired")
 
 
+@dataclass(frozen=True)
+class _DashboardUsage:
+    tokens: Optional[int] = None
+    total: Optional[int] = None
+    capacity: Optional[int] = None
+
+
+def _usage_key(e: DashboardRow) -> tuple:
+    # A name can survive resume/compaction. Never apply an old thread's
+    # measurements to its replacement just because their names match.
+    return e.cwd, e.runtime, e.row_key, e.session_id, e.claude_uuid
+
+
 class MonitorApp(App):
     CSS = """
     Screen {
@@ -3681,9 +3694,17 @@ class MonitorApp(App):
         self._pending_reattach: Optional[str] = None
         # Cleared and refilled by each _redraw_table pass.
         self._inbox_cache: dict[tuple[str, str], int] = {}
-        self._tokens_cache: dict[tuple[str, str], Optional[int]] = {}
-        self._total_cache: dict[tuple[str, str], Optional[int]] = {}
-        self._context_window_cache: dict[tuple[str, str], Optional[int]] = {}
+        self._usage: dict[tuple, _DashboardUsage] = {}
+        self._refresh_generation = 0
+        self._refresh_in_flight = False
+        self._usage_in_flight = False
+        self._usage_requested = False
+        self._relay_in_flight = False
+        self._refresh_closed = False
+        self._startup_recovery_done = False
+        self._ending_recovery_done = False
+        self._refresh_error: Optional[str] = None
+        self._refresh_focus: Optional[tuple[str, Optional[str]]] = None
         # chosen name → (spawner name, request id, approved at), for
         # spawns approved but not yet created. A ``None`` spawner marks a
         # name two approvals are racing for, which the monitor cannot
@@ -3713,15 +3734,11 @@ class MonitorApp(App):
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         self.title = "Multiverse Monitor"
         self.sub_title = f"cwd: {self.monitor_cwd}"
-        try:
-            recover_abandoned_handoffs(self.monitor_cwd)
-        except OSError as exc:
-            self.notify(f"Could not recover abandoned handoffs: {exc}", severity="error")
         self.refresh_sessions()
-        self._recover_ending_sessions()
-        self.set_interval(1.0, self.refresh_sessions)
+        self.set_interval(1.0, self._poll_sessions)
 
     def on_unmount(self) -> None:
+        self._refresh_closed = True
         # Ephemeral forks can outlive Textual's worker cancellation. Release
         # the reservation here; late results must not open a successor modal.
         self._cancel_handoff()
@@ -3751,29 +3768,170 @@ class MonitorApp(App):
         self.action_primary()
 
     def refresh_sessions(self) -> None:
-        all_sessions = list_sessions()
-        # Scope to the monitor's cwd — other multiverse instances own sessions
-        # in other cwds.
-        self.sessions = [s for s in all_sessions if s.cwd == self.monitor_cwd]
-        # Vouch for every session THIS machine can see, not just this
-        # workspace's: liveness correction sweeps every session under the
-        # shared root regardless of cwd, so a dashboard open for one workspace
-        # will happily bury another workspace's rows unless somebody has
-        # published proof of life for them.
-        self._vouch_for_visible(all_sessions)
+        """Request a snapshot without blocking the input/render event loop.
+
+        Explicit refreshes invalidate an older in-flight scan (e.g. after k
+        or spawn). Timer ticks do not: repeatedly invalidating a slow scan
+        every second would prevent it from ever publishing.
+        """
+        if self._refresh_closed:
+            return
+        self._refresh_generation += 1
+        if not self._refresh_in_flight:
+            self._start_refresh()
+
+    def _poll_sessions(self) -> None:
+        if not self._refresh_in_flight:
+            self.refresh_sessions()
+
+    def _start_refresh(self) -> None:
+        self._refresh_in_flight = True
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
-        self.entries = build_dashboard_rows(
-            self.sessions,
-            cwd=self.monitor_cwd,
-            hide_uuids=hide,
-        )
+        self._refresh_worker(self._refresh_generation, hide)
+
+    def _publish_from_worker(self, callback, *args) -> None:
+        # Textual cancels worker lifecycles on exit, but cannot interrupt a
+        # Python thread already parsing a file. Late results must stay inert.
+        if not self._refresh_closed:
+            try:
+                self.call_from_thread(callback, *args)
+            except RuntimeError:
+                pass  # application exited while this worker was finishing
+
+    @work(thread=True, group="dashboard_refresh", exit_on_error=False)
+    def _refresh_worker(self, generation: int, hide: set[str]) -> None:
+        try:
+            if not self._startup_recovery_done:
+                error = None
+                try:
+                    recover_abandoned_handoffs(self.monitor_cwd)
+                except OSError as exc:
+                    error = str(exc)
+                self._publish_from_worker(self._finish_startup_recovery, error)
+            all_sessions = list_sessions()
+            self._vouch_for_visible(all_sessions)
+            scoped = [s for s in all_sessions if s.cwd == self.monitor_cwd]
+            entries = build_dashboard_rows(scoped, cwd=self.monitor_cwd, hide_uuids=hide)
+            try:
+                shared = web_share.status(self.monitor_cwd) is not None
+            except Exception:
+                shared = False
+            self._publish_from_worker(
+                self._finish_refresh, generation, scoped, entries, shared, None,
+            )
+        except Exception as exc:
+            self._publish_from_worker(
+                self._finish_refresh, generation, [], [], False, str(exc),
+            )
+
+    def _finish_startup_recovery(self, error: Optional[str]) -> None:
+        if self._refresh_closed:
+            return
+        self._startup_recovery_done = True
+        if error:
+            self.notify(f"Could not recover abandoned handoffs: {error}", severity="error")
+
+    def _finish_refresh(self, generation, scoped, entries, shared, error) -> None:
+        self._refresh_in_flight = False
+        if self._refresh_closed:
+            return
+        if generation != self._refresh_generation:
+            self._start_refresh()
+            return
+        if error is not None:
+            if error != self._refresh_error:
+                self.notify(f"Dashboard refresh failed: {error}", severity="error")
+            self._refresh_error = error
+            return  # retain the last good view; next timer tick retries
+        self._refresh_error = None
+        self._startup_recovery_done = True
+        self.sessions, self.entries = scoped, entries
+        self._web_tag = "  ·  🌐 web: ON" if shared else ""
         self._file_arrived_spawns()
+        # Folder edits can happen while discovery runs. Read current folder
+        # state here rather than overwriting edits with a worker's old copy.
         self.group_state = groups.load(self.monitor_cwd)
+        focus, self._refresh_focus = self._refresh_focus, None
+        focus_unchanged = (
+            focus is not None and self._cursor_row_key() == focus[1]
+            and not self._user_is_busy()
+        )
         self._redraw_table()
+        if focus_unchanged:
+            self._move_cursor_to_key(focus[0])
+        if not self._ending_recovery_done:
+            self._recover_ending_sessions()
+            self._ending_recovery_done = True
         self._tick_spawn_requests()
-        self._tick_host_liveness()
-        self._update_web_indicator()
+        self._request_usage()
+        if not self._relay_in_flight:
+            self._relay_in_flight = True
+            self._relay_worker()
+
+    def _request_usage(self) -> None:
+        if self._refresh_closed:
+            return
+        if self._usage_in_flight:
+            self._usage_requested = True
+            return
+        self._usage_in_flight = True
+        self._usage_requested = False
+        self._usage_worker([replace(e) for e in self.entries])
+
+    def _collect_usage(self, entries: list[DashboardRow]) -> dict:
+        measured = {}
+        for entry in entries:
+            if self._refresh_closed:
+                break
+            try:
+                measured[_usage_key(entry)] = _DashboardUsage(
+                    self._agent_tokens(entry), self._agent_total(entry),
+                    self._agent_context_window(entry),
+                )
+            except Exception:
+                # An in-flight/rewritten transcript must not prevent other
+                # rows from updating; retain this row's last good sample.
+                continue
+        return measured
+
+    @work(thread=True, group="dashboard_usage", exit_on_error=False)
+    def _usage_worker(self, entries: list[DashboardRow]) -> None:
+        self._publish_from_worker(self._finish_usage, self._collect_usage(entries))
+
+    def _finish_usage(self, measured: dict) -> None:
+        self._usage_in_flight = False
+        if self._refresh_closed:
+            return
+        # Prune removed generations, and never resurrect a killed row from a
+        # slow result. The UI always renders its CURRENT entries/folder tree.
+        self._usage = {
+            key: measured.get(key, self._usage.get(key, _DashboardUsage()))
+            for key in (_usage_key(e) for e in self.entries)
+        }
+        self._redraw_table()
+        if self._usage_requested:
+            self._request_usage()
+
+    @work(thread=True, group="dashboard_relay", exit_on_error=False)
+    def _relay_worker(self) -> None:
+        try:
+            self._tick_host_liveness()
+        finally:
+            self._publish_from_worker(self._finish_relay)
+
+    def _finish_relay(self) -> None:
+        self._relay_in_flight = False
+
+    def _focus_refreshed_row(self, key: str) -> None:
+        """Follow a just-created wrapper when its background snapshot arrives.
+
+        Don't steal selection if the user navigates elsewhere in the meantime.
+        Immediate movement also handles a row already in the current snapshot.
+        """
+        self._move_cursor_to_key(key)
+        if self._refresh_in_flight:
+            self._refresh_focus = key, self._cursor_row_key()
 
     def _vouch_for_visible(self, sessions: list[Session]) -> None:
         """Publish proof of life for every session this machine can see.
@@ -4121,30 +4279,21 @@ class MonitorApp(App):
         return self._inbox_cache[key]
 
     def _tokens_of(self, e: DashboardRow) -> Optional[int]:
-        """``_agent_tokens`` for one agent, once per redraw."""
-        key = (e.cwd, e.name)
-        if key not in self._tokens_cache:
-            self._tokens_cache[key] = self._agent_tokens(e)
-        return self._tokens_cache[key]
+        return self._usage.get(_usage_key(e), _DashboardUsage()).tokens
 
     def _total_of(self, e: DashboardRow) -> Optional[int]:
-        """``_agent_total`` for one agent, once per redraw."""
-        key = (e.cwd, e.name)
-        if key not in self._total_cache:
-            self._total_cache[key] = self._agent_total(e)
-        return self._total_cache[key]
+        return self._usage.get(_usage_key(e), _DashboardUsage()).total
 
     def _context_window_of(self, e: DashboardRow) -> Optional[int]:
-        """Context capacity (Claude may use a fallback), once per redraw."""
-        key = (e.cwd, e.name)
-        if key not in self._context_window_cache:
-            capacity = None
-            if e.runtime == RUNTIME_CODEX:
-                capacity = codex_token_usage_cached(e.session_id).context_window
-            elif e.runtime == RUNTIME_CLAUDE:
-                capacity = claude_context_window_assumed(e.claude_uuid, e.cwd)
-            self._context_window_cache[key] = capacity
-        return self._context_window_cache[key]
+        return self._usage.get(_usage_key(e), _DashboardUsage()).capacity
+
+    def _agent_context_window(self, e: DashboardRow) -> Optional[int]:
+        """Worker-only measurement; redraws must never read transcripts."""
+        if e.runtime == RUNTIME_CODEX:
+            return codex_token_usage_cached(e.session_id).context_window
+        if e.runtime == RUNTIME_CLAUDE:
+            return claude_context_window_assumed(e.claude_uuid, e.cwd)
+        return None
 
     def _agent_total(self, e: DashboardRow) -> Optional[int]:
         """Runtime-native lifetime tokens for one agent, or None if unknown.
@@ -4332,9 +4481,6 @@ class MonitorApp(App):
         # nested d deep is globbed d+1 times per redraw — and
         # typing a folder name redraws on every keystroke.
         self._inbox_cache.clear()
-        self._tokens_cache.clear()
-        self._total_cache.clear()
-        self._context_window_cache.clear()
         self.display_rows = groups.build_display_rows(
             self.entries,
             self.group_state,
@@ -5279,7 +5425,7 @@ class MonitorApp(App):
             except (ValueError, OSError):
                 pass  # the session exists; filing it is a nicety
         self.refresh_sessions()
-        self._move_cursor_to_key(f"mv:{session.id}")
+        self._focus_refreshed_row(f"mv:{session.id}")
 
     def _draft_cells(self, row: groups.DisplayRow) -> tuple:
         """The placeholder row: a name field and a Tab-cycled runtime."""
@@ -5348,7 +5494,7 @@ class MonitorApp(App):
             )
             self._handoff_in_progress = True
             self.refresh_sessions()
-            self._move_cursor_to_key(f"mv:{self._handoff_session.id}")
+            self._focus_refreshed_row(f"mv:{self._handoff_session.id}")
             self.notify(f"Generating handoff context from '{target.name}'…", markup=False)
             self._handoff_context_worker(target, native_id)
         except (OSError, ValueError, RuntimeError) as exc:
@@ -5484,7 +5630,7 @@ class MonitorApp(App):
             except (OSError, ValueError):
                 pass  # the session exists; filing it is a nicety
             self.refresh_sessions()
-            self._move_cursor_to_key(f"mv:{session.id}")
+            self._focus_refreshed_row(f"mv:{session.id}")
 
         # Unlike `n`, this spawn has something to read before it happens:
         # the report the predecessor wrote for whoever takes over. Show it
@@ -5978,11 +6124,20 @@ class MonitorApp(App):
             self.notify(f"Could not mark session as ending: {exc}", severity="error")
             return
 
+        # Input remains live while discovery runs. Gate this row immediately
+        # from the durable status we just wrote, not after the next scan.
+        changed = False
+        for entry in self.entries:
+            if entry.session is not None and entry.session.id == session.id:
+                entry.status, entry.status_ts = "ending", session.status_ts
+                changed = True
         self._start_session_teardown(
             session,
             success_message,
             delay=_ENDING_MIN_VISIBLE_SECONDS,
         )
+        if changed:
+            self._redraw_table()
 
     def _launch_session_teardown(
         self, session: Session, *, delay: float
@@ -6018,7 +6173,7 @@ class MonitorApp(App):
             self.refresh_sessions()
             return
 
-        # Rebuild from the durable status immediately. The child owns the
+        # Request a fresh durable-state snapshot. The child owns the
         # blocking wait/signals and remains alive if this Textual app exits.
         self.refresh_sessions()
         self.call_after_refresh(

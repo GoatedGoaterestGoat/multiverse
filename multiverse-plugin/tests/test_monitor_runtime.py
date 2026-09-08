@@ -275,9 +275,17 @@ class DashboardEndingAsyncTests(unittest.IsolatedAsyncioTestCase):
                     app, "_launch_session_teardown", side_effect=launch
                 ),
                 patch.object(monitor, "_ENDING_MIN_VISIBLE_SECONDS", 0.01),
+                patch.object(monitor, "recover_abandoned_handoffs"),
+                patch.object(app, "_vouch_for_visible"),
+                patch.object(app, "_tick_host_liveness"),
             ):
                 try:
                     async with app.run_test() as pilot:
+                        for _ in range(100):
+                            if app.entries:
+                                break
+                            await asyncio.sleep(0.01)
+                        self.assertTrue(app.entries)
                         await pilot.press("k")
                         for _ in range(20):
                             if kill_started.is_set():
@@ -603,12 +611,19 @@ class RuntimeModalTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(monitor.web_share, "status", return_value=None),
                 patch.object(monitor, "pending_inbox_count", return_value=0),
                 patch.object(monitor, "delete_codex_thread") as delete_thread,
+                patch.object(monitor, "recover_abandoned_handoffs"),
+                patch.object(monitor.MonitorApp, "_tick_host_liveness"),
                 patch.dict(
                     "os.environ", {"MULTIVERSE_ORIG_CWD": "/workspace"}
                 ),
             ):
                 app = monitor.MonitorApp([])
                 async with app.run_test() as pilot:
+                    for _ in range(100):
+                        if app.entries:
+                            break
+                        await asyncio.sleep(0.01)
+                    self.assertTrue(app.entries)
                     await pilot.press("k")
                     await pilot.pause()
                     self.assertIsInstance(app.screen, monitor.ConfirmDeleteScreen)
