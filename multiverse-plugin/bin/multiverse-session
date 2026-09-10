@@ -170,10 +170,39 @@ if [ -f "$_MV_STATUSLINE_SCRIPT" ]; then
   fi
 fi
 
-"${CLAUDE_LAUNCH[@]}" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
-       ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
-       ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
-       ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"} || true
+_mv_run_runtime() {
+  "${CLAUDE_LAUNCH[@]}" ${PLUGIN_ARGS[@]+"${PLUGIN_ARGS[@]}"} \
+         ${NAME_ARGS[@]+"${NAME_ARGS[@]}"} \
+         ${CLAUDE_ARGS[@]+"${CLAUDE_ARGS[@]}"} \
+         ${PROMPT_ARGS[@]+"${PROMPT_ARGS[@]}"}
+}
+
+# The runtime's exit status used to be discarded with `|| true`, which made a
+# launch that failed instantly — a --model the build rejects, a missing
+# binary — indistinguishable from a clean exit: the block below wrote
+# status=ended, and the tmux pane was torn down before the error could be
+# read. So keep the status, and tee stderr to a per-session log so a fast
+# failure stays diagnosable after the pane is gone.
+#
+# `|| true`'s semantics are preserved deliberately: a non-zero runtime exit
+# must NOT abort this script under `set -e`, because the ended-status write
+# below (and the monitor's reaping of this entry) depend on reaching the end.
+_MV_SESSION_DIR=$(dirname "$MULTIVERSE_STATUS")
+_MV_STDERR_LOG="$_MV_SESSION_DIR/launch-stderr.log"
+_MV_EXIT=0
+# Truncate per launch (not cumulative), and only tee when the log is actually
+# writable — never trade the runtime's stderr for a log that cannot be written.
+if : > "$_MV_STDERR_LOG" 2>/dev/null; then
+  _mv_run_runtime 2> >(tee -a "$_MV_STDERR_LOG" >&2) || _MV_EXIT=$?
+else
+  _mv_run_runtime || _MV_EXIT=$?
+fi
+
+# Record a non-zero exit beside status.json. Kept in its own file rather than
+# added to status.json, whose {"status","ts"} shape has several readers.
+if [ "$_MV_EXIT" -ne 0 ]; then
+  printf '%s\n' "$_MV_EXIT" > "$_MV_SESSION_DIR/last-exit" 2>/dev/null || true
+fi
 
 # Mark ended so the monitor can reap this entry.
 if [ -n "${MULTIVERSE_STATUS:-}" ]; then
