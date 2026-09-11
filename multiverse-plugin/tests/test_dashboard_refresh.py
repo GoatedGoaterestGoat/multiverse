@@ -6,6 +6,7 @@ import os
 import tempfile
 import threading
 import unittest
+from xml.etree import ElementTree
 from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
@@ -191,9 +192,14 @@ class RefreshResponsivenessTests(unittest.IsolatedAsyncioTestCase):
         stack.enter_context(patch.object(app, "_collect_usage", return_value={}))
         return app
 
-    async def test_slow_discovery_does_not_block_mount_or_navigation(self):
+    async def test_slow_refresh_does_not_block_navigation_or_restore_loading_screen(self):
         started, release, timed_out = (threading.Event() for _ in range(3))
+        scans = 0
         def slow_scan():
+            nonlocal scans
+            scans += 1
+            if scans == 1:
+                return []
             started.set()
             if not release.wait(timeout=8):
                 timed_out.set()
@@ -204,13 +210,11 @@ class RefreshResponsivenessTests(unittest.IsolatedAsyncioTestCase):
             stack.enter_context(patch.object(monitor, "list_sessions", side_effect=slow_scan))
             try:
                 async with app.run_test() as pilot:
+                    await self.wait_until(lambda: app._initial_scan_complete)
+                    app.refresh_sessions()
                     await self.wait_until(started.is_set)
-                    self.assertEqual(app.entries, [])
-                    # Render a last-known view while the replacement scan is
-                    # deliberately blocked, then drive actual arrow bindings.
-                    app.entries = entries
-                    app._redraw_table()
                     table = app.query_one(DataTable)
+                    self.assertFalse(table.loading)
                     table.focus()
                     await asyncio.wait_for(pilot.press("down"), 2)
                     self.assertEqual(table.cursor_row, 1)
@@ -219,6 +223,61 @@ class RefreshResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                     await self.wait_until(lambda: not app._refresh_in_flight)
             finally:
                 release.set()
+
+    async def test_first_scan_shows_loading_then_reveals_rows_or_empty_workspace(self):
+        for entries in ([row()], []):
+            with self.subTest(empty=not entries), ExitStack() as stack:
+                app = self.isolated_app(stack, entries)
+                started, release = threading.Event(), threading.Event()
+                def slow_scan():
+                    started.set()
+                    release.wait(timeout=8)
+                    return []
+                stack.enter_context(patch.object(monitor, "list_sessions", side_effect=slow_scan))
+                try:
+                    async with app.run_test() as pilot:
+                        await self.wait_until(started.is_set)
+                        await pilot.pause()
+                        table = app.query_one(DataTable)
+                        self.assertTrue(table.loading)
+                        rendered = "".join(ElementTree.fromstring(app.export_screenshot()).itertext()).replace("\xa0", " ")
+                        self.assertIn("Loading agents…", rendered)
+                        self.assertNotIn("Tokens", rendered)
+                        self.assertFalse(app._initial_scan_complete)
+                        release.set()
+                        await self.wait_until(lambda: app._initial_scan_complete)
+                        await pilot.pause()
+                        self.assertFalse(table.loading)
+                        self.assertEqual(table.row_count, len(entries))
+                        rendered = "".join(ElementTree.fromstring(app.export_screenshot()).itertext()).replace("\xa0", " ")
+                        self.assertNotIn("Loading agents…", rendered)
+                        self.assertIn("Tokens", rendered)
+                        self.assertIs(app.focused, table)
+                finally:
+                    release.set()
+
+    async def test_failed_first_scan_keeps_loading_until_successful_retry(self):
+        with ExitStack() as stack:
+            app = self.isolated_app(stack, [row()])
+            stack.enter_context(patch.object(monitor, "list_sessions", side_effect=OSError("offline")))
+            stack.enter_context(patch.object(app, "notify"))
+            async with app.run_test():
+                await self.wait_until(lambda: app._refresh_error == "offline")
+                self.assertTrue(app.query_one(DataTable).loading)
+                self.assertFalse(app._initial_scan_complete)
+                with patch.object(monitor, "list_sessions", return_value=[]):
+                    app.refresh_sessions()
+                    await self.wait_until(lambda: app._initial_scan_complete)
+                self.assertFalse(app.query_one(DataTable).loading)
+
+    async def test_quit_is_available_while_first_scan_is_pending(self):
+        with ExitStack() as stack:
+            app = self.isolated_app(stack, [])
+            stack.enter_context(patch.object(app, "_refresh_worker"))
+            async with app.run_test() as pilot:
+                self.assertTrue(app.query_one(DataTable).loading)
+                await pilot.press("q")
+                self.assertFalse(app.is_running)
 
     async def test_slow_tokens_and_relay_allow_rows_navigation_and_folder_edits(self):
         usage_started, relay_started, release, timed_out = (threading.Event() for _ in range(4))
@@ -244,6 +303,7 @@ class RefreshResponsivenessTests(unittest.IsolatedAsyncioTestCase):
                     await self.wait_until(lambda: usage_started.is_set() and relay_started.is_set())
                     table = app.query_one(DataTable)
                     self.assertEqual(table.row_count, 3)
+                    self.assertFalse(table.loading)
                     self.assertIsNone(app._tokens_of(entries[0]))
                     table.focus()
                     # Collapse and reopen the folder while BOTH workers wait.

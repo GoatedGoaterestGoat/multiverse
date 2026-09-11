@@ -41,6 +41,7 @@ from textual.widgets import (
     Footer,
     Header,
     Input,
+    LoadingIndicator,
     ProgressBar,
     RadioButton,
     RadioSet,
@@ -3132,6 +3133,15 @@ class _MoveMode:
     highlight: Optional[str]
 
 
+class DashboardLoadingIndicator(LoadingIndicator):
+    """Startup placeholder while the first agent snapshot is being collected."""
+
+    def render(self) -> Text:
+        if self.app.animation_level == "none":
+            return Text("Loading agents…")
+        return Text.assemble("Loading agents…\n\n", super().render())
+
+
 class DashboardTable(DataTable):
     """The dashboard's table, with outliner keys.
 
@@ -3154,6 +3164,9 @@ class DashboardTable(DataTable):
             "shift+down", "app.extend_selection_down", "Select down", show=False
         ),
     ]
+
+    def get_loading_widget(self) -> LoadingIndicator:
+        return DashboardLoadingIndicator()
 
     def on_key(self, event: events.Key) -> None:
         intercept = getattr(self.app, "_intercept_key", None)
@@ -3705,6 +3718,7 @@ class MonitorApp(App):
         self._relay_in_flight = False
         self._refresh_closed = False
         self._startup_recovery_done = False
+        self._initial_scan_complete = False
         self._ending_recovery_done = False
         self._refresh_error: Optional[str] = None
         self._refresh_focus: Optional[tuple[str, Optional[str]]] = None
@@ -3789,6 +3803,8 @@ class MonitorApp(App):
 
     def _start_refresh(self) -> None:
         self._refresh_in_flight = True
+        if not self._initial_scan_complete and self.is_running:
+            self.query_one(DashboardTable).loading = True
         with self._fork_lock:
             hide = set(self._active_fork_uuids)
         self._refresh_worker(self._refresh_generation, hide)
@@ -3861,6 +3877,13 @@ class MonitorApp(App):
             and not self._user_is_busy()
         )
         self._redraw_table()
+        if not self._initial_scan_complete:
+            self._initial_scan_complete = True
+            if self.is_running:
+                table = self.query_one(DashboardTable)
+                table.loading = False
+                if self.focused is None and not self._user_is_busy():
+                    table.focus()
         if focus_unchanged:
             self._move_cursor_to_key(focus[0])
         if not self._ending_recovery_done:
