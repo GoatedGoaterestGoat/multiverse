@@ -47,6 +47,48 @@ from .pi_transcript import pi_session_path
 CLAUDE_PROJECTS_DIR = claude_projects_dir()
 
 
+def _kill_process_group(proc: "subprocess.Popen") -> None:
+    """SIGTERM then SIGKILL a child's whole process group.
+
+    Signalling only the direct child leaves its descendants running. An ask
+    fork that outlives its killer keeps writing the transcript we are about
+    to delete, so the delete is silently undone. Falls back to signalling
+    just the child where process groups do not exist (non-POSIX).
+
+    Callers must spawn with ``start_new_session=True``; a child that shares
+    our group is signalled alone rather than taking this process (a monitor
+    or daemon) down with it.
+    """
+    if proc.poll() is not None:
+        return
+    if os.name != "posix":  # pragma: no cover - POSIX-only deployment
+        proc.kill()
+        proc.wait()
+        return
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        return
+    if pgid == os.getpgid(0):
+        # Spawned without its own session: killing this group would kill us.
+        proc.kill()
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        return
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(pgid, sig)
+        except OSError:
+            return
+        try:
+            proc.wait(timeout=5 if sig is signal.SIGTERM else 2)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+
+
 def _full_dir():
     """Directory holding the append-only full-JSONL mirrors.
 
@@ -556,22 +598,46 @@ def _ask_one_claude(
     err: Optional[str] = None
     response: Optional[str] = None
     try:
-        r = subprocess.run(
+        # Own process group (start_new_session), so a timeout can kill the
+        # whole tree. subprocess.run(timeout=) would SIGKILL only the direct
+        # child: any descendant survives, finishes the turn, and writes the
+        # fork's transcript AFTER the `finally` below has already deleted it
+        # — recreating the live JSONL, mirror and marker, which then surface
+        # as a second, preview-less dashboard row under the origin agent's
+        # own name. _JsonLineProcess.close() does the same for Codex.
+        proc = subprocess.Popen(
             cmd,
             cwd=target.cwd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
             env=_env_without_session_vars(),
+            start_new_session=True,
         )
-        if r.returncode != 0:
+        try:
+            out, errs = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(proc)
+            # Drain and reap, so the group is confirmed dead before the
+            # `finally` reaps its files — otherwise a still-running child
+            # simply recreates them.
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        if proc.returncode != 0:
             # On failure the CLI often prints the real reason to stdout
             # (e.g. "Prompt is too long") with empty stderr — fall back to
             # stdout so the caller sees the cause, not a bare "claude
             # exited N".
-            err = (r.stderr.strip() or r.stdout.strip() or f"claude exited {r.returncode}")[:400]
+            err = (
+                (errs or "").strip()
+                or (out or "").strip()
+                or f"claude exited {proc.returncode}"
+            )[:400]
         else:
-            response = r.stdout.strip() or None
+            response = (out or "").strip() or None
             if not response:
                 err = "empty response"
     except subprocess.TimeoutExpired:
@@ -594,6 +660,12 @@ def _ask_one_claude(
             jsonl,
             _full_dir() / f"{fork_uuid}.jsonl",
             _full_dir() / f"{fork_uuid}.marker",
+            # Mirror sidecars, written by the same hooks (see full_jsonl /
+            # mirror_sync). Neither can surface as a dashboard row — only
+            # *.jsonl is scanned — but a fork per ask would otherwise leave
+            # one of each behind forever.
+            _full_dir() / f"{fork_uuid}.cursor.json",
+            _full_dir() / f".{fork_uuid}.sync.lock",
         ):
             try:
                 stale.unlink(missing_ok=True)
@@ -637,27 +709,42 @@ def _ask_one_pi(
                 "--print",
                 SIDE_QUESTION_WRAPPER + question,
             ]
-            result = subprocess.run(
+            # Own process group, so a timeout kills the whole tree. A
+            # surviving descendant would keep writing into the scratch dir
+            # after the `finally` rmtree'd it, leaking a temp dir. (It cannot
+            # become a phantom agent: the fork lives outside pi's session
+            # roots.) Same reason as the Claude path above.
+            proc = subprocess.Popen(
                 cmd,
                 cwd=target.cwd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout,
                 # Do not let an inherited session-dir override the scratch
                 # fork location. Keep PI_CODING_AGENT_DIR, though: it carries
                 # the target runtime's settings and credentials.
                 env=_env_without_session_vars(
                     drop_keys=("PI_CODING_AGENT_SESSION_DIR",)
                 ),
+                start_new_session=True,
             )
-            if result.returncode != 0:
+            try:
+                out, errs = proc.communicate(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(proc)
+                try:
+                    proc.communicate(timeout=10)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise
+            if proc.returncode != 0:
                 err = (
-                    result.stderr.strip()
-                    or result.stdout.strip()
-                    or f"pi exited {result.returncode}"
+                    (errs or "").strip()
+                    or (out or "").strip()
+                    or f"pi exited {proc.returncode}"
                 )[:400]
             else:
-                response = result.stdout.strip() or None
+                response = (out or "").strip() or None
                 if response is None:
                     err = "empty response"
     except subprocess.TimeoutExpired:
