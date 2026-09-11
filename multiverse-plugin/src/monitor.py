@@ -514,7 +514,10 @@ class HandoffSuccessorScreen(ModalScreen[Optional[tuple[str, str]]]):
             ),
             VerticalScroll(
                 Static(
-                    escape(self.handoff_context) or "[dim](empty report)[/]",
+                    # Generated prose may contain incomplete markup-like
+                    # brackets. Render it literally, without parsing or escaping.
+                    self.handoff_context or "(empty report)",
+                    markup=False,
                     id="handoff-context",
                 ),
                 id="handoff-context-scroll",

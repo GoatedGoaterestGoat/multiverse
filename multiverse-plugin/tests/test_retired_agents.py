@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from textual.app import App
+from textual.widgets import Static
+
 from src import compact_runner, groups, monitor, server, sessions
 from src.ask_agents import AskResult
 
@@ -457,6 +460,31 @@ class DashboardHandoffTests(unittest.TestCase):
             app.action_compact()
         for blocked in (attach, resume, worker, kill, push):
             blocked.assert_not_called()
+
+
+class HandoffSuccessorScreenTests(unittest.IsolatedAsyncioTestCase):
+    async def test_report_renders_literally_and_escape_still_cancels(self) -> None:
+        reports = (
+            "Earlier bug: `[opacity=0 / 0.1)` as markup and crashed the entire TUI on `on_mount`\n",
+            "[bold]literal tags[/bold]\n[1, 2] and [unfinished\nC:\\work\\[notes]\\",
+            "",
+        )
+        for report in reports:
+            with self.subTest(report=report):
+                app = App()
+                results = []
+                async with app.run_test(size=(213, 51)) as pilot:
+                    screen = monitor.HandoffSuccessorScreen(
+                        "/workspace", "SecondBrain", "claude", report, "SecondBrain II"
+                    )
+                    app.push_screen(screen, results.append)
+                    await pilot.pause()
+                    displayed = screen.query_one("#handoff-context", Static)
+                    self.assertEqual(displayed.render().plain, report or "(empty report)")
+                    self.assertEqual(screen.handoff_context, report)
+                    await pilot.press("escape")
+                    await pilot.pause()
+                self.assertEqual(results, [None])
 
 
 class HandoffShutdownTests(unittest.IsolatedAsyncioTestCase):
