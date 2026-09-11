@@ -143,8 +143,32 @@ class CodexSideQuestionProtocolTests(unittest.TestCase):
     def _records(self) -> list[dict]:
         return [json.loads(line) for line in self.log_path.read_text().splitlines()]
 
+    def test_config_overrides_can_be_disabled_for_a_host(self) -> None:
+        # On a host whose packaged Codex injects its provider as -c args, any
+        # competing -c replaces that table and the fork silently falls back to
+        # an unreachable default provider. The opt-out drops the -c overrides;
+        # the --disable feature list (the tool-denial posture) must survive.
+        with patch.dict(
+            os.environ, {"MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES": "1"}
+        ):
+            ask_agents.ask_one("What did you finish?", self._codex_target())
+
+        argv = self._records()[0]["argv"]
+        self.assertNotIn("--config", argv)
+        self.assertNotIn('web_search="disabled"', argv)
+        self.assertNotIn("mcp_servers={}", argv)
+        self.assertNotIn("apps._default.enabled=false", argv)
+        for feature in ask_agents._CODEX_DISABLED_FEATURES:
+            self.assertIn(feature, argv)
+
     def test_ephemeral_fork_returns_final_answer_with_no_runtime_leak(self) -> None:
-        result = ask_agents.ask_one("What did you finish?", self._codex_target())
+        # Pin the opt-out knob off: this asserts the DEFAULT hardening, and a
+        # host that sets it in bin/multiverse.local would otherwise leak into
+        # the test environment and fail this legitimately-passing build.
+        with patch.dict(
+            os.environ, {"MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES": ""}
+        ):
+            result = ask_agents.ask_one("What did you finish?", self._codex_target())
 
         self.assertEqual(result.response, "Codex side answer")
         self.assertIsNone(result.error)
