@@ -2100,12 +2100,23 @@ def create_session(
         "MULTIVERSE_CLAUDE_BIN", "MULTIVERSE_EXTRA_PLUGIN_DIRS",
         "MULTIVERSE_CODEX_BIN", "MULTIVERSE_CODEX_MODEL",
         "MULTIVERSE_CODEX_REASONING_EFFORT",
+        # The permission/sandbox flags bin/multiverse-codex-session launches
+        # with. A session spawned by an agent's own MCP server must land on
+        # the same level as one spawned from the dashboard; without this it
+        # silently falls back to the --approve-for-me default.
+        "MULTIVERSE_CODEX_PERMISSION_ARGS",
         # ask_agent's Codex side-fork reads this in whichever process makes
         # the call — the monitor OR an agent's own MCP server — so it has to
         # reach spawned sessions too, not just the monitor.
         "MULTIVERSE_CODEX_ASK_NO_CONFIG_OVERRIDES",
         "MULTIVERSE_PI_BIN",
         "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR",
+        # The forwarding list has to forward itself. An agent spawned from
+        # here can spawn further agents through its own MCP server, and that
+        # process only knows to pass a host's extra keys along if it still
+        # has the list naming them. Without this, host-specific config
+        # survives exactly one hop and is silently dropped after that.
+        "MULTIVERSE_FORWARD_ENV",
         # Rate-limit retry tuning — see bin/multiverse for defaults +
         # rationale. Propagated so interactive claude sessions inside tmux
         # honor them, not just subprocess-inherited workers.

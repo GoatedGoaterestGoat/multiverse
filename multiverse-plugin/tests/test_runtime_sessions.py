@@ -721,6 +721,31 @@ class RuntimeLaunchTests(unittest.TestCase):
         meta = json.loads((state_dir / "session-id" / "meta.json").read_text())
         return created, meta, calls
 
+    def test_codex_permission_and_forward_env_reach_spawned_sessions(self) -> None:
+        # An agent spawns further agents through its own MCP server, which only
+        # sees what the previous hop forwarded. Both of these have to survive
+        # that hop: the permission args, or the new session silently drops to
+        # the --approve-for-me default instead of the host's chosen level; and
+        # the forwarding list itself, or a host's extra keys survive exactly one
+        # hop and are dropped for every session spawned after that.
+        _, _, calls = self._create_with_runtime(
+            sessions.RUNTIME_CODEX,
+            [],
+            extra_env={
+                "MULTIVERSE_CODEX_PERMISSION_ARGS": "-s danger-full-access -a never",
+                "MULTIVERSE_FORWARD_ENV": "SOME_HOST_TOKEN",
+                "SOME_HOST_TOKEN": "value-from-host",
+            },
+        )
+        tmux_cmd = calls[0]
+
+        self.assertIn(
+            "MULTIVERSE_CODEX_PERMISSION_ARGS=-s danger-full-access -a never",
+            tmux_cmd,
+        )
+        self.assertIn("MULTIVERSE_FORWARD_ENV=SOME_HOST_TOKEN", tmux_cmd)
+        self.assertIn("SOME_HOST_TOKEN=value-from-host", tmux_cmd)
+
     def test_codex_launch_uses_codex_runner_and_resume_command(self) -> None:
         created, meta, calls = self._create_with_runtime(
             sessions.RUNTIME_CODEX,
