@@ -356,6 +356,159 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0].session_id, "current-thread")
 
+    # -- archived Codex threads ------------------------------------------------
+    # Codex moves a thread the user archives into archived_sessions/, and a
+    # retired multiverse agent routinely points at one. Discovery used to read
+    # sessions/ only, so the retired row resolved to nothing and the ancestor
+    # walk rooted at its thread stopped dead.
+
+    def _codex_rollout(
+        self,
+        root: Path,
+        thread_id: str,
+        cwd: str,
+        prompt: str,
+        ancestors: tuple[str, ...] = (),
+    ) -> Path:
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"rollout-2026-01-01T00-00-00-{thread_id}.jsonl"
+        rows = [{"type": "session_meta", "payload": {"id": thread_id, "cwd": cwd}}]
+        rows += [
+            {"type": "session_meta", "payload": {"id": a, "cwd": cwd}}
+            for a in ancestors
+        ]
+        rows.append(
+            {"type": "event_msg",
+             "payload": {"type": "user_message", "message": prompt}}
+        )
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return path
+
+    def _codex_index(self, codex_home: Path, names: dict[str, str]) -> None:
+        (codex_home / "session_index.jsonl").write_text(
+            "".join(
+                json.dumps({"id": i, "thread_name": n}) + "\n"
+                for i, n in names.items()
+            )
+        )
+
+    def _dashboard(self, codex_home: Path, live: list, cwd: str) -> list:
+        with (
+            patch.object(sessions, "CODEX_HOME", codex_home),
+            patch.object(sessions.forks, "gc"),
+            patch.object(sessions.forks, "active_uuids", return_value=set()),
+            patch.object(sessions, "list_locked", return_value=set()),
+            patch.object(sessions, "CLAUDE_PROJECTS_DIR", Path("/missing")),
+        ):
+            return sessions.build_dashboard_rows(live, cwd)
+
+    def test_codex_discovery_reads_archived_threads_but_hides_them(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            self._codex_rollout(home / "sessions", "live-thread", ws, "Live")
+            self._codex_rollout(
+                home / "archived_sessions", "archived-thread", ws, "Archived"
+            )
+            self._codex_index(
+                home, {"live-thread": "agent-a", "archived-thread": "agent-b"}
+            )
+            with patch.object(sessions, "CODEX_HOME", home):
+                # One discovery cache serves both views.
+                default = {i["id"] for i in sessions.list_codex_sessions_in(ws)}
+                full = {
+                    i["id"]: i
+                    for i in sessions.list_codex_sessions_in(
+                        ws, include_archived=True
+                    )
+                }
+
+        self.assertEqual(default, {"live-thread"})
+        self.assertEqual(set(full), {"live-thread", "archived-thread"})
+        self.assertTrue(full["archived-thread"]["archived"])
+        self.assertFalse(full["live-thread"]["archived"])
+
+    def test_retired_agent_on_archived_thread_is_one_row_with_preview(
+        self,
+    ) -> None:
+        # The reported shape: a retired codex agent whose fork chain Codex had
+        # archived showed a BLANK retired row (no preview, no tokens) plus the
+        # still-unarchived ORIGINAL thread as a dormant duplicate.
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            self._codex_rollout(home / "sessions", "root-thread", ws, "Original")
+            self._codex_rollout(
+                home / "archived_sessions", "mid-thread", ws, "Original",
+                ("root-thread",),
+            )
+            self._codex_rollout(
+                home / "archived_sessions", "latest-thread", ws, "Original",
+                ("mid-thread", "root-thread"),
+            )
+            self._codex_index(
+                home,
+                {t: "codex-agent"
+                 for t in ("root-thread", "mid-thread", "latest-thread")},
+            )
+            retired = sessions.Session(
+                id="mv-id",
+                cwd=ws,
+                created_at=1,
+                status="retired",
+                status_ts=2,
+                name="codex-agent",
+                runtime=sessions.RUNTIME_CODEX,
+                resumed_from="latest-thread",
+                successor="Ed",
+            )
+            rows = self._dashboard(home, [retired], ws)
+
+        named = [(r.status, r.session_id, r.preview)
+                 for r in rows if r.name == "codex-agent"]
+        self.assertEqual(named, [("retired", "latest-thread", "Original")])
+
+    def test_archived_fork_does_not_hide_its_live_parent(self) -> None:
+        # Archiving a branch is putting it away, not a vote for it: the live
+        # thread it came from must stay visible.
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            self._codex_rollout(home / "sessions", "parent-thread", ws, "Parent")
+            self._codex_rollout(
+                home / "archived_sessions", "fork-thread", ws, "Parent",
+                ("parent-thread",),
+            )
+            self._codex_index(
+                home, {"parent-thread": "codex-agent", "fork-thread": "codex-agent"}
+            )
+            rows = self._dashboard(home, [], ws)
+
+        named = [(r.status, r.session_id)
+                 for r in rows if r.name == "codex-agent"]
+        self.assertEqual(named, [("dormant", "parent-thread")])
+
+    def test_find_rollout_path_prefers_live_then_falls_back_to_archived(
+        self,
+    ) -> None:
+        from src import codex_transcript
+
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            live = self._codex_rollout(home / "sessions", "both-thread", ws, "p")
+            self._codex_rollout(home / "archived_sessions", "both-thread", ws, "p")
+            gone = self._codex_rollout(
+                home / "archived_sessions", "gone-thread", ws, "p"
+            )
+            both = codex_transcript.find_rollout_path(home, "both-thread")
+            fallback = codex_transcript.find_rollout_path(home, "gone-thread")
+            missing = codex_transcript.find_rollout_path(home, "no-such-thread")
+
+        self.assertEqual(both, live)
+        self.assertEqual(fallback, gone)
+        self.assertIsNone(missing)
+
     def test_all_session_names_share_one_runtime_namespace(self) -> None:
         with (
             patch.object(

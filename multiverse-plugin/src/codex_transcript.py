@@ -312,17 +312,25 @@ def find_rollout_path(codex_home: Path, thread_id: str) -> Path | None:
     """Newest materialized rollout whose filename belongs to ``thread_id``."""
     if not thread_id:
         return None
-    sessions_dir = Path(codex_home) / "sessions"
-    if not sessions_dir.is_dir():
-        return None
     suffix = f"-{thread_id}.jsonl"
     candidates: list[Path] = []
-    try:
-        for path in sessions_dir.rglob("rollout-*.jsonl"):
-            if path.name.endswith(suffix):
-                candidates.append(path)
-    except OSError:
-        return None
+    # Live rollouts first, archived only as a fallback. Codex moves a thread
+    # it archives into archived_sessions/, and a retired multiverse agent
+    # often points at exactly such a thread — without the fallback its token
+    # count read as nothing. Searching live first keeps every non-archived
+    # thread resolving exactly as it did before.
+    for sub in ("sessions", "archived_sessions"):
+        root = Path(codex_home) / sub
+        if not root.is_dir():
+            continue
+        try:
+            for path in root.rglob("rollout-*.jsonl"):
+                if path.name.endswith(suffix):
+                    candidates.append(path)
+        except OSError:
+            continue
+        if candidates:
+            break
     if not candidates:
         return None
     dated: list[tuple[float, Path]] = []

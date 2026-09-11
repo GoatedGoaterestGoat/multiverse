@@ -367,6 +367,7 @@ def list_codex_sessions_in(
     *,
     include_unnamed: bool = False,
     include_ancestors: bool = False,
+    include_archived: bool = False,
 ) -> list[dict]:
     """Return Codex sessions under ``cwd``, newest first.
 
@@ -376,9 +377,20 @@ def list_codex_sessions_in(
     embed their prior thread metadata; named ancestors are omitted by default
     so one logical conversation does not appear multiple times. Internal
     callers that need the complete lineage can pass ``include_ancestors``.
+
+    Threads the user archived in Codex (moved to ``archived_sessions/``) are
+    also read, tagged ``archived``, and dropped unless ``include_archived`` —
+    so they never surface as agents, but lineage lookups can still resolve
+    them. That matters because a retired multiverse agent routinely points
+    at an archived thread: without it, the retired row resolved to nothing
+    (no preview, no tokens) and the ancestor walk rooted at it stopped dead,
+    letting the still-unarchived ORIGINAL thread reappear as a dormant
+    duplicate of the same agent.
     """
     def visible(items: list[dict]) -> list[dict]:
         selected = items
+        if not include_archived:
+            selected = [item for item in selected if not item.get("archived")]
         if not include_ancestors:
             superseded = {
                 ancestor_id
@@ -402,10 +414,14 @@ def list_codex_sessions_in(
         return visible(cached[1])
 
     names = _read_codex_names()
-    sessions_dir = CODEX_HOME / "sessions"
     by_id: dict[str, dict] = {}
-    if sessions_dir.is_dir():
-        for path in sessions_dir.rglob("rollout-*.jsonl"):
+    for root, archived in (
+        (CODEX_HOME / "sessions", False),
+        (CODEX_HOME / "archived_sessions", True),
+    ):
+        if not root.is_dir():
+            continue
+        for path in root.rglob("rollout-*.jsonl"):
             meta = _read_codex_session_metadata(path)
             session_id = meta.get("id")
             if not session_id or meta.get("cwd") != cwd_abs:
@@ -421,6 +437,7 @@ def list_codex_sessions_in(
                 "size": st.st_size,
                 "name": names.get(session_id),
                 "ancestor_ids": list(meta.get("ancestor_ids") or ()),
+                "archived": archived,
             }
             previous = by_id.get(session_id)
             if previous is None or found["mtime"] > previous["mtime"]:
@@ -1300,14 +1317,21 @@ def build_dashboard_rows(
         cwd,
         include_unnamed=True,
         include_ancestors=True,
+        # Archived threads are needed for resolution, never as rows: a
+        # retired agent's thread is often archived, and both its preview and
+        # the ancestor walk below go through codex_by_id.
+        include_archived=True,
     )
     codex_by_id = {info["id"]: info for info in codex_sessions}
     pi_sessions = list_pi_sessions_in(cwd, include_unnamed=True)
     pi_by_id = {info["id"]: info for info in pi_sessions}
+    # Only a live (non-archived) named thread supersedes its ancestors. An
+    # archived fork must not hide the thread it came from — archiving is the
+    # user putting that branch away, not a vote for it.
     superseded_codex_ids = {
         ancestor_id
         for info in codex_sessions
-        if info.get("name")
+        if info.get("name") and not info.get("archived")
         for ancestor_id in info.get("ancestor_ids") or ()
     }
     pending_codex_ids = list(wrapped_codex_ids)
@@ -1465,6 +1489,7 @@ def build_dashboard_rows(
             session_id in wrapped_codex_ids
             or session_id in superseded_codex_ids
             or not info.get("name")
+            or info.get("archived")
         ):
             continue
         rows.append(
