@@ -166,10 +166,70 @@ _LISTENING_STATUS = "listening"
 
 #: Minimum mtime gap between the freshest transcript and the runner-up before
 #: ``_resolve_self_identity`` will trust the freshest one as its own.
-_IDENTITY_RACE_MARGIN_S = 0.25
+# Substring identifying THIS MCP server in a transcript's tool_use rows.
+# Claude names them ``mcp__<server>__<tool>``; under the plugin loader the
+# server is ``plugin_multiverse_multiverse``, so match on the stable part.
+_MCP_SERVER_HINT = "multiverse"
+# How much of a transcript's tail to inspect for that row. The caller's
+# tool_use is the last thing written before we were dispatched, so this only
+# has to cover a handful of rows — but rows can be large, hence the byte cap.
+_IDENTITY_TAIL_ROWS = 25
+_IDENTITY_TAIL_BYTES = 256_000
 # How recently a transcript must have been appended to for its session to
 # count as "currently writing" for identity purposes.
 _IDENTITY_WINDOW_S = 10.0
+
+
+def _row_calls_this_server(row: object) -> bool:
+    """True if ``row`` is an assistant turn invoking one of OUR MCP tools."""
+    if not isinstance(row, dict):
+        return False
+    server = row.get("attributionMcpServer")
+    if isinstance(server, str) and _MCP_SERVER_HINT in server:
+        return True
+    content = (row.get("message") or {}).get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        name = block.get("name")
+        if (
+            isinstance(name, str)
+            and name.startswith("mcp__")
+            and _MCP_SERVER_HINT in name
+        ):
+            return True
+    return False
+
+
+def _tail_calls_this_server(path: Path) -> bool:
+    """True if this transcript's tail holds a tool_use naming this MCP server.
+
+    Claude writes the tool_use row to disk and THEN dispatches to us, so at the
+    instant one of our tools runs, the CALLING session's transcript ends with
+    that row. That is positive evidence of who is calling — a different
+    question from who wrote most recently, which is all mtime can answer.
+    """
+    try:
+        with path.open("rb") as fh:
+            try:
+                fh.seek(-_IDENTITY_TAIL_BYTES, os.SEEK_END)
+            except OSError:
+                fh.seek(0)
+            tail = fh.read()
+    except OSError:
+        return False
+    lines = [ln for ln in tail.split(b"\n") if ln.strip()][-_IDENTITY_TAIL_ROWS:]
+    for raw in reversed(lines):
+        try:
+            row = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # A line torn by the seek offset, or a half-flushed write.
+            continue
+        if _row_calls_this_server(row):
+            return True
+    return False
 
 
 def _env_session_wrote_recently(
@@ -319,26 +379,30 @@ def _resolve_self_identity() -> tuple[str | None, str | None]:
                 recent.append((mt, j))
         if not recent:
             return env_name, env_cwd
-        recent.sort(key=lambda item: item[0], reverse=True)
-        best = recent[0]
-        # Refuse to guess when two agents raced. Our own tool_use row is
-        # written immediately before this call dispatches, so the freshest
-        # jsonl is normally ours by a clear margin — but in a multiverse
-        # workspace several Claude agents are live at once, and if another
-        # one wrote inside the same instant "freshest wins" is a coin flip
-        # that hands this caller a DIFFERENT agent's name and cwd. Wrong
-        # identity is far worse than no correction: it stamps outgoing
-        # messages with someone else's name and drains their inbox. When
-        # the top two are too close to separate, fall back to the env vars,
-        # which are correct for every session except the bg-pty-host case
-        # this lookup exists to repair.
-        if len(recent) > 1 and best[0] - recent[1][0] < _IDENTITY_RACE_MARGIN_S:
+        # Which of these transcripts belongs to the CALLER? Freshness cannot
+        # say. It answers a different question — whether the env identity is
+        # still plausible — and once discovery legitimately fires, the busiest
+        # agent in the workspace beats an idle-but-correct caller by far more
+        # than any race margin could absorb. Reported in exactly that shape: a
+        # message authored by toolsmith arrived stamped "SecondBrain II", a
+        # different live agent in the same workspace, and replies then went to
+        # the wrong agent.
+        #
+        # So require positive evidence instead. Sender identity is a trust
+        # boundary; a wrong answer here is undetectable downstream.
+        candidates = [path for _mt, path in recent if _tail_calls_this_server(path)]
+        # Exactly one, or we do not know. Ambiguity deliberately falls back to
+        # the env vars rather than a best guess: a stale-but-plausible identity
+        # is usually right and stays recoverable, a confidently wrong one is
+        # neither.
+        if len(candidates) != 1:
             return env_name, env_cwd
+        best_path = candidates[0]
         # Read the first row's sessionId (sessionId is stable per file,
         # so any row works; first is cheapest).
         session_id: str | None = None
         try:
-            with best[1].open() as f:
+            with best_path.open() as f:
                 for line in f:
                     line = line.strip()
                     if not line:

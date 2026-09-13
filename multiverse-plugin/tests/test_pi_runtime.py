@@ -902,13 +902,45 @@ class ClaudeCallerIdentityTests(unittest.TestCase):
     vars, so the bg-pty-host correction the function exists for never happened.
     """
 
-    def _fixture(self, root: Path, transcripts: list[tuple[str, str]]) -> dict[str, str]:
-        """``transcripts`` is [(jsonl stem, sessionId)], written oldest first."""
+    @staticmethod
+    def _mcp_row(session_id: str) -> dict:
+        """The row Claude writes to disk immediately before dispatching one of
+        our MCP tools — the positive evidence that this transcript is the
+        caller, as opposed to merely the most recently written."""
+        return {
+            "sessionId": session_id,
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "t1",
+                        "name": "mcp__plugin_multiverse_multiverse__list_agents",
+                        "input": {},
+                    }
+                ],
+            },
+        }
+
+    def _fixture(
+        self,
+        root: Path,
+        transcripts: list[tuple[str, str]],
+        callers: tuple[str, ...] = ("mine",),
+    ) -> dict[str, str]:
+        """``transcripts`` is [(jsonl stem, sessionId)], written oldest first.
+
+        Stems in ``callers`` end with an MCP tool_use row, i.e. they look like
+        the session that is calling us right now."""
         projects = root / "claude" / "projects" / "-slug"
         projects.mkdir(parents=True)
         for index, (stem, session_id) in enumerate(transcripts):
             path = projects / f"{stem}.jsonl"
-            path.write_text(json.dumps({"sessionId": session_id, "type": "user"}) + "\n")
+            rows: list[dict] = [{"sessionId": session_id, "type": "user"}]
+            if stem in callers:
+                rows.append(self._mcp_row(session_id))
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
             # Space the mtimes so "freshest" is deterministic rather than
             # dependent on filesystem timestamp granularity.
             stamp = time.time() - (len(transcripts) - index)
@@ -936,17 +968,16 @@ class ClaudeCallerIdentityTests(unittest.TestCase):
                     ("real-name", "/real/workspace"),
                 )
 
-    def test_a_photo_finish_between_agents_falls_back_to_env(self) -> None:
-        """Enabling the lookup must not enable a coin flip. Several Claude
-        agents are live at once in a multiverse workspace; if another one writes
-        in the same instant, "freshest wins" would handoff THIS caller another
-        agent's name and cwd — stamping its outgoing messages and draining its
-        inbox. Too close to call means don't call it."""
+    def test_two_transcripts_claiming_the_call_fall_back_to_env(self) -> None:
+        """Ambiguity must not become a coin flip. If two transcripts both end
+        with a call to this server, we cannot tell which one reached us, so we
+        keep the env identity: stale-but-plausible is usually right and stays
+        recoverable, confidently-wrong is neither."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             env = self._fixture(root, [("mine", "sid-mine")])
             other = root / "claude" / "projects" / "-slug" / "other.jsonl"
-            other.write_text(json.dumps({"sessionId": "sid-other"}) + "\n")
+            other.write_text(json.dumps(self._mcp_row("sid-other")) + "\n")
             mine = root / "claude" / "projects" / "-slug" / "mine.jsonl"
             now = time.time()
             os.utime(mine, (now, now))
@@ -958,10 +989,34 @@ class ClaudeCallerIdentityTests(unittest.TestCase):
                     ("stale-env-name", "/stale/env/workspace"),
                 )
 
-    def test_a_clear_winner_is_still_trusted(self) -> None:
+    def test_a_busier_agent_does_not_win_the_callers_identity(self) -> None:
+        """The reported failure. Another agent is working continuously, so it
+        is far fresher than the caller — no race margin absorbs that gap. Only
+        the caller wrote a tool_use naming this server, so only the caller can
+        be it. Previously this returned the busy agent's name, and messages
+        went out stamped with it."""
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             env = self._fixture(root, [("mine", "sid-mine")])
+            other = root / "claude" / "projects" / "-slug" / "other.jsonl"
+            other.write_text(json.dumps({"sessionId": "sid-other"}) + "\n")
+            mine = root / "claude" / "projects" / "-slug" / "mine.jsonl"
+            now = time.time()
+            os.utime(mine, (now - 4, now - 4))
+            os.utime(other, (now, now))
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("MULTIVERSE_RUNTIME", None)
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("real-name", "/real/workspace"),
+                )
+
+    def test_no_transcript_claims_the_call_falls_back_to_env(self) -> None:
+        """Freshness alone decides nothing: with no tool_use evidence anywhere,
+        the freshest transcript is just the busiest agent, not the caller."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env = self._fixture(root, [("mine", "sid-mine")], callers=())
             other = root / "claude" / "projects" / "-slug" / "other.jsonl"
             other.write_text(json.dumps({"sessionId": "sid-other"}) + "\n")
             mine = root / "claude" / "projects" / "-slug" / "mine.jsonl"
@@ -972,7 +1027,7 @@ class ClaudeCallerIdentityTests(unittest.TestCase):
                 os.environ.pop("MULTIVERSE_RUNTIME", None)
                 self.assertEqual(
                     server._resolve_self_identity(),
-                    ("real-name", "/real/workspace"),
+                    ("stale-env-name", "/stale/env/workspace"),
                 )
 
     def test_non_claude_callers_are_still_short_circuited(self) -> None:
