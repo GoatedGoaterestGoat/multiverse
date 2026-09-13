@@ -1975,6 +1975,17 @@ class SBConnector:
             await self._send(ws, p.Pong(ts=frame.ts))  # type: ignore[attr-defined]
         elif t is p.FrameType.BYE:
             raise ConnectionError("server sent bye")
+        else:
+            # A frame type this build knows of but doesn't serve. Ignoring it is right --
+            # SB adds frames we have no part in -- but ignoring it SILENTLY means a frame
+            # we should have handled looks identical to one we shouldn't, and the only
+            # evidence is an absence. Say so.
+            #
+            # Note this branch is currently unreachable for a frame type we've never heard
+            # of: p.decode raises ProtocolError on an unknown 't' before dispatch sees it,
+            # which drops the connection. Raised with infra; if decode is relaxed to let
+            # unknown frames through, they arrive here already handled.
+            log.info("ignoring unhandled frame type %s", getattr(t, "value", t))
 
     async def _on_action(self, ws, action: p.Action) -> None:  # noqa: ANN001
         """Execute an inbound action against Multiverse, idempotently (§8.2)."""
