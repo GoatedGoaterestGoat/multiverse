@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import itertools
 import json
 import logging
@@ -1169,6 +1170,21 @@ class SBConnector:
                         )
                         await self._emit_workspace_connected(from_seq)  # rewinds + enqueues
                         await self._pump(ws, from_seq)
+                    except p.ProtocolError:
+                        # Close with 4400 so the HOST can tell this apart too. Dropping
+                        # the socket bare gives SB an abrupt 1006, indistinguishable from
+                        # a network fault -- the same "looks like a flaky network"
+                        # complaint that motivated naming the frame in OUR log, mirrored
+                        # onto SB's side, where the audit is all they have. §10 documents
+                        # 4400 as the response; without this the contract asserts a
+                        # behaviour this client does not perform.
+                        with contextlib.suppress(Exception):
+                            await asyncio.wait_for(
+                                ws.close(code=int(p.CloseCode.PROTOCOL_ERROR),
+                                         reason="undecodable frame"),
+                                timeout=5.0,
+                            )
+                        raise
                     finally:
                         self._ws = None
             except asyncio.CancelledError:

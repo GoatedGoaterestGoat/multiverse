@@ -43,6 +43,31 @@ from typing import Any, ClassVar
 #: Wire protocol version carried in every frame's ``v`` field.
 PROTOCOL_VERSION = 1
 
+#: Feature tokens a client may advertise in ``hello.supports`` (§6.3).
+#:
+#: The seam's two halves ship independently and connectors on remote machines re-vendor
+#: only when they pull, so a frame added here can reach a peer that has never heard of it
+#: — and an unknown ``t`` is fatal (see :func:`decode`). Negotiation is what keeps that
+#: from happening: **the sender must not emit a frame the peer did not advertise.**
+#:
+#: Absent or empty ``supports`` means "baseline v1 only", which is what every connector
+#: deployed before this field existed implicitly says — so they are protected without
+#: changing a line on their side. That default is the whole point of putting the
+#: capability on the sender rather than making the receiver lenient: leniency only ever
+#: reaches a peer that has already pulled, which is the same pull that would have taught
+#: it the frame anyway.
+#:
+#: **Tokens name a frame, not a capability** — considered and decided, so it need not be
+#: re-litigated. A capability token ("transcript_pull") reads better and would gate a whole
+#: surface with one string, but it is a promise a peer cannot keep: a connector built today
+#: advertising the capability is asserting it can decode frames that **did not exist when it
+#: was built**, so the day a second frame joins the feature, every old peer that advertised
+#: the capability receives it and drops — reintroducing exactly the failure this gate exists
+#: to prevent. A frame token is monotonic and exactly verifiable: a peer advertises only what
+#: it can actually decode, and a second frame simply means a second token that old peers do
+#: not claim. The cost is one token per frame; the alternative is a promise about the future.
+FEATURE_TRANSCRIPT_ACK = "transcript_ack"
+
 #: Default maximum size (bytes) of a single frame. Over-limit senders must
 #: summarize/omit; receivers close with :attr:`CloseCode.FRAME_TOO_BIG` (§4.2).
 #: Configurable via :class:`sb_host.config.HostConfig.max_frame_bytes`.
@@ -78,6 +103,7 @@ class FrameType(StrEnum):
     AUTH_OK = "auth_ok"
     RESUME = "resume"
     ACK = "ack"
+    TRANSCRIPT_ACK = "transcript_ack"  # advance an agent's transcript delivery marker
     LOCK = "lock"
     UNLOCK = "unlock"
     PING = "ping"
@@ -133,6 +159,24 @@ class EventKind(StrEnum):
     # Synthetic (SB-side, no wire origin): the daily nudge to tidy memory, fired a
     # few minutes before the data-repo backup. Payload: {scheduled_utc}.
     MEMORY_REMINDER = "memory.reminder"
+    # Synthetic (SB-side, no wire origin): the user responded to a point SB raised
+    # in the curated feed (§8, sb_host.feed). Carries the original point alongside
+    # the response so SB can act on it even if it compacted away raising it.
+    # Payload: {id, text, response, workspace_label}.
+    FEED_ITEM_ADDRESSED = "feed.item_addressed"
+    # Synthetic (SB-side, no wire origin): the user turned a point down without
+    # addressing it — the feed's clearest signal that SB's bar was too low.
+    # Payload: {id, text, note, workspace_label}.
+    FEED_ITEM_DISMISSED = "feed.item_dismissed"
+    # Synthetic (SB-side, no wire origin): the user read a point and took it in
+    # with nothing to send back — the ordinary close for a point raised to inform
+    # rather than to ask. Payload: {id, text, note, workspace_label}.
+    FEED_ITEM_ACKNOWLEDGED = "feed.item_acknowledged"
+    # Synthetic (SB-side, no wire origin): the user decided something SB deferred
+    # (§7). Distinct from clearing a deferral in the TUI, which stays silent.
+    # Payload: {deferral_id, situation, proposed_action, uncertainty, decision,
+    #           note, workspace_label}.
+    DEFERRAL_RESOLVED = "deferral.resolved"
 
 
 class ActionKind(StrEnum):
@@ -159,10 +203,18 @@ class QueryKind(StrEnum):
     LIST_WORKSPACES = "list_workspaces"
     LIST_AGENTS = "list_agents"
     GET_STATUS = "get_status"
+    # UNIMPLEMENTED as of 2026-09-13 — declared here and in INFRA.md §10.4, but no
+    # connector dispatches it (it falls through to `not_implemented`) and nothing on the
+    # host issues one. Kept because the contract is still the intended shape for
+    # bulk/historical backfill. **Delete this comment the moment a connector implements
+    # the handler** — the condition that makes it true is "grep the connector's query
+    # dispatch for get_transcript and find nothing", which anyone can re-check.
+    # For incremental since-last-delivery reads, use PEEK_TRANSCRIPT below instead.
     GET_TRANSCRIPT = "get_transcript"
     GET_DASHBOARD = "get_dashboard"  # full monitor dashboard for one workspace (first agent tool)
     ASK_AGENT = "ask_agent"  # read-only side-question to one agent (answers from its own history)
     PEEK_AGENT = "peek_agent"  # read-only capture-pane snapshot of an agent's live screen
+    PEEK_TRANSCRIPT = "peek_transcript"  # transcript since the last delivered marker (read half)
 
 
 class Authority(StrEnum):
@@ -269,6 +321,10 @@ class Hello(Frame):
     client_version: str
     epk_c: str  # base64 X25519 ephemeral public key (client)
     workspaces: list[str] = field(default_factory=list)  # abs cwds this device exposes
+    #: Optional feature tokens this client understands (see FEATURE_* above). Absent or
+    #: empty means baseline v1 — which is exactly what a connector predating this field
+    #: says by saying nothing, so the host will not send it anything newer.
+    supports: list[str] = field(default_factory=list)
     T: ClassVar[FrameType] = FrameType.HELLO
 
 
@@ -341,6 +397,58 @@ class Ack(Frame):
 
     ack_seq: int
     T: ClassVar[FrameType] = FrameType.ACK
+
+
+@dataclass
+class TranscriptAck(Frame):
+    """server -> client. The **commit half** of ``peek_transcript`` (§10.4): SB has durably
+    stored everything up to ``cursor``, so the connector may advance that agent's delivery
+    marker.
+
+    Same family as :class:`Ack` — cumulative, idempotent, fire-and-forget — but a
+    *different marker*, which is why it is a separate frame rather than a field on ``Ack``:
+
+    * **Scope.** ``ack_seq`` is one cursor per *device* over the event stream, and drives
+      the connector's outbound buffer trim and replay origin. This is one marker per
+      *(workspace, agent)* over transcript text. Different cardinality and lifecycle.
+    * **Skew fails loudly.** Decode is lenient about unknown *fields* but fatal about an
+      unknown ``t`` (§10). An extra field on ``Ack`` would reach an older connector, trim
+      its buffer, and *silently* drop the marker — so the marker would never advance and
+      SB would re-deliver the same turns forever, which is exactly the failure the
+      two-phase design exists to prevent, arriving invisibly. An unknown frame type closes
+      ``4400`` instead: immediate and diagnosable.
+
+    ``cursor`` is an **opaque JSON value** minted by the connector in the ``peek_transcript``
+    result and echoed back **verbatim**; the host never interprets it. In practice it is an
+    object whose shape varies by runtime — ``{"claude_uuid", "turn_id", "row_uuid"}`` for a
+    Claude agent, a self-tagged ``{"runtime": "codex", …}`` for Codex — and the connector
+    dispatches on fields inside it, so it must survive the round trip structurally intact.
+
+    It is typed ``Any`` rather than ``str`` **deliberately**. Under a ``str`` annotation the
+    natural way to carry an object is ``json.dumps(cursor)``, which silently changes key
+    order and separators and breaks the dispatch — a declaration under which the wrong
+    choice looks like the right one, failing in neither reader's direction with an error.
+
+    The sharper hazard is **type**, not key order: the Codex cursor carries ``record_offset``
+    as an ``int``, and a round trip that stringified it would leave every later comparison
+    reporting "advanced" forever — a value that is still *equal* by JSON but no longer the
+    same thing. That is why the tests assert the cursor by **identity**, not equality: an
+    equality assertion passes straight through the bug it exists to catch.
+    Pass the decoded value straight through: :func:`encode` embeds it as a nested JSON
+    value, :func:`decode` hands it back as the same structure. **Never re-serialize it.**
+
+    Fire-and-forget is safe *because* of the ordering: SB stores, then acks. A lost ack
+    means the marker doesn't advance and the turns are re-delivered — at-least-once, never
+    loss. The connector must treat the marker as **monotonic** and ignore a stale or
+    duplicate token rather than rewinding.
+    """
+
+    workspace_id: str  # "<device_id>:/abs/cwd"
+    agent: str
+    # Opaque connector-minted JSON (usually an object). NOT `str` — see the docstring:
+    # a str annotation invites json.dumps(), which breaks the connector's field dispatch.
+    cursor: Any
+    T: ClassVar[FrameType] = FrameType.TRANSCRIPT_ACK
 
 
 @dataclass
@@ -556,6 +664,7 @@ _FRAME_CLASSES: tuple[type[Frame], ...] = (
     AuthOk,
     Resume,
     Ack,
+    TranscriptAck,
     Lock,
     Unlock,
     Ping,
@@ -597,6 +706,20 @@ def decode(raw: str | bytes) -> Frame:
     Raises :class:`ProtocolError` for: non-JSON input, a non-object payload, a
     missing/unknown ``t`` discriminator, or a body missing a required field. The caller
     should close with :attr:`CloseCode.PROTOCOL_ERROR` (``4400``) on this error.
+
+    **Why an unknown ``t`` is fatal, when an unknown enum *value* is not.** A new ``kind``
+    on a *known* frame still routes — we know it is an event, and skipping one is a
+    bounded, local loss — so :meth:`Frame.from_json` keeps it as a plain string. An
+    unknown ``t`` is unclassifiable: nothing here can tell whether the frame was advisory
+    or whether it carried state the sender now believes was accepted. Ignoring it is
+    therefore unsafe exactly when it matters most — a dropped ``transcript_ack`` would
+    leave a delivery marker unadvanced and re-deliver the same turns forever, with no
+    error on either side. Fatal is the safe default for the unclassifiable.
+
+    An unknown ``t`` should not *arise* between correctly-behaving peers: senders gate on
+    ``hello.supports`` (see :data:`FEATURE_TRANSCRIPT_ACK`). When it does arise it means a
+    real version skew, and a caller that closes should say so by name — "peer sent an
+    unknown frame type" — rather than letting it surface as a bare reconnect.
     """
     if isinstance(raw, (bytes, bytearray)):
         try:
@@ -637,6 +760,7 @@ __all__ = [
     "AuthOk",
     "Resume",
     "Ack",
+    "TranscriptAck",
     "Lock",
     "Unlock",
     "Ping",

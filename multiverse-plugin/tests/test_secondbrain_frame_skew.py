@@ -13,10 +13,15 @@ a correct-but-anonymous failure is the thing being repaired.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import sys
 import unittest
+from unittest.mock import patch
+
+from cryptography.hazmat.primitives.asymmetric import ed25519
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -25,9 +30,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "vendor"))
 from secondbrain import protocol as p  # noqa: E402
 from src import sb_connector as C  # noqa: E402
 
+# A frame type that will never exist. It MUST be fictional: this file first used
+# "transcript_ack", which stopped testing anything the moment that frame was vendored --
+# decode began succeeding and three tests went green for the wrong reason. A real
+# future frame tests skew only until it arrives, which is exactly when you stop
+# noticing. Same shape as testing a vocabulary you do not own with a made-up member.
 FUTURE = json.dumps({
-    "t": "transcript_ack", "workspace_id": "d:/ws", "agent": "Alice",
-    "cursor": {"claude_uuid": "u", "turn_id": "t1", "row_uuid": "r1"},
+    "t": "frobnicate_widget", "workspace_id": "d:/ws", "agent": "Alice",
+    "payload": {"whatever": 1},
 })
 
 
@@ -54,7 +64,7 @@ class UnknownFrameTypeTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(p.ProtocolError):
                 await _conn()._recv(FakeWS([FUTURE]))
         blob = "\n".join(logs.output)
-        self.assertIn("transcript_ack", blob)
+        self.assertIn(json.loads(FUTURE)["t"], blob)  # derived, never a second copy
         self.assertIn("re-vendor", blob.lower())
 
     async def test_it_stays_fatal(self):
@@ -87,6 +97,77 @@ class KnownTypesAreDerivedTests(unittest.TestCase):
         self.assertEqual(C._KNOWN_FRAME_TYPES, frozenset(ft.value for ft in p.FrameType))
         for expected in ("ack", "query", "action", "lock", "bye"):
             self.assertIn(expected, C._KNOWN_FRAME_TYPES)
+
+
+class ClosesWith4400Tests(unittest.IsolatedAsyncioTestCase):
+    """A bare drop gives SB an abrupt 1006, indistinguishable from a network fault --
+    the same complaint that motivated naming the frame locally, mirrored onto the host,
+    where the audit log is all they have. §10 documents 4400 as the response.
+
+    This drives the REAL run() loop rather than reconstructing the close. A first draft
+    rebuilt the try/except in the test and passed against a mutant that changed the
+    production close -- it was exercising a copy, and would have passed with the close
+    deleted outright.
+    """
+
+    async def test_run_closes_4400_when_the_stream_hits_a_protocol_error(self):
+        import tempfile
+
+        closed: list[tuple] = []
+
+        class WS:
+            async def close(self, code=None, reason=None):
+                closed.append((code, reason))
+
+        class Connecting:
+            def __call__(self, *a, **kw):
+                return self
+
+            async def __aenter__(self):
+                return WS()
+
+            async def __aexit__(self, *a):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self.enterContext(patch.dict(os.environ, {"MULTIVERSE_ROOT": tmp}))
+            key = ed25519.Ed25519PrivateKey.generate()
+            ident = C.DeviceIdentity(
+                device_id="dev", private_key=key, pinned_server_fingerprint="FP",
+                granted_workspaces=["/ws"], device_name="t",
+            )
+            conn = C.SBConnector("ws://127.0.0.1:1", ident)
+
+            async def boom(self, ws, from_seq):
+                raise p.ProtocolError("unknown frame type 'frobnicate_widget'")
+
+            async def noop(self, *a, **kw):
+                return None
+
+            async def handshake(self, ws):
+                conn._stop.set()  # one pass through the loop, then leave
+                return 0
+
+            import websockets.asyncio.client as mod  # run() imports it lazily
+            with patch.object(mod, "connect", Connecting()), \
+                 patch.object(C.SBConnector, "_handshake", handshake), \
+                 patch.object(C.SBConnector, "_emit_workspace_connected", noop), \
+                 patch.object(C.SBConnector, "_pump", boom):
+                await asyncio.wait_for(conn.run(), timeout=5)
+
+        self.assertEqual(closed, [(4400, "undecodable frame")])
+
+    def test_the_code_is_taken_from_the_vendored_enum(self):
+        """Never the literal 4400: re-vendoring must carry any change, and a hardcoded
+        number is the same drift hazard as a hardcoded frame-type list."""
+        self.assertEqual(int(p.CloseCode.PROTOCOL_ERROR), 4400)
+
+
+class TheFixtureIsStillFictionalTests(unittest.TestCase):
+    def test_the_future_frame_type_is_not_one_the_protocol_knows(self):
+        """If this ever fails, the fixture has become real and every skew test above is
+        passing for the wrong reason. Assert the premise, not just the conclusion."""
+        self.assertNotIn(json.loads(FUTURE)["t"], C._KNOWN_FRAME_TYPES)
 
 
 if __name__ == "__main__":
