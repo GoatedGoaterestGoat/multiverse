@@ -88,6 +88,20 @@ class ProtocolError(ValueError):
     """
 
 
+class UnknownFrameType(ProtocolError):
+    """The frame was well-formed JSON with a ``t`` this build does not know.
+
+    Split out from its parent because the two cases want **opposite responses** and the
+    difference is not guessable from the message text. An unknown ``t`` means the peer is
+    running a newer protocol than this build — the remedy is to re-vendor. A malformed
+    frame means something produced garbage, and telling that operator to re-vendor sends
+    them to the wrong place entirely.
+
+    Subclasses :class:`ProtocolError`, so ``except ProtocolError`` keeps catching both and
+    nothing that already handles decode failures needs to change.
+    """
+
+
 # --------------------------------------------------------------------------------------
 # Enumerations (string-valued so they serialize transparently to JSON)
 # --------------------------------------------------------------------------------------
@@ -416,7 +430,11 @@ class TranscriptAck(Frame):
       its buffer, and *silently* drop the marker — so the marker would never advance and
       SB would re-deliver the same turns forever, which is exactly the failure the
       two-phase design exists to prevent, arriving invisibly. An unknown frame type closes
-      ``4400`` instead: immediate and diagnosable.
+      ``4400`` instead — *provided the receiver does so*. That close is an **obligation on
+      the client**, not something :func:`decode` performs: it raises, and a client that lets
+      the exception reach a generic reconnect guard produces an abrupt 1006 that looks like
+      a network fault, which is the very outcome this was meant to avoid. The reference
+      connector demonstrates the required handling.
 
     ``cursor`` is an **opaque JSON value** minted by the connector in the ``peek_transcript``
     result and echoed back **verbatim**; the host never interprets it. In practice it is an
@@ -692,7 +710,7 @@ def frame_class_for(t: str) -> type[Frame]:
     try:
         return _REGISTRY[t]
     except KeyError:
-        raise ProtocolError(f"unknown frame type {t!r}") from None
+        raise UnknownFrameType(f"unknown frame type {t!r}") from None
 
 
 def encode(frame: Frame) -> str:
@@ -746,6 +764,7 @@ __all__ = [
     "PROTOCOL_VERSION",
     "MAX_FRAME_BYTES",
     "ProtocolError",
+    "UnknownFrameType",
     "FrameType",
     "EventKind",
     "ActionKind",

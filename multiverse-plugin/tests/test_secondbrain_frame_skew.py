@@ -85,18 +85,14 @@ class UnknownFrameTypeTests(unittest.IsolatedAsyncioTestCase):
         for raw in ('{"t": "ack"', '"not an object"', '{"no_t": 1}', '{"t": 42}',
                     json.dumps({"t": "ack"})):  # known type, missing ack_seq
             with self.subTest(raw=raw):
-                with self.assertRaises(p.ProtocolError):
-                    with self.assertNoLogs("sb_connector", level=logging.ERROR):
+                # assertNoLogs OUTSIDE assertRaises, deliberately. Its __exit__ skips the
+                # assertion entirely when an exception is propagating, so the intuitive
+                # nesting (raises outside, no-logs inside) asserts NOTHING about logs --
+                # it passed against a mutant that logged for every ProtocolError.
+                with self.assertNoLogs("sb_connector", level=logging.ERROR):
+                    with self.assertRaises(p.ProtocolError):
                         await _conn()._recv(FakeWS([raw]))
 
-
-class KnownTypesAreDerivedTests(unittest.TestCase):
-    def test_the_known_set_comes_from_the_vendored_enum(self):
-        """Never a hardcoded list: re-vendoring must update it for free, or the skew
-        detector becomes the next thing to drift."""
-        self.assertEqual(C._KNOWN_FRAME_TYPES, frozenset(ft.value for ft in p.FrameType))
-        for expected in ("ack", "query", "action", "lock", "bye"):
-            self.assertIn(expected, C._KNOWN_FRAME_TYPES)
 
 
 class ClosesWith4400Tests(unittest.IsolatedAsyncioTestCase):
@@ -167,7 +163,24 @@ class TheFixtureIsStillFictionalTests(unittest.TestCase):
     def test_the_future_frame_type_is_not_one_the_protocol_knows(self):
         """If this ever fails, the fixture has become real and every skew test above is
         passing for the wrong reason. Assert the premise, not just the conclusion."""
-        self.assertNotIn(json.loads(FUTURE)["t"], C._KNOWN_FRAME_TYPES)
+        known = frozenset(ft.value for ft in p.FrameType)
+        self.assertNotIn(json.loads(FUTURE)["t"], known)
+
+
+class TheBranchIsStructuralTests(unittest.IsolatedAsyncioTestCase):
+    """protocol.py distinguishes the two cases; this client must not re-derive it.
+
+    Before, the branch compared the frame's 't' against a locally-built set -- a second
+    source of truth for a distinction the contract already makes, and one more thing that
+    could drift out of step with it.
+    """
+
+    async def test_unknown_type_raises_the_subclass_and_malformed_raises_the_parent(self):
+        with self.assertRaises(p.UnknownFrameType):
+            await _conn()._recv(FakeWS([FUTURE]))
+        with self.assertRaises(p.ProtocolError) as caught:
+            await _conn()._recv(FakeWS(['{"t": "ack"}']))  # known type, missing field
+        self.assertNotIsInstance(caught.exception, p.UnknownFrameType)
 
 
 if __name__ == "__main__":

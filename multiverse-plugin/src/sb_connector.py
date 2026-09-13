@@ -123,33 +123,6 @@ def _ssl_for(url: str) -> "ssl.SSLContext | None":
     return ssl.create_default_context(cafile=certifi.where())
 
 
-# Frame types this build can decode. Derived from the vendored enum rather than
-# written out, so re-vendoring protocol.py updates it and no list can drift.
-_KNOWN_FRAME_TYPES = frozenset(ft.value for ft in p.FrameType)
-
-
-def _frame_type_of(raw) -> str | None:  # noqa: ANN001
-    """The ``t`` discriminator of a frame we failed to decode, if it has a plain one.
-
-    Used only to tell "a type this build predates" from "a frame we cannot parse".
-    Returns None when the payload isn't an object or ``t`` isn't a string -- both are
-    genuine protocol errors and must keep raising.
-    """
-    if isinstance(raw, (bytes, bytearray)):
-        try:
-            raw = raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return None
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    t = data.get("t")
-    return t if isinstance(t, str) else None
-
-
 def _ensure_claude_retry_env() -> None:
     """Guarantee the daemon's forks inherit Multiverse's rate-limit retry tuning.
 
@@ -1244,15 +1217,18 @@ class SBConnector:
             raw = auth.open(self.channel, raw)
         try:
             return p.decode(raw)
-        except p.ProtocolError:
-            t = _frame_type_of(raw)
-            if t is not None and t not in _KNOWN_FRAME_TYPES:
-                log.error(
-                    "SecondBrain sent frame type %r, which this build predates -- "
-                    "re-vendor vendor/secondbrain/protocol.py from the SecondBrain repo. "
-                    "Until then this connection drops and retries on every such frame.",
-                    t,
-                )
+        except p.UnknownFrameType as exc:
+            # Structural, not a string match: protocol.py raises this subclass only for a
+            # well-formed frame whose 't' this build predates. A MALFORMED frame raises
+            # the parent and is deliberately not logged here -- the two want opposite
+            # responses, and sending someone to re-vendor over a corrupt frame points
+            # them at the wrong place entirely. exc already names the type.
+            log.error(
+                "SecondBrain sent a frame this build predates (%s) -- re-vendor "
+                "vendor/secondbrain/protocol.py from the SecondBrain repo. Until then "
+                "this connection closes 4400 and retries on every such frame.",
+                exc,
+            )
             raise
 
     # ---- §13.3 handshake: hello -> challenge -> auth -> auth_ok --------------------
