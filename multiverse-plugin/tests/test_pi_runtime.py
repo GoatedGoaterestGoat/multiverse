@@ -1030,6 +1030,106 @@ class ClaudeCallerIdentityTests(unittest.TestCase):
                     ("stale-env-name", "/stale/env/workspace"),
                 )
 
+    def test_only_a_real_mcp_tool_use_counts_as_calling_this_server(self) -> None:
+        """The ``mcp__`` prefix is what makes matching on the substring
+        "multiverse" safe, and it is not incidental. This workspace is the one
+        most likely to produce false positives — agents here discuss multiverse
+        constantly, read paths under Multiverse/, and quote each other's
+        inter-agent notes. A bare substring test over the row would match most
+        of the negatives below and hand the caller another agent's identity.
+        """
+        def tool_use(name: str, **inp: object) -> dict:
+            return {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "t", "name": name, "input": inp}
+                    ],
+                },
+            }
+
+        negatives = {
+            "assistant prose about multiverse": {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "the multiverse plugin does X"}
+                    ],
+                },
+            },
+            "Bash command naming multiverse": tool_use(
+                "Bash", command="grep -r multiverse src/"
+            ),
+            "Read of a path under Multiverse/": tool_use(
+                "Read", file_path="/Users/x/Documents/Multiverse/src/server.py"
+            ),
+            "tool_result echoing multiverse output": {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "t",
+                            "content": "multiverse-plugin/src/server.py",
+                        }
+                    ],
+                },
+            },
+            "user quoting an inter-agent note": {
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "content": "[Multiverse Inter-Agent] message from toolsmith",
+                },
+            },
+            "a DIFFERENT MCP server's tool": tool_use("mcp__ide__getDiagnostics"),
+            "not a dict": ["mcp__plugin_multiverse_multiverse__list_agents"],
+        }
+        for label, row in negatives.items():
+            with self.subTest(label):
+                self.assertFalse(server._row_calls_this_server(row))
+
+        positives = {
+            "real multiverse MCP tool_use": tool_use(
+                "mcp__plugin_multiverse_multiverse__message_agent", target_name="x"
+            ),
+            "attributionMcpServer field": {
+                "type": "assistant",
+                "attributionMcpServer": "plugin_multiverse_multiverse",
+                "message": {"role": "assistant", "content": []},
+            },
+        }
+        for label, row in positives.items():
+            with self.subTest(label):
+                self.assertTrue(server._row_calls_this_server(row))
+
+    def test_a_dormant_transcript_never_reaches_the_tail_check(self) -> None:
+        """A dormant agent whose last write was a multiverse tool call keeps
+        that row as its tail forever, so it would be a permanent candidate —
+        except the mtime window excludes it before the tail is ever read. The
+        window still does real work; it just no longer decides WHO."""
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            env = self._fixture(root, [("mine", "sid-mine")])
+            slug = root / "claude" / "projects" / "-slug"
+            dormant = slug / "dormant.jsonl"
+            dormant.write_text(json.dumps(self._mcp_row("sid-dormant")) + "\n")
+            now = time.time()
+            os.utime(slug / "mine.jsonl", (now, now))
+            # Well outside the freshness window.
+            os.utime(dormant, (now - 3600, now - 3600))
+            with patch.dict(os.environ, env, clear=False):
+                os.environ.pop("MULTIVERSE_RUNTIME", None)
+                # Resolves to the live caller, not ambiguous against the
+                # dormant transcript that also "claims" the call.
+                self.assertEqual(
+                    server._resolve_self_identity(),
+                    ("real-name", "/real/workspace"),
+                )
+
     def test_non_claude_callers_are_still_short_circuited(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             env = self._fixture(Path(raw), [("mine", "sid-mine")])
