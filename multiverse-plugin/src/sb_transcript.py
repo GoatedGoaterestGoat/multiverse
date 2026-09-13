@@ -644,6 +644,39 @@ def codex_turn_state(cwd: str, agent_name: str, turn_id: str) -> dict | None:
     return codex_transcript.turn_state(CODEX_HOME, thread_id, turn_id)
 
 
+def cursor_advances_marker(cwd: str, agent_name: str, cursor: dict) -> bool:
+    """Would committing ``cursor`` actually move the marker?
+
+    ``peek_partial_transcript`` deliberately refuses to anchor onto a turn that is still
+    in progress (a user prompt with no assistant leaves yet), because advancing into one
+    makes the next peek treat the whole turn as delivered and silently lose the agent's
+    response. The price is that such a peek returns text it will return again.
+
+    The EVENT path pays that price for free: SecondBrain dedupes on ``event_id``. A PULL
+    (SB asking for the transcript on demand) carries no event id, so SB would render the
+    same turns twice with nothing marking the repeat — and since a pull can land at any
+    moment, mid-turn is its common case, not an edge. This lets the caller say so.
+
+    Note what it does and does not promise. ``False`` means nothing finalized and every
+    line returned will come again. ``True`` means the cursor moved, NOT that nothing
+    repeats: with several new turns whose last is partial, the cursor advances past the
+    finalized ones while that tail still returns next time.
+
+    Runtime-agnostic by construction: it compares only the cursor's OWN keys against the
+    stored marker, and all three marker writers copy the cursor's position fields under
+    the same names. Nothing here interprets a cursor field, so a new runtime minting a
+    differently-shaped cursor keeps working.
+    """
+    if not isinstance(cursor, dict):
+        return False
+    marker = read_marker(cwd, agent_name)
+    if marker is None:
+        # Never initialized: the peek delivered from the start of history, so any commit
+        # is an advance.
+        return True
+    return any(marker.get(key) != value for key, value in cursor.items())
+
+
 def commit_marker(cwd: str, agent_name: str, cursor: dict) -> None:
     """Advance the delivery marker to ``cursor`` (from :func:`peek_partial_transcript`).
 

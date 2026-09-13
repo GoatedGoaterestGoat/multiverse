@@ -3108,7 +3108,12 @@ class SBConnector:
                     result = payload
                 else:
                     return await self._reject_query(ws, query, outcome, payload["message"])
-            else:  # get_transcript (recall path) — a later phase-2 step
+            else:
+                # Catch-all for any kind we don't serve yet (get_transcript, and
+                # peek_transcript until its dispatch lands). The MESSAGE interpolates
+                # kind_str rather than naming one, so SB is told which kind was
+                # refused instead of being told about whichever one this comment
+                # happened to mention.
                 return await self._reject_query(
                     ws, query, "not_implemented",
                     f"query {kind_str} not implemented yet",
