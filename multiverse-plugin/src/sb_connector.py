@@ -122,6 +122,33 @@ def _ssl_for(url: str) -> "ssl.SSLContext | None":
     return ssl.create_default_context(cafile=certifi.where())
 
 
+# Frame types this build can decode. Derived from the vendored enum rather than
+# written out, so re-vendoring protocol.py updates it and no list can drift.
+_KNOWN_FRAME_TYPES = frozenset(ft.value for ft in p.FrameType)
+
+
+def _frame_type_of(raw) -> str | None:  # noqa: ANN001
+    """The ``t`` discriminator of a frame we failed to decode, if it has a plain one.
+
+    Used only to tell "a type this build predates" from "a frame we cannot parse".
+    Returns None when the payload isn't an object or ``t`` isn't a string -- both are
+    genuine protocol errors and must keep raising.
+    """
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    t = data.get("t")
+    return t if isinstance(t, str) else None
+
+
 def _ensure_claude_retry_env() -> None:
     """Guarantee the daemon's forks inherit Multiverse's rate-limit retry tuning.
 
@@ -1172,10 +1199,45 @@ class SBConnector:
             await ws.send(text)
 
     async def _recv(self, ws) -> p.Frame:  # noqa: ANN001
+        """One decoded frame. A frame type this build predates is NAMED, then fatal.
+
+        SB and the connector ship independently, so meeting a newly-added frame is
+        routine. ``p.decode`` raises on an unknown ``t``; the connect loop catches it and
+        logs "connection lost", so the operator sees a reconnect loop with no cause --
+        indistinguishable from a flaky network, which is the real complaint. This names
+        it instead.
+
+        It stays FATAL deliberately. Skipping the frame and carrying on was the obvious
+        fix and is wrong: an unknown ``t`` is UNCLASSIFIABLE. A new ``kind`` on a known
+        frame still routes -- we know it is an event, and dropping one is a bounded local
+        loss -- but nothing can tell whether an unknown frame was advisory or carried
+        state its sender now believes we accepted. Ignoring it is a confident claim that
+        it did not matter, and is least safe exactly when it matters most. For SB's
+        transcript ack specifically, skipping would mean the marker never advances while
+        SB believes it did, and the fire-and-forget send means SB never learns.
+
+        Skew is prevented at the SENDER instead: ``hello.supports`` advertises feature
+        tokens, absent-or-empty meaning baseline -- which is what a connector predating
+        the field says by saying nothing -- so SB withholds a frame a peer cannot serve.
+        That protects already-deployed peers with no change on their side, which
+        leniency here structurally cannot do: lenient code only ever reaches a peer that
+        has already pulled, and that same pull teaches it the frame anyway.
+        """
         raw = await ws.recv()
         if self.channel is not None:
             raw = auth.open(self.channel, raw)
-        return p.decode(raw)
+        try:
+            return p.decode(raw)
+        except p.ProtocolError:
+            t = _frame_type_of(raw)
+            if t is not None and t not in _KNOWN_FRAME_TYPES:
+                log.error(
+                    "SecondBrain sent frame type %r, which this build predates -- "
+                    "re-vendor vendor/secondbrain/protocol.py from the SecondBrain repo. "
+                    "Until then this connection drops and retries on every such frame.",
+                    t,
+                )
+            raise
 
     # ---- §13.3 handshake: hello -> challenge -> auth -> auth_ok --------------------
 
