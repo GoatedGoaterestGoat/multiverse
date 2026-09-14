@@ -26,8 +26,9 @@ import shlex
 import shutil
 import signal
 import subprocess
+import threading
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -71,6 +72,8 @@ _PANE_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _PANE_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _CLAIM_DIR_NAME = "session_claims"
 _ENDING_MARKER_NAME = "ending"
+_TMUX_SESSION_SNAPSHOT = threading.local()
+_TMUX_SESSION_SNAPSHOT_UNSET = object()
 
 # Custom-title stamped on the throwaway transcripts our OWN compaction
 # machinery writes (vendor/compaction/priv_session.py::_metadata_row). The
@@ -772,17 +775,13 @@ def _pid_alive(pid: int) -> bool:
 
 def _proc_cmdline(pid: int) -> Optional[str]:
     try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
+        raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    except OSError:
         return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+    # Linux exposes argv as NUL-separated bytes. Matching the flattened
+    # command is sufficient here and avoids spawning one `ps` process per
+    # Codex session on every dashboard refresh.
+    return raw.replace(b"\0", b" ").decode(errors="replace").strip() or None
 
 
 def _runtime_pid(s: Session) -> Optional[int]:
@@ -1186,24 +1185,71 @@ def list_sessions() -> list[Session]:
     if not STATE_DIR.exists():
         return []
     out: list[Session] = []
-    for entry in sorted(STATE_DIR.iterdir()):
-        if not entry.is_dir():
-            continue
-        s = load_session(entry.name)
-        if s is not None:
-            _correct_local_liveness(s)
-            out.append(s)
+    with tmux_session_snapshot():
+        for entry in sorted(STATE_DIR.iterdir()):
+            if not entry.is_dir():
+                continue
+            s = load_session(entry.name)
+            if s is not None:
+                _correct_local_liveness(s)
+                out.append(s)
     out.sort(key=lambda s: s.created_at)
     return out
 
 
+def _read_tmux_session_names() -> Optional[frozenset[str]]:
+    """Read all local tmux session names with one subprocess."""
+    try:
+        result = subprocess.run(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode not in (0, 1):
+        return None
+    return frozenset(line.strip() for line in result.stdout.splitlines() if line.strip())
+
+
+@contextmanager
+def tmux_session_snapshot():
+    """Batch repeated liveness checks within one logical discovery pass.
+
+    The snapshot is thread-local and scoped, so destructive operations outside
+    a discovery pass still query tmux directly and never act on stale cache
+    data. Nested callers reuse the outer snapshot.
+    """
+    prior = getattr(_TMUX_SESSION_SNAPSHOT, "names", _TMUX_SESSION_SNAPSHOT_UNSET)
+    if prior is _TMUX_SESSION_SNAPSHOT_UNSET:
+        _TMUX_SESSION_SNAPSHOT.names = _read_tmux_session_names()
+    try:
+        yield
+    finally:
+        if prior is _TMUX_SESSION_SNAPSHOT_UNSET:
+            try:
+                del _TMUX_SESSION_SNAPSHOT.names
+            except AttributeError:
+                pass
+        else:
+            _TMUX_SESSION_SNAPSHOT.names = prior
+
+
 def tmux_session_exists(name: str) -> bool:
-    r = subprocess.run(
-        ["tmux", "has-session", "-t", name],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return r.returncode == 0
+    names = getattr(_TMUX_SESSION_SNAPSHOT, "names", _TMUX_SESSION_SNAPSHOT_UNSET)
+    if names is not _TMUX_SESSION_SNAPSHOT_UNSET and names is not None:
+        return name in names
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 # Ranking for dashboard sort: lower = higher in the table.
@@ -1917,7 +1963,20 @@ def remove_retiring_session_record(session: Session) -> None:
 def recover_abandoned_handoffs(cwd: str) -> None:
     """Release reservations left by a dead local dashboard, never another host."""
     cwd = str(Path(cwd).expanduser().resolve())
-    for session in list_sessions():
+    try:
+        directories = list(STATE_DIR.iterdir())
+    except FileNotFoundError:
+        return
+    # Do not call list_sessions() here. Startup invokes this immediately before
+    # the normal dashboard discovery pass, and list_sessions performs runtime
+    # liveness checks. Reading the small handoff records directly avoids doing
+    # that entire scan twice before the first rows can be displayed.
+    for directory in directories:
+        if not directory.is_dir():
+            continue
+        session = load_session(directory.name)
+        if session is None:
+            continue
         if (session.cwd != cwd or session.status != "retiring"
                 or session.host != current_host()):
             continue

@@ -49,6 +49,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -95,6 +96,13 @@ _WORKSPACE_ASK_TIMEOUT_S = 7 * 60 * 60  # 25200s = 7 hours
 #: enough not to flood the API with N simultaneous requests all vying for the same
 #: rate-limit bucket.
 _WORKSPACE_MAX_PARALLEL = 5
+
+# Turn-keyed hook signals normally materialize in the runtime transcript within
+# seconds.  Keep a generous grace period so a slow FUSE append or short daemon
+# outage doesn't lose an event, but stop retrying forever once the named agent
+# has been durably ended or retired.
+_TERMINAL_SIGNAL_GRACE_S = 60 * 60
+_PENDING_TOOL_PRUNE_INTERVAL_S = 60 * 60
 
 
 def _supports_secondbrain_runtime(runtime: str) -> bool:
@@ -928,6 +936,7 @@ class OutboundBuffer:
         self, *, path: Path | None = None, start_seq: int = 0, on_seq=None,
         buffer_max: int = 50_000,
     ) -> None:
+        self._lock = threading.RLock()
         self._path = path
         self._events: list[p.Event] = self._load()
         self._seq = itertools.count(start_seq + 1)  # continue from the durable high-water
@@ -954,32 +963,41 @@ class OutboundBuffer:
             log.debug("outbox persist failed", exc_info=True)
 
     def next_seq(self) -> int:
-        s = next(self._seq)
-        if self._on_seq is not None:
-            self._on_seq(s)  # durable before the event goes on the wire (§8.1)
-        return s
+        with self._lock:
+            s = next(self._seq)
+            if self._on_seq is not None:
+                self._on_seq(s)  # durable before the event goes on the wire (§8.1)
+            return s
 
     def append(self, event: p.Event) -> None:
-        self._events.append(event)
-        self._persist()
-        if len(self._events) > self._buffer_max:
-            log.warning("outbound buffer at cap (%s) — applying backpressure", self._buffer_max)
+        with self._lock:
+            self._events.append(event)
+            self._persist()
+            if len(self._events) > self._buffer_max:
+                log.warning(
+                    "outbound buffer at cap (%s) — applying backpressure",
+                    self._buffer_max,
+                )
 
     def trim_through(self, ack_seq: int) -> None:
-        before = len(self._events)
-        self._events = [e for e in self._events if e.seq > ack_seq]
-        if len(self._events) != before:
-            self._persist()
+        with self._lock:
+            before = len(self._events)
+            self._events = [e for e in self._events if e.seq > ack_seq]
+            if len(self._events) != before:
+                self._persist()
 
     def replay_from(self, from_seq: int) -> list[p.Event]:
-        return [e for e in self._events if e.seq > from_seq]
+        with self._lock:
+            return [e for e in self._events if e.seq > from_seq]
 
     def pending_after(self, seq: int) -> list[p.Event]:
         """Buffered events with ``seq`` greater than ``seq`` (the unsent tail)."""
-        return [e for e in self._events if e.seq > seq]
+        with self._lock:
+            return [e for e in self._events if e.seq > seq]
 
     def has_after(self, seq: int) -> bool:
-        return any(e.seq > seq for e in self._events)
+        with self._lock:
+            return any(e.seq > seq for e in self._events)
 
 
 class ActionDedup:
@@ -1081,12 +1099,17 @@ class SBConnector:
         # Producer <-> sender coordination: the watcher enqueues events and sets
         # _new_event; the per-connection sender flushes everything past _sent_through.
         self._new_event = asyncio.Event()
+        self._event_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
+        self._last_pending_tool_prune = 0.0
         self._sent_through = 0  # highest seq sent on the current connection
         self._poll_interval = 1.0  # producer poll cadence (s)
 
     def _persist_seq(self, seq: int) -> None:
-        self._state["seq_hw"] = seq
-        save_conn_state(self._state)
+        with self._state_lock:
+            self._state["seq_hw"] = seq
+            save_conn_state(self._state)
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -1293,12 +1316,13 @@ class SBConnector:
                 # retry of the SAME one. It is persisted BEFORE the event is built, so
                 # a crash between emitting and recording `seeded` replays the identical
                 # id rather than inventing a second onboarding.
-                epoch = self._seed_epochs.get(workspace_id)
-                if not epoch:
-                    epoch = uuid.uuid4().hex[:8]
-                    self._seed_epochs[workspace_id] = epoch
-                    self._state["seed_epochs"] = dict(self._seed_epochs)
-                    save_conn_state(self._state)
+                with self._state_lock:
+                    epoch = self._seed_epochs.get(workspace_id)
+                    if not epoch:
+                        epoch = uuid.uuid4().hex[:8]
+                        self._seed_epochs[workspace_id] = epoch
+                        self._state["seed_epochs"] = dict(self._seed_epochs)
+                        save_conn_state(self._state)
 
                 self._init_markers_for_workspace(cwd)
                 summary = await self._gather_workspace_summary(cwd)
@@ -1309,12 +1333,14 @@ class SBConnector:
                     payload=sb_events.workspace_connected_event_fields(agents_summary=summary),
                     event_id=f"wsconn-first:{workspace_id}:{epoch}",
                 )
-                self._seeded.add(workspace_id)
-                self._marker_inited.add(workspace_id)
+                with self._state_lock:
+                    self._seeded.add(workspace_id)
+                    self._marker_inited.add(workspace_id)
 
-            self._state["seeded"] = sorted(self._seeded)
-            self._state["seed_epochs"] = dict(self._seed_epochs)
-            save_conn_state(self._state)
+            with self._state_lock:
+                self._state["seeded"] = sorted(self._seeded)
+                self._state["seed_epochs"] = dict(self._seed_epochs)
+                save_conn_state(self._state)
 
     def _init_markers_for_workspace(self, cwd: str) -> None:
         """Initialize sb_transcript markers to the latest jsonl entry for every named
@@ -1495,6 +1521,50 @@ class SBConnector:
 
     # ---- producer: watch the Multiverse substrate, enqueue events ------------------
 
+    def _producer_step(self) -> None:
+        """Run one blocking filesystem/transcript scan.
+
+        This work can traverse network-mounted state and parse large transcripts.
+        It must not run on the asyncio socket loop: one slow FUSE operation would
+        otherwise prevent the WebSocket opening handshake, pings, and inbound
+        frames from making progress. ``make_event`` and ``OutboundBuffer`` provide
+        the small amount of synchronization needed between this worker thread and
+        the socket sender.
+        """
+        from . import sb_notify
+
+        self._init_new_markers()
+        self._consume_pending()
+        self._consume_response_signals()
+        self._consume_user_prompt_signals()
+        self._consume_question_signals()
+        self._consume_answered_signals()
+        self._consume_permission_request_signals()
+        self._consume_permission_decision_signals()
+        now = time.monotonic()
+        if now - self._last_pending_tool_prune >= _PENDING_TOOL_PRUNE_INTERVAL_S:
+            self._last_pending_tool_prune = now
+            removed = sb_notify.prune_stale_pending_tools()
+            if removed:
+                log.info("pruned %d abandoned pending-tool records", removed)
+
+    @staticmethod
+    def _stale_terminal_signal(sig: dict) -> bool:
+        """Whether an old turn signal can no longer materialize.
+
+        A hook can race the runtime's JSONL append, so a missing turn isn't by
+        itself grounds for deletion.  Once the signal is at least an hour old
+        and its exact named agent is durably ended/retired, however, retrying
+        only re-parses an immutable transcript on every producer cycle.
+        """
+        timestamp = _parse_iso(str(sig.get("ts") or ""))
+        if timestamp is None or time.time() - timestamp < _TERMINAL_SIGNAL_GRACE_S:
+            return False
+        from .sessions import find_agent_by_name
+
+        row = find_agent_by_name(sig.get("cwd", ""), sig.get("agent", ""))
+        return row is not None and row.status in ("ended", "retired")
+
     async def run_producer(self) -> None:
         """Relay events into the durable buffer. Runs continuously across reconnects
         (independent of the socket): events accumulate in the durable outbox while
@@ -1505,16 +1575,10 @@ class SBConnector:
         and dropped into a durable pending queue — the connector does not poll or race the
         file substrate. This loop just drains that queue onto the wire. The "connected
         before" gate was applied at record time, so nothing here needs re-gating."""
+        self._event_loop = asyncio.get_running_loop()
         while not self._stop.is_set():
             try:
-                self._init_new_markers()            # transcript markers for newly-seeded workspaces
-                self._consume_pending()              # spawn events (fully composed at the choke-point)
-                self._consume_response_signals()     # agent.response (transcript generated here)
-                self._consume_user_prompt_signals()   # user.prompt (transcript = context + text + overview)
-                self._consume_question_signals()     # agent.question (transcript = "why" context)
-                self._consume_answered_signals()     # user.answered (no transcript — agent was blocked)
-                self._consume_permission_request_signals()  # agent.permission_request (transcript = "why")
-                self._consume_permission_decision_signals() # user.permission_decision (no transcript)
+                await asyncio.to_thread(self._producer_step)
             except Exception:  # noqa: BLE001 - a step error must not kill the producer
                 log.debug("producer step failed", exc_info=True)
             try:
@@ -1529,7 +1593,8 @@ class SBConnector:
         off the connect path (in the producer loop); idempotent per workspace + per agent.
         A NEW agent created later has no marker → its first transcript covers its whole
         (short) history, which is correct."""
-        pending = self._seeded - self._marker_inited
+        with self._state_lock:
+            pending = self._seeded - self._marker_inited
         if not pending:
             return
         from . import sb_transcript
@@ -1544,7 +1609,8 @@ class SBConnector:
                     sb_transcript.initialize_marker(cwd, row.name)
             except Exception:  # noqa: BLE001
                 log.debug("marker init failed for %s", cwd, exc_info=True)
-            self._marker_inited.add(workspace_id)
+            with self._state_lock:
+                self._marker_inited.add(workspace_id)
 
     def _consume_response_signals(self) -> None:
         """Turn each fast turn-end signal (from the Stop hook) into an ``agent.response``
@@ -1572,6 +1638,15 @@ class SBConnector:
             agent = sig.get("agent", "")
             turn_id = sig.get("turn_id")
             if isinstance(turn_id, str) and turn_id:
+                if self._stale_terminal_signal(sig):
+                    log.info(
+                        "agent.response: %s turn %s belongs to an old terminal "
+                        "agent; dropping stale signal",
+                        agent,
+                        turn_id,
+                    )
+                    sb_notify.delete_response_signal(sig)
+                    continue
                 if (cwd, agent, turn_id) in pending_prompt_turns:
                     log.debug(
                         "agent.response: %s turn %s still has a prompt signal; "
@@ -1691,6 +1766,15 @@ class SBConnector:
             text = sig.get("text", "")
             turn_id = sig.get("turn_id")
             if isinstance(turn_id, str) and turn_id:
+                if self._stale_terminal_signal(sig):
+                    log.info(
+                        "user.prompt: %s turn %s belongs to an old terminal "
+                        "agent; dropping stale signal",
+                        agent,
+                        turn_id,
+                    )
+                    sb_notify.delete_user_prompt_signal(sig)
+                    continue
                 turn_state = sb_transcript.codex_turn_state(cwd, agent, turn_id)
                 if turn_state is None or (
                     not turn_state.get("has_user_input")
@@ -1822,15 +1906,47 @@ class SBConnector:
             tool_name = sig.get("tool_name", "")
             tool_input = sig.get("tool_input")
             turn_id = sig.get("codex_turn_id")
+            if turn_id and self._stale_terminal_signal(sig):
+                sb_notify.delete_permission_request_signal(sig)
+                sb_notify.cleanup_pending_tool(tool_use_id)
+                log.info(
+                    "agent.permission_request: %s turn %s belongs to an old "
+                    "terminal agent; dropping stale signal",
+                    agent,
+                    turn_id,
+                )
+                continue
+            turn_state = (
+                sb_transcript.codex_turn_state(cwd, agent, turn_id)
+                if turn_id
+                else None
+            )
             if sig.get("await_user_confirmation") and not sb_notify.had_permission_prompt(
                 tool_use_id
             ):
+                # The native turn is already over, so this prompt can never
+                # become visible. Avoid the much more expensive agent/tmux
+                # discovery and discard the stale candidate immediately.
+                if turn_state and turn_state.get("status") in (
+                    "completed",
+                    "aborted",
+                ):
+                    sb_notify.delete_permission_request_signal(sig)
+                    sb_notify.cleanup_pending_tool(tool_use_id)
+                    log.info(
+                        "agent.permission_request: %s turn %s already %s; "
+                        "discarding stale unconfirmed candidate",
+                        agent,
+                        turn_id,
+                        turn_state.get("status"),
+                    )
+                    continue
                 if not self._codex_user_permission_prompt_is_visible(cwd, agent):
                     continue
                 # Marker first: if the local user answers between this pane capture and
                 # event composition, PostToolUse/Stop still closes the same pair.
                 sb_notify.mark_permission_requested(tool_use_id)
-            if turn_id and sb_transcript.codex_turn_state(cwd, agent, turn_id) is None:
+            if turn_id and turn_state is None:
                 # Codex can invoke PermissionRequest before its rollout append becomes
                 # visible. Keep the durable signal for the next producer pass so the
                 # existing "why" transcript contract is not silently emptied.
@@ -3262,19 +3378,30 @@ class SBConnector:
         event_id: str | None = None,
     ) -> p.Event:
         """Build an outbound event with the next durable per-device ``seq`` (§8.1)."""
-        seq = self.buffer.next_seq()
-        event = p.Event(
-            seq=seq,
-            event_id=event_id or f"evt_{seq:08d}",  # TODO(binding): source-citable ids
-            ts=_now_iso(),
-            workspace_id=workspace_id,
-            workspace_label=workspace_label,
-            kind=kind,
-            agent=agent,
-            payload=payload,
-        )
-        self.buffer.append(event)  # durable
-        self._new_event.set()  # wake the sender (no-op if disconnected)
+        event_lock = getattr(self, "_event_lock", None)
+        if event_lock is None:
+            event_lock = self._event_lock = threading.Lock()
+        with event_lock:
+            seq = self.buffer.next_seq()
+            event = p.Event(
+                seq=seq,
+                event_id=event_id or f"evt_{seq:08d}",  # TODO(binding): source-citable ids
+                ts=_now_iso(),
+                workspace_id=workspace_id,
+                workspace_label=workspace_label,
+                kind=kind,
+                agent=agent,
+                payload=payload,
+            )
+            self.buffer.append(event)  # durable
+        loop = getattr(self, "_event_loop", None)
+        if loop is not None and loop.is_running():
+            try:
+                loop.call_soon_threadsafe(self._new_event.set)
+            except RuntimeError:
+                pass  # loop closed while a final producer thread was unwinding
+        else:
+            self._new_event.set()  # tests / pre-loop callers
         return event
 
 

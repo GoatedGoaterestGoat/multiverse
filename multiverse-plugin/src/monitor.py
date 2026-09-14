@@ -111,6 +111,7 @@ from .sessions import (
     retiring_agent_message,
     strip_fold_suffix,
     tmux_session_exists,
+    tmux_session_snapshot,
     wrapped_runtime_session_ids,
 )
 from .spawn_requests import (
@@ -3828,8 +3829,9 @@ class MonitorApp(App):
                 except OSError as exc:
                     error = str(exc)
                 self._publish_from_worker(self._finish_startup_recovery, error)
-            all_sessions = list_sessions()
-            self._vouch_for_visible(all_sessions)
+            with tmux_session_snapshot():
+                all_sessions = list_sessions()
+                self._vouch_for_visible(all_sessions)
             scoped = [s for s in all_sessions if s.cwd == self.monitor_cwd]
             entries = build_dashboard_rows(scoped, cwd=self.monitor_cwd, hide_uuids=hide)
             try:
