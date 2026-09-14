@@ -1924,5 +1924,70 @@ class CodexRunnerTests(unittest.TestCase):
             self.assertEqual(json.loads(status.read_text())["status"], "ended")
 
 
+class ProcessCmdlineTests(unittest.TestCase):
+    """Exercise the REAL argv reader on whatever platform runs the suite.
+
+    Every other caller of ``_proc_cmdline`` is tested against a patch, so a
+    reader that returns None on this platform stays invisible: the Codex
+    ownership check silently answers "not mine" for every live process, and
+    ``_correct_local_liveness`` buries sessions that are still running. That
+    is exactly what a ``/proc``-only reader did on macOS.
+    """
+
+    def test_reads_this_processs_own_argv(self) -> None:
+        command = sessions._proc_cmdline(os.getpid())
+        self.assertIsNotNone(
+            command, "argv is unreadable on this platform; liveness checks are blind"
+        )
+        self.assertIn("test_runtime_sessions", command)
+
+    def test_a_dead_pid_has_no_argv(self) -> None:
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        sessions._CMDLINE_CACHE.pop(proc.pid, None)
+        self.assertIsNone(sessions._proc_cmdline(proc.pid))
+
+    def test_a_live_codex_process_is_recognised_as_owned(self) -> None:
+        """The predicate that decides whether a Codex row may be buried."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(sessions, "STATE_DIR", root / "sessions"):
+                d = sessions.STATE_DIR / "sid1234"
+                d.mkdir(parents=True)
+                (d / "meta.json").write_text(
+                    json.dumps(
+                        {
+                            "cwd": str(root),
+                            "created_at": time.time(),
+                            "runtime": "codex",
+                            "host": sessions.current_host(),
+                            "name": "probe",
+                        }
+                    )
+                )
+                s = sessions.load_session("sid1234")
+                assert s is not None
+                marker = f'MULTIVERSE_SESSION_ID="{s.id}"'
+                proc = subprocess.Popen(
+                    [sys.executable, "-c", "import time; time.sleep(30)", marker],
+                    env=_isolated_process_env(),
+                )
+                try:
+                    sessions._CMDLINE_CACHE.pop(proc.pid, None)
+                    self.assertTrue(
+                        sessions._codex_runtime_pid_matches(s, proc.pid),
+                        "a live process carrying this session's ID reads as unowned",
+                    )
+                    other = sessions.load_session("sid1234")
+                    assert other is not None
+                    other.id = "different"
+                    self.assertFalse(
+                        sessions._codex_runtime_pid_matches(other, proc.pid)
+                    )
+                finally:
+                    proc.kill()
+                    proc.wait()
+
+
 if __name__ == "__main__":
     unittest.main()

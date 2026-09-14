@@ -70,6 +70,7 @@ _CODEX_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _CODEX_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
 _PANE_RUNTIME_TERM_TIMEOUT_SECONDS = 2.0
 _PANE_RUNTIME_KILL_TIMEOUT_SECONDS = 1.0
+_PS_CMDLINE_TIMEOUT_SECONDS = 5.0
 _CLAIM_DIR_NAME = "session_claims"
 _ENDING_MARKER_NAME = "ending"
 _TMUX_SESSION_SNAPSHOT = threading.local()
@@ -773,7 +774,49 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
+#: ``/proc`` is Linux-only. Probed once: whether it exists cannot change
+#: while the process runs, and the fallback is the difference between a
+#: working liveness check and none at all.
+_HAS_PROCFS = Path("/proc").is_dir()
+
+#: ``ps`` costs a fork, so its answer is reused briefly. A cmdline never
+#: changes, so the only staleness this admits is a PID recycled within the
+#: window still looking like its previous owner — bounded, self-correcting
+#: on the next refresh, and far cheaper than one fork per Codex session per
+#: dashboard tick.
+_CMDLINE_TTL_SECONDS = 2.0
+_CMDLINE_CACHE: dict[int, tuple[float, Optional[str]]] = {}
+
+
+def _ps_cmdline(pid: int) -> Optional[str]:
+    """Read argv via ``ps`` where ``/proc`` does not exist (macOS, BSD)."""
+    now = time.monotonic()
+    cached = _CMDLINE_CACHE.get(pid)
+    if cached is not None and now - cached[0] < _CMDLINE_TTL_SECONDS:
+        return cached[1]
+    command: Optional[str] = None
+    try:
+        # -ww defeats the width truncation that would otherwise cut the
+        # argv long before the MCP env overrides carrying the session ID.
+        proc = subprocess.run(
+            ["ps", "-ww", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=_PS_CMDLINE_TIMEOUT_SECONDS,
+        )
+        if proc.returncode == 0:
+            command = proc.stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        command = None
+    if len(_CMDLINE_CACHE) > 256:
+        _CMDLINE_CACHE.clear()
+    _CMDLINE_CACHE[pid] = (now, command)
+    return command
+
+
 def _proc_cmdline(pid: int) -> Optional[str]:
+    if not _HAS_PROCFS:
+        return _ps_cmdline(pid)
     try:
         raw = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
