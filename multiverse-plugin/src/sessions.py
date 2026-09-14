@@ -333,6 +333,21 @@ def _read_codex_session_metadata(path: Path) -> dict:
                         value = payload.get("id")
                         if isinstance(value, str):
                             session_id = value
+                        # A fork records its parent here, on the rollout's
+                        # first line. The embedded-session_meta scan below is
+                        # the only other lineage signal, and it is unreliable:
+                        # a fork carries history at the top, so the early
+                        # break fires before any embedded ancestor row is
+                        # reached. One parent pointer is enough — the caller
+                        # walks the chain transitively.
+                        parent = payload.get("forked_from_id")
+                        if (
+                            isinstance(parent, str)
+                            and parent
+                            and parent != session_id
+                            and parent not in ancestor_ids
+                        ):
+                            ancestor_ids.append(parent)
                     else:
                         value = payload.get("id")
                         if (

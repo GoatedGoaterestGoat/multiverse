@@ -402,6 +402,91 @@ class RuntimeMetadataTests(unittest.TestCase):
         ):
             return sessions.build_dashboard_rows(live, cwd)
 
+    def _codex_fork_rollout(
+        self, root: Path, thread_id: str, cwd: str, prompt: str, forked_from: str
+    ) -> Path:
+        """A fork shaped the way Codex actually writes one.
+
+        The parent is named once, in the first ``session_meta``, and the
+        inherited history follows immediately — so the first user message
+        arrives long before any embedded ancestor metadata would. A helper
+        that front-loads ancestor rows (``_codex_rollout``) cannot reproduce
+        this, which is why lineage loss stayed invisible here.
+        """
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"rollout-2026-01-01T00-00-00-{thread_id}.jsonl"
+        rows = [
+            {
+                "type": "session_meta",
+                "payload": {
+                    "id": thread_id,
+                    "cwd": cwd,
+                    "forked_from_id": forked_from,
+                },
+            },
+            {
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": prompt},
+            },
+        ]
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return path
+
+    def test_a_fork_names_its_parent_in_its_first_row(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            path = self._codex_fork_rollout(
+                home / "sessions", "child", ws, "Carried over", "parent"
+            )
+            sessions._CODEX_METADATA_CACHE.clear()
+            meta = sessions._read_codex_session_metadata(path)
+            self.assertEqual(meta["id"], "child")
+            self.assertEqual(
+                list(meta["ancestor_ids"]),
+                ["parent"],
+                "the parent pointer on the first row was dropped",
+            )
+
+    def test_an_archived_fork_chain_collapses_to_one_row(self) -> None:
+        """A retired agent several forks deep must not resurface its root."""
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw)
+            ws = str(home.resolve())
+            # The original conversation, still live and still named.
+            self._codex_rollout(home / "sessions", "root", ws, "Original work")
+            # Each fork names only its immediate parent, and each is archived.
+            self._codex_fork_rollout(
+                home / "archived_sessions", "mid", ws, "Original work", "root"
+            )
+            self._codex_fork_rollout(
+                home / "archived_sessions", "tip", ws, "Original work", "mid"
+            )
+            self._codex_index(
+                home,
+                {"root": "agent", "mid": "agent", "tip": "agent"},
+            )
+            live = [
+                sessions.Session(
+                    id="sid1",
+                    cwd=ws,
+                    created_at=time.time(),
+                    runtime=sessions.RUNTIME_CODEX,
+                    name="agent",
+                    resumed_from="tip",
+                    codex_session_id="tip",
+                    status="retired",
+                )
+            ]
+            sessions._CODEX_METADATA_CACHE.clear()
+            sessions._CODEX_DISCOVERY_CACHE.clear()
+            rows = [r for r in self._dashboard(home, live, ws) if r.name == "agent"]
+            self.assertEqual(
+                [(r.status, r.session_id) for r in rows],
+                [("retired", "tip")],
+                "the root resurfaced as a duplicate dormant row",
+            )
+
     def test_codex_discovery_reads_archived_threads_but_hides_them(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             home = Path(raw)
