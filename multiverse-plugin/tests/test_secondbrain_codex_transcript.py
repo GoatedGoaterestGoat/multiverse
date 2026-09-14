@@ -179,10 +179,12 @@ class CodexRolloutTranscriptTests(unittest.TestCase):
         assert second is not None
         second_text, _ = second
         self.assertNotIn("Second prompt", second_text)
+        # Arguments render COMPLETE (the whole input object), not as a single
+        # cherry-picked field -- `full` is the verbatim record view_full serves.
         self.assertEqual(
             second_text,
             "[turn 2026-07-19 00:02]\n"
-            "[tool:functions.exec] git status --short\n"
+            '[tool:functions.exec] {"command": "git status --short"}\n'
             "[assistant] Second answer",
         )
 
@@ -633,7 +635,7 @@ class CodexRolloutTranscriptTests(unittest.TestCase):
         )
         assert peeked is not None
         self.assertIn("[user] Visible prompt", peeked[0])
-        self.assertIn("[tool:exec] git status", peeked[0])
+        self.assertIn('[tool:exec] {"command": "git status"}', peeked[0])
         self.assertIn("[assistant] Visible answer", peeked[0])
         self.assertNotIn("HIDDEN", peeked[0])
 

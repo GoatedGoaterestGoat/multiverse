@@ -75,12 +75,6 @@ if _VENDOR not in sys.path:
     sys.path.insert(0, _VENDOR)
 
 
-#: Max length of a tool call's rendered arguments before truncation. Tool *results*
-#: are dropped entirely (per spec), but a call's args can still be large (e.g. a Write
-#: payload), so we cap them to keep the transcript compact.
-ARG_TRUNC = 100
-
-
 # ---------------------------------------------------------------------------
 # Marker storage — one JSON file per (cwd, agent) under the connector state dir
 # ---------------------------------------------------------------------------
@@ -349,20 +343,36 @@ def _fmt_ts(ts: str | None) -> str:
         return ts
 
 
-def _short_args(inp) -> str:
-    """One-line rendering of a tool's input, truncated to ``ARG_TRUNC``."""
+def _render_args(inp) -> str:
+    """One-line rendering of a tool's input, COMPLETE -- nothing dropped or clipped.
+
+    This feeds ``full``, the verbatim record SecondBrain's ``view_full`` serves.
+    Anything lost here is lost permanently: the bytes never reach SB, so nothing on
+    that side can recover them. Summary-grade abbreviation belongs in ``summary``
+    (RESP_SUMMARY_TRUNC, SPAWN_PROMPT_TRUNC), which exists for exactly that.
+
+    This abbreviated twice, and the second was the larger loss:
+
+      * clipped to 100 chars with an ellipsis -- the reported defect. Measured on a
+        real cached event: all 8 tool lines clipped, 0 prose lines, which is what
+        made it look like a mid-stream cut-off rather than a renderer choice.
+      * rendered only the FIRST matching "interesting" key and dropped every other
+        one. An Edit rendered as its file_path alone, old_string/new_string gone; a
+        Write as its path, the entire content gone. Unbounded in what it discarded
+        and silent about it -- unlike the clip, which at least left an ellipsis.
+
+    Whitespace is still collapsed, deliberately rather than by oversight: the
+    rendering is line-oriented ("[tool:X] ...", "[assistant] ..."), and
+    sb_events._last_assistant_line scans for a "[assistant] " line prefix. A raw
+    newline inside a tool argument would break the one-line-per-leaf shape AND let
+    argument text impersonate a leaf marker. Collapsing drops no bytes; only runs of
+    whitespace change length.
+    """
     if isinstance(inp, dict):
-        for key in ("command", "file_path", "path", "url", "query", "pattern", "prompt"):
-            v = inp.get(key)
-            if isinstance(v, str) and v:
-                s = v
-                break
-        else:
-            s = json.dumps(inp, ensure_ascii=False)
+        s = json.dumps(inp, ensure_ascii=False, sort_keys=True)
     else:
         s = str(inp)
-    s = " ".join(s.split())  # collapse whitespace so it stays one line
-    return s if len(s) <= ARG_TRUNC else s[: ARG_TRUNC - 1] + "…"
+    return " ".join(s.split())
 
 
 def _render_leaf(leaf, error_tool_ids: set[str]) -> str | None:
@@ -386,13 +396,13 @@ def _render_leaf(leaf, error_tool_ids: set[str]) -> str | None:
         return f"[user] <{len(imgs)} image(s)>" if imgs else None
     if kind == "tool_use":
         name = leaf.content.get("name", "?")
-        args = _short_args(leaf.content.get("input", {}))
+        args = _render_args(leaf.content.get("input", {}))
         err = " (error)" if leaf.content.get("tool_use_id") in error_tool_ids else ""
         return f"[tool:{name}] {args}{err}".rstrip()
     if kind == "tool_exchange":
         # Auto-merged use+result (only appears if preprocessing ran); result omitted.
         name = leaf.content.get("name", "?")
-        args = _short_args(leaf.content.get("input", {}))
+        args = _render_args(leaf.content.get("input", {}))
         err = " (error)" if leaf.content.get("is_error") else ""
         return f"[tool:{name}] {args}{err}".rstrip()
     if kind == "tool_result":

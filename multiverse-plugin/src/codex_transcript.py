@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 
-ARG_TRUNC = 100
 _WAKE_PROMPT = (
     "Please check your inbox — one or more new inter-agent messages have arrived. "
     "Use the multiverse check_inbox tool to read and clear them, then respond or act "
@@ -624,7 +623,18 @@ def _fmt_ts(ts: str | None) -> str:
         return ts
 
 
-def _short_args(value: Any) -> str:
+def _render_args(value: Any) -> str:
+    """Complete one-line rendering of a tool call's arguments -- nothing dropped.
+
+    Codex counterpart of sb_transcript._render_args, and the reasoning is the same:
+    this feeds ``full``, the verbatim record view_full serves, so whatever is lost
+    here cannot be recovered on SB's side. See that docstring for why abbreviating
+    belongs in ``summary`` instead, and why whitespace collapse stays.
+
+    The defect was reported against the Claude renderer; this one and the pi one had
+    it identically, so fixing only the reported path would have left Codex and pi
+    agents still truncated while looking fixed.
+    """
     if isinstance(value, str):
         try:
             decoded = json.loads(value)
@@ -632,27 +642,12 @@ def _short_args(value: Any) -> str:
             decoded = value
         value = decoded
     if isinstance(value, dict):
-        for key in (
-            "command",
-            "file_path",
-            "path",
-            "url",
-            "query",
-            "pattern",
-            "prompt",
-        ):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate:
-                text = candidate
-                break
-        else:
-            text = json.dumps(value, ensure_ascii=False)
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     elif value is None:
         text = ""
     else:
         text = str(value)
-    text = " ".join(text.split())
-    return text if len(text) <= ARG_TRUNC else text[: ARG_TRUNC - 1] + "…"
+    return " ".join(text.split())
 
 
 def _render_suffix(
@@ -682,7 +677,7 @@ def _render_suffix(
             elif item.kind == "assistant":
                 lines.append(f"[assistant] {item.text.strip()}")
             elif item.kind == "tool":
-                args = _short_args(item.arguments)
+                args = _render_args(item.arguments)
                 error = " (error)" if item.error else ""
                 lines.append(f"[tool:{item.name}] {args}{error}".rstrip())
         if len(lines) > 1:

@@ -161,7 +161,8 @@ class PiSecondBrainTranscriptTests(unittest.TestCase):
         self.assertIsNotNone(second)
         text, cursor = second or ("", {})
         self.assertIn("[assistant] Implemented.", text)
-        self.assertIn("[tool:bash] python -m unittest", text)
+        # Complete arguments, not a cherry-picked field: `full` is verbatim.
+        self.assertIn('[tool:bash] {"command": "python -m unittest"}', text)
         self.assertNotIn("large output", text)
         sb_transcript.commit_marker(self.cwd, self.agent, cursor)
         self.assertEqual(

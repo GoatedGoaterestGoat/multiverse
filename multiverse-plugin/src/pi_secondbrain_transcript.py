@@ -13,8 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-_ARG_TRUNC = 240
-
 
 #: Parsed-transcript cache, keyed by path. pi's JSONL is append-only, so a poll
 #: that finds no new bytes needs no work at all, and one that finds new bytes
@@ -144,19 +142,19 @@ def _content_text(content: Any) -> str:
     return "\n".join(part for part in parts if part)
 
 
-def _short_args(value: Any) -> str:
+def _render_args(value: Any) -> str:
+    """Complete one-line rendering of a tool call's arguments -- nothing dropped.
+
+    pi counterpart of sb_transcript._render_args; see that docstring for the full
+    reasoning. Short version: this feeds ``full``, the verbatim record view_full
+    serves, so anything lost here is unrecoverable on SB's side, and abbreviation
+    belongs in ``summary``. Whitespace collapse stays to keep one line per entry.
+    """
     if isinstance(value, dict):
-        for key in ("command", "path", "query", "pattern", "prompt", "target_name"):
-            candidate = value.get(key)
-            if isinstance(candidate, str) and candidate:
-                text = candidate
-                break
-        else:
-            text = json.dumps(value, ensure_ascii=False)
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     else:
         text = str(value)
-    text = " ".join(text.split())
-    return text if len(text) <= _ARG_TRUNC else text[: _ARG_TRUNC - 1] + "…"
+    return " ".join(text.split())
 
 
 def _fmt_ts(raw: Any) -> str:
@@ -195,7 +193,7 @@ def _render_entry(row: dict) -> list[str]:
                 if not isinstance(block, dict) or block.get("type") != "toolCall":
                     continue
                 name = str(block.get("name") or "?")
-                lines.append(f"[tool:{name}] {_short_args(block.get('arguments') or {})}".rstrip())
+                lines.append(f"[tool:{name}] {_render_args(block.get('arguments') or {})}".rstrip())
         return lines
     if role == "toolResult":
         if message.get("isError"):
@@ -203,7 +201,7 @@ def _render_entry(row: dict) -> list[str]:
             return [f"[tool-result] {name} (error)"]
         return []
     if role == "bashExecution":
-        return [f"[tool:bash] {_short_args(message.get('command') or '')}".rstrip()]
+        return [f"[tool:bash] {_render_args(message.get('command') or '')}".rstrip()]
     if role in ("custom", "branchSummary", "compactionSummary"):
         text = _content_text(content) or str(message.get("summary") or "").strip()
         return [f"[context] {text}"] if text else []
