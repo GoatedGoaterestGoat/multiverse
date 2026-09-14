@@ -360,6 +360,30 @@ class CodexSecondBrainHookTests(unittest.TestCase):
         self.assertFalse(sb_notify.had_permission_prompt("call-one"))
         self.assertFalse(sb_notify.had_permission_prompt("call-two"))
 
+    def test_stale_pending_tool_prune_preserves_recent_and_confirmed(self) -> None:
+        for tool_id in ("call-stale", "call-recent", "call-confirmed"):
+            sb_notify.record_pending_tool(
+                self.cwd,
+                "codex-agent",
+                tool_id,
+                "Bash",
+                {"command": "true"},
+                runtime=sessions.RUNTIME_CODEX,
+            )
+        sb_notify.mark_permission_requested("call-confirmed")
+        old = 1_700_000_000
+        pending = sb_notify.pending_tools_dir()
+        os.utime(pending / "call-stale.json", (old, old))
+        os.utime(pending / "call-confirmed.json", (old, old))
+
+        with patch.object(sb_notify.time, "time", return_value=old + 100):
+            removed = sb_notify.prune_stale_pending_tools(max_age_seconds=60)
+
+        self.assertEqual(removed, 1)
+        self.assertIsNone(sb_notify.pending_tool_data("call-stale"))
+        self.assertIsNotNone(sb_notify.pending_tool_data("call-recent"))
+        self.assertIsNotNone(sb_notify.pending_tool_data("call-confirmed"))
+
 
 class CodexSecondBrainEventTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -413,6 +437,24 @@ class CodexSecondBrainEventTests(unittest.TestCase):
 
     def _events(self):  # noqa: ANN202
         return self.connector.buffer.replay_from(0)
+
+    def test_producer_step_runs_off_the_asyncio_event_loop(self) -> None:
+        connector = object.__new__(sb_connector.SBConnector)
+        connector._stop = asyncio.Event()
+        connector._poll_interval = 3600
+        caller_thread = None
+        loop_thread = __import__("threading").get_ident()
+
+        def producer_step() -> None:
+            nonlocal caller_thread
+            caller_thread = __import__("threading").get_ident()
+            connector._event_loop.call_soon_threadsafe(connector._stop.set)
+
+        connector._producer_step = producer_step
+        asyncio.run(connector.run_producer())
+
+        self.assertIsNotNone(caller_thread)
+        self.assertNotEqual(caller_thread, loop_thread)
 
     def test_prompt_waits_for_rollout_then_response_keeps_wire_contract(self) -> None:
         sb_notify.record_user_prompt_signal(
@@ -497,6 +539,57 @@ class CodexSecondBrainEventTests(unittest.TestCase):
         self.connector._consume_response_signals()
         self.assertEqual(self._events(), [])
         self.assertEqual(sb_notify.list_response_signals(), [])
+
+    def test_old_terminal_agent_signals_are_dropped_without_transcript_scan(self) -> None:
+        sb_notify.record_user_prompt_signal(
+            self.cwd, self.agent, "Old prompt", turn_id="turn-old"
+        )
+        sb_notify.record_response_signal(
+            self.cwd, self.agent, turn_id="turn-old"
+        )
+
+        with (
+            patch.object(self.connector, "_stale_terminal_signal", return_value=True),
+            patch.object(
+                sb_transcript,
+                "codex_turn_state",
+                side_effect=AssertionError("stale signal should not parse a rollout"),
+            ),
+        ):
+            self.connector._consume_response_signals()
+            self.connector._consume_user_prompt_signals()
+
+        self.assertEqual(self._events(), [])
+        self.assertEqual(sb_notify.list_user_prompt_signals(), [])
+        self.assertEqual(sb_notify.list_response_signals(), [])
+
+    def test_recent_or_live_agent_signal_is_not_stale(self) -> None:
+        recent = {"cwd": self.cwd, "agent": self.agent, "ts": "2026-07-19T00:00:00Z"}
+        with (
+            patch.object(
+                sb_connector.time,
+                "time",
+                return_value=sb_connector._parse_iso(recent["ts"]) + 30,
+            ),
+            patch.object(sessions, "find_agent_by_name") as find,
+        ):
+            self.assertFalse(self.connector._stale_terminal_signal(recent))
+        find.assert_not_called()
+
+        old = {**recent, "ts": "2026-07-18T00:00:00Z"}
+        with (
+            patch.object(
+                sb_connector.time,
+                "time",
+                return_value=sb_connector._parse_iso(old["ts"]) + 7200,
+            ),
+            patch.object(
+                sessions,
+                "find_agent_by_name",
+                return_value=SimpleNamespace(status="retired"),
+            ),
+        ):
+            self.assertTrue(self.connector._stale_terminal_signal(old))
 
     def test_permission_notification_waits_for_rollout_and_keeps_wire_contract(
         self,
@@ -586,6 +679,41 @@ class CodexSecondBrainEventTests(unittest.TestCase):
         self.assertEqual(events[0].payload["tool_use_id"], "call-user-approval")
         self.assertTrue(sb_notify.had_permission_prompt("call-user-approval"))
         self.assertEqual(sb_notify.list_permission_request_signals(), [])
+
+    def test_terminal_codex_turn_discards_stale_unconfirmed_permission(self) -> None:
+        tool_input = {"command": "rm generated.txt"}
+        self.rollout.start("turn-stale", "Delete the generated file")
+        self.rollout.finish("turn-stale", status="completed")
+        sb_notify.record_pending_tool(
+            self.cwd,
+            self.agent,
+            "call-stale",
+            "Bash",
+            tool_input,
+            runtime=sessions.RUNTIME_CODEX,
+            session_id=self.rollout.thread_id,
+            turn_id="turn-stale",
+        )
+        sb_notify.record_permission_request_signal(
+            self.cwd,
+            self.agent,
+            "call-stale",
+            "Bash",
+            tool_input,
+            codex_turn_id="turn-stale",
+            await_user_confirmation=True,
+        )
+
+        with patch.object(
+            self.connector,
+            "_codex_user_permission_prompt_is_visible",
+            return_value=False,
+        ):
+            self.connector._consume_permission_request_signals()
+
+        self.assertEqual(self._events(), [])
+        self.assertEqual(sb_notify.list_permission_request_signals(), [])
+        self.assertIsNone(sb_notify.pending_tool_data("call-stale"))
 
 
 if __name__ == "__main__":

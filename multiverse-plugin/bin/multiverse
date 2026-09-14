@@ -487,6 +487,20 @@ if [ "${1:-}" = "update" ]; then
   exit 0
 fi
 
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
+  cat <<'EOF'
+Usage: multiverse [setup|update] [runtime arguments...]
+
+Launch the Multiverse monitor. Arguments not recognized as wrapper
+subcommands are forwarded to newly-created Claude sessions.
+
+Commands:
+  setup    Install/check dependencies and runtime integrations
+  update   Pull the latest Multiverse checkout
+EOF
+  exit 0
+fi
+
 for dep in tmux jq uv; do
   if ! command -v "$dep" &>/dev/null; then
     echo "[multiverse] Error: $dep is required but not found." >&2
@@ -496,4 +510,8 @@ for dep in tmux jq uv; do
 done
 
 cd "$PLUGIN_ROOT"
-exec uv run python -m src.monitor "$@"
+MULTIVERSE_PYTHON_BIN="${MULTIVERSE_PYTHON_BIN:-$PLUGIN_ROOT/.venv/bin/python}"
+if [ -x "$MULTIVERSE_PYTHON_BIN" ]; then
+  exec "$MULTIVERSE_PYTHON_BIN" -m src.monitor "$@"
+fi
+exec uv run --no-sync python -m src.monitor "$@"

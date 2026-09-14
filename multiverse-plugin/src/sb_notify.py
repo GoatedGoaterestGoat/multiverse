@@ -523,6 +523,36 @@ def pending_tools_dir() -> Path:
     return _sb_dir() / "pending_tools"
 
 
+def prune_stale_pending_tools(*, max_age_seconds: float = _MAX_PENDING_AGE_S) -> int:
+    """Remove abandoned PreToolUse candidates after a generous safety window.
+
+    A normal tool invocation deletes its candidate from PostToolUse. Abruptly
+    killed sessions may leave one behind forever; those records are only a
+    short-lived permission-correlation cache, not durable event history.
+    Confirmed prompts (``.perm``) are preserved so an unresolved user decision
+    is never silently discarded.
+    """
+    d = pending_tools_dir()
+    if not d.is_dir():
+        return 0
+    cutoff = time.time() - max_age_seconds
+    removed = 0
+    try:
+        paths = list(d.glob("*.json"))
+    except OSError:
+        return 0
+    for path in paths:
+        if path.name.endswith(".json.tmp") or (d / f"{path.stem}.perm").exists():
+            continue
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def permission_request_signals_dir() -> Path:
     return _sb_dir() / "permission_request_signals"
 

@@ -827,6 +827,35 @@ class RuntimeLivenessTests(unittest.TestCase):
         self.assertEqual(after_restart[0].runtime_session_id, "codex-thread")
         self.assertEqual(after_restart[0].status, "idle")
 
+    def test_tmux_session_exists_batches_repeated_lookups(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="multiverse-one\nmultiverse-two\n", stderr=""
+        )
+        with patch.object(sessions.subprocess, "run", return_value=completed) as run:
+            with sessions.tmux_session_snapshot():
+                self.assertTrue(sessions.tmux_session_exists("multiverse-one"))
+                self.assertTrue(sessions.tmux_session_exists("multiverse-two"))
+                self.assertFalse(sessions.tmux_session_exists("multiverse-missing"))
+
+        run.assert_called_once_with(
+            ["tmux", "list-sessions", "-F", "#{session_name}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def test_tmux_session_exists_outside_snapshot_is_immediate(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0)
+        with patch.object(sessions.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(sessions.tmux_session_exists("multiverse-one"))
+
+        run.assert_called_once_with(
+            ["tmux", "has-session", "-t", "multiverse-one"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+
 
 class RuntimeLaunchTests(unittest.TestCase):
     def _create_with_runtime(

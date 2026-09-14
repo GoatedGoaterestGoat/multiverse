@@ -39,6 +39,7 @@ class MultiverseSetupTests(unittest.TestCase):
             "MULTIVERSE_CODEX_MODEL",
             "MULTIVERSE_CODEX_PLUGIN_ROOT",
             "MULTIVERSE_CODEX_REASONING_EFFORT",
+            "MULTIVERSE_PYTHON_BIN",
             "MULTIVERSE_PI_BIN",
             "PI_CODING_AGENT_DIR",
             "PI_CODING_AGENT_SESSION_DIR",
@@ -69,11 +70,12 @@ class MultiverseSetupTests(unittest.TestCase):
         )
 
     def test_launcher_defaults_codex_model_and_preserves_override(self) -> None:
-        self._write_executable(
-            "uv",
+        python_bin = self._write_executable(
+            "python-custom",
             "#!/bin/sh\nprintf '%s\\n' \"$MULTIVERSE_CODEX_MODEL\"\n",
         )
         env = self._environment(self.root / "model-state")
+        env["MULTIVERSE_PYTHON_BIN"] = str(python_bin)
 
         defaulted = subprocess.run(
             [str(self.wrapper)],
@@ -97,6 +99,25 @@ class MultiverseSetupTests(unittest.TestCase):
         )
         self.assertEqual(overridden.returncode, 0, overridden.stderr)
         self.assertEqual(overridden.stdout.strip(), "gpt-explicit")
+
+    def test_help_does_not_launch_the_monitor(self) -> None:
+        marker = self.root / "uv-was-called"
+        self._write_executable(
+            "uv",
+            f"#!/bin/sh\ntouch {marker}\nexit 99\n",
+        )
+        completed = subprocess.run(
+            [str(self.wrapper), "--help"],
+            cwd=self.root,
+            env=self._environment(self.root / "help-state"),
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("Usage: multiverse", completed.stdout)
+        self.assertFalse(marker.exists())
 
     def test_setup_snapshots_and_restores_codex_environment(self) -> None:
         state_root = self.root / "state"
