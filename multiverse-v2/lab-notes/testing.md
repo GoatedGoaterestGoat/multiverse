@@ -9,7 +9,9 @@ Baseline: `3c7de7ed69f732a0e70362b69e3127022cf3e587`. Native manager session: `0
 | LAB-SOCKET-001 (LAB-H001) | high | Actual child `MV2_TMUX_SOCKET` unset | template-dev | testing-harnesses | Pending independent retest of `14ff690` |
 | LAB-INBOX-001 (LAB-H002, MV2-EMPTY-INBOX-ACK) | medium | Empty inbox cursor 0 then ack exits 1 ENOENT | template-dev | testing-harnesses | Pending independent retest of `14ff690` |
 | LAB-SPAWN-003 | medium | Failed sandbox spawn + same-name retry makes send ambiguous | template-dev | testing-manager | Open; exact-ID workaround |
-| Portal behavior | normal | Baseline + Pilot + live tmux coverage | ui-dev | testing-ui | Await actual fix commit |
+| LAB-VIEW-004 | low | External report link rejected by portal containment; named accent invalid | testing-manager | testing-ui | Local file/hex accent corrected; commit + retest pending |
+| LAB-UI002 | low | Nested tmux detach exits client rather than returning to dashboard | ui-dev | testing-ui | Host reported; hint fix pending |
+| LAB-UI001 | high | Enter CAD folds; scope unchanged; independent Pilot fails | ui-dev | testing-ui | Reproduced at baseline; await portal commit |
 
 Reproduction commands and expected/actual: `/Users/admin/Documents/Github/Multiverse-Lab/artifacts/testing/initial-bugs.md`.
 A fix is closed only after independent verification of the actual commit, with evidence.
@@ -30,3 +32,7 @@ A fix is closed only after independent verification of the actual commit, with e
 Actual worker native sessions: UI `01a0a9bc-1ebd-78b2-8ff1-3ec97d645c62`; harness `01a0a9bc-1ec2-7ae2-a267-4d325da53841`. Fix commit `14ff6901570233a63dcdfd5b7786d91c5521bba4` assigned for independent harness retest. The single bounded live probe slot is allocated to harness worker; alternate executables are present but no live alternate success is claimed.
 
 Failed spawn records retain runtime `failed` without panes. Their evidence is archived under `artifacts/testing/failed-spawn-ID`; no records deleted. Lab server roster is seven real ordinary agents. Commands using same names are ambiguous, so authoritative IDs are required.
+
+Baseline independent UI: 17 existing tests pass; independent hover/draft/resize passes and portal navigation fails. `artifacts/testing-ui/baseline-independent-tests.log`. Director authorized separate `testing-ui-evidence` non-agent TUI on the lab socket. Root integrated core fix as `08da915`; harness cherry-pick `da3c863` has developer `14ff690` tree. Five independent offline harness contracts pass; actual probe pending.
+
+View install: copy `testing-view.json` to testing universe `views/default.json`; copy `testing-initial-bugs.md` to local `artifacts/initial-bugs.md`. Local artifact containment is deliberate; external paths/symlinks are rejected. Accent uses `#f9e2af`. Independent UI baseline test commit: `e7cddc9`.
