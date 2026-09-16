@@ -104,3 +104,26 @@ external messages, pushes, or edits outside the lab were made.
 One low, unconfirmed buffered slash/search-focus observation was sent to
 testing-manager as `LAB/artifacts/ui-dev/LAB-UI004-investigation.md`. No ordinary
 paced-search failure is established; this is separate from verified LAB-UI003.
+
+## Continued integration: LAB-UI004 buffered search
+
+The independent bounded comparison subsequently confirmed LAB-UI004 at medium
+severity: a single terminal batch `/Testing queue` followed by Enter opened a
+Stop confirmation instead of editing the query. Nothing was confirmed or stopped.
+User/director authorized this bounded fix on 2026-09-16; existing worker roles and
+worktree were reused, with no main-dashboard interaction.
+
+The opening Slash now uses a priority binding, before Textual forwards the rest
+of the terminal input batch to the old widget. It focuses the filter synchronously
+and closes the inspector without queuing a later table refocus. The binding is
+disabled for editors, drafts, modal screens and in-progress operations, preserving
+literal slashes and normal form behavior.
+
+Three behavior regressions exercise a raw event batch (without Pilot's per-key
+waits), absence of global action callbacks, an open inspector, continued buffered
+action-letter text, and literal slashes in search/draft/message editors. The first
+test fails before the fix with `action_stop` invoked; evidence is
+`LAB/artifacts/ui-dev/ui004-before.log`. Fixed-suite results are recorded in
+`ui004-ui-tests.log` (22 UI checks) and `ui004-portal-tests.log` (6 portal checks)
+under the same artifacts directory. Independent testing-ui owns its separate
+Driver.send_message regression and exact-commit actual-terminal retest.

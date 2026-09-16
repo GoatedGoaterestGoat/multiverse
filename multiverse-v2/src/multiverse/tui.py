@@ -208,7 +208,7 @@ class MultiverseApp(App):
     CSS_PATH = "tui.tcss"
     TITLE = "Multiverse"
     BINDINGS = [
-        Binding("enter", "open", "Open"), Binding("slash", "filter", "Find"),
+        Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New"), Binding("m", "message", "Message"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
@@ -284,6 +284,13 @@ class MultiverseApp(App):
 
     def ready(self):
         return len(self.screen_stack) == 1 and not self.operating and self.draft is None
+
+    def check_action(self, action, parameters):
+        if action == "filter":
+            # Handle the opening slash before buffered keys are forwarded to
+            # the old widget, but leave literal slashes in editors and drafts.
+            return self.ready() and not isinstance(self.focused, (Input, TextArea))
+        return True
 
     def refresh_snapshot(self):
         if not self.scanning:
@@ -624,9 +631,12 @@ class MultiverseApp(App):
 
     def action_filter(self):
         if self.ready():
-            self.hide_inspector()
-            self.query_one("#filter").display = True
-            self.query_one("#filter").focus()
+            self.hide_inspector(restore_focus=False)
+            search = self.query_one("#filter", Input)
+            search.display = True
+            # Widget.focus() is deferred; the rest of a terminal input batch
+            # must see this focus immediately, without a queued table refocus.
+            self.screen.set_focus(search)
 
     def action_clear_filter(self):
         if self.draft:
@@ -702,10 +712,11 @@ class MultiverseApp(App):
         if self.inspector.mode == "hover":
             self.inspector.close()
 
-    def hide_inspector(self):
+    def hide_inspector(self, *, restore_focus=True):
         self.cancel_inspector_timers()
         self.inspector.close()
-        self.query_one("#agents", DataTable).focus()
+        if restore_focus:
+            self.query_one("#agents", DataTable).focus()
 
     def target_scope(self):
         row = self.visible_rows.get(self.selected_key)

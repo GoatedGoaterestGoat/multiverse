@@ -1,6 +1,6 @@
 """Real Textual widgets and events, without a model, socket or terminal."""
 import asyncio
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 import sys
 from threading import Event
@@ -464,6 +464,59 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("no current client", str(self.app.query_one("#status", Static).render()))
             await pilot.press("slash", *"gearbox")
             self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["verifier"])
+
+    async def test_buffered_search_routes_query_to_input_without_global_actions(self):
+        self.backend.scopes[self.review]["name"] = "Testing queue"
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("p")
+            self.assertIsNotNone(self.app.inspector.row)
+            with ExitStack() as stack:
+                actions = {name: stack.enter_context(patch.object(self.app, "action_" + name))
+                           for name in ("stop", "spawn", "subverse", "message", "resume", "quit", "preview", "details")}
+                # Unlike Pilot.press, enqueue the whole terminal read without
+                # yielding between keys. The live repro sends this exact batch.
+                for key, character in [("slash", "/"), *[(c, c) for c in "Testing queue"], ("enter", None)]:
+                    self.app.post_message(events.Key(key, character))
+                await self.settle(pilot)
+                for action in actions.values():
+                    action.assert_not_called()
+            self.assertEqual(self.app.query_one("#filter", Input).value, "Testing queue")
+            self.assertIs(self.app.focused, self.app.query_one("#agents"))
+            self.assertEqual(len(self.app.screen_stack), 1)
+            self.assertIsNone(self.app.draft)
+            self.assertEqual(self.backend.calls, [])
+            await pilot.press("escape")
+            self.assertFalse(self.app.query_one("#filter").display)
+
+    async def test_buffered_search_keeps_focus_for_subsequent_action_letters(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            with ExitStack() as stack:
+                actions = [stack.enter_context(patch.object(self.app, "action_" + name))
+                           for name in ("stop", "spawn", "subverse", "message", "resume", "quit", "preview", "details")]
+                for key, character in [("slash", "/"), *[(c, c) for c in "nmsqgpvr"]]:
+                    self.app.post_message(events.Key(key, character))
+                await self.settle(pilot)
+                self.assertIs(self.app.focused, self.app.query_one("#filter"))
+                for key, character in [("slash", "/"), ("q", "q")]:
+                    self.app.post_message(events.Key(key, character))
+                await self.settle(pilot)
+                self.assertEqual(self.app.query_one("#filter", Input).value, "nmsqgpvr/q")
+                for action in actions:
+                    action.assert_not_called()
+
+    async def test_search_shortcut_preserves_slashes_in_editors_and_drafts(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("slash", "a", "slash", "b")
+            self.assertEqual(self.app.query_one("#filter", Input).value, "a/b")
+            await pilot.press("escape", "n", "tab", "tab", "a", "slash", "b")
+            self.assertEqual(self.app.draft.values["task"], "a/b")
+            await pilot.press("escape", "m")
+            await pilot.press("a", "slash", "b")
+            self.assertEqual(self.app.screen.query_one("#field-text", TextArea).text, "a/b")
+            await pilot.press("escape")
 
 
 if __name__ == "__main__":
