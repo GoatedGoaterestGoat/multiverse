@@ -55,3 +55,23 @@ artifact activation checks once ui-dev supplies its implementation. Static
 fixture previews are not live terminal evidence. This initial commit supplies
 the demo data; portal validation and any follow-up evidence will be recorded
 separately when the actual UI revision is ready.
+
+## Committed portal follow-up
+
+Demo commit `ff8a9934decf0b72251a89e2a29c6fe9406a7c56` was reviewed and
+integrated by director. On UI commit
+`bfa7790ba62f08632710a13c8d72b5681060925c`, a read-only Textual Pilot run
+against the actual installed universe files passed:
+
+- Select CAD, `Enter`; select verification, `Enter`.
+- Activate the verification report artifact; no artifact error.
+- `Escape`, `Backspace`: CAD scope and verification selection restored.
+- `Backspace`: mockups scope and CAD selection restored.
+- Select stock-trading, `Enter`: local Northstar title and content displayed.
+- Resize from 120×36 to 80×24: stock scope preserved.
+
+Evidence: `LAB/artifacts/mockups/verified-portal.json`,
+`verified-portal-report.svg`, `verified-portal-stock.svg`, and
+`verified-portal-stock-80.svg`. These are headless Pilot exports, not live tmux
+captures. Independent live terminal validation remains assigned to testing-ui.
+All evidence paths and tested SHAs were reported to director and testing-manager.
