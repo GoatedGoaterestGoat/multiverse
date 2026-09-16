@@ -96,7 +96,8 @@ selection, Mockups/CAD selection, and Lab/Mockups selection. Archives:
 | Distinct testing queue and evidence link | `20260916T103425Z-ui-dev-65f228f-testing-queue-pass` |
 
 All are live tmux frames, not headless fixture images. The supplemental non-agent
-`ui-dev-evidence` session is left showing Testing queue on the lab socket. The
+`ui-dev-evidence` session showed Testing queue, then was closed at the director's
+request after verifying all six archived captures. The ordinary agent remains available. The
 director controls the user-facing dashboard and integration. No extra workers,
 external messages, pushes, or edits outside the lab were made.
 
