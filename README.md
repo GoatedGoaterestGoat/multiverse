@@ -195,3 +195,10 @@ The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse
 The renderer exports actual SVG screens to `/tmp/multiverse-previews` for visual review, including the unified hierarchy, live inspector, narrow layouts and inline creation. Additional tests cover concurrent inbox writers, interrupted records, recursive installs, ambiguous commands, real tmux launch/rename/stop/resume and pane ownership, Textual attach/detach/exit, Codex/Claude argv and exact resume with fake executables, session registration guards, and real Pi delivery/resume with its optional extension and a local fake provider. They use temporary universes and isolated tmux sockets, with no network or model spend. Authenticated Codex/Claude model turns are not exercised. Pi/tmux checks skip when their binaries are absent. A sandbox that denies Unix sockets must allow the terminal integration tests explicitly.
 
 `doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are optional native delivery integrations, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy, background ask primitive, or urgent mid-turn delivery in this slice.
+
+## Development checkout
+
+Run `uv sync --locked`, then `. scripts/dev-env.sh` in the main checkout to use
+the local `.multiverse` and `.run/tmux.sock`. Launch `mv2 tui`. Worktrees share Git
+history; runtime state and evidence are ignored. See `.multiverse/DEVELOPMENT.md`
+for this machine’s active agents and migration conventions.
