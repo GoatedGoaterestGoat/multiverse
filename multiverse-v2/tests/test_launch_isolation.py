@@ -83,6 +83,27 @@ class LaunchIsolationTest(unittest.TestCase):
         self.assertNotIn("CODEX_THREAD_ID", env)
         self.assertTrue(env["PATH"].startswith("/launch/bin" + os.pathsep))
 
+    def test_failed_spawn_retry_keeps_records_and_explains_exact_addressing(self):
+        backend = Mock()
+        backend.create.side_effect = [RuntimeError("socket access denied"),
+                                      {"socket": "/actual/tmux.sock", "session": "$1", "pane": "%1"}]
+        with patch.object(agents, "Tmux", return_value=backend), \
+                patch.object(agents.shutil, "which", return_value="/fake/executable"):
+            with self.assertRaises(RuntimeError) as failure:
+                agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+            failed = agents.directory(self.root, "same-name")
+            self.assertEqual(agents.runtime(failed)["state"], "failed")
+            successful = agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+        self.assertIn(failed.name, str(failure.exception))
+        self.assertIn("unique name", str(failure.exception))
+        self.assertEqual(agents.directory(self.root, failed.name), failed)
+        self.assertEqual(agents.directory(self.root, successful["id"]).name, successful["id"])
+        with self.assertRaises(ValueError) as ambiguous:
+            agents.directory(self.root, "same-name")
+        self.assertIn(failed.name, str(ambiguous.exception))
+        self.assertIn(successful["id"], str(ambiguous.exception))
+        self.assertIn("full UUID", str(ambiguous.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

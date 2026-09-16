@@ -18,7 +18,9 @@ def directory(root, reference):
         if reference in (data["id"], data["name"]) or data["id"].startswith(reference):
             matches.append(path.parent)
     if len(matches) != 1:
-        raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}")
+        detail = (". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
+                  if matches else ". Use `mv2 list --json` to find the agent UUID")
+        raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
     return matches[0]
 
 
@@ -159,7 +161,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 except Exception:
                     pass
             update_runtime(agent_dir, launch_id, state="failed", error=str(error))
-            raise
+            recovery = (f"Resume this agent by its full UUID: {properties['id']}"
+                        if session_mode == "file" or resume
+                        else "The native session has not started; retry spawn with a unique name")
+            raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
+                               f"Failed record preserved. {recovery}.") from error
     return {**properties, "universe": str(root), "runtime": runtime(agent_dir)}
 
 

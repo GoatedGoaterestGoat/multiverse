@@ -31,3 +31,19 @@ errors), `regressions-after.txt` (four passing regressions), and
 `files-harness-after.txt` (nine existing checks pass). Independent live committed
 fix retest is assigned to testing-manager/harness worker; local checks are not
 claimed as that independent verification.
+
+Fix commit: `14ff6901570233a63dcdfd5b7786d91c5521bba4`.
+
+## LAB-SPAWN-003
+
+Testing-manager reported repeated names after a sandbox-denied spawn followed by
+a successful retry. A mocked failure/retry reproduced the missing recovery
+guidance at `14ff690`. Failed records remain intact and duplicate labels stay
+supported. Launch errors now expose the preserved UUID and suggest either exact
+resume (file/bound native session) or unique-name spawn (unbound native session).
+Ambiguous resolution lists candidate UUIDs and still refuses to choose one.
+Recovery details live in `docs/launch-recovery.md`.
+
+Evidence: `LAB/artifacts/template-dev/spawn-before.txt` (expected failing new
+regression) and `spawn-after.txt` (five launch/inbox checks pass). Independent
+committed-fix retest requested separately.
