@@ -75,3 +75,28 @@ Evidence: `LAB/artifacts/mockups/verified-portal.json`,
 `verified-portal-stock-80.svg`. These are headless Pilot exports, not live tmux
 captures. Independent live terminal validation remains assigned to testing-ui.
 All evidence paths and tested SHAs were reported to director and testing-manager.
+
+## Independent live acceptance
+
+Testing-ui repeated the live demonstration on UI commit
+`65f228fbbd20b3e9c7b81a2d8b0e66a1413dc6b6`, lab-socket pane 19. I inspected
+the corrected capture contents, confirming:
+
+- `LAB/artifacts/testing-ui/fixed-04-verification.txt`: Verification masthead,
+  full mockups/CAD/verification breadcrumb and local constraint results.
+- `fixed-06-canceled-60x20.txt`: canceled draft absent and Verification scope
+  preserved after resize.
+- `fixed-07-back-cad.txt`: CAD masthead and Verification selection restored.
+- `fixed-08-back-mockups.txt`: Mockups masthead and CAD selection restored,
+  with CAD folded as before entering.
+
+Actual terminal SVG:
+`LAB/artifacts/terminal/20260916T103248Z-testing-ui-65f228f-verification-confirmed/pane-19.svg`.
+The earlier `portal-verification.txt`, `portal-back-mockups.txt` and
+`20260916T102811Z-testing-ui-bfa7790-verification/pane-14.svg` did not show the
+claimed scopes. I caught this mismatch; testing-ui retracted the earlier live
+claim and replaced it with the inspected evidence above. Those earlier files
+must not be cited as successful live navigation proof.
+
+This closes the nested-demo acceptance. Other UI issues, including attachment
+error recovery, remain under testing-manager's separate acceptance process.
