@@ -68,3 +68,38 @@ separate `Down`, inspected selected CAD row, then `Enter` showed both local
 portals correctly. Successful mockups live capture:
 `LAB/artifacts/terminal/20260916T102813Z-ui-dev-bfa7790-mockups-rendered/pane-13.*`.
 No main-dashboard interaction was performed by ui-dev.
+
+## Verified fix and terminal handoff
+
+Fix commit: `65f228f` (clean UI worktree). Independent testing-ui cherry-pick
+`848d508` has identical production source. Its five independent checks, nineteen
+UI checks and six portal checks pass (30 total). Same-loop cursor activation and
+suspend-error checks fail before the fix and pass after it. On 2026-09-16,
+testing-manager closed LAB-UI003 after independent **actual-terminal** verification:
+
+- `LAB/artifacts/testing-ui/UI003-fixed-error.txt`: dashboard restored after error.
+- `LAB/artifacts/testing-ui/UI003-fixed-draft.txt`: input/draft still usable.
+- `LAB/artifacts/testing-ui/UI003-fixed-batch.txt`: correct batched navigation.
+
+My own actual terminal sequence on `65f228f`, including exact commands, is in
+`LAB/artifacts/ui-dev/terminal-65f228f.md`. Confirmed each frame before continuing:
+Lab → Mockups → CAD → Verification, then Backspace restoring CAD/Verification
+selection, Mockups/CAD selection, and Lab/Mockups selection. Archives:
+
+| Result | Folder under `LAB/artifacts/terminal/` (pane-13.*) |
+| --- | --- |
+| Original batched navigation now passes | `20260916T103100Z-ui-dev-65f228f-batched-portal-pass` |
+| Grandchild local view and four-scope breadcrumb | `20260916T103143Z-ui-dev-65f228f-verification-pass` |
+| Back restores CAD and selected Verification | `20260916T103205Z-ui-dev-65f228f-back-cad-pass` |
+| Back restores Mockups and selected CAD | `20260916T103234Z-ui-dev-65f228f-back-mockups-pass` |
+| Real detached attach error restores dashboard | `20260916T103349Z-ui-dev-65f228f-attach-error-restored` |
+| Distinct testing queue and evidence link | `20260916T103425Z-ui-dev-65f228f-testing-queue-pass` |
+
+All are live tmux frames, not headless fixture images. The supplemental non-agent
+`ui-dev-evidence` session is left showing Testing queue on the lab socket. The
+director controls the user-facing dashboard and integration. No extra workers,
+external messages, pushes, or edits outside the lab were made.
+
+One low, unconfirmed buffered slash/search-focus observation was sent to
+testing-manager as `LAB/artifacts/ui-dev/LAB-UI004-investigation.md`. No ordinary
+paced-search failure is established; this is separate from verified LAB-UI003.
