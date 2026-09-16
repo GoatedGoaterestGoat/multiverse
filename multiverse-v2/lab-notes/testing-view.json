@@ -23,9 +23,9 @@
         [
           "LAB-UI004",
           "medium",
-          "OPEN: buffered search; pace slash/query",
-          "ui-dev (follow-up)",
-          "testing-ui reproduced"
+          "verified dbcba0a buffered input/actions",
+          "ui-dev",
+          "testing-ui"
         ],
         [
           "LAB-SOCKET-001",
