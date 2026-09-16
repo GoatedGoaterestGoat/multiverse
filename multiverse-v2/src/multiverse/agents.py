@@ -104,9 +104,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError(f'Harness executable not found: {spec[mode][0]}')
     if not shutil.which("tmux"):
         raise ValueError("tmux is required to spawn agents")
-    workdir = universe.workspace(root)
+    # A universe can contain agents assigned to different worktrees. Resume in
+    # the agent's recorded workspace even if the universe default has changed.
+    workdir = Path(properties["workspace"]).resolve() if resume and properties.get("workspace") else universe.workspace(root)
     if not workdir.is_dir():
         raise ValueError(f"Workspace does not exist: {workdir}")
+    properties["workspace"] = str(workdir)
     agent_dir.mkdir(parents=True, exist_ok=True)
     with lock(agent_dir / ".launch.lock"):
         previous = runtime(agent_dir)

@@ -63,6 +63,33 @@ class LaunchIsolationTest(unittest.TestCase):
             self.assertIn(unittest.mock.call("/explicit/tmux.sock"), tmux.call_args_list)
             self.assertIn(unittest.mock.call("/inherited/tmux.sock"), tmux.call_args_list)
 
+    def test_resume_preserves_agent_workspace_and_legacy_fallback(self):
+        backend = Mock()
+        backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}
+        other = self.work / "other-worktree"
+        other.mkdir()
+        with patch.object(agents, "Tmux", return_value=backend), \
+                patch.object(agents.shutil, "which", return_value="/fake/executable"), \
+                patch.object(agents, "observe", return_value={"live": "stopped"}):
+            first = agents.start(self.root, "worker", "task", "pi")
+            metadata = read(self.root / "universe.json")
+            metadata["workspace"] = str(other)
+            write(self.root / "universe.json", metadata)
+            resumed = agents.start(self.root, resume=first["id"])
+            self.assertEqual(resumed["workspace"], str(self.work))
+            self.assertEqual(backend.create.call_args.args[1], self.work)
+            directory = agents.directory(self.root, first["id"])
+            properties = read(directory / "properties.json")
+            properties["workspace"] = str(self.work / "missing")
+            write(directory / "properties.json", properties)
+            with self.assertRaisesRegex(ValueError, "Workspace does not exist"):
+                agents.start(self.root, resume=first["id"])
+            del properties["workspace"]
+            write(directory / "properties.json", properties)
+            legacy = agents.start(self.root, resume=first["id"])
+            self.assertEqual(legacy["workspace"], str(other))
+            self.assertEqual(backend.create.call_args.args[1], other)
+
     def test_runner_uses_request_identity_and_socket(self):
         agent = self.work / "agent"
         launch = agent / "launches" / "launch"
