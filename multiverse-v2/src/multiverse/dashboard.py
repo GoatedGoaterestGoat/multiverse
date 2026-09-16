@@ -3,8 +3,9 @@ from pathlib import Path
 from hashlib import sha256
 import re
 
-from . import agents, universe
-from .store import append_message, read
+from . import universe
+from .store import read
+from .tools import attach, inspect, list_agents, resume, send, spawn, stop, subverse
 from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
@@ -76,7 +77,7 @@ class LocalBackend:
 
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
-        members = agents.listing(root, recursive=True)
+        members = list_agents.run(root, recursive=True, json=True)
         groups = []
         for scope in universe.tree(root):
             group = {"path": str(scope), "parent": str(scope.parent.parent) if scope != root else None,
@@ -95,29 +96,28 @@ class LocalBackend:
                 "columns": config["columns"], "widgets": config["widgets"], "agents": members}
 
     def spawn(self, root, values):
-        return agents.start(root, name=values["name"], task=values["task"],
-                            harness=values.get("harness") or "codex", model=values.get("model") or None)
+        return spawn.run(root, name=values["name"], task=values["task"],
+                         harness=values.get("harness") or "codex", model=values.get("model") or None)
 
     def send(self, root, reference, text):
-        return append_message(agents.directory(root, reference), text, {"name": "user", "agent_id": None})
+        return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None})
 
     def resume(self, root, reference):
-        return agents.start(root, resume=reference)
+        return resume.run(root, agent=reference)
 
     def stop(self, root, reference):
-        return agents.terminal_action(root, reference, "stop")
+        return stop.run(root, agent=reference)
 
     def inspect(self, root, reference):
-        return agents.terminal_action(root, reference, "inspect")
+        return inspect.run(root, agent=reference)
 
     def attach(self, root, reference):
-        from .cli import attach
-        return attach(root, reference)
+        return attach.run(root, agent=reference)
 
     def subverse(self, root, values):
-        name = universe.slug(values["name"])
-        return universe.create(root / "subverses" / name, name, values.get("template") or "base",
-                               values.get("workspace") or universe.workspace(root))
+        result = subverse.run(root, name=values["name"], template=values.get("template") or "base",
+                              workspace=values.get("workspace") or None)
+        return Path(result["universe"])
 
 
 def group_key(path):

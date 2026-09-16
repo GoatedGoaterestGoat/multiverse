@@ -1,0 +1,114 @@
+"""Exercise standalone tools and compatibility CLI against the same file protocol."""
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+from uuid import uuid4
+
+PROJECT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT / "src"))
+from multiverse import cli, universe
+from multiverse.dashboard import LocalBackend
+from multiverse.store import read, write
+from multiverse.tools import spawn
+
+
+class ToolsTest(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.work = Path(temporary.name)
+        self.root = universe.create(self.work / "universe", "tools", workdir=self.work)
+        self.env = {k: v for k, v in os.environ.items() if not k.startswith("MV2_")}
+        self.env["PYTHONPATH"] = str(PROJECT / "src")
+        self.agent = str(uuid4())
+        self.directory = self.root / "state/agents" / self.agent
+        write(self.directory / "properties.json", {"id": self.agent, "name": "worker",
+              "universe_id": read(self.root / "universe.json")["id"]})
+        write(self.directory / "runtime.json", {"launch_id": "current", "state": "stopped"})
+
+    def invoke(self, action, *args, standalone=True, env=None, code=0, text=None):
+        entry = ["-m", "multiverse.tools." + ("list_agents" if action == "list" else action.replace("-", "_"))]
+        if not standalone:
+            entry = [str(PROJECT / "bin/mv2")]
+        result = subprocess.run([sys.executable, *entry, "-u", str(self.root),
+                                 *([] if standalone else [action]), *args],
+                                env=env or self.env, input=text, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+        return result
+
+    def test_every_tool_runs_independently_and_cli_help_stays_available(self):
+        for action in cli.COMMANDS:
+            with self.subTest(action=action):
+                result = self.invoke(action, "--help")
+                self.assertIn("--universe", result.stdout)
+        # Non-UI commands must remain usable without importing Textual.
+        result = subprocess.run([sys.executable, "-c",
+            "import sys; from multiverse.cli import parser; parser(); "
+            "assert 'textual' not in sys.modules"], env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_cli_and_standalone_share_list_catalog_command_and_failure_output(self):
+        for action, args in (("list", ("--json",)), ("catalog", ()),
+                             ("command", ("help", "literal $(false)", "--flag"))):
+            self.assertEqual(self.invoke(action, *args).stdout,
+                             self.invoke(action, *args, standalone=False).stdout)
+        for standalone in (True, False):
+            result = self.invoke("command", "missing", standalone=standalone, code=1)
+            self.assertIn("Expected one exact match", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            write(self.directory / "runtime.json", {"state": "failed", "error": "launch failed"})
+            self.assertFalse(json.loads(self.invoke("doctor", standalone=standalone, code=1).stdout)["ok"])
+
+    def test_message_roundtrip_across_tool_cli_and_tui_keeps_sender_and_cursor(self):
+        message = "literal 'quoted'\n$(false) `false`"
+        first = json.loads(self.invoke("send", self.agent, "--stdin", text=message).stdout)
+        self.assertEqual(first["state"], "queued")
+        batch = json.loads(self.invoke("inbox", "--agent", self.agent, standalone=False).stdout)
+        self.assertEqual(batch["messages"][0]["text"], message)
+        self.invoke("ack", "--agent", self.agent, "--cursor", str(batch["cursor"]))
+        LocalBackend().send(self.root, self.agent, "from dashboard")
+        batch = json.loads(self.invoke("inbox", "--agent", self.agent).stdout)
+        self.assertEqual([m["text"] for m in batch["messages"]], ["from dashboard"])
+        self.assertEqual(batch["messages"][0]["from"], {"name": "user", "agent_id": None})
+
+    def test_standalone_callbacks_reject_stale_launch_without_mutating_state(self):
+        before = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
+        callbacks = (("inbox", ()), ("ack", ("--cursor", "0")),
+                     ("status", ("--phase", "done")), ("runtime-update", ("--activity", "idle")),
+                     ("session-bind", ("--session-id", str(uuid4()))))
+        for action, args in callbacks:
+            with self.subTest(action=action):
+                result = self.invoke(action, "--agent", self.agent, *args,
+                                     env={**self.env, "MV2_LAUNCH_ID": "old"}, code=1)
+                self.assertIn("Outdated launch", result.stderr)
+        after = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
+        self.assertEqual(before, after)
+
+    def test_init_and_tui_subverse_install_fresh_scoped_definitions(self):
+        installed = json.loads(self.invoke("init", str(self.work / "fresh"), "--name", "fresh").stdout)
+        self.assertEqual(installed["name"], "fresh")
+        child = LocalBackend().subverse(self.root, {"name": "child"})
+        self.assertEqual(child, self.root / "subverses/child")
+        self.assertNotEqual(read(child / "universe.json")["id"], read(self.root / "universe.json")["id"])
+        self.assertEqual(list((child / "state/agents").iterdir()), [])
+
+    def test_cli_and_tui_spawn_use_same_tool_with_original_target_and_literals(self):
+        literal = "--flag\n$(false) `false` {literal}"
+        task_file = self.work / "task.md"
+        task_file.write_text(literal)
+        with patch.object(spawn.agents, "start", return_value={"id": "created"}) as start:
+            cli.run(cli.parser().parse_args(["-u", str(self.root), "spawn", "--name", "worker",
+                                            "--task-file", str(task_file), "--model", "chosen"]))
+            first = start.call_args
+            LocalBackend().spawn(self.root, {"name": "worker", "task": literal, "model": "chosen"})
+            self.assertEqual(first, start.call_args)
+            self.assertEqual(first.args, (self.root, "worker", literal, "codex", "chosen"))
+
+
+if __name__ == "__main__":
+    unittest.main()

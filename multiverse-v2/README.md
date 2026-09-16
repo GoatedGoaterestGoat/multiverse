@@ -37,6 +37,34 @@ mv2 -u /path/to/project/.multiverse/subverses/pr-review send reviewer --text 'Fo
 
 `-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. Ambiguity is an error.
 
+## Individual tools
+
+Each action lives in `src/multiverse/tools/` with its own argument definitions
+and importable `run` function. `mv2` remains a small compatibility dispatcher;
+the TUI backend calls the same tool functions directly. Shared file, terminal
+identity and launch mechanics remain in `store.py`, `tmux.py`, `agents.py` and
+`runner.py`.
+
+With the package installed, run a tool without the dispatcher:
+
+```sh
+python -m multiverse.tools.list_agents -u /path/to/project --recursive --json
+python -m multiverse.tools.spawn -u /path/to/project --name worker --task 'Review the code.'
+python -m multiverse.tools.inspect -u /path/to/project worker
+```
+
+For a checkout, use its Python environment with `PYTHONPATH=multiverse-v2/src`.
+Run modules with `python -m`, rather than executing their files by path.
+Tool names match CLI commands except `list` is `list_agents`, and hyphens become
+underscores (`session_bind`, `runtime_update`). Every tool supports `--help`.
+Python callers use, for example,
+`spawn.run(root, name="worker", task="Review the code.")` or
+`list_agents.run(root, recursive=True, json=True)`; results are returned and
+errors raised, while shell entry points format output and exit codes.
+
+This is a behavior-preserving extraction. `send`, `inbox` and `ack` still use the
+durable file protocol; no terminal keystroke delivery is introduced.
+
 ## Files and ownership
 
 ```text
