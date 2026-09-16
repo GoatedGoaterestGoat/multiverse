@@ -78,6 +78,19 @@ Blank model uses Astra; explicit model is passed as matching --model and later c
 
 `LAB/START-HERE.md` documents landed keys and defaults. `LAB/STATUS.md` is the current handoff; all commits use shaoxiongduan <shaoxiongduan@gmail.com>, remain local, and the original source checkout was not modified.
 
-## Remaining follow-up
+## Initial milestone follow-up (superseded below)
 
 Bounded independent testing reproduced **LAB-UI004 (medium, OPEN)** at `65f228f`: a single terminal batch containing slash + `Testing queue` + Enter leaves the filter blank and can invoke query-letter dashboard shortcuts, including a Stop confirmation. No submit occurred and no agent was stopped; tester canceled the dialog. Separate slash, wait for the filter, then query works. Evidence `LAB/artifacts/testing-ui/UI004-{before,batched,paced-filter-ready,paced-query,paced-after-enter}.txt`. The eight prior verified repairs remain closed. This ninth confirmed issue is recorded for follow-up, with no claim of a fix and no further source expansion during the finite milestone.
+
+
+## Continued integration: buffered search verified
+
+User requested continued integration and authorized dashboard restart. Existing ui-dev and testing-manager/testing-ui were reactivated through their recorded native sessions; no new agents were created. Developer fix `dbcba0a` was reviewed and integrated as `2a394bf`: priority slash entry with editing-context guards, synchronous filter focus, and no queued inspector refocus. Independent raw Driver batches reproduce the prior failure and pass the fix; exact live-terminal retest verifies no global actions, backend calls, modal or draft. Report: `LAB/artifacts/testing-ui/UI004-retest-dbcba0a.md`.
+
+Independent test `54f7d3d` integrated as `ab6eeb0` initially assumed reopened queries append. Existing Input select-on-focus behavior replaces the selected query. Corrective test `fa5dca5`, integrated `4b2560b`, retains original query/no-action gates and explicitly compares paced replacement. The completed director comparison is `LAB/artifacts/director/ui004-reopen-semantics.json`; two earlier failed diagnostics were immediately retracted and are not evidence. Production fix was unchanged.
+
+Integrated verification: existing combined UI suite 33/33 passes (`ui004-integrated-tests.log`), then corrected independent suite 7/7 passes in16.136s (`ui004-corrected-independent-tests.log`), covering all35 distinct UI/portal/independent tests with unchanged production source. Independent tester also ran35/35. Earlier55-check broader milestone remains historical, not a claim of a new full-suite run.
+
+Integrated final evidence notes as `65e73cd`/`b986b4f`; testing-manager closure `666d763` integrated as `73947bb`. All nine confirmed bugs independently verified. Only main dashboard restarted at `b986b4f` (production source `2a394bf`). Exact original single tmux send-keys batch `/ "Testing queue" Enter` on real root dashboard now displays correct filter with no modal and seven live agents. Evidence: `LAB/artifacts/director/ui004-live-buffered-search.txt`, recorder `20260916T105124Z-ui004-integrated-buffered-search-fixed`. Esc then Down Down Enter restores Mockups from observed root selection.
+
+Tester auxiliary session removed; seven ordinary native sessions, isolated socket, dashboard and recorder preserved. Final follow-up roster/pane audit: `LAB/artifacts/director/ui004-final-{roster.json,panes.txt,audit.json}`. No remaining delegated task; workers remain available for user inspection. STATUS.md and START-HERE.md updated to remove the obsolete pacing workaround. All commits remain local to the lab clone with the requested identity.
