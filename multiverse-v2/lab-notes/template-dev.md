@@ -99,3 +99,34 @@ in all five cases before the fix and passes afterward. Combined 19 checks pass;
 evidence `markers-before.txt` (synthetic environment only) and `markers-after.txt`.
 No live-manifest rewrite or additional live probe performed; director owns
 reviewed installed-manifest deployment after independent offline retest.
+
+Marker cleanup commit: `1fe2fe4ec139ccc0d308dabf12c51b6377321ca5`.
+Harness tester independently VERIFIED all five adapters with actual runner
+subprocesses: each fails at `6b4baca` and passes at this commit; combined 25
+independent offline checks pass. Evidence:
+`LAB/artifacts/testing-harnesses/session-004-before.txt`, `session-004-after.txt`,
+`session-004-suite.txt`; tester test/log commit `d7e9b40`.
+
+## Lab-only default model proposal
+
+Director requested an Astra default for blank inline model fields, retaining an
+explicit override and leaving reusable templates free of a forced model.
+Prepared a review-only bundle at
+`LAB/artifacts/template-dev/live-manifest-proposal/`: 33 exact current manifest
+paths, before/after hashes, staged JSON, full diff and deployment/rollback notes.
+No installed manifests were changed by this worker. Director owns rollout.
+
+Lab Codex spawn/resume add `-c model="gpt-6-astra"`. Explicit `model_args` add both
+`--model {model}` and a later `-c model="{model}"`, so the flag/config values agree.
+All 44 blank/explicit spawn/resume request-construction combinations pass. An
+actual no-model-turn Codex `config/read` diagnostic confirms a blank/default
+config resolves Astra and later explicit config wins. It created no threads,
+turns, workers or tmux sessions; SQLite/log paths were scoped to LAB and both
+short-lived stdio processes were stopped. Sandbox escalation was approved after
+OS denied startup. Evidence: `live-manifest-proposal-result.txt`,
+`model-config-resolution.txt`, with exact scripts beside them.
+
+Official configuration sources consulted: [configuration basics](https://learn.chatgpt.com/docs/config-file/config-basic)
+and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+The proposal avoids relying on undocumented precedence between a conflicting
+`--model` flag and `-c model` setting; no model turn is claimed for this diagnostic.
