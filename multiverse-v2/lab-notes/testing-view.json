@@ -1,0 +1,65 @@
+{
+  "title": "Testing queue",
+  "columns": [
+    "name",
+    "live",
+    "phase",
+    "summary"
+  ],
+  "accent": "yellow",
+  "description": "Independent reproduction, assigned fix and actual-commit verification.",
+  "widgets": [
+    {
+      "type": "table",
+      "title": "Reproduction \u2192 fix \u2192 retest",
+      "columns": [
+        "Bug",
+        "Severity",
+        "State",
+        "Fix owner",
+        "Verifier"
+      ],
+      "rows": [
+        [
+          "LAB-SOCKET-001",
+          "high",
+          "retest 14ff690 pending",
+          "template-dev",
+          "testing-harnesses"
+        ],
+        [
+          "LAB-INBOX-001",
+          "medium",
+          "retest 14ff690 pending",
+          "template-dev",
+          "testing-harnesses"
+        ],
+        [
+          "LAB-SPAWN-003",
+          "medium",
+          "reproduced / exact-ID workaround",
+          "template-dev",
+          "testing-manager"
+        ],
+        [
+          "Portal coverage",
+          "normal",
+          "baseline underway",
+          "ui-dev",
+          "testing-ui"
+        ]
+      ]
+    },
+    {
+      "type": "artifacts",
+      "title": "Testing evidence",
+      "items": [
+        {
+          "label": "Initial reproductions",
+          "path": "../../../artifacts/testing/initial-bugs.md",
+          "description": "Actual child environment and empty inbox ack evidence"
+        }
+      ]
+    }
+  ]
+}
