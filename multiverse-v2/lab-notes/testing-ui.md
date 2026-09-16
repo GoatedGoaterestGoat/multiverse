@@ -12,3 +12,9 @@ Commands use `/Users/admin/Documents/Github/Multiverse-Lab/repo/multiverse-v2/.v
 
 Evidence: `/Users/admin/Documents/Github/Multiverse-Lab/artifacts/testing-ui/{baseline-existing-tests.log,baseline-independent-tests.log,LAB-UI001.md}`.
 LAB-UI001 high severity; proposed fix: local portal Enter/double-click with Backspace restoring parent context. Actual committed fix has not yet been independently retested. Demo inspection above is headless simulated output, not live terminal capture.
+
+Expanded acceptance checks also cover mouse double-click entry with a temporary local universe, artifact URL preview and parent search restoration; baseline has 2 navigation failures and 1 passing check (`baseline-expanded-tests.log`). Nested draft checks prevent Backspace from accidentally leaving a draft's scope.
+
+Actual tmux baseline: director-approved non-agent session `testing-ui-evidence:baseline`, pane `%10`, on lab socket. `terminal-baseline.md` in role artifacts records exact keys, SGR click/hover and resize sequence. Group Enter reproduces LAB-UI001. Real terminal demo hover preserves CAD selection while showing reviewer; draft cancel and 60×20 resize pass. Labeled SVG: `artifacts/terminal/20260916T102413Z-testing-ui-baseline-hover/pane-10.svg`. This terminal is real, but its backend preview payload is simulated and labeled as such.
+
+Queued independent verification: actual portal fix SHA; mockups → CAD → verification and stock views/artifacts; local-view/inspector layout at 120×32, 80×24, 60×20; LAB-VIEW-004 testing view correction **814e775** (supersedes mistaken manager prefix); LAB-UI002 nested tmux return hint.
