@@ -536,6 +536,12 @@ class MultiverseApp(App):
 
     def action_open(self):
         if self.ready() and self.focused is self.query_one("#agents"):
+            # RowHighlighted is queued. A fast arrow+Enter can arrive before it,
+            # so activation must use the actual cursor rather than its observer.
+            table = self.query_one("#agents", DataTable)
+            if not 0 <= table.cursor_row < table.row_count:
+                return
+            self.show_selection(str(table.ordered_rows[table.cursor_row].key.value))
             if self.selected:
                 self.action_attach()
             elif (row := self.visible_rows.get(self.selected_key)) and row["kind"] == "group":
@@ -860,8 +866,16 @@ class MultiverseApp(App):
             if self.backend.demo:
                 self.set_status("Demo terminal. In a live universe, Enter opens the agent's tmux pane.")
             else:
+                attach_error = None
                 with self.suspend():
-                    await asyncio.to_thread(self.backend.attach, Path(agent["universe"]), agent["id"])
+                    # Textual resumes the terminal only after a normal exit.
+                    # Report attach failures after leaving suspension.
+                    try:
+                        await asyncio.to_thread(self.backend.attach, Path(agent["universe"]), agent["id"])
+                    except Exception as error:
+                        attach_error = error
+                if attach_error is not None:
+                    raise attach_error
         except Exception as error:
             self.set_status(f"Attach failed: {error}", error=True)
         finally:

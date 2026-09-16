@@ -1,6 +1,6 @@
 """Real Textual widgets and events, without a model, socket or terminal."""
 import asyncio
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 import sys
 from threading import Event
@@ -428,6 +428,42 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("read-only", str(self.app.query_one("#status", Static).render()))
             self.assertFalse(self.app.operating)
             self.assertEqual(len(self.app.visible_agents), 7)
+
+
+    async def test_enter_uses_cursor_before_highlight_message_is_dispatched(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            old_agent = self.app.selected
+            table = self.app.query_one("#agents", DataTable)
+            index = list(self.app.visible_rows).index(group_key(self.cad))
+            # Move and activate in one event-loop turn, as with batched keys.
+            table.move_cursor(row=index, animate=False)
+            self.assertIs(self.app.selected, old_agent)
+            self.app.action_open()
+            await self.settle(pilot)
+            self.assertEqual(self.app.root, self.cad)
+            self.assertEqual(self.backend.calls, [])
+
+    async def test_attach_failure_exits_suspend_normally_and_restores_input(self):
+        resumed = []
+
+        @contextmanager
+        def suspend():
+            # Match Textual: code after yield is skipped if the body raises.
+            yield
+            resumed.append(True)
+
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            with patch.object(self.app, "suspend", side_effect=suspend), \
+                    patch.object(self.backend, "attach", side_effect=RuntimeError("no current client")):
+                await pilot.press("enter")
+                await self.settle(pilot)
+            self.assertEqual(resumed, [True])
+            self.assertFalse(self.app.operating)
+            self.assertIn("no current client", str(self.app.query_one("#status", Static).render()))
+            await pilot.press("slash", *"gearbox")
+            self.assertEqual([a["name"] for a in self.app.visible_agents.values()], ["verifier"])
 
 
 if __name__ == "__main__":

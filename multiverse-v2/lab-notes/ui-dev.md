@@ -40,3 +40,31 @@ The initial launch scope is the history boundary (documented). Back restores the
 previous visited scope, including direct jumps to grandchildren. Artifacts render
 UTF-8/Markdown previews; SVG/HTML source includes an explicit default-viewer file
 link. No graphical rendering is claimed inside the terminal.
+
+## First committed portal and live failure/fix cycle
+
+Portal commit `bfa7790` was sent to director and testing-ui for independent review.
+The worker independently passed three Pilot checks and installed fixture checks
+at 120×32, 80×24 and 60×20. Director integrated it as `780674f` and reported a
+combined 37-test pass under the integration environment.
+
+Supplemental actual terminal session `ui-dev-evidence`, pane `%13`, uses only
+`LAB/run/tmux.sock` and the ui-dev source path. It is a non-agent UI process.
+On `bfa7790`, batched `Down Enter` from the initial live-agent selection produced
+a blank cooked terminal. Report: `LAB/artifacts/ui-dev/LAB-UI003.md`. Failure
+capture: `LAB/artifacts/terminal/20260916T102633Z-ui-dev-bfa7790-mockups/pane-13.*`.
+Despite the old label, this is explicitly FAILED navigation evidence.
+Director independently reproduced the failure and assigned the bounded fix.
+
+Fix resolves Enter from the actual table cursor before queued highlight delivery,
+and catches attach errors inside Textual's suspension context so terminal resume
+runs before reporting the error. Two regressions cover same-event-loop activation
+and normal suspension-context exit on backend failure. All 19 UI tests pass;
+log: `LAB/artifacts/ui-dev/ui003-tests.log`. Independent actual-terminal failure
+and fixed-commit verification are delegated to the existing testing-ui worker.
+
+After replacing only the supplemental UI process, direct mockups launch and
+separate `Down`, inspected selected CAD row, then `Enter` showed both local
+portals correctly. Successful mockups live capture:
+`LAB/artifacts/terminal/20260916T102813Z-ui-dev-bfa7790-mockups-rendered/pane-13.*`.
+No main-dashboard interaction was performed by ui-dev.
