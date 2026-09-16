@@ -99,7 +99,8 @@ def inbox(agent_dir, limit=50):
 def ack(agent_dir, cursor):
     agent_dir = Path(agent_dir)
     with lock(agent_dir / ".inbox.lock"):
-        data = (agent_dir / "inbox.jsonl").read_bytes()
+        path = agent_dir / "inbox.jsonl"
+        data = path.read_bytes() if path.exists() else b""
         _validate_cursor(data, cursor)
         current = _cursor(agent_dir)
         _validate_cursor(data, current)

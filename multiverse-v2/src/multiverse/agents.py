@@ -135,7 +135,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError("Cannot locate mv2 CLI")
         env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
                "MV2_LAUNCH_ID": launch_id, "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
-        write(launch / "request.json", {"argv": argv, "env": env, "unset_env": spec.get("unset_env", [])})
         properties.update(model=model, updated_at=now())
         write(agent_dir / "properties.json", properties)
         write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(), "started_at": now()})
@@ -148,6 +147,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
             update_runtime(agent_dir, launch_id, tmux=terminal)
+            # Use the server that actually owns this pane, including when tmux
+            # resolved a default socket. The runner scrubs inherited MV2 identity.
+            env["MV2_TMUX_SOCKET"] = terminal["socket"]
+            write(launch / "request.json", {"argv": argv, "env": env, "unset_env": spec.get("unset_env", [])})
             (launch / "ready").touch()
         except Exception as error:
             if terminal:
