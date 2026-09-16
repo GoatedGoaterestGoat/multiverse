@@ -4,9 +4,11 @@ import sys
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 from multiverse.dashboard import LocalBackend, group_key, agent_key
 from multiverse.demo import DemoBackend
 from multiverse.tui import MultiverseApp
@@ -115,6 +117,45 @@ class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(app.root, root)
                 self.assertEqual(app.query_one("#filter").value, "Child evidence")
                 self.assertEqual(app.selected_key, group_key(child))
+
+    async def test_attach_failure_exits_suspend_normally_and_ui_remains_usable(self):
+        backend = DemoBackend()
+        backend.demo = False
+        backend.attach = lambda root, reference: (_ for _ in ()).throw(OSError("independent attach failure"))
+        app = MultiverseApp(backend.root, backend, refresh_interval=0)
+        resumed = []
+
+        @contextmanager
+        def suspend_like_installed_textual():
+            # Installed Textual resumes after yield, not in finally. The actual
+            # terminal reproduction separately confirms why normal exit matters.
+            yield
+            resumed.append(True)
+
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot, app)
+            with patch.object(app, "suspend", suspend_like_installed_textual):
+                await pilot.press("enter")
+                await self.settle(pilot, app)
+            self.assertEqual(resumed, [True], "LAB-UI003: attach errors must not escape suspend")
+            self.assertIn("independent attach failure", str(app.query_one("#status").render()))
+            self.assertFalse(app.operating)
+            await pilot.press("n", "escape")
+            self.assertIsNone(app.draft)
+
+    async def test_activation_reads_current_cursor_before_highlight_dispatch(self):
+        backend = DemoBackend()
+        app = MultiverseApp(backend.root, backend, refresh_interval=0)
+        cad = backend.root / "subverses/cad-lab"
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot, app)
+            # A rapid activation can occur before queued RowHighlighted updates
+            # app.selected; the visible table cursor is authoritative.
+            target = list(app.visible_rows).index(group_key(cad))
+            app.query_one("#agents", DataTable).move_cursor(row=target, animate=False)
+            app.action_open()
+            await self.settle(pilot, app)
+            self.assertEqual(app.root, cad, "LAB-UI003: activation must use current table cursor")
 
 
 if __name__ == "__main__":
