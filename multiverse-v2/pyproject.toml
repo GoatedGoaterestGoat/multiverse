@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "multiverse-v2"
+version = "0.1.0"
+description = "Local, prompt-led agent universes"
+requires-python = ">=3.11"
+dependencies = ["textual>=8.2.3,<9"]
+
+[project.scripts]
+mv2 = "multiverse.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+multiverse = ["templates/**/*", "templates/**/.gitignore", "*.tcss"]

@@ -1,0 +1,5 @@
+{
+  "columns": ["name", "harness", "live", "activity", "phase", "summary"],
+  "accent": "auto",
+  "description": "Process observations and agent-reported progress stay separate."
+}

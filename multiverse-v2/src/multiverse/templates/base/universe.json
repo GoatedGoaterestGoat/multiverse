@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "name": "base",
+  "workspace": "..",
+  "description": "A small place for agents to work together."
+}
