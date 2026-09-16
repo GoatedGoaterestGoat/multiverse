@@ -1,5 +1,7 @@
 # testing-ui independent verification
 
+Latest: reactivated LAB-UI004 independently verified fixed on **dbcba0a**;35 UI checks pass. Original open status below is historical. Retest details at end.
+
 Native session: `01a0a9bc-1ebd-78b2-8ff1-3ec97d645c62`; agent `e5d01748-d437-485f-a64c-08357284bc6f`.
 
 Baseline implementation: `3c7de7ed69f732a0e70362b69e3127022cf3e587`.
@@ -46,3 +48,13 @@ LAB-UI002 help text verified in actual pane `%16` with bfa7790, expanded to 120�
 Manager requested one LAB-UI004 buffered-versus-paced search comparison, with no further expansion. On65f228f, actual pane20 starts at observed root/director selection with filter hidden. One `send-keys / "Testing queue" Enter` produces empty filter plus **Stop director?** confirmation (`UI004-batched.txt`); canceled with standalone Escape, never submitted. Paced slash → visible filter → literal query → Enter succeeds (`UI004-paced-query.txt`, `UI004-paced-after-enter.txt`). LAB-UI004 reproduced; proposed medium severity, suspected focus/event queue delay dispatches text as global shortcuts. Full repro/proposal in `artifacts/testing-ui/LAB-UI004.md`; this remaining finding does not undo verified UI001/UI003 fixes. Test fixture overrides only attach to protect real user clients. No model workers created.
 
 Manager accepted UI004 as medium OPEN with paced-search workaround and no further tests/fixes in this run. Final capture archive `artifacts/terminal/20260916T103716Z-testing-ui-final-before-cleanup`. Closed only owned non-agent `testing-ui-evidence` session after verifying its eight launch commands. `cleanup-remaining-panes.txt` confirms main dashboard, recorder and all seven ordinary workers remain, including this testing-ui pane7. Available for independent retest; native session unchanged. No queue nonce challenge received in this run.
+
+## Reactivated LAB-UI004 retest
+
+User/director reopened UI004 for bounded independent verification. Exact fix **dbcba0a**, cherry-picked as **e02521f**, with empty production-source diff. One developer-note conflict resolved using exact fix-commit note blob; no source changes. New independent test commit54f7d3d reproduces two baseline65f228f failures with raw Driver key batches (Pilot.press waits between keys). Corrective test commit **fa5dca5** fixes an editor assumption: reopening selects existing query, so new input replaces it. Explicit paced reopen assertion and actual terminal comparison confirm identical normal replacement semantics; no-action/query/focus gates remain. Baseline failures occur earlier at empty query and remain valid.
+
+**35/35 UI checks pass** on fix:7 independent,22 existing/developer UI,6 portal. Logs `UI004-independent-baseline.log` and `UI004-dbcba0a-{independent,existing,portal}.log`. Actual terminal pane21, `testing-ui-ui004:fixed-search`, loads production UI with action audit and blocked backend mutations. Exact original batch `/ "Testing queue" Enter` now yields exact query, filtered table, one screen/no draft, zero global-action invocations and backend calls. `UI004-fixed-before.txt`, `UI004-fixed-batched.txt/state.json`; actual SVG `artifacts/terminal/20260916T104555Z-testing-ui-dbcba0a-buffered-search/pane-21.svg`.
+
+Actual inspector-open `/Testing` then idle retains filter focus; additional ` queue/nmsqgpvr` remains literal text without action/modal (`UI004-fixed-settled-focus.json`, `UI004-fixed-continued-typing.txt/state.json`). Paced search/submit and paced reopen replacement both pass (`UI004-fixed-paced-*.txt`, `UI004-fixed-paced-replacement-state.json`). Guard review plus developer regression verifies literal slash remains editable in Input/TextArea/drafts/modals. Retest report `artifacts/testing-ui/UI004-retest-dbcba0a.md`. No new agents/model probes; no main-dashboard changes. UI004 verified fixed.
+
+Final actual retest archive `artifacts/terminal/20260916T104855Z-testing-ui-dbcba0a-retest-complete`. Closed only owned non-agent `testing-ui-ui004` after checking launch command. `UI004-cleanup-remaining-panes.txt` confirms dashboard, recorder and all seven ordinary workers remain. Available for independent retests.
