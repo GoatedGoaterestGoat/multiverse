@@ -130,3 +130,9 @@ Official configuration sources consulted: [configuration basics](https://learn.c
 and [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 The proposal avoids relying on undocumented precedence between a conflicting
 `--model` flag and `-c model` setting; no model turn is claimed for this diagnostic.
+
+Director subsequently deployed the reviewed bundle. Final read-only verification
+confirmed all 33 installed files exactly match their reviewed after hashes and
+marker/default/override assertions. Reusable source adapters remain model-neutral.
+Evidence: `LAB/artifacts/template-dev/installed-manifests-verified.json`. No
+processes, agents or restarts were needed for this deployment verification.
