@@ -14,13 +14,16 @@ from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hiera
 from .draft import AgentDraft, FIELDS, LABELS
 from .inspector import Inspector
 from .universe import slug
+from .views import LocalView
 
 KEYS = """NAVIGATION
 ↑ / k, ↓ / j   Select a row
 ← / h          Fold a group, or go to its parent
 → / l          Expand a group, or select its first child
 Space          Fold / expand the selected group
-Enter          Fold / expand a group; attach to a live agent
+Enter          Enter a subverse; attach to a live agent
+Backspace      Return to the previous universe, restoring its context
+Tab            Move between hierarchy, local view and artifact links
 /              Search every subverse, including folded groups
 Esc            Clear search, or close the current dialog
 
@@ -48,11 +51,15 @@ Shift+Enter      New line in the initial prompt (pasting also works)
 
 MOUSE
 Pause over a row for details and a live pane preview.
-Click a group to fold / expand; click an agent to select.
+Click a group to fold / expand; double-click to enter it.
+Click the breadcrumb to return to the previous universe.
 Double-click an agent to attach. Scroll the list normally.
 The key hints along the bottom are clickable.
 
-Detach from tmux with its usual binding (normally Ctrl-b d)."""
+When the dashboard is inside the same tmux server, attaching switches sessions.
+Ctrl-b L returns to the previous session (the dashboard).
+Ctrl-b d detaches the whole tmux client. For a dashboard launched outside tmux,
+detaching the attached agent returns to the dashboard. These are default tmux keys."""
 
 
 class Form(ModalScreen[dict | None]):
@@ -192,11 +199,17 @@ class Fleet(Vertical):
         self.call_later(self.app.populate_table)
 
 
+class Breadcrumb(Static):
+    def on_click(self):
+        self.app.action_back(from_mouse=True)
+
+
 class MultiverseApp(App):
     CSS_PATH = "tui.tcss"
     TITLE = "Multiverse"
     BINDINGS = [
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find"),
+        Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New"), Binding("m", "message", "Message"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
@@ -225,16 +238,21 @@ class MultiverseApp(App):
         self._harness_options = None
         self.scan_count = 0
         self._table_signature = None
+        self.history = []
+        self._restore_scroll = None
+        self._scope_generation = 0
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="masthead"):
             yield Static("◈ MULTIVERSE" + (" / DEMO" if self.backend.demo else ""), id="brand")
             yield Static("", id="totals", markup=False)
+        yield Breadcrumb("", id="breadcrumb", markup=False)
         yield Input(placeholder="/ Find agents, tasks, status or groups · Esc clears", id="filter")
         with Horizontal(id="body"):
             with Fleet(id="fleet"):
                 yield AgentTable(id="agents", cursor_type="row", show_row_labels=False)
                 yield Static("Loading universe…", id="empty", markup=False)
+            yield LocalView(id="local-view")
             self.inspector = Inspector(id="inspector")
             yield self.inspector
         yield Static("", id="selection", markup=False)
@@ -274,17 +292,41 @@ class MultiverseApp(App):
 
     @work(group="scan", exit_on_error=False)
     async def scan(self):
+        root, generation = self.root, self._scope_generation
         try:
-            self.snapshot = await asyncio.to_thread(self.backend.snapshot, self.root)
+            snapshot = await asyncio.to_thread(self.backend.snapshot, root)
+            if generation != self._scope_generation:
+                return
+            self.snapshot = snapshot
             self.scan_count += 1
+            self.title = clean(snapshot["name"])
+            self.query_one("#brand", Static).update(Text("◈ " + self.title + (" / DEMO" if self.backend.demo else ""),
+                                                        style=snapshot["accent"]))
+            trail = [entry["name"] for entry in self.history] + [self.title]
+            breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
+            breadcrumb.display = bool(self.history)
+            breadcrumb.update("‹ Back · " + " / ".join(trail))
             totals = self.snapshot["counts"]
             self.query_one("#totals", Static).update(
                 f'{totals["alive"]} live · {totals["blocked"]} blocked · {totals["total"]} agents')
+            await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
+            if generation != self._scope_generation:
+                return
             self.populate_table()
+            if self._restore_scroll is not None:
+                scroll = self._restore_scroll
+                self._restore_scroll = None
+                self.call_after_refresh(self.restore_scroll, scroll)
         except Exception as error:
             self.set_status(f"Could not refresh: {error}", error=True)
         finally:
             self.scanning = False
+            if generation != self._scope_generation:
+                self.refresh_snapshot()
+
+    def restore_scroll(self, scroll):
+        self.query_one("#agents", DataTable).scroll_to(x=scroll[0], y=scroll[1], animate=False)
+        self.query_one("#local-view", LocalView).scroll_to(y=scroll[2], animate=False)
 
     def populate_table(self):
         if not self.snapshot:
@@ -477,10 +519,12 @@ class MultiverseApp(App):
             self.queue_inspector(key, "selection", min(0.12, self.hover_delay))
 
     def click_row(self, key, chain):
+        if not self.ready():
+            return
         self.show_selection(key)
         row = self.visible_rows.get(key)
         if row and row["kind"] == "group":
-            self.action_fold()
+            self.enter_scope(Path(row["path"])) if chain == 2 else self.action_fold()
         elif chain == 2:
             self.action_attach()
 
@@ -492,7 +536,46 @@ class MultiverseApp(App):
 
     def action_open(self):
         if self.ready() and self.focused is self.query_one("#agents"):
-            self.action_attach() if self.selected else self.action_fold()
+            if self.selected:
+                self.action_attach()
+            elif (row := self.visible_rows.get(self.selected_key)) and row["kind"] == "group":
+                self.enter_scope(Path(row["path"]))
+
+    def enter_scope(self, root):
+        if not self.ready() or root == self.root or not self.snapshot:
+            return
+        table = self.query_one("#agents", DataTable)
+        search = self.query_one("#filter", Input)
+        self.history.append({"root": self.root, "name": self.snapshot["name"], "selected_key": self.selected_key,
+                             "collapsed": set(self.collapsed), "search": search.value, "search_visible": search.display,
+                             "scroll": (table.scroll_x, table.scroll_y, self.query_one("#local-view").scroll_y)})
+        self.switch_scope(root)
+
+    def action_back(self, from_mouse=False):
+        if self.ready() and self.history and (from_mouse or not isinstance(self.focused, (Input, TextArea))):
+            context = self.history.pop()
+            self.switch_scope(context["root"], context)
+
+    def switch_scope(self, root, context=None):
+        self.hide_inspector()
+        self.hover_key = None
+        self.root = root
+        self._scope_generation += 1
+        self.snapshot = self.selected = None
+        self.visible_rows, self.visible_agents = {}, {}
+        self.collapsed = set(context["collapsed"]) if context else set()
+        self.selected_key = context["selected_key"] if context else group_key(root)
+        self._table_signature = None
+        self._restore_scroll = context["scroll"] if context else (0, 0, 0)
+        search = self.query_one("#filter", Input)
+        search.value = context["search"] if context else ""
+        search.display = context["search_visible"] if context else False
+        self.query_one("#agents", DataTable).clear(columns=True)
+        self.query_one("#local-view").remove_class("populated")
+        self.query_one("#empty", Static).update("Loading universe…")
+        self.query_one("#empty").display = True
+        self.set_status("")
+        self.refresh_snapshot()
 
     def action_fold(self):
         if not self.ready():

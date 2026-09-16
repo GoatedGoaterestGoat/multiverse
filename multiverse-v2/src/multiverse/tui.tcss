@@ -2,6 +2,16 @@ Screen { background: #11111b; color: #cdd6f4; }
 #masthead { height: 1; padding: 0 1; background: #181825; }
 #brand { width: 1fr; color: #94e2d5; text-style: bold; }
 #totals { width: auto; color: #a6adc8; }
+#breadcrumb { display: none; height: 1; padding: 0 1; color: #89b4fa; background: #181825; }
+#breadcrumb:hover { background: #31374e; }
+#local-view { display: none; width: 48%; height: 1fr; padding: 0 1; border-left: solid #45475a; scrollbar-size: 1 1; }
+#local-view.populated { display: block; }
+.inspecting #local-view { display: none; }
+.view-title { height: auto; margin-top: 1; color: #94e2d5; text-style: bold; }
+#local-view Markdown { margin: 0; padding: 0; height: auto; }
+.view-table { margin-top: 1; scrollbar-size: 1 1; }
+.artifact-button { width: 100%; height: auto; min-height: 1; margin-top: 1; border: none; background: #242535; text-align: left; }
+.artifact-description { height: auto; color: #a6adc8; }
 #filter { display: none; height: 1; border: none; padding: 0 1; background: #242535; }
 #filter:focus { border: none; }
 #body { height: 1fr; }
@@ -50,6 +60,7 @@ Footer { background: #181825; }
 #preview { height: auto; color: #a6adc8; }
 #inspect-hint { height: 1; color: #7f849c; }
 .drawer #body { layout: vertical; }
+.drawer #local-view { width: 100%; height: 45%; border-left: none; border-top: solid #45475a; }
 .drawer #inspector { width: 100%; max-width: 100%; height: 12; max-height: 60%; border-left: none; border-top: solid #45475a; }
 .drawer #inspect-label { display: none; }
 .drawer #inspect-meta { display: none; }
@@ -59,7 +70,7 @@ Footer { background: #181825; }
 .short.drawer #inspect-work { max-height: 1; }
 .drawer #inspect-group { margin-top: 0; }
 .narrow #totals { width: auto; }
-Form, Details { align: center middle; background: #11111b 75%; }
+Form, Details, ArtifactPreview { align: center middle; background: #11111b 75%; }
 #dialog { width: 72; max-width: 94%; height: auto; max-height: 90%; border: round #94e2d5; background: #1e1e2e; padding: 1 2; }
 #dialog-title { text-style: bold; height: auto; margin-bottom: 1; }
 #dialog-description { height: auto; color: #a6adc8; margin-bottom: 1; }

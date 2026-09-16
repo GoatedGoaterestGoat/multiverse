@@ -5,6 +5,7 @@ import re
 
 from . import agents, universe
 from .store import append_message, read
+from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
@@ -20,7 +21,12 @@ def clean(value):
 
 def view(root):
     path = root / "views" / "default.json"
-    config = read(path) if path.is_file() else {}
+    try:
+        config = read(path) if path.is_file() else {}
+        if not isinstance(config, dict):
+            raise ValueError("View must be a JSON object")
+    except (OSError, ValueError) as error:
+        config = {"widgets": [{"type": "markdown", "title": "View configuration error", "text": str(error)}]}
     accent = config.get("accent", "auto")
     if accent == "auto":
         identity = read(root / "universe.json")["id"]
@@ -33,7 +39,7 @@ def view(root):
         requested = DEFAULT_COLUMNS
     selected = list(dict.fromkeys(key for key in requested if isinstance(key, str) and key in COLUMNS))
     return {"columns": selected or DEFAULT_COLUMNS, "accent": accent,
-            "title": str(config.get("title", ""))}
+            "title": str(config.get("title", "")), "widgets": normalize_widgets(config.get("widgets", []))}
 
 
 def columns(root):
@@ -86,7 +92,7 @@ class LocalBackend:
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),
-                "columns": columns(root), "agents": members}
+                "columns": config["columns"], "widgets": config["widgets"], "agents": members}
 
     def spawn(self, root, values):
         return agents.start(root, name=values["name"], task=values["task"],
