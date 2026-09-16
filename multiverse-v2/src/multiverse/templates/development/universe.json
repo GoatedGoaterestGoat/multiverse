@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "name": "development",
+  "workspace": "..",
+  "description": "Reusable development workspace with lazy role workflows and evidence forms."
+}

@@ -1,0 +1,44 @@
+{
+  "title": "Testing",
+  "accent": "#f9e2af",
+  "columns": [
+    "name",
+    "live",
+    "phase",
+    "summary"
+  ],
+  "widgets": [
+    {
+      "type": "markdown",
+      "title": "Working agreement",
+      "text": "Track exact revisions, reproducible commands, and evidence. This is an empty reusable template; no results are claimed."
+    },
+    {
+      "type": "table",
+      "title": "Reproduction / retest queue",
+      "columns": [
+        "ID",
+        "Owner",
+        "Status",
+        "Revision"
+      ],
+      "rows": []
+    },
+    {
+      "type": "artifacts",
+      "title": "Evidence forms",
+      "items": [
+        {
+          "label": "Bug Report",
+          "path": "artifacts/bug-report.md",
+          "description": "Copy this blank form for each case."
+        },
+        {
+          "label": "Retest Report",
+          "path": "artifacts/retest-report.md",
+          "description": "Copy this blank form for each case."
+        }
+      ]
+    }
+  ]
+}

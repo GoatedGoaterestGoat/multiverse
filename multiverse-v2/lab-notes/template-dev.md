@@ -47,3 +47,21 @@ Recovery details live in `docs/launch-recovery.md`.
 Evidence: `LAB/artifacts/template-dev/spawn-before.txt` (expected failing new
 regression) and `spawn-after.txt` (five launch/inbox checks pass). Independent
 committed-fix retest requested separately.
+
+Recovery commit: `adfcdb78f620187defe6a7120b7f6d9283ce534a`. Testing-manager
+independently verified it against archived source and real persisted duplicate
+records; evidence `LAB/artifacts/testing/LAB-SPAWN-003-retest.txt`. Closed as
+recovery/diagnostics, not deduplication or deletion.
+
+## Reusable templates
+
+Bundled `testing` and `development` templates include a short bootstrap pointer,
+lazy role/task workflows, the unchanged declarative Codex adapter, blank evidence
+forms and distinct local views. Schema coordinated with UI development: markdown,
+inline table, and artifacts widgets. No workers or fake results are preinstalled.
+See `docs/role-templates.md` for installation and usage.
+
+Validation: `python -m unittest discover -s multiverse-v2/tests -p test_templates.py -v`.
+Tests exercise fresh IDs and empty-state cloning, adapter consistency, lazy prompt
+loading, prompt size, and artifact paths. Evidence:
+`LAB/artifacts/template-dev/templates-tests.txt`.
