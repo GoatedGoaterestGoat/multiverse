@@ -127,3 +127,32 @@ test fails before the fix with `action_stop` invoked; evidence is
 `ui004-ui-tests.log` (22 UI checks) and `ui004-portal-tests.log` (6 portal checks)
 under the same artifacts directory. Independent testing-ui owns its separate
 Driver.send_message regression and exact-commit actual-terminal retest.
+
+Fix commit: `dbcba0a`. Independent testing-ui cherry-picked it as `e02521f` and
+verified identical production source. All 35 checks pass: 7 independent, 22 UI,
+6 portal. Its two raw Driver batches fail the prior `65f228f` implementation and
+pass the fix. Evidence: `LAB/artifacts/testing-ui/UI004-dbcba0a-independent.log`,
+`UI004-dbcba0a-existing.log`, and `UI004-dbcba0a-portal.log`.
+
+The independent actual-terminal audit on lab-socket pane `%21` verifies:
+
+- Exact original slash/`Testing queue`/Enter batch: query correct, focus returns
+  to agents, no modal or draft, `actions=[]`, `backend_calls=[]`.
+- Inspector closed then continued typing: query `Testing queue/nmsqgpvr`, focus
+  remains in filter, no modal/draft/action/backend dispatch.
+
+Audit files are `LAB/artifacts/testing-ui/UI004-fixed-batched-state.json` and
+`UI004-fixed-continued-state.json`. Corresponding real terminal archive:
+`LAB/artifacts/terminal/20260916T104555Z-testing-ui-dbcba0a-buffered-search/pane-21.*`.
+The independent reopened-query test was corrected to match Textual Input's
+existing `select_on_focus=True` replacement behavior; the fix does not change
+that setting. Main-dashboard restart/integration remains director-owned.
+
+Final independent report `LAB/artifacts/testing-ui/UI004-retest-dbcba0a.md`
+marks LAB-UI004 **verified fixed**. Paced search and paced reopen also pass;
+`UI004-fixed-paced-replacement-state.json` confirms the same replacement semantics
+as buffered reopening, with no actions. Corrected independent test commit
+`fa5dca5` adds the explicit paced comparison. Final actual-terminal archive is
+`20260916T104855Z-testing-ui-dbcba0a-retest-complete`; the tester closed only its
+own auxiliary non-agent UI session afterward. No further production changes
+were needed after `dbcba0a`.
