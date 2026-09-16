@@ -1,0 +1,60 @@
+{
+  "method": "Analytical dimensions and cylindrical through-hole volume; no FEA",
+  "all_expectations_met": true,
+  "cases": [
+    {
+      "id": "CAD-001",
+      "name": "Nominal rev B",
+      "overrides": {},
+      "expected": "pass",
+      "mass_g": 94.983,
+      "edge_clearance_mm": 8.7,
+      "checks": {
+        "edge-clearance": true,
+        "minimum-thickness": true,
+        "mass-budget": true,
+        "hole-separation": true
+      },
+      "result": "pass",
+      "expectation_met": true
+    },
+    {
+      "id": "CAD-002",
+      "name": "Oversized-hole regression",
+      "overrides": {
+        "hole_diameter": 10
+      },
+      "expected": "fail",
+      "expected_failure": "edge-clearance",
+      "mass_g": 92.111,
+      "edge_clearance_mm": 7.0,
+      "checks": {
+        "edge-clearance": false,
+        "minimum-thickness": true,
+        "mass-budget": true,
+        "hole-separation": true
+      },
+      "result": "fail",
+      "expectation_met": true
+    },
+    {
+      "id": "CAD-003",
+      "name": "Thin-stock regression",
+      "overrides": {
+        "thickness": 5
+      },
+      "expected": "fail",
+      "expected_failure": "minimum-thickness",
+      "mass_g": 79.153,
+      "edge_clearance_mm": 8.7,
+      "checks": {
+        "edge-clearance": true,
+        "minimum-thickness": false,
+        "mass-budget": true,
+        "hole-separation": true
+      },
+      "result": "fail",
+      "expectation_met": true
+    }
+  ]
+}

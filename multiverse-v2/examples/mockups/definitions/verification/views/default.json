@@ -1,0 +1,67 @@
+{
+  "title": "Verification | MP-100 regression suite",
+  "description": "Three analytical cases \u2022 two expected failures \u2022 no FEA",
+  "columns": [
+    "name",
+    "phase",
+    "summary"
+  ],
+  "widgets": [
+    {
+      "type": "table",
+      "title": "Constraint results",
+      "columns": [
+        "Case",
+        "Scenario",
+        "Geometry",
+        "Expectation"
+      ],
+      "rows": [
+        [
+          "CAD-001",
+          "Nominal rev B",
+          "PASS",
+          "matched"
+        ],
+        [
+          "CAD-002",
+          "Oversized-hole regression",
+          "FAIL",
+          "matched"
+        ],
+        [
+          "CAD-003",
+          "Thin-stock regression",
+          "FAIL",
+          "matched"
+        ]
+      ]
+    },
+    {
+      "type": "markdown",
+      "title": "Result interpretation",
+      "text": "3/3 expectations met. Nominal geometry passes. Oversized holes fail edge clearance; thin stock fails minimum thickness. Expected failures demonstrate that checks detect invalid geometry."
+    },
+    {
+      "type": "artifacts",
+      "title": "Local artifacts",
+      "items": [
+        {
+          "label": "Test results",
+          "path": "artifacts/results.json",
+          "description": "Calculated checks and expected outcomes"
+        },
+        {
+          "label": "Case definitions",
+          "path": "artifacts/cases.json",
+          "description": "Nominal and invalid inputs"
+        },
+        {
+          "label": "Verification report",
+          "path": "artifacts/report.md",
+          "description": "Human-readable method and limitations"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+Explore stock-trading and cad, then cad/verification. Each universe has local prompts, declarative views and lightweight artifacts; agents are not required for these static worlds. Market data is fictional. Read artifacts/guide.md for the walkthrough.

@@ -1,0 +1,41 @@
+{
+  "name": "MP-100 sensor mounting plate",
+  "revision": "B",
+  "units": "mm",
+  "material": {
+    "name": "Aluminum 6061-T6 (nominal)",
+    "density_kg_m3": 2700
+  },
+  "plate": {
+    "length": 100,
+    "width": 60,
+    "thickness": 6
+  },
+  "holes": {
+    "diameter": 6.6,
+    "centers": [
+      [
+        12,
+        12
+      ],
+      [
+        88,
+        12
+      ],
+      [
+        88,
+        48
+      ],
+      [
+        12,
+        48
+      ]
+    ]
+  },
+  "constraints": {
+    "min_edge_clearance": 8,
+    "min_thickness": 5.5,
+    "max_mass_g": 110
+  },
+  "scope": "Analytical geometry demonstration only; no structural certification or manufacturing release."
+}

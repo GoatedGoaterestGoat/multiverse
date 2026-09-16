@@ -1,0 +1,53 @@
+{
+  "title": "Mockups | Working worlds",
+  "description": "Offline fixtures \u2022 nested local workspaces \u2022 no extra agents",
+  "columns": [
+    "name",
+    "phase",
+    "summary"
+  ],
+  "widgets": [
+    {
+      "type": "markdown",
+      "title": "Choose a world",
+      "text": "Enter stock-trading for the fictional Northstar paper desk, or cad for a mounting plate. Inside cad, enter verification for calculated regression tests."
+    },
+    {
+      "type": "table",
+      "title": "Demo map",
+      "columns": [
+        "Universe",
+        "Preview",
+        "Evidence"
+      ],
+      "rows": [
+        [
+          "stock-trading",
+          "Paper portfolio",
+          "$40,000 NAV"
+        ],
+        [
+          "cad",
+          "MP-100 plate",
+          "94.983 g"
+        ],
+        [
+          "cad / verification",
+          "Constraint suite",
+          "3/3 expectations met"
+        ]
+      ]
+    },
+    {
+      "type": "artifacts",
+      "title": "Local artifacts",
+      "items": [
+        {
+          "label": "Demo guide",
+          "path": "artifacts/guide.md",
+          "description": "Navigation and artifact map"
+        }
+      ]
+    }
+  ]
+}

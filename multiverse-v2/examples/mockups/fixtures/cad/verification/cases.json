@@ -1,0 +1,7 @@
+{
+  "cases": [
+    {"id": "CAD-001", "name": "Nominal rev B", "overrides": {}, "expected": "pass"},
+    {"id": "CAD-002", "name": "Oversized-hole regression", "overrides": {"hole_diameter": 10}, "expected": "fail", "expected_failure": "edge-clearance"},
+    {"id": "CAD-003", "name": "Thin-stock regression", "overrides": {"thickness": 5}, "expected": "fail", "expected_failure": "minimum-thickness"}
+  ]
+}

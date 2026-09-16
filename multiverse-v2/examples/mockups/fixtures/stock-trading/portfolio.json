@@ -1,0 +1,16 @@
+{
+  "scenario": "Northstar paper desk / fictional companies",
+  "as_of": "2026-09-15T16:00:00Z",
+  "currency": "USD",
+  "simulated": true,
+  "cash": "23911.00",
+  "positions": [
+    {"symbol": "QVLT", "company": "Quill Volt Systems (fictional)", "shares": 125, "average_cost": "42.80", "mark": "46.12", "previous_close": "45.60"},
+    {"symbol": "HBRG", "company": "Harbor Glassworks (fictional)", "shares": 80, "average_cost": "78.50", "mark": "76.35", "previous_close": "77.20"},
+    {"symbol": "NIMB", "company": "Nimbus Orchard Labs (fictional)", "shares": 200, "average_cost": "19.40", "mark": "21.08", "previous_close": "20.72"}
+  ],
+  "orders": [
+    {"id": "PAPER-1042", "symbol": "QVLT", "side": "buy", "shares": 20, "limit": "45.50", "status": "unfilled simulation"},
+    {"id": "PAPER-1043", "symbol": "HBRG", "side": "sell", "shares": 10, "limit": "78.00", "status": "unfilled simulation"}
+  ]
+}

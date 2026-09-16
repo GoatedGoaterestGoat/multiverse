@@ -1,0 +1,1 @@
+Review artifacts/cases.json and results.json. Confirm nominal passes, the 10 mm hole mutation fails edge-clearance, and 5 mm stock fails minimum-thickness. A detected expected failure is a passing regression test. Use the reusable demo.py verify command to recalculate; no FEA or CAD engine is involved.

@@ -1,0 +1,1 @@
+Inspect the MP-100 rev B sensor mounting plate in artifacts/model.json, plate.svg and plate.scad. Dimensions use mm. Enter verification for calculated constraints and regression cases. Do not describe geometry checks as structural analysis or manufacturing approval. No large CAD installation is needed.
