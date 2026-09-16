@@ -190,12 +190,20 @@ class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
                 # Reopening search after submission must also accept buffered text.
                 self.buffered_keys(app, "/ new message stop resume")
                 await self.settle(pilot, app)
-                self.assertEqual(app.query_one("#filter").value, "Testing queue new message stop resume")
+                # Input selects the existing query on refocus, so new text replaces it.
+                self.assertEqual(app.query_one("#filter").value, " new message stop resume")
                 self.assertIs(app.focused, app.query_one("#filter"))
                 self.assertEqual(len(app.screen_stack), 1)
                 self.assertIsNone(app.draft)
                 for action in (stop, spawn, send, resume):
                     action.assert_not_called()
+                for action in actions:
+                    action.assert_not_called()
+                # The ordinary paced editor has the same select-on-refocus behavior.
+                await pilot.press("enter", "slash", *"paced names")
+                self.assertEqual(app.query_one("#filter").value, "paced names")
+                self.assertIs(app.focused, app.query_one("#filter"))
+                self.assertEqual(len(app.screen_stack), 1)
                 for action in actions:
                     action.assert_not_called()
 
