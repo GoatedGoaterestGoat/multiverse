@@ -3,9 +3,9 @@ from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 
-from .dashboard import COLORS, DEFAULT_COLUMNS, counts, within
-from .store import uid
-from .universe import slug
+from multiverse.dashboard import COLORS, DEFAULT_COLUMNS, counts, within
+from multiverse.store import uid
+from multiverse.universe import slug
 
 
 class DemoBackend:
@@ -87,3 +87,10 @@ class DemoBackend:
             self.scopes[path] = {"name": name, "description": "A new demo universe", "accent": COLORS[len(self.scopes) % len(COLORS)],
                                  "harnesses": ["codex", "claude", "pi"]}
             return path
+
+
+if __name__ == "__main__":
+    from multiverse.tui import start
+
+    backend = DemoBackend()
+    start(backend.root, backend)

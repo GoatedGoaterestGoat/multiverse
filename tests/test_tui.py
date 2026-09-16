@@ -8,10 +8,11 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import Button, DataTable, Footer, Input, OptionList, Static, TextArea
 from textual import events
 from multiverse.dashboard import agent_key, group_key
-from multiverse.demo import DemoBackend
+from tui_demo import DemoBackend
 from multiverse.tui import Details, Form, MultiverseApp
 
 

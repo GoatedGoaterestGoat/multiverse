@@ -2,22 +2,16 @@
 from .. import universe
 
 def configure(parser):
-    parser.add_argument("--demo", action="store_true", help="Explore an in-memory demo without starting processes")
+    pass
 
 
-def run(root=None, *, demo=False):
-    backend = None
-    if demo:
-        from ..demo import DemoBackend
-        backend = DemoBackend()
-        root = backend.root
-    else:
-        root = universe.resolve(root)
+def run(root=None):
+    root = universe.resolve(root)
     try:
         from ..tui import start
     except ModuleNotFoundError as error:
         raise RuntimeError("Install the TUI dependencies with `uv sync` or `pip install .`.") from error
-    start(root, backend)
+    start(root)
 
 
 if __name__ == "__main__":

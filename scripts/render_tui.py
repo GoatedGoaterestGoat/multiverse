@@ -5,9 +5,11 @@
 import argparse
 import asyncio
 import os
+import sys
 from pathlib import Path
 
-from multiverse.demo import DemoBackend
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+from tui_demo import DemoBackend
 from multiverse.tui import MultiverseApp
 from multiverse.dashboard import group_key
 

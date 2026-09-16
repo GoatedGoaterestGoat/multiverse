@@ -12,10 +12,10 @@ From the repository root:
 
 ```sh
 uv sync
-./bin/mv2 tui --demo
+.venv/bin/python examples/tui_demo.py
 ```
 
-The demo has a project universe, PR review and CAD subverses, nested verification, and sample agents. Its actions operate entirely in memory; it needs no tmux, model account or existing universe. The checkout launcher automatically uses `multiverse-v2/.venv` after setup.
+The checkout-only example in `examples/tui_demo.py` has a project universe, PR review and CAD subverses, nested verification, and sample agents. Its actions operate entirely in memory; it needs no tmux, model account or existing universe. The checkout launcher automatically uses `.venv` after setup.
 
 For real work:
 
