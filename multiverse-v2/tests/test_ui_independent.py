@@ -4,11 +4,12 @@ import sys
 import json
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import DataTable, Static
+from textual import events
 from multiverse.dashboard import LocalBackend, group_key, agent_key
 from multiverse.demo import DemoBackend
 from multiverse.tui import MultiverseApp
@@ -16,6 +17,21 @@ from multiverse.universe import create
 
 
 class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
+    @contextmanager
+    def watch_global_actions(self, app):
+        with ExitStack() as stack:
+            yield [stack.enter_context(patch.object(app, name, wraps=getattr(app, name)))
+                   for name in ("action_stop", "action_spawn", "action_message", "action_resume",
+                                "action_attach", "action_subverse", "action_quit")]
+
+    def buffered_keys(self, app, text, enter=False):
+        # Unlike Pilot.press, send an entire terminal read without per-key waits.
+        for char in text:
+            key = {"/": "slash", " ": "space"}.get(char, char)
+            app._driver.send_message(events.Key(key, char))
+        if enter:
+            app._driver.send_message(events.Key("enter", "\r"))
+
     async def settle(self, pilot, app):
         await pilot.pause()
         await app.workers.wait_for_complete()
@@ -156,6 +172,59 @@ class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
             app.action_open()
             await self.settle(pilot, app)
             self.assertEqual(app.root, cad, "LAB-UI003: activation must use current table cursor")
+
+    async def test_buffered_search_never_dispatches_global_actions(self):
+        backend = DemoBackend()
+        app = MultiverseApp(backend.root, backend, refresh_interval=0)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot, app)
+            with patch.object(backend, "stop") as stop, patch.object(backend, "spawn") as spawn, \
+                    patch.object(backend, "send") as send, patch.object(backend, "resume") as resume, \
+                    self.watch_global_actions(app) as actions:
+                self.buffered_keys(app, "/Testing queue", enter=True)
+                await self.settle(pilot, app)
+                self.assertEqual(app.query_one("#filter").value, "Testing queue")
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertIsNone(app.draft)
+                self.assertIs(app.focused, app.query_one("#agents"))
+                # Reopening search after submission must also accept buffered text.
+                self.buffered_keys(app, "/ new message stop resume")
+                await self.settle(pilot, app)
+                self.assertEqual(app.query_one("#filter").value, "Testing queue new message stop resume")
+                self.assertIs(app.focused, app.query_one("#filter"))
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertIsNone(app.draft)
+                for action in (stop, spawn, send, resume):
+                    action.assert_not_called()
+                for action in actions:
+                    action.assert_not_called()
+
+    async def test_search_retains_focus_after_hiding_inspector_and_more_typing(self):
+        backend = DemoBackend()
+        app = MultiverseApp(backend.root, backend, refresh_interval=0)
+        async with app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot, app)
+            await pilot.press("p")
+            await self.settle(pilot, app)
+            self.assertIsNotNone(app.inspector.row)
+            with patch.object(backend, "stop") as stop, patch.object(backend, "spawn") as spawn, \
+                    self.watch_global_actions(app) as actions:
+                self.buffered_keys(app, "/Testing")
+                await self.settle(pilot, app)
+                self.assertEqual(app.query_one("#filter").value, "Testing")
+                self.assertIs(app.focused, app.query_one("#filter"))
+                self.buffered_keys(app, " queue names", enter=True)
+                await self.settle(pilot, app)
+                self.assertEqual(app.query_one("#filter").value, "Testing queue names")
+                self.assertEqual(len(app.screen_stack), 1)
+                self.assertIsNone(app.draft)
+                stop.assert_not_called()
+                spawn.assert_not_called()
+                for action in actions:
+                    action.assert_not_called()
+                await pilot.press("escape", "slash", *"CAD", "enter")
+                self.assertEqual(app.query_one("#filter").value, "CAD")
+                self.assertIn(group_key(backend.root / "subverses/cad-lab"), app.visible_rows)
 
 
 if __name__ == "__main__":
