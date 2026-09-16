@@ -23,30 +23,51 @@
         [
           "LAB-SOCKET-001",
           "high",
-          "retest 14ff690 pending",
+          "verified 14ff690 + live 08da915",
           "template-dev",
           "testing-harnesses"
         ],
         [
           "LAB-INBOX-001",
           "medium",
-          "retest 14ff690 pending",
+          "verified 14ff690 + live 08da915",
           "template-dev",
           "testing-harnesses"
         ],
         [
           "LAB-SPAWN-003",
           "medium",
-          "reproduced / exact-ID workaround",
+          "verified adfcdb7 (recovery guidance)",
           "template-dev",
           "testing-manager"
         ],
         [
           "LAB-UI001",
           "high",
-          "reproduced / portal fix underway",
+          "retest bfa7790 underway",
           "ui-dev",
           "testing-ui"
+        ],
+        [
+          "LAB-VIEW-004",
+          "low",
+          "814e775 preview retest pending",
+          "testing-manager",
+          "testing-ui"
+        ],
+        [
+          "LAB-UI002",
+          "low",
+          "help bfa7790 retest pending",
+          "ui-dev",
+          "testing-ui"
+        ],
+        [
+          "LAB-SESSION-004",
+          "medium",
+          "assigned / synthetic repro",
+          "template-dev",
+          "testing-harnesses"
         ]
       ]
     },
