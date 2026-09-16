@@ -1,278 +1,197 @@
-# Multiverse: Branching Agent Workflows with Time Travel
+# Multiverse 2.0 — first working slice
 
-> *What if agent conversations were a tree instead of a line?*
+Local universes, short prompts, ordinary shell tools. Models decide how to coordinate; a small CLI handles file integrity and terminal identity. The dashboard uses Textual; the orchestration core uses the Python standard library. This is a standalone implementation alongside V1, with no imports from it, no daemon and no MCP server.
 
-Multiverse is a **runtime-agnostic** multi-agent orchestration layer that introduces **branching conversations**, **parallel agents on git worktrees**, **intelligent context management**, and **inter-agent communication** -- inspired by [5D Chess with Multiverse Time Travel](https://store.steampowered.com/app/1349230/5D_Chess_With_Multiverse_Time_Travel/).
+The base bootstrap is under 200 words, plus agent identity and paths. It supplements the harness's normal prompt. Skills, workflows and commands stay on disk until needed. This follows [Pi's minimal, extensible approach](https://github.com/earendil-works/pi/tree/main/packages/coding-agent); it doesn't require using Pi.
 
-It runs on top of resumable CLI coding-agent runtimes. [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, and [pi](https://pi.dev) sessions share one dashboard, agent registry, inbox, and spawn broker. Frontier-coherent Multiverse compaction remains Claude-specific; Codex and pi retain their native compaction behavior.
+## Try it
 
----
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.231; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
-## The Problem
+From the repository root:
 
-Current agent coding assistants (Cursor, Claude Code, etc.) have **linear chat histories**. This creates several pain points:
-
-- **Context pollution**: Tool outputs, long file reads, and debugging traces fill up the context window with low-value information
-- **No branching**: You can't explore an idea without committing that exploration to the main conversation history
-- **Wasted context**: When you investigate a bug and then want to continue where you left off, you either lose your carefully-built context by starting a new chat, or pollute it by continuing in the same one
-- **Single agent**: Only one agent works at a time, with no way to parallelize independent tasks
-- **No communication**: Agents working on different parts of a codebase can't share findings or coordinate
-
-## The Vision
-
-### 1. Conversation Trees (Time Travel)
-
-Turn linear chat into a **tree structure**:
-
-- **Branch** from any point in a conversation to explore an idea, debug something, or try a different approach
-- **Merge** branches back: bring conclusions from an exploration branch back to the parent without bringing all the noise
-- **Restore without reverting**: Jump back to an earlier conversation state while keeping code changes (like git checkpoint restore without reverting the working tree)
-
-This maps directly to git concepts:
-| Git | Multiverse |
-|-----|-----------|
-| Branch | Fork a conversation timeline |
-| Merge | Bring conclusions/context from one timeline to another |
-| Checkout | Switch active conversation timeline |
-| Cherry-pick | Pull specific findings from one timeline into another |
-
-### 2. Intelligent Context Management
-
-A **context manager model** sits between the user/agent and the API:
-
-- Maintains the full conversation history but presents a **curated view** to the working model
-- **Summarizes** low-value sections (long tool outputs, file reads) while preserving that they happened
-- **Unsummarizes** on demand when the agent needs full detail
-- **Recall tool**: The working agent can always call `recall(message_id)` to retrieve the full original content of any summarized message
-- Optimizes context per-request: different requests may need different parts of history expanded
-
-Context management applies uniformly to all context sources -- user conversations, agent-to-agent responses, and tool outputs all go through the same curation pipeline before being sent to the API.
-
-### 3. Parallel Agents on Git Worktrees
-
-Multiple agents work simultaneously on **isolated git worktrees**:
-
-- Each agent gets its own worktree (a real, full copy of the repo on a separate branch)
-- Agents work in parallel without stepping on each other's files
-- The orchestrator manages worktree lifecycle (create, merge, cleanup)
-- User's own git branches/workflow are never touched -- all Multiverse branches live in a separate namespace (e.g., `multiverse/agent-1/fix-auth`)
-
-### 4. Inter-Agent Communication
-
-#### Conversation Storage
-
-Each agent's context is composed from multiple **JSONL** (newline-delimited JSON) conversation files, matching Claude Code's native transcript format. Each line is a self-contained event with a `timestamp`, `uuid`, `parentUuid` (for threading), `type`, and `message` payload.
-
-- **`user-agentX.jsonl`** -- the conversation between the user and Agent X
-- **`agentA-agentB.jsonl`** -- the conversation between Agent A (asker) and Agent B (responder)
-
-There is one file per agent-user pair and one file per agent-agent pair that has communicated. These files store the full, uncurated history. The context manager curates from these before each API call.
-
-**Why JSONL (matching Claude Code's format):**
-- **Append-only**: new messages are appended without rewriting the file, safe for concurrent agents writing simultaneously
-- **Streaming-friendly**: the UI or orchestrator can tail/watch files as agents work in real time
-- **Natively timestamped**: every event already has an ISO 8601 `timestamp`, making it trivial to interleave messages from multiple files chronologically during context assembly
-- **Tree structure built in**: `parentUuid` linking already supports branching conversation topology
-- **Claude Code compatibility**: the external UI can read both native Claude Code transcripts and Multiverse conversation files with the same parser
-
-#### Asker/Responder Protocol
-
-All inter-agent communication follows an **asker/responder** model:
-
-- The **asker** is always the agent that initiates the conversation. For example, Agent A is tasked with merging Agent B's changes and needs details -- Agent A is the asker, Agent B is the responder.
-- A conversation between two agents is always one-directional in terms of roles: if A asked B, the entire exchange (even if B asks clarifying questions back) is stored as `agentA-agentB.jsonl` with A as asker.
-- **The responder cannot initiate a conversation back to the asker.** Anything it needs to say to the asker goes in its response. If B needs clarification from A, B asks within its response, and A answers in its next message -- but the roles don't flip.
-- **The responder CAN initiate conversations with other agents.** While responding to A's request, Agent B has full tool access, including the ability to ask Agent C for help. This creates a chain: A asks B, B asks C, C responds to B, B responds to A.
-
-#### Context Assembly Rules
-
-When an agent receives a request (from user or another agent), its **full pre-curation context** is assembled as follows:
-
-**For a user request to Agent X:**
-| Source | Included |
-|---|---|
-| `user-agentX.jsonl` | Full conversation with user |
-| `agentX-agentY.jsonl` (for all Y) | Only **responses X received** -- X was the asker, Y was the responder, so these contain Y's replies to X |
-| `agentY-agentX.jsonl` (for all Y) | **Not included** -- Y was the asker, X was the responder, so these contain X's responses to others' questions |
-
-**For Agent A asking Agent B:**
-| Source | Included |
-|---|---|
-| `user-agentB.jsonl` | Full conversation with user |
-| `agentB-agentY.jsonl` (for all Y) | Only responses B received -- B was the asker, Y was the responder |
-| `agentA-agentB.jsonl` | **Full history** -- B can see its own previous responses to A, so it has continuity across multiple requests from the same asker |
-| `agentY-agentB.jsonl` (for all Y, Y != A) | Not included -- Y was the asker, B was the responder, so these contain B's responses to others' questions |
-
-The key asymmetry: an agent always sees responses it *received* from others but not responses it *gave* to others -- except when responding to a specific asker, where it sees its own prior responses to that asker for continuity.
-
-**Assembly order**: Messages from all included JSONL files are interleaved by `timestamp` into a single chronological sequence. This means an agent sees events in the order they actually happened -- a user message, then a response from Agent C that arrived mid-conversation, then the next user message, etc. -- rather than seeing each source as a separate block.
-
-#### Why This Design
-
-- **No circular calls**: A can't call B who calls A. This prevents infinite loops and simplifies the execution model.
-- **Context efficiency**: Agents don't need to see their own answers to others' questions -- that information is already internalized. They only need what others told *them*.
-- **Chained delegation**: B can recruit C while answering A, enabling deep task decomposition without the asker needing to know about it.
-- **Continuity**: B seeing its prior responses to A means repeated A-to-B conversations build on each other naturally.
-- **Uniform curation**: All of the above is the *pre-curation* context. The context manager then summarizes, trims, and optimizes this assembled context before the actual API call, applying the same process regardless of source.
-
----
-
-## Architecture
-
-### Building on a runtime
-
-Multiverse needs a handful of things from every CLI it drives: resumable on-disk sessions, a way to inject context, tools, and lifecycle events. Claude Code supplies plugin/MCP/hooks, Codex uses its plugin bundle, and `multiverse-plugin/pi-extension/` provides the equivalent integration for pi.
-
-| Claude Code Feature | Multiverse Use |
-|---|---|
-| **Agent SDK** (`@anthropic-ai/claude-agent-sdk`) | Core orchestration -- spawn and manage multiple agent sessions programmatically |
-| **Git worktrees** (`--worktree`, `isolation: worktree`) | Each parallel branch gets its own isolated worktree at `.claude/worktrees/` |
-| **Hooks** (`PreToolUse`, `PostToolUse`, `Stop`, etc.) | Intercept agent lifecycle for context management and coordination |
-| **MCP Servers** | Expose custom tools (recall, branch, merge, communicate) to agents |
-| **Custom subagent definitions** (`.claude/agents/*.md`) | Define specialized agent roles with constrained tools/models |
-| **Session transcripts** (JSONL at `~/.claude/projects/`) | External UI reads conversation history for visualization |
-| **Plugins** | Package and distribute the entire Multiverse system |
-
-### High-Level Components
-
-```
-+---------------------------+
-|     Multiverse UI         |  Web UI: timeline visualization, branch/merge controls
-|  (reads git + transcripts)|
-+------------+--------------+
-             |
-+------------+--------------+
-|   Orchestrator / CLI      |  Manages agent lifecycle, worktrees, communication
-+---+--------+----------+---+
-    |        |          |
-+---v--+ +---v--+  +---v--+
-|Agent | |Agent |  |Agent |   Each agent = Claude Code session via Agent SDK
-|  1   | |  2   |  |  3   |   Each in its own git worktree
-+---+--+ +---+--+  +---+--+
-    |        |          |
-+---v--------v----------v---+
-|   Context Manager Layer    |  Summarize/unsummarize/recall per agent
-+----------------------------+
-    |
-+---v------------------------+
-|   Message Bus / Mailbox    |  Inter-agent communication
-+----------------------------+
+```sh
+uv sync
+./bin/mv2 tui --demo
 ```
 
-### Key Design Decisions to Explore
+The demo has a project universe, PR review and CAD subverses, nested verification, and sample agents. Its actions operate entirely in memory; it needs no tmux, model account or existing universe. The checkout launcher automatically uses `multiverse-v2/.venv` after setup.
 
-**Git isolation**: All Multiverse branches use a namespace prefix (e.g., `multiverse/`) and worktrees live under `.claude/worktrees/`. The user's branches are never modified. `.claude/worktrees/` is gitignored.
+For real work:
 
-**Context manager placement**: The context manager can operate at two levels:
-  - *Pre-API*: Rewrite the message history before each API call (more control, more complexity)
-  - *Tool-based*: Give agents summarize/recall tools and let them self-manage (simpler, less reliable)
-  - Likely a hybrid: automated summarization of tool outputs + agent-accessible recall
+```sh
+./bin/mv2 init /path/to/project
+./bin/mv2 -u /path/to/project spawn --name worker --task 'Inspect this project and summarize its architecture.'
+./bin/mv2 -u /path/to/project spawn --name reviewer --harness claude --task 'Review the current diff.'
+./bin/mv2 -u /path/to/project tui
+```
 
-**Communication protocol**: How agents message each other:
-  - Shared task list (Claude Code's experimental Agent Teams already does this)
-  - Direct mailbox (agent A sends a message, agent B sees it on next turn)
-  - Synchronous request/response (agent A blocks until agent B answers)
+Or install with `pip install .` to put `mv2` on PATH, including its Textual dependency. No agent is launched just by opening the dashboard or initializing a universe.
 
-**UI separation**: The UI is a standalone app that reads:
-  - Git repo structure (branches, worktrees) for timeline topology
-  - Session transcript JSONLs for conversation content
-  - A Multiverse metadata file for branch relationships and merge history
+```sh
+mv2 -u /path/to/project subverse pr-review
+mv2 -u /path/to/project/.multiverse/subverses/pr-review spawn --name reviewer --task 'Review the current branch using the review workflow.'
+mv2 -u /path/to/project list --recursive
+mv2 -u /path/to/project/.multiverse/subverses/pr-review send reviewer --text 'Focus on correctness and regression risks.'
+```
 
----
+`-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. Ambiguity is an error.
 
-## Roadmap
+## Individual tools
 
-### Phase 0: Foundation & Exploration
-- [x] Set up repository
-- [ ] Prototype with Claude Agent SDK: spawn a single agent session programmatically
-- [ ] Prototype git worktree management: create/destroy worktrees, branch naming conventions
-- [ ] Experiment with Claude Code hooks to understand lifecycle events
-- [ ] Define the Multiverse metadata schema (branch relationships, merge history, context snapshots)
+Each action lives in `src/multiverse/tools/` with its own argument definitions
+and importable `run` function. `mv2` remains a small compatibility dispatcher;
+the TUI backend calls the same tool functions directly. Shared file, terminal
+identity and launch mechanics remain in `store.py`, `tmux.py`, `agents.py` and
+`runner.py`.
 
-### Phase 1: Branching Conversations (Single Agent)
-- [ ] Implement conversation tree data structure (branch, merge, checkout)
-- [ ] Build "branch from here" -- fork conversation state at any message
-- [ ] Build "merge back" -- inject summary/conclusions from a branch into parent
-- [ ] Build "restore without revert" -- jump to earlier conversation state, keep code changes
-- [ ] CLI commands or slash skills for branching operations
+With the package installed, run a tool without the dispatcher:
 
-### Phase 2: Context Management
-- [ ] Define JSONL schema for conversation files (`user-agent.jsonl`, `agent-agent.jsonl`)
-- [ ] Implement context assembly logic (merge user conversations + received responses per the assembly rules)
-- [ ] Implement context manager model that curates assembled context before API calls
-- [ ] Auto-summarize large tool outputs (file reads, command outputs) after they've been processed
-- [ ] Build `recall` tool for agents to retrieve full original content
-- [ ] Track context budget per agent and trigger summarization proactively
-- [ ] Benchmark: measure quality impact of context management vs raw history
+```sh
+python -m multiverse.tools.list_agents -u /path/to/project --recursive --json
+python -m multiverse.tools.spawn -u /path/to/project --name worker --task 'Review the code.'
+python -m multiverse.tools.inspect -u /path/to/project worker
+```
 
-### Phase 3: Parallel Agents
-- [ ] Orchestrator that spawns multiple Agent SDK sessions on separate worktrees
-- [ ] Agent lifecycle management (start, monitor, stop, resume)
-- [ ] Task decomposition: break a user request into parallelizable sub-tasks
-- [ ] Merge agent worktree branches back (handle conflicts)
-- [ ] Progress tracking and status reporting
+For a checkout, use its Python environment with `PYTHONPATH=src`.
+Run modules with `python -m`, rather than executing their files by path.
+Tool names match CLI commands except `list` is `list_agents`, and hyphens become
+underscores (`session_bind`, `runtime_update`). Every tool supports `--help`.
+Python callers use, for example,
+`spawn.run(root, name="worker", task="Review the code.")` or
+`list_agents.run(root, recursive=True, json=True)`; results are returned and
+errors raised, while shell entry points format output and exit codes.
 
-### Phase 4: Inter-Agent Communication
-- [ ] Implement per-pair conversation files (`agentA-agentB.jsonl`) with asker/responder roles
-- [ ] Build asker/responder protocol: initiation, response, chained delegation
-- [ ] Implement context assembly rules (received responses only, asker history for continuity)
-- [ ] Enforce no-circular-call constraint (responder cannot call back to asker)
-- [ ] Merge conflict negotiation (two agents discuss how to resolve conflicts)
-- [ ] End-to-end test: Agent A asks B, B recruits C, chain resolves correctly
+This is a behavior-preserving extraction. `send`, `inbox` and `ack` still use the
+durable file protocol; no terminal keystroke delivery is introduced.
 
-### Phase 5: UI
-- [ ] Web-based timeline visualization (conversation tree + git branch topology)
-- [ ] Standalone app that reads git structure + session transcripts (no Claude Code embedding)
-- [ ] Visual branch/merge/checkout controls
-- [ ] Cross-branch context injection UI (drag findings from one timeline to another)
-- [ ] Agent status dashboard (what each agent is doing, progress, communication log)
-- [ ] "5D Chess" style multi-timeline view
+## Files and ownership
 
-### Phase 6: Polish & Distribution
-- [x] Mixed runtime orchestration — Claude Code, Codex, and [pi](https://pi.dev) share one dashboard and agent registry
-- [x] pi runtime — inter-agent tools, inbox delivery, native session discovery/resume, and native compaction
-- [ ] Package as a Claude Code plugin
-- [ ] Configuration system (which model for context manager, parallelism limits, etc.)
-- [ ] Error recovery (agent crashes, worktree corruption, merge failures)
-- [ ] Documentation and examples
+```text
+project/.multiverse/
+  universe.json                 # ID, name, workspace and template provenance
+  bootstrap.md                  # short automatic instructions
+  harnesses/codex/              # argv manifest, short session registration prompt
+  harnesses/claude/             # argv manifest, assigned native session identity
+  harnesses/pi/                 # argv manifest, optional native bridge
+  skills/coordination/          # entry.json metadata + SKILL.md
+  commands/help/                # entry.json metadata + prompt.md
+  workflows/review/             # entry.json metadata + prompt.md
+  views/default.json            # local dashboard title, accent and columns
+  state/                        # local, ignored by Git
+    agents/<uuid>/
+      properties.json           # identity, task, reported phase and summary
+      runtime.json              # launch generation, host, pane, observed activity
+      inbox.jsonl               # append-only messages with IDs and reply references
+      inbox.cursor              # acknowledged byte offset
+      session.jsonl             # native Pi conversation
+      launches/<uuid>/          # exact bootstrap, task and argv for each launch
+  subverses/pr-review/           # the same structure, recursively
+```
 
----
+Everything belongs to the universe, including its live state. Definitions and runtime have separate directories so a clean template install can exclude old conversations and processes. JSON describes current state, JSONL records messages, and Markdown holds prompts. Lock files and temporary files are implementation details.
 
-## Open Questions
+`init --template NAME` looks for `~/.multiverse/templates/NAME`, then a bundled template; an explicit directory also works. `subverse NAME --template PATH` uses the same installer. It copies definitions, generates fresh IDs recursively, and starts with empty state. It does not silently update existing universes. Templates are trusted local files and may contain executable adapters; symlinks are rejected.
 
-1. **Context manager model choice**: Should the context manager use a cheap/fast model (Haiku) for summarization, or the same model as the agent for better fidelity?
+Subverses inherit the parent's workspace **at creation**, using a relative path. They receive their own clean definitions and IDs, with no implicit ongoing prompt inheritance. `subverse NAME --workspace /path/to/worktree` can target a worktree. The universe remains in the parent tree when that worktree is removed; `doctor` reports the missing workspace. A universe can have a manager agent, but none is mandatory or auto-created.
 
-2. **Merge semantics**: When merging a branch back, what exactly gets merged? Options:
-   - Just the code changes (git merge)
-   - Code changes + a summary of findings
-   - Code changes + selected messages from the branch conversation
+## The Textual dashboard
 
-3. **Agent autonomy vs user control**: Should agents autonomously decide when to branch/merge, or should the user always initiate? Probably start with user-initiated, add autonomous later.
+The dashboard is one compact hierarchy. The root universe and every nested subverse appear as colored, collapsible group rows, with their agents underneath. Vertical guides and rounded branch ends connect each group to its children; the lines follow the visible tree when folding or searching. All descendants are loaded together; there is no sidebar or local/all toggle. A skill supplies instructions to an agent; a subverse gives a group its own configuration, workflows, agent state and display identity. It behaves like a folder in the UI.
 
-4. **Worktree limits**: Git worktrees are real disk copies. For large repos, having many parallel agents could be expensive. Possible mitigations: shallow clones, sparse checkouts, or limiting parallelism.
+The [r/unixporn Catppuccin setups](https://www.reddit.com/r/unixporn/comments/1fao619/) informed the muted palette. Group accents and indentation distinguish subverses without separate navigation panels.
 
-5. **Communication overhead**: Every inter-agent message costs tokens. How to keep communication concise? Structured protocols? Token budgets per exchange?
+![Compact Textual hierarchy with colored subverse groups](docs/screenshots/dashboard.png)
 
-6. **Session persistence**: How to handle long-running parallel work across terminal sessions? Agent SDK sessions can be resumed by ID, but orchestrator state needs persistence too.
+One-line headers and footer hints leave the terminal for agents. There are no action buttons. Search opens with `/`, includes folded descendants, and keeps matching ancestors visible. Escape clears it and restores the existing folds. `v` opens full details. At smaller widths, secondary columns disappear; the demo's entire hierarchy fits at 60×20 with the inspector closed. `NO_COLOR` is respected.
 
-7. **Conflict resolution**: When two agents modify the same file, do we:
-   - Auto-merge and let an agent review?
-   - Stop both agents and ask the user?
-   - Have agents negotiate?
+Pause over a row for 300 ms to inspect it: current work, harness/model, observed activity, reported phase, and a live pane capture. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Keyboard selection opens the same view; `p` toggles it and Escape dismisses it. Moving into the inspector keeps it open for reading and scrolling. Hovering never changes the selected agent or the target of actions. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
 
----
+`n` inserts a draft row in the selected group, following the original Multiverse monitor's inline creation pattern. Type over the suggested name; Tab cycles through name, harness, initial prompt, and optional model. Harness opens an inline selector populated from that group's `harnesses/*/harness.json`: arrows choose, Enter confirms, or click an option. Codex is preferred, then Claude, then the first configured adapter. It is not a free-text field. The initial prompt is the first instruction sent to the agent, not a scheduled job or workflow name. Enter in a text field creates the agent; Ctrl+Enter submits from any field, Escape discards, and Shift+Enter or paste allows multiline prompts. Creation failures retain the draft for correction. No agent starts before submission. Messages and subverse creation still use compact forms.
 
-## Design Notes
+Filesystem and tmux work run outside the UI event loop. Stable agent keys preserve selection across refreshes. New agents and subverses belong to the selected group; selecting an agent targets its group. Drafts and dialogs capture the intended universe and recipient before submitting an action. Rendering and I/O are separated in `tui.py` and `dashboard.py` for testing.
 
-- [`docs/compaction-algorithm.md`](docs/compaction-algorithm.md) — frontier-coherent tree compaction: the design
-- [`docs/PROGRESS.md`](docs/PROGRESS.md) — what is built, what was learned, what is next
-- [`multiverse-plugin/README.md`](multiverse-plugin/README.md) — the implementation
+### Agent identity
 
-## Prior Art & Inspiration
+The TUI reads `properties.json` to discover agents and their reported work. It reconciles `runtime.json` with `tmux list-panes` to observe whether each launch is alive. Each pane carries three tags: universe ID, agent ID and launch ID. A readable window/session name is only a label. Renaming it does not change identity; a reused pane ID cannot impersonate an old launch. Unknown or inaccessible state is shown as unknown.
 
-- **5D Chess with Multiverse Time Travel** -- the visual metaphor for branching timelines
-- **Claude Code Agent Teams** (experimental) -- native multi-agent with shared task list
-- **Git worktrees** -- filesystem-level branch isolation
-- **Cursor / Windsurf** -- current state of agent coding assistants (linear chat)
-- **Ralph Wiggum Claude Code configs** -- community prompt engineering on top of Claude Code
+`LIVE` comes from tmux, `ACTIVITY` comes from the harness, and `PHASE`/`SUMMARY` come from the model. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
 
+The dashboard is a reader and command client. Quit it and agents continue. The default tmux server is named `multiverse-v2`, separate from existing sessions; `MV2_TMUX_SOCKET` can select an explicit socket. Attach/inspect/stop verify pane ownership first. `stop` terminates the pane and its running work.
+
+| Key | Action |
+| --- | --- |
+| ↑/↓ or k/j | Select a row |
+| ←/h, →/l | Fold / parent; expand / first child |
+| Enter / Space | Enter attaches to a live agent; either key folds a group |
+| /, Escape | Search all groups; clear search |
+| n / m | Spawn in selected group / message selected agent |
+| g | Create a subverse inside the selected group |
+| s / r | Stop after confirmation / resume |
+| v / p | Full details / show or hide inspector |
+| ? / q | Keyboard help / quit dashboard |
+| F5 / Ctrl-p | Refresh / command palette |
+| Tab / Shift-Tab | Move between inline draft fields or form fields |
+| ↑/↓ in the harness field | Choose a configured harness |
+| Enter / Escape in a draft | Confirm harness or create / discard the new agent |
+| Escape / Ctrl-Enter | Cancel / submit a form |
+
+Mouse: pause over a row to inspect; click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
+
+Detach from an attached agent with tmux's usual binding (normally Ctrl-b d). Each universe can customize `views/default.json`:
+
+```json
+{
+  "title": "PR Review",
+  "accent": "#cba6f7",
+  "columns": ["name", "live", "phase", "summary"]
+}
+```
+
+The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Arbitrary view plugins and dashboard links remain follow-up work.
+
+## Messages, commands and prompts
+
+`send` serializes concurrent appends under a file lock. Plain Codex, Claude and Pi adapters follow the short bootstrap: check the inbox at startup, between work steps and before finishing. **A queued message does not automatically wake an idle agent.** `inbox` peeks; `ack --cursor N` acknowledges the returned batch. Queued, read, and answered are different states. A crash around acknowledgement can cause duplicate delivery; IDs and `--reply-to` support correlation. This is a local, cooperative file protocol, not a security boundary or a distributed queue.
+
+`catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
+
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Adding `"--extension", "{harness_dir}/extension.ts"` to its spawn/resume arrays enables automatic idle inbox delivery, lifecycle observations and a native `/multiverse` command. Those extras require native integration; launching a harness does not.
+
+## Harness definitions
+
+Adding a harness means adding `harnesses/NAME/harness.json` in that universe. No Python branch, TypeScript plugin or code registration is needed. Use ordinary JSON for configuration, Markdown for prompts and JSONL for append-only inboxes.
+
+Each manifest declares `schema: 1`, `spawn` and optional `resume` argv arrays, optional `model_args`, `bootstrap` text, `unset_env` names and a docs URL. Arguments are passed directly to the process, never through a shell. Model flags are inserted before a `--` terminator when present, so prompts beginning with a hyphen remain literal. Available substitutions:
+
+| Value | Meaning |
+| --- | --- |
+| `{name}`, `{agent_id}`, `{workspace}` | Agent name, UUID and working directory |
+| `{agent_dir}`, `{harness_dir}` | Runtime files and local adapter definition |
+| `{task}`, `{task_file}` | Initial prompt text or its saved file |
+| `{bootstrap}`, `{bootstrap_file}` | Short bootstrap text or its saved file |
+| `{bootstrap_json}` | Quoted bootstrap string, also suitable as a TOML string value |
+| `{model}` | Explicit model override; omitted flags use the native default |
+| `{session_file}`, `{session_id}` | File-based session path or recorded native UUID |
+
+`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Activity remains `unknown` unless reported; liveness still comes from tagged tmux panes.
+
+Existing universes own their copies of definitions. To add these adapters to an older universe, copy the `codex` and `claude` directories from `src/multiverse/templates/base/harnesses/` into its `harnesses/` directory and add the inbox checkpoint instruction from the base bootstrap. Do not overwrite custom definitions as part of a package update.
+
+## Verification and next slices
+
+```sh
+.venv/bin/python -m unittest discover -s tests -v
+./bin/mv2 -u /path/to/project doctor
+```
+
+The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, hover delays, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
+
+```sh
+.venv/bin/python -m unittest discover -s tests -p test_tui.py -v
+.venv/bin/python scripts/render_tui.py
+```
+
+The renderer exports actual SVG screens to `/tmp/multiverse-previews` for visual review, including the unified hierarchy, live inspector, narrow layouts and inline creation. Additional tests cover concurrent inbox writers, interrupted records, recursive installs, ambiguous commands, real tmux launch/rename/stop/resume and pane ownership, Textual attach/detach/exit, Codex/Claude argv and exact resume with fake executables, session registration guards, and real Pi delivery/resume with its optional extension and a local fake provider. They use temporary universes and isolated tmux sockets, with no network or model spend. Authenticated Codex/Claude model turns are not exercised. Pi/tmux checks skip when their binaries are absent. A sandbox that denies Unix sockets must allow the terminal integration tests explicitly.
+
+`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are optional native delivery integrations, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy, background ask primitive, or urgent mid-turn delivery in this slice.

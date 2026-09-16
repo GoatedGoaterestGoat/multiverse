@@ -1,50 +1,12 @@
-# Playground
-Playground/
-
-# Reference CC source
-claude-code-src/
-
-# Legacy standalone MCP server (superseded by multiverse-plugin/)
-context-fold-mcp/
-
-# Compaction package has been moved into the plugin at
-# multiverse-plugin/vendor/compaction/. The standalone compaction/ dir is
-# kept on disk as a scratch workspace but is no longer tracked.
-# Leading slash anchors the rule to the repo root so it doesn't also
-# silently exclude multiverse-plugin/vendor/compaction/.
-/compaction/
-
-# Test files
-context-original.md
-context-folded.md
-testing
-
-# Local scratch — downloaded JSONLs, stitching scripts, etc.
-/work/
-
-# Python
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
 *.egg-info/
-dist/
-build/
 .venv/
-venv/
-
-# Node
-node_modules/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
+build/
+dist/
 .DS_Store
-Thumbs.db
-
-# Machine-local multiverse overrides (host-specific claude binary, extra
-# plugin dirs, config dir). Sourced by bin/multiverse; per-machine, never
-# committed. See "Machine-local config" in multiverse-plugin/README.md.
-multiverse-plugin/bin/multiverse.local
+/.multiverse/
+/.worktrees/
+/.artifacts/
+/.run/
+/multiverse-v2
