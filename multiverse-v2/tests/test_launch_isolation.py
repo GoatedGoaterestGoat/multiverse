@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import agents, runner, universe
@@ -103,6 +104,49 @@ class LaunchIsolationTest(unittest.TestCase):
         self.assertIn(failed.name, str(ambiguous.exception))
         self.assertIn(successful["id"], str(ambiguous.exception))
         self.assertIn("full UUID", str(ambiguous.exception))
+
+    def test_stale_cli_callbacks_cannot_read_ack_bind_or_change_current_launch(self):
+        agent = self.root / "state/agents" / str(uuid4())
+        properties = {"id": agent.name, "name": "callback", "phase": "working"}
+        runtime = {"launch_id": "current", "activity": "working"}
+        write(agent / "properties.json", properties)
+        write(agent / "runtime.json", runtime)
+        message = append_message(agent, "for current launch", {})
+        cursor = inbox(agent)["cursor"]
+        actions = (["inbox"], ["ack", "--cursor", str(cursor)],
+                   ["status", "--phase", "done"], ["runtime-update", "--activity", "idle"],
+                   ["session-bind", "--session-id", str(uuid4())])
+        for action in actions:
+            with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):
+                args = parser().parse_args(["-u", str(self.root), *action, "--agent", agent.name])
+                with self.assertRaisesRegex(ValueError, "Outdated launch"):
+                    run(args)
+        self.assertEqual(read(agent / "properties.json"), properties)
+        self.assertEqual(read(agent / "runtime.json"), runtime)
+        self.assertEqual(inbox(agent)["messages"], [message])
+        self.assertFalse((agent / "inbox.cursor").exists())
+
+    def test_all_bundled_adapters_clear_cross_harness_native_markers(self):
+        for manifest in sorted(universe.TEMPLATES.glob("*/harnesses/*/harness.json")):
+            with self.subTest(manifest=manifest.relative_to(universe.TEMPLATES)):
+                spec = read(manifest)
+                launch = self.work / "marker-test" / "launches" / "launch"
+                identity = {"MV2_CLI": "/child/bin/mv2", "MV2_AGENT_ID": "child",
+                            "MV2_LAUNCH_ID": "launch", "MV2_TMUX_SOCKET": "/actual/tmux.sock"}
+                write(launch / "request.json", {"argv": ["fake"], "env": identity,
+                                                "unset_env": spec.get("unset_env", [])})
+                (launch / "ready").touch()
+                process = Mock(pid=123)
+                process.wait.return_value = 0
+                with patch.object(sys, "argv", ["runner", str(launch)]), \
+                        patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-codex", "CLAUDECODE": "parent-claude"}, clear=True), \
+                        patch.object(runner, "update_runtime"), \
+                        patch.object(runner.subprocess, "Popen", return_value=process) as popen:
+                    self.assertEqual(runner.main(), 0)
+                env = popen.call_args.kwargs["env"]
+                self.assertNotIn("CODEX_THREAD_ID", env)
+                self.assertNotIn("CLAUDECODE", env)
+                self.assertEqual({key: value for key, value in env.items() if key.startswith("MV2_")}, identity)
 
 
 if __name__ == "__main__":

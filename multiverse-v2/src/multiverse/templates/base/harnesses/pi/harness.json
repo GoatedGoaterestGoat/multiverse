@@ -5,5 +5,6 @@
   "spawn": ["pi", "--name", "{name}", "--session", "{session_file}", "--append-system-prompt", "{bootstrap_file}", "@{task_file}"],
   "resume": ["pi", "--name", "{name}", "--session", "{session_file}", "--append-system-prompt", "{bootstrap_file}"],
   "model_args": ["--model", "{model}"],
+  "unset_env": ["CODEX_THREAD_ID", "CLAUDECODE"],
   "docs": "https://github.com/earendil-works/pi/tree/main/packages/coding-agent"
 }

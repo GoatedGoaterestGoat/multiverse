@@ -65,3 +65,37 @@ Validation: `python -m unittest discover -s multiverse-v2/tests -p test_template
 Tests exercise fresh IDs and empty-state cloning, adapter consistency, lazy prompt
 loading, prompt size, and artifact paths. Evidence:
 `LAB/artifacts/template-dev/templates-tests.txt`.
+
+Template commit: `6b4baca39901700942ece73fab399a44228a25a4`.
+
+## Independent results and session audit
+
+Harness tester independently VERIFIED `14ff690` (identical-source cherry-pick
+`da3c863`) with 18 offline checks and an authorized actual Codex/Astra probe:
+lab socket propagation, fresh-inbox ack, native binding, exact resume and actual
+idle/resumed native queue responses. Root integrated `08da915` passed the live
+resume check. Evidence: `LAB/artifacts/testing-harnesses/verification-report.md`,
+tester tests/log commit `91d1d7f`. Disposable probe was stopped by its owner.
+
+Local session audit verifies stale CLI callbacks leave current inbox, binding,
+status and runtime unchanged. Combined 18 launch/template/file/harness checks pass:
+`PYTHONPATH=multiverse-v2/src:multiverse-v2/tests python -m unittest test_launch_isolation test_templates test_multiverse.FilesTest test_harnesses.HarnessFilesTest -v`.
+Evidence: `LAB/artifacts/template-dev/combined-checks.txt`.
+
+New report LAB-SESSION-004 records synthetic cross-harness marker leakage; sent
+to testing-manager/director with reproduction script and evidence under
+`LAB/artifacts/template-dev/session-audit.*`. Documented explicit binding's
+caller-trust/global-uniqueness limitation without claiming an automatic live
+misbinding. See `docs/session-isolation.md`. No session registry or additional
+workers were introduced.
+
+Testing-manager independently verified template commit `6b4baca` with fresh CLI
+installs and all three template tests; evidence
+`LAB/artifacts/testing/templates-6b4baca-retest.txt`.
+
+LAB-SESSION-004 assigned bounded cleanup: all five bundled manifests now unset
+both known markers, preserving custom MV2 launch identity. New regression fails
+in all five cases before the fix and passes afterward. Combined 19 checks pass;
+evidence `markers-before.txt` (synthetic environment only) and `markers-after.txt`.
+No live-manifest rewrite or additional live probe performed; director owns
+reviewed installed-manifest deployment after independent offline retest.

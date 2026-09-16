@@ -6,6 +6,6 @@
   "spawn": ["claude", "--session-id", "{session_id}", "--append-system-prompt", "{bootstrap}", "--add-dir", "{agent_dir}", "--", "{task}"],
   "resume": ["claude", "--resume", "{session_id}", "--append-system-prompt", "{bootstrap}", "--add-dir", "{agent_dir}"],
   "model_args": ["--model", "{model}"],
-  "unset_env": ["CLAUDECODE"],
+  "unset_env": ["CODEX_THREAD_ID", "CLAUDECODE"],
   "docs": "https://code.claude.com/docs/en/cli-reference"
 }
