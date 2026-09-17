@@ -24,8 +24,9 @@ class PiAdapter(LegacyAdapter):
         bridge = (context.runtime.get('native_bridge') == 'pi-inbox-v1'
                   and context.runtime.get('state') == 'running')
         for name in ('steer', 'follow_up', 'wake', 'activity'):
-            result[name] = (Capability('supported', mechanism='pi-inbox-v1') if bridge else
-                            Capability('unavailable', 'Pi inbox bridge has not registered for this launch'))
+            result[name] = (Capability('supported', mechanism='pi-inbox-v1', required=name in ('steer', 'follow_up')) if bridge else
+                            Capability('unavailable', 'Pi inbox bridge has not registered for this launch',
+                                       required=name in ('steer', 'follow_up')))
         return result
 
     def control(self, operation, context, text):

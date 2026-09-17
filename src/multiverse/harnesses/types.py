@@ -12,6 +12,7 @@ class Capability:
     state: Literal['supported', 'unavailable', 'error']
     reason: str = ''
     mechanism: str | None = None
+    required: bool = False
 
 
 @dataclass(frozen=True)

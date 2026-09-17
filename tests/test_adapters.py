@@ -35,6 +35,8 @@ class AdapterContractTest(BaseTest):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     self.assertEqual(adapter.launch(context), legacy.launch(context))
                 self.assertEqual(set(adapter.capabilities(NativeContext({}))), set(CAPABILITIES))
+                for required in ('launch', 'resume', 'steer', 'follow_up'):
+                    self.assertTrue(adapter.capabilities(NativeContext({}))[required].required)
 
     def test_configuration_is_declarative_and_never_rewritten(self):
         config = self.root / 'harnesses/codex/harness.json'

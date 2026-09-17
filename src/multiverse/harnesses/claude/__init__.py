@@ -7,5 +7,6 @@ class ClaudeAdapter(LegacyAdapter):
     def capabilities(self, context):
         result = super().capabilities(context)
         for name in ('steer', 'follow_up', 'native_queue', 'wake', 'activity', 'usage', 'interrupt', 'ask'):
-            result[name] = Capability('unavailable', 'No verified Mods bridge attached to this native TUI')
+            result[name] = Capability('unavailable', 'No verified Mods/channel bridge attached to this native TUI',
+                                      required=name in ('steer', 'follow_up'))
         return result

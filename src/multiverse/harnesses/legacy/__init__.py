@@ -71,10 +71,11 @@ class LegacyAdapter:
         return CommandSpec(tuple(argv), unset)
 
     def capabilities(self, context: NativeContext):
-        result = {name: Capability('unavailable', 'No native interactive implementation') for name in CAPABILITIES}
-        result['launch'] = Capability('supported', mechanism='terminal')
+        result = {name: Capability('unavailable', 'No native interactive implementation',
+                                   required=name in ('launch', 'resume', 'steer', 'follow_up')) for name in CAPABILITIES}
+        result['launch'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
-            result['resume'] = Capability('supported', mechanism=self.session_mode)
+            result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
         return result
 
     def probes(self):

@@ -112,7 +112,7 @@ def deliver(root, reference, message_id, retry=False, mode=None):
                           NativeResult('error', f'Native queue exited {output.returncode}: {output.stderr.strip() or output.stdout.strip()}'))
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             result = NativeResult('error', f'{error}; acceptance may be unknown; retry can duplicate')
-        receipt = {**result.to_dict(), 'message_id': message_id, 'native_session_id': native_id,
+        receipt = {**result.to_dict(), 'ok': result.state not in ('unavailable', 'error'), 'message_id': message_id, 'native_session_id': native_id,
                    'mode': mode, 'agent_id': ctx.properties['id'], 'launch_id': ctx.runtime.get('launch_id'), 'at': now()}
         history[message_id] = [*previous, receipt]
         write(receipts, history)

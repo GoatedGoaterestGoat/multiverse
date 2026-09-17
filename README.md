@@ -71,9 +71,9 @@ durable file protocol; no terminal keystroke delivery is introduced.
 project/.multiverse/
   universe.json                 # ID, name, workspace and template provenance
   bootstrap.md                  # short automatic instructions
-  harnesses/codex/              # argv manifest, short session registration prompt
-  harnesses/claude/             # argv manifest, assigned native session identity
-  harnesses/pi/                 # argv manifest, optional native bridge
+  harnesses/codex/              # declarative source adapter reference and preferences
+  harnesses/claude/             # declarative source adapter reference and preferences
+  harnesses/pi/                 # declarative reference; optional source-owned bridge
   skills/coordination/          # entry.json metadata + SKILL.md
   commands/help/                # entry.json metadata + prompt.md
   workflows/review/             # entry.json metadata + prompt.md
@@ -156,13 +156,13 @@ The title and accent style its group row and agents in the parent hierarchy. The
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Adding `"--extension", "{harness_dir}/extension.ts"` to its spawn/resume arrays enables automatic idle inbox delivery, lifecycle observations and a native `/multiverse` command. Those extras require native integration; launching a harness does not.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Those extras require native integration; launching a harness does not.
 
 ## Harness definitions
 
-Adding a harness means adding `harnesses/NAME/harness.json` in that universe. No Python branch, TypeScript plugin or code registration is needed. Use ordinary JSON for configuration, Markdown for prompts and JSONL for append-only inboxes.
+Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 
-Each manifest declares `schema: 1`, `spawn` and optional `resume` argv arrays, optional `model_args`, `bootstrap` text, `unset_env` names and a docs URL. Arguments are passed directly to the process, never through a shell. Model flags are inserted before a `--` terminator when present, so prompts beginning with a hyphen remain literal. Available substitutions:
+A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` argv arrays, optional `model_args`, `bootstrap` text, `unset_env` names and a docs URL. Arguments are passed directly to the process, never through a shell. Model flags are inserted before a `--` terminator when present, so prompts beginning with a hyphen remain literal. Available substitutions:
 
 | Value | Meaning |
 | --- | --- |
@@ -176,7 +176,7 @@ Each manifest declares `schema: 1`, `spawn` and optional `resume` argv arrays, o
 
 `session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Activity remains `unknown` unless reported; liveness still comes from tagged tmux panes.
 
-Existing universes own their copies of definitions. To add these adapters to an older universe, copy the `codex` and `claude` directories from `src/multiverse/templates/base/harnesses/` into its `harnesses/` directory and add the inbox checkpoint instruction from the base bootstrap. Do not overwrite custom definitions as part of a package update.
+Existing schema-1 definitions and assets remain authoritative and are never rewritten on package update. Opting into schema 2 is explicit: preserve every local model, argument, permission and workspace preference; keep schema 1 for behavior that cannot be represented. No live-universe migration is automatic.
 
 ## Verification and next slices
 

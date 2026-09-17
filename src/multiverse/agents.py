@@ -163,7 +163,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     pass
             update_runtime(agent_dir, launch_id, state="failed", error=str(error))
             recovery = (f"Resume this agent by its full UUID: {properties['id']}"
-                        if session_mode == "file" or resume
+                        if resume
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { resolve } from "node:path";
+import { TranscriptReceipts } from "./transcript.ts";
 
 // No model tools: normal shell commands are enough. This bridge only supplies
 // lifecycle observations, native safe-boundary delivery and a human slash command.
@@ -14,6 +15,7 @@ export default function multiverse(pi: any, run = exec) {
   let draining = false;
   let closed = false;
   let lastError = "";
+  let transcript = new TranscriptReceipts();
   const inFlight = new Set<string>();
 
   async function cli(...args: string[]) {
@@ -27,6 +29,7 @@ export default function multiverse(pi: any, run = exec) {
     lastError = message;
   }
   async function activity(value: string) {
+    if (closed) return;
     try { await cli("runtime-update", "--activity", value); } catch (error) { report(error); }
   }
   async function drain() {
@@ -35,10 +38,10 @@ export default function multiverse(pi: any, run = exec) {
     try {
       const batch = JSON.parse(await cli("inbox"));
       if (closed || !batch.messages.length) return;
-      const persisted = () => new Set<string>(context.sessionManager.getEntries()
-        .filter((entry: any) => entry.type === "custom_message" && entry.customType === "multiverse-inbox")
-        .flatMap((entry: any) => entry.details?.ids ?? []));
-      const seen = persisted();
+      const persisted = () => transcript.scan(context.sessionManager.getSessionFile(), context.sessionManager.getSessionId());
+      const before = await persisted();
+      if (!before.complete) return;
+      const seen = before.ids;
       // Native steering waits for a safe model/tool boundary; it does not abort tools.
       // sendMessage is fire-and-forget in Pi. Its return is NOT delivery evidence.
       for (const message of batch.messages) {
@@ -63,8 +66,8 @@ export default function multiverse(pi: any, run = exec) {
       }
       // Only native transcript persistence permits ack. A crash before persistence
       // leaves the inbox unread. A resumed bridge deduplicates persisted stable IDs.
-      const confirmed = persisted();
-      if (!batch.messages.every((message: any) => confirmed.has(message.id))) return;
+      const confirmed = await persisted();
+      if (!confirmed.complete || !batch.messages.every((message: any) => confirmed.ids.has(message.id))) return;
       await cli("ack", "--cursor", String(batch.cursor));
       for (const message of batch.messages) inFlight.delete(message.id);
       lastError = "";
@@ -76,6 +79,7 @@ export default function multiverse(pi: any, run = exec) {
     context = ctx;
     closed = false;
     inFlight.clear();
+    transcript = new TranscriptReceipts();
     if (timer) clearInterval(timer);
     // A native /new or session switch must not drain this agent's inbox elsewhere.
     const expected = resolve(env.MV2_AGENT_DIR!, "session.jsonl");
@@ -94,7 +98,7 @@ export default function multiverse(pi: any, run = exec) {
       report(error);
       return;
     }
-    timer = setInterval(() => { void drain(); }, 1500);
+    timer = setInterval(drain, 1500);
     timer.unref?.();
   });
   pi.on("agent_start", async () => { await activity("working"); });
