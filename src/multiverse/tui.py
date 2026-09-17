@@ -56,10 +56,11 @@ Click the breadcrumb to return to the previous universe.
 Double-click an agent to attach. Scroll the list normally.
 The key hints along the bottom are clickable.
 
-When the dashboard is inside the same tmux server, attaching switches sessions.
-Ctrl-b L returns to the previous session (the dashboard).
-Ctrl-b d detaches the whole tmux client. For a dashboard launched outside tmux,
-detaching the attached agent returns to the dashboard. These are default tmux keys."""
+Ctrl-b d detaches from an attached agent and returns to the dashboard that
+opened it, including when that dashboard runs inside tmux. The dashboard and
+agent keep running. On the dashboard itself, Ctrl-b d detaches normally.
+These are the default tmux keys; custom prefixes and bindings are preserved.
+Ctrl-b L is tmux's stock last-session action, not the dashboard return key."""
 
 
 class Form(ModalScreen[dict | None]):

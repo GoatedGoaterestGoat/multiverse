@@ -1,7 +1,10 @@
 """Attach to the owned live terminal pane."""
 import os
+import shlex
 import subprocess
 from .. import agents, universe
+from ..tmux import Tmux
+
 
 def configure(parser):
     parser.add_argument("agent")
@@ -9,14 +12,31 @@ def configure(parser):
 
 def run(root=None, *, agent):
     backend, pane = agents.terminal_action(universe.resolve(root), agent, "attach")
-    # Switch only inside the owning server; otherwise attach without nesting.
+    command = [*backend.prefix, "attach-session", "-t", pane]
     current = os.environ.get("TMUX", "").split(",")[0]
-    if current == backend.prefix[2]:
-        backend.run("switch-client", "-t", pane)
-    else:
-        env = dict(os.environ)
-        env.pop("TMUX", None)
-        subprocess.run([*backend.prefix, "attach-session", "-t", pane], env=env, check=True)
+    if current:
+        origin = os.environ.get("TMUX_PANE")
+        if not origin:
+            raise RuntimeError("Cannot identify the originating tmux pane")
+        host = Tmux(current)
+        tty, client = host.run("display-message", "-p", "-t", origin,
+                               "#{pane_tty}\t#{client_name}").split("\t")
+        # A separate terminal can inherit TMUX from its launcher. It must not
+        # replace that launcher's client just because its environment matches.
+        if os.isatty(0) and os.ttyname(0) == tty:
+            visible = host.run("list-clients", "-t", origin, "-F", "#{client_name}\t#{pane_id}")
+            if not client or f"{client}\t{origin}" not in visible.splitlines():
+                raise RuntimeError("No tmux client is attached to the originating dashboard")
+            # Replace the host client, not the dashboard process. A nested attach
+            # lets the host consume prefix+d; switch-client detaches the whole host.
+            return_command = [*host.prefix, "attach-session", "-t", origin]
+            route = "unset TMUX TMUX_PANE; " + shlex.join(command) + "; exec " + shlex.join(return_command)
+            host.run("detach-client", "-t", client, "-E", route)
+            return
+    env = dict(os.environ)
+    env.pop("TMUX", None)
+    env.pop("TMUX_PANE", None)
+    subprocess.run(command, env=env, check=True)
 
 
 if __name__ == "__main__":

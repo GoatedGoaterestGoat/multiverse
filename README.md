@@ -138,7 +138,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 
 Mouse: pause over a row to inspect; click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
 
-Detach from an attached agent with tmux's usual binding (normally Ctrl-b d). Each universe can customize `views/default.json`:
+Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to return to the dashboard that opened it. This also works when the dashboard runs inside tmux: the host terminal opens the agent client and reattaches to the exact dashboard pane when that client exits. The dashboard's selection/state and agent process remain alive. On the dashboard itself, detach works normally. Custom prefixes and bindings are preserved; uppercase L remains tmux's stock last-session action. Each universe can customize `views/default.json`:
 
 ```json
 {
