@@ -78,7 +78,7 @@ class LegacyAdapter:
             result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
         return result
 
-    def probes(self):
+    def probes(self, context=None):
         return {}
 
     def control(self, operation, context, text):

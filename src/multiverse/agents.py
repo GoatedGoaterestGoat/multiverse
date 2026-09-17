@@ -1,3 +1,4 @@
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
@@ -127,7 +128,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                   "session_file": str(agent_dir / "session.jsonl"), "bootstrap_file": str(launch / "bootstrap.md"),
                   "task_file": str(launch / "task.md"), "workspace": str(workdir), "model": model or ""}
         values["adapter_dir"] = str(harnesses.PACKAGES / harness)
+        # A short private path avoids Unix socket length limits in deep worktrees.
+        # Created only when the adapter requests a native service below.
+        service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
+        values['control_socket'] = str(service_dir / 'rpc.sock')
         command = adapter.launch(LaunchContext(mode, values, model))
+        if command.service and command.service.ready_socket != values['control_socket']:
+            raise ValueError('Native service must use the core-assigned private socket')
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
@@ -143,7 +150,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(), "started_at": now()})
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
         terminal = None
+        service_directory_created = False
         try:
+            if command.service:
+                service_dir.mkdir(mode=0o700)
+                service_directory_created = True
             runner = Path(__file__).with_name("runner.py")
             terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
                                       [sys.executable, str(runner), str(launch)])
@@ -153,9 +164,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
             env["MV2_TMUX_SOCKET"] = terminal["socket"]
-            write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env)})
+            endpoint = asdict(command.control_endpoint) if command.control_endpoint else None
+            update_runtime(agent_dir, launch_id, control_endpoint=endpoint)
+            write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
+                                           "control_endpoint": endpoint,
+                                           "service": asdict(command.service) if command.service else None})
             (launch / "ready").touch()
         except Exception as error:
+            if service_directory_created:
+                shutil.rmtree(service_dir)
             if terminal:
                 try:
                     backend.run("kill-session", "-t", terminal["session"])

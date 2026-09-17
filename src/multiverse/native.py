@@ -2,27 +2,41 @@
 
 Durable send/inbox/ack never depend on these best-effort operations.
 """
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 import subprocess
 
 from . import agents, harnesses
-from .harnesses.types import Capability, NativeContext, NativeResult, CommandSpec
+from .harnesses.types import Capability, NativeContext, NativeResult, CommandSpec, RpcSpec
 from .store import inbox, lock, now, read, write
 from .tmux import owned
 
 
+def environment(command):
+    return {k: v for k, v in os.environ.items() if not k.startswith('MV2_') and k not in command.unset_env}
+
+
 def execute(command: CommandSpec, workspace, timeout=10):
-    env = {k: v for k, v in os.environ.items() if not k.startswith('MV2_') and k not in command.unset_env}
+    env = environment(command)
     # Never use a shell: message text and native IDs remain literal argv values.
     return subprocess.run(command.argv, cwd=workspace, env=env, text=True, capture_output=True, timeout=timeout)
 
 
-def probe(adapter, workspace):
+def execute_rpc(spec, workspace, timeout=10):
+    from .rpc import execute as run
+    return run(spec, timeout)
+
+
+def probe(adapter, workspace, ctx=None):
     result = {}
-    for name, command in adapter.probes().items():
+    for name, command in adapter.probes(ctx).items():
         try:
+            if isinstance(command, RpcSpec):
+                observed = execute_rpc(command, workspace, timeout=5)
+                result[name] = Capability('supported' if observed.state == 'ok' else observed.state,
+                                          observed.reason, mechanism='codex-app-server')
+                continue
             output = execute(command, workspace, timeout=5)
             if output.returncode:
                 detail = output.stderr.strip() or output.stdout.strip()
@@ -34,7 +48,7 @@ def probe(adapter, workspace):
                 result[name] = Capability('unavailable', 'Installed native help does not advertise the required interface')
         except FileNotFoundError as error:
             result[name] = Capability('unavailable', str(error))
-        except (OSError, subprocess.SubprocessError) as error:
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             result[name] = Capability('error', str(error))
     return result
 
@@ -44,7 +58,7 @@ def context(root, reference, run_probe=False):
     properties = read(directory / 'properties.json')
     adapter = harnesses.load(root, properties['harness'])
     facts = agents.runtime(directory)
-    probes = probe(adapter, properties['workspace']) if run_probe else {}
+    probes = probe(adapter, properties['workspace'], NativeContext(properties, facts)) if run_probe else {}
     return directory, adapter, NativeContext(properties, facts, probes)
 
 
@@ -58,7 +72,7 @@ def observation(root, properties, facts, operation='usage'):
     try:
         adapter = harnesses.load(root, properties['harness'])
         result = adapter.control(operation, NativeContext(properties, facts), '')
-        if isinstance(result, CommandSpec):
+        if isinstance(result, (CommandSpec, RpcSpec)):
             return NativeResult('unavailable', 'Explicit native control required').to_dict()
         return result.to_dict()
     except Exception as error:
@@ -71,7 +85,7 @@ def control(root, reference, operation):
     with lock(directory / '.launch.lock'):
         _, adapter, ctx = context(root, reference)
         result = adapter.control(operation, ctx, '')
-        if isinstance(result, CommandSpec):
+        if isinstance(result, (CommandSpec, RpcSpec)):
             return NativeResult('unavailable', 'This operation needs an explicit implementation').to_dict()
         return result.to_dict()
 
@@ -100,7 +114,7 @@ def deliver(root, reference, message_id, retry=False, mode=None):
         if operation is None:
             raise ValueError(f'Unknown delivery mode: {mode}')
         try:
-            result = adapter.control(operation, ctx, text)
+            result = adapter.control(operation, replace(ctx, message_id=message_id), text)
             if isinstance(result, NativeResult) and result.state == 'pending' and mode != message.get('delivery', 'steer'):
                 result = NativeResult('unavailable', 'The Pi bridge honors the durable message delivery mode; overrides are unsupported')
             if isinstance(result, CommandSpec):
@@ -110,6 +124,9 @@ def deliver(root, reference, message_id, retry=False, mode=None):
                 result = (NativeResult('native_queued', 'Accepted by the native queue; delivery, read and answer unconfirmed')
                           if output.returncode == 0 else
                           NativeResult('error', f'Native queue exited {output.returncode}: {output.stderr.strip() or output.stdout.strip()}'))
+            elif isinstance(result, RpcSpec):
+                owned(dict(ctx.properties), dict(ctx.runtime))
+                result = execute_rpc(result, ctx.properties['workspace'])
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             result = NativeResult('error', f'{error}; acceptance may be unknown; retry can duplicate')
         receipt = {**result.to_dict(), 'ok': result.state not in ('unavailable', 'error'), 'message_id': message_id, 'native_session_id': native_id,

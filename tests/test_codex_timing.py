@@ -1,0 +1,146 @@
+"""Installed Codex TUI + native server, backed only by a local scripted HTTP provider."""
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import os
+from pathlib import Path
+import shutil
+import threading
+import time
+import unittest
+from unittest.mock import patch
+
+from multiverse import agents, native
+from multiverse.store import append_message, read, write
+from test_multiverse import TerminalBase, until
+
+
+@unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
+class CodexTimingTest(TerminalBase):
+    def test_native_tui_steering_and_after_turn_queue(self):
+        records = []
+        work = self.work
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(b'{"data":[]}')
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                value = json.loads(body)
+                if not self.path.endswith('/responses'):
+                    self.send_error(404)
+                    return
+                is_title = 'title' in value.get('text', {}).get('format', {}).get('schema', {}).get('properties', {})
+                if not is_title:
+                    records.append({'at': time.time() * 1000, 'body': value})
+                index = len(records)
+                item = {'type': 'message', 'role': 'assistant', 'id': f'msg-{index}',
+                        'content': [{'type': 'output_text', 'text': 'Offline sequence complete.'}]}
+                if is_title:
+                    item['content'][0]['text'] = '{"title":"Run offline test"}'
+                elif index <= 2:
+                    command = f'touch tool-{index}-start; sleep 4; touch tool-{index}-end'
+                    if index == 1:
+                        command = '"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; ' + command
+                    item = {'type': 'function_call', 'call_id': f'call-{index}', 'name': 'exec_command',
+                            'arguments': json.dumps({'cmd': command, 'yield_time_ms': 10000, 'max_output_tokens': 200})}
+                events = [
+                    {'type': 'response.created', 'response': {'id': f'resp-{index}'}},
+                    {'type': 'response.output_item.done', 'item': item},
+                    {'type': 'response.completed', 'response': {'id': f'resp-{index}',
+                     'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}},
+                ]
+                payload = ''.join(f'event: {e["type"]}\ndata: {json.dumps(e)}\n\n' for e in events).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        native_home = self.work / 'native-home'
+        native_home.mkdir()
+        (native_home / 'config.toml').write_text(
+            'model = "gpt-5.6-terra"\nmodel_provider = "mv2-test"\n'
+            '[model_providers.mv2-test]\nname = "Offline test"\n'
+            f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
+            'wire_api = "responses"\nrequires_openai_auth = false\n'
+            f'[projects.{json.dumps(str(work))}]\ntrust_level = "trusted"\n')
+        path = self.root / 'harnesses/codex/harness.json'
+        spec = read(path)
+        spec['settings'] = {'inbox_bridge': True, 'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
+        write(path, spec)
+        test_env = dict(CODEX_HOME=str(native_home), NO_COLOR='1', NO_PROXY='127.0.0.1,localhost',
+                        HTTP_PROXY='', HTTPS_PROXY='', ALL_PROXY='', http_proxy='', https_proxy='', all_proxy='')
+        with patch.dict(os.environ, test_env):
+            result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket)
+        self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
+        directory = agents.directory(self.root, result['id'])
+        endpoint = Path(result['runtime']['control_endpoint']['address'])
+
+        def stop_owned():
+            try:
+                if agents.listing(self.root)[0]['live'] == 'alive':
+                    agents.terminal_action(self.root, result['id'], 'stop')
+            finally:
+                until(lambda: not endpoint.parent.exists(), seconds=10)
+
+        self.addCleanup(stop_owned)
+        try:
+            until(lambda: (work / 'tool-1-start').exists(), seconds=30)
+            sent = time.time() * 1000
+            urgent = append_message(directory, 'URGENT_SAFE_BOUNDARY', {}, delivery='steer')
+            normal = append_message(directory, 'NORMAL_AFTER_TURN', {}, delivery='follow-up')
+            for message in (urgent, normal):
+                receipt = native.deliver(self.root, result['id'], message['id'])
+                self.assertEqual(receipt['state'], 'native_queued', receipt)
+            until(lambda: len(records) >= 4, seconds=30)
+            self.assertTrue('URGENT_SAFE_BOUNDARY' in json.dumps(records[1]['body']), 'Urgent input must reach the next request')
+            self.assertFalse('NORMAL_AFTER_TURN' in json.dumps(records[1]['body']), 'Normal input must wait for turn completion')
+            self.assertFalse('NORMAL_AFTER_TURN' in json.dumps(records[2]['body']), 'Normal input must wait for turn completion')
+            self.assertTrue('NORMAL_AFTER_TURN' in json.dumps(records[3]['body']), 'Normal input must wake after the turn')
+            for index in (1, 2):
+                self.assertTrue((work / f'tool-{index}-end').exists())
+            self.assertTrue(str(self.root) in json.dumps(records[0]['body']), 'Bootstrap must reach the native conversation')
+            print('Codex timing evidence:', json.dumps({'urgent_ms': records[1]['at'] - sent,
+                  'normal_ms': records[3]['at'] - sent, 'tool_duration_ms': 4000}))
+            original_native = read(directory / 'properties.json')['native_session_id']
+            old_endpoint = endpoint
+            stop_owned()
+            with patch.dict(os.environ, test_env):
+                resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
+            self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
+            endpoint = Path(resumed['runtime']['control_endpoint']['address'])
+            self.assertNotEqual(endpoint, old_endpoint)
+            self.assertEqual(resumed['native_session_id'], original_native)
+            self.assertEqual(resumed['workspace'], str(work))
+            until(lambda: native.capabilities(self.root, result['id'], run_probe=True)['follow_up']['state'] == 'supported', seconds=20)
+            idle = append_message(directory, 'IDLE_AFTER_EXACT_RESUME', {}, delivery='follow-up')
+            receipt = native.deliver(self.root, result['id'], idle['id'])
+            self.assertEqual(receipt['state'], 'native_queued', receipt)
+            self.assertEqual(receipt['native_session_id'], original_native)
+            until(lambda: len(records) >= 5, seconds=20)
+            self.assertTrue('IDLE_AFTER_EXACT_RESUME' in json.dumps(records[4]['body']))
+            metadata = json.loads(records[4]['body']['client_metadata']['x-codex-turn-metadata'])
+            self.assertEqual(metadata['sandbox_mode'], 'workspace-write', 'Saved native permissions must survive resume')
+        except Exception:
+            print('REQUESTS', [{'at': r['at'], 'urgent': 'URGENT_SAFE_BOUNDARY' in json.dumps(r['body']),
+                                 'normal': 'NORMAL_AFTER_TURN' in json.dumps(r['body'])} for r in records])
+            print('RUNTIME', agents.runtime(directory))
+            try:
+                facts = agents.runtime(directory)
+                print(self.backend.run('capture-pane', '-p', '-S', '-200', '-t', facts['tmux']['pane']))
+            except Exception as error:
+                print(error)
+            print((directory / 'launches' / agents.runtime(directory)['launch_id'] / 'native-service.log').read_text()[-3000:])
+            raise

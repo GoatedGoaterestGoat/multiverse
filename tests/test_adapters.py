@@ -69,6 +69,27 @@ class AdapterContractTest(BaseTest):
         self.assertEqual(path.read_bytes(), before)
         self.assertIn('my-settings', adapter.launch(LaunchContext('spawn', self.values())).argv)
 
+    def test_codex_bridge_keeps_native_preferences_and_rejects_resume_overrides_without_rewriting(self):
+        path = self.root / 'harnesses/codex/harness.json'
+        spec = read(path)
+        spec['settings'] = {'inbox_bridge': True, 'model': 'chosen',
+                            'spawn_args': ['--sandbox', 'workspace-write'], 'args': ['--add-dir', '/custom']}
+        write(path, spec)
+        original = path.read_bytes()
+        adapter = harnesses.load(self.root, 'codex')
+        values = {**self.values(), 'control_socket': '/tmp/owned/rpc.sock'}
+        command = adapter.launch(LaunchContext('spawn', values, 'chosen'))
+        self.assertEqual(command.service.ready_socket, values['control_socket'])
+        self.assertIn('/custom', command.argv)
+        self.assertIn('workspace-write', command.argv)
+        self.assertIn('chosen', command.argv)
+        with self.assertRaisesRegex(ValueError, 'saved permissions'):
+            adapter.validate_resume({'native_session_id': str(uuid4())}, self.work)
+        resumed = adapter.launch(LaunchContext('resume', values, 'chosen'))
+        self.assertIn('/custom', resumed.argv, 'User arguments must never be silently removed')
+        self.assertNotIn(values['agent_dir'], resumed.argv, 'Native resume inherits the source-owned writable grant')
+        self.assertEqual(path.read_bytes(), original)
+
     def test_malformed_and_unknown_settings_fail_cleanly_and_discovery_survives(self):
         path = self.root / 'harnesses/codex/harness.json'
         cases = [[], {'schema': 19}, {'schema': 2, 'adapter': 'missing'},
@@ -76,7 +97,7 @@ class AdapterContractTest(BaseTest):
                  {'schema': 2, 'adapter': 'codex', 'settings': {'typo': True}},
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': '--bad'}},
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': ['{unknown}']}},
-                 {'schema': 2, 'adapter': 'codex', 'settings': {'inbox_bridge': True}},
+                 {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': True}},
                  {'schema': 1, 'spawn': []}, {'schema': 1, 'spawn': [22]},
                  {'schema': 1, 'spawn': ['binary'], 'bootstrap': []}]
         for data in cases:

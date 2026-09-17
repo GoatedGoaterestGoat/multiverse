@@ -1,7 +1,7 @@
 """Adapter boundary: specifications and observations, never tmux or state writes."""
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping, Protocol
+from typing import Any, Callable, Generator, Literal, Mapping, Protocol
 
 CapabilityName = Literal['launch', 'resume', 'steer', 'follow_up', 'native_queue', 'wake', 'activity', 'usage', 'interrupt', 'ask']
 CAPABILITIES: tuple[CapabilityName, ...] = ('launch', 'resume', 'steer', 'follow_up', 'native_queue', 'wake', 'activity', 'usage', 'interrupt', 'ask')
@@ -16,9 +16,36 @@ class Capability:
 
 
 @dataclass(frozen=True)
+class NativeEndpoint:
+    transport: Literal['unix-websocket']
+    address: str
+
+
+@dataclass(frozen=True)
+class ServiceSpec:
+    argv: tuple[str, ...]
+    ready_socket: str
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     argv: tuple[str, ...]
     unset_env: tuple[str, ...] = ('CODEX_THREAD_ID', 'CLAUDECODE')
+    control_endpoint: NativeEndpoint | None = None
+    service: ServiceSpec | None = None
+
+
+@dataclass(frozen=True)
+class RpcRequest:
+    method: str
+    params: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class RpcSpec:
+    """A bounded adapter protocol; core owns the local WebSocket transport."""
+    socket_path: str
+    plan: Callable[[], Generator[RpcRequest, Mapping[str, Any], 'NativeResult']]
 
 
 @dataclass(frozen=True)
@@ -34,6 +61,7 @@ class NativeContext:
     runtime: Mapping[str, Any] = field(default_factory=dict)
     # Results of explicit, bounded probes performed by core; no adapter subprocesses.
     probes: Mapping[str, Capability] = field(default_factory=dict)
+    message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -56,5 +84,5 @@ class HarnessAdapter(Protocol):
     def session_id(self, value: str) -> str: ...
     def validate_resume(self, properties: Mapping[str, Any], agent_dir: Path) -> None: ...
     def capabilities(self, context: NativeContext) -> dict[str, Capability]: ...
-    def probes(self) -> dict[str, CommandSpec]: ...
-    def control(self, operation: str, context: NativeContext, text: str) -> CommandSpec | NativeResult: ...
+    def probes(self, context: NativeContext) -> dict[str, CommandSpec | RpcSpec]: ...
+    def control(self, operation: str, context: NativeContext, text: str) -> CommandSpec | RpcSpec | NativeResult: ...

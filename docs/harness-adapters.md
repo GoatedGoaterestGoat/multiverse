@@ -8,12 +8,13 @@ inboxes and delivery receipts. Each built-in has its own source package under
 `legacy/` interprets existing local definitions without rewriting them.
 
 `harnesses/types.py` defines `HarnessAdapter`, `LaunchContext`, `CommandSpec`,
-`NativeContext`, `Capability` and `NativeResult`. Adapters produce specifications
+`NativeContext`, `Capability`, `NativeResult`, `RpcSpec`, and `ServiceSpec`. Adapters produce specifications
 or observations. They never create tmux panes, execute subprocesses, or mutate
 Multiverse state. Core executes bounded native probes/commands without a shell.
 Launch, resume, normal follow-up and urgent steering are marked `required` in capability discovery.
-The current milestone does **not** meet required normal/urgent delivery for Codex
-or Claude; these are explicit integration blockers, not silently optional features.
+Claude normal/urgent delivery remains a required integration blocker. Codex and Pi
+require their declarative inbox bridge to enable native delivery; plain compatibility
+launches explicitly report missing required controls.
 Unknown capabilities return unavailable; unavailable differs from a failed probe
 or operation. Optional observation failures remain data and do not break snapshots.
 
@@ -30,7 +31,7 @@ New universes contain only a reference and preferences:
 ```
 
 Supported settings: `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-`unset_env`, and Pi's boolean `inbox_bridge`. Argument settings are string arrays,
+`unset_env`, and the boolean `inbox_bridge` for Codex and Pi. Argument settings are string arrays,
 inserted before the prompt/session terminator. Explicit launch models override
 saved agent models on resume, which override the configured default. Workspace
 is owned by core: resume preserves the recorded agent worktree even if the
@@ -56,15 +57,16 @@ ID. Native terminal attach remains the ordinary `mv2 attach AGENT` operation.
 ## Capability matrix
 
 “Unavailable” is intentional, not a zero measurement. Support below describes
-interactive native TUI mode, not separate SDK, RPC, or app-server sessions.
+interactive native TUI mode. The Codex bridge launches its native TUI and native
+app-server together; it does not resume a parallel session behind the TUI.
 
 | Operation | Codex | Claude | Pi plain | Pi with registered bridge | Legacy |
 | --- | --- | --- | --- | --- | --- |
 | Launch / exact resume | Yes | Yes | Yes | Yes | Manifest-dependent |
-| Native steering at a safe boundary | Unavailable | Unavailable | Unavailable | Yes, `deliverAs: steer` | Unavailable |
-| After-turn follow-up | Unavailable | Unavailable | Unavailable | Yes, `followUp` | Unavailable |
+| Native steering at a safe boundary | With bridge, exact `expectedTurnId` | Unavailable | Unavailable | Yes, `deliverAs: steer` | Unavailable |
+| After-turn follow-up | With bridge, native after-turn queue | Unavailable | Unavailable | Yes, `followUp` | Unavailable |
 | Queue, timing unspecified | Installed `queue --help` probe + exact bound UUID | Unavailable | Unavailable | Unavailable | Unavailable |
-| Wake idle native session | Unconfirmed | Unavailable | Unavailable | Yes, `triggerTurn` | Unavailable |
+| Wake idle native session | With bridge, native queued input | Unavailable | Unavailable | Yes, `triggerTurn` | Unavailable |
 | Native activity | Unavailable | Unavailable | Unavailable | Lifecycle events | Unavailable |
 | Cumulative measured usage | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable |
 | Native turn interrupt | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable |
@@ -81,9 +83,40 @@ confirms only acceptance, never steering timing, read status, wake, or an answer
 Claude Mods are early access and are not required for lifecycle. The published
 `$.prompt.submit`, `$.session.usage`, and `$.model.fork` APIs do not establish that
 a bridge is installed in a running native TUI. Isolated fork can also return null.
-This release does not implement that bridge. Similarly, starting a Codex app-server
+This release does not implement that bridge. Starting an unrelated Codex app-server
 or Pi RPC process does not attach controls to an existing interactive TUI. No
 terminal keystrokes or tool cancellation simulate unsupported native operations.
+
+## Codex native controller
+
+`settings.inbox_bridge: true` asks core to own a native app-server for this launch.
+The source adapter specifies `codex app-server --listen unix://...` and the native
+TUI's matching `--remote`; core creates a private short socket directory, starts
+both processes with the scrubbed agent environment, monitors failures, and cleans
+up the owned service process group on terminal exit/stop. Nothing starts, stops,
+or reconfigures the user's shared daemon. Custom `--remote` / `--no-daemon` flags
+conflict explicitly with this mode; other preferences remain in native argv.
+On native remote resume, Codex restores its saved permissions and rejects explicit
+permission overrides. The adapter therefore does not repeat its own initial
+`--add-dir` grant on resume. Put initial permission flags in `spawn_args`, not
+`args`; custom resume permission/profile flags are rejected with a diagnostic and
+are never removed or rewritten. Other saved preferences and exact native IDs stay
+intact. Older Codex versions that lack this interface can retain plain lifecycle mode.
+
+The adapter's bounded RPC plan reads the exact thread and saved workspace on the
+recorded launch endpoint. It refuses unloaded/mismatched targets. Urgent delivery
+uses `turn/steer` with the observed active turn ID; normal delivery uses
+`thread/queue/add`, whose native dispatcher starts only when idle. Idle urgent
+input uses the same queue. Stable inbox IDs become `clientUserMessageId`.
+A finalization race returns an error without silently starting or steering another
+turn; an explicit retry rereads state. No resume, interrupt, approval response,
+or model/permission override is sent by the delivery client.
+
+Core's local Unix WebSocket transport limits each plan to 16 requests, a deadline,
+and 1 MiB frames. A successful native receipt remains `native_queued`, not read or
+answered. Discovery is explicit and bounded; dashboard snapshots do not connect.
+`codex app-server proxy` is not used: the installed proxy's raw control-socket
+transport does not speak the Unix WebSocket API used here.
 
 ## Shared tools and message semantics
 
@@ -155,8 +188,9 @@ CLI fakes, including busy steering, follow-up, finalization, delayed persistence
 ack failures, session changes and stale launches. Installed Pi timing tests run two real four-second shell tools through an offline
 provider: steering enters between them, follow-up after turn completion, and neither
 tool is aborted. Terminal integration uses stub Codex/Claude executables and an offline Pi mock provider on disposable tmux
-servers. Authenticated Codex/Claude model turns and real-provider busy delivery are not
-exercised. The installed Codex queue was also probed against a disposable fake
+servers. Installed Codex native TUI tests use a local scripted HTTP provider for busy timing,
+idle wake, exact resume, workspace/bootstrap preservation and owned-service cleanup.
+Authenticated Codex/Claude model turns and real-provider busy delivery are not exercised. The installed Codex queue was also probed against a disposable fake
 Unix/WebSocket endpoint: it emits `thread/queue/add` only, not `turn/steer`. Run the full suite with:
 
 ```sh
@@ -170,13 +204,6 @@ Codex queue semantics are limited to the installed CLI's `codex queue --help`;
 the app-server documentation does not establish this CLI queue's timing.
 
 ## Required-delivery blockers at this milestone
-
-Codex 0.154.0 has separate native queue and `turn/steer` APIs. Its CLI queue only
-adds a submission and does not establish safe-boundary delivery. A future controller
-must connect to the **same** live app-server that owns the bound thread, verify its
-current turn, use `expectedTurnId`, and handle idle/finalization races without
-silently replaying or resuming elsewhere. This milestone does not add a second
-app-server or infer a live native endpoint from unrelated session history.
 
 Claude 2.1.231 has native cross-session messaging, but the documented entry points
 are model tools, not an external send CLI. A supported external channel can inject
