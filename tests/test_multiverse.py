@@ -219,7 +219,7 @@ class TerminalTest(TerminalBase):
             read_until(b"FAKE READY")
             until(lambda: self.backend.run("list-clients", "-F", "#{client_session}"))
             os.write(master, b"\x02d")
-            output = read_until(b"MULTIVERSE")
+            output = read_until("◈ test".encode())
             os.write(master, b"q")
             deadline = time.monotonic() + 5
             while process.poll() is None and time.monotonic() < deadline:
