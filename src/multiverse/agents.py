@@ -6,7 +6,8 @@ import socket
 import sys
 from uuid import UUID
 
-from . import universe
+from . import universe, harnesses
+from .harnesses.types import LaunchContext
 from .store import lock, now, read, uid, write
 from .tmux import Tmux, observe, owned
 
@@ -47,7 +48,10 @@ def listing(root, recursive=False):
                 properties = read(path)
                 facts = runtime(path.parent)
                 observation = observe(properties, facts, snapshots)
-                rows.append({**properties, "universe": str(scope), **observation,
+                from . import native, usage
+                measured = native.observation(scope, properties, facts)
+                rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
+                             "usage_detail": usage.details(measured), "universe": str(scope), **observation,
                              "activity": facts.get("activity", "unknown") if observation["live"] == "alive" else "—",
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
@@ -58,12 +62,13 @@ def listing(root, recursive=False):
 
 def bind_session(root, reference, session_id, launch_id=None):
     """Record a harness-reported session without guessing from global history."""
-    session_id = str(UUID(session_id))
     agent_dir = directory(root, reference)
     with lock(agent_dir / ".launch.lock"), lock(agent_dir / ".properties.lock"):
         if launch_id and runtime(agent_dir).get("launch_id") != launch_id:
             raise ValueError("Outdated launch")
         data = read(agent_dir / "properties.json")
+        adapter = harnesses.load(root, data["harness"]) if data.get("harness") else None
+        session_id = adapter.session_id(session_id) if adapter else str(UUID(session_id))
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
         data.update(native_session_id=session_id, updated_at=now())
@@ -86,22 +91,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         agent_dir = root / "state" / "agents" / properties["id"]
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
-    spec = read(harness_dir / "harness.json")
-    if spec.get("schema") != 1:
-        raise ValueError("Unsupported harness schema")
+    adapter = harnesses.load(root, harness)
+    model = model or adapter.default_model
     mode = "resume" if resume else "spawn"
-    if mode not in spec:
-        raise ValueError(f"Harness does not support {mode}")
-    session_mode = spec.get("session", "file")
-    if session_mode not in ("file", "assigned", "reported"):
-        raise ValueError("Unsupported harness session mode")
+    session_mode = adapter.session_mode
     if not resume and session_mode == "assigned":
         properties["native_session_id"] = properties["id"]
-    if resume and session_mode != "file" and not properties.get("native_session_id"):
-        raise ValueError("No native session ID recorded. Use `mv2 session-bind --agent AGENT --session-id UUID` "
-                         "with the ID from the harness, then resume. No latest-session fallback is used.")
-    if not shutil.which(spec[mode][0]):
-        raise ValueError(f'Harness executable not found: {spec[mode][0]}')
+    if resume:
+        adapter.validate_resume(properties, agent_dir)
     if not shutil.which("tmux"):
         raise ValueError("tmux is required to spawn agents")
     # A universe can contain agents assigned to different worktrees. Resume in
@@ -119,8 +116,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         launch = agent_dir / "launches" / launch_id
         launch.mkdir(parents=True)
         bootstrap = universe.bootstrap(root, properties)
-        if spec.get("bootstrap"):
-            bootstrap += "\n" + spec["bootstrap"].strip() + "\n"
+        if adapter.bootstrap:
+            bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(properties["task"])
         values = {"name": properties["name"], "agent_id": properties["id"],
@@ -129,10 +126,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                   "task": properties["task"], "agent_dir": str(agent_dir), "harness_dir": str(harness_dir),
                   "session_file": str(agent_dir / "session.jsonl"), "bootstrap_file": str(launch / "bootstrap.md"),
                   "task_file": str(launch / "task.md"), "workspace": str(workdir), "model": model or ""}
-        argv = [arg.format_map(values) for arg in spec[mode]]
-        if model:
-            position = argv.index("--") if "--" in argv else len(argv)
-            argv[position:position] = [arg.format_map(values) for arg in spec.get("model_args", [])]
+        values["adapter_dir"] = str(harnesses.PACKAGES / harness)
+        command = adapter.launch(LaunchContext(mode, values, model))
+        argv = list(command.argv)
+        if not shutil.which(argv[0]):
+            raise ValueError(f'Harness executable not found: {argv[0]}')
         cli = Path(__file__).resolve().parents[2] / "bin" / "mv2"
         invoked = Path(sys.argv[0]).resolve()
         cli_path = str(cli) if cli.exists() else str(invoked) if invoked.name == "mv2" and invoked.is_file() else shutil.which("mv2")
@@ -155,7 +153,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
             env["MV2_TMUX_SOCKET"] = terminal["socket"]
-            write(launch / "request.json", {"argv": argv, "env": env, "unset_env": spec.get("unset_env", [])})
+            write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env)})
             (launch / "ready").touch()
         except Exception as error:
             if terminal:

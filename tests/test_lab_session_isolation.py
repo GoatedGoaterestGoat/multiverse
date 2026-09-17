@@ -11,6 +11,7 @@ from uuid import uuid4
 SOURCE = Path(os.environ.get('MV2_SESSION_TEST_SOURCE', Path(__file__).resolve().parents[1] / 'src'))
 sys.path.insert(0, str(SOURCE))
 from multiverse.store import read, write
+from multiverse.harnesses import load
 
 
 class CrossHarnessParentIdentity(unittest.TestCase):
@@ -19,7 +20,7 @@ class CrossHarnessParentIdentity(unittest.TestCase):
         self.assertGreaterEqual(len(manifests), 5, 'Include base and both reusable role templates')
         for manifest in manifests:
             with self.subTest(manifest=str(manifest.relative_to(SOURCE))):
-                spec = read(manifest)
+                spec = load(manifest.parents[2], manifest.parent.name).spec
                 with tempfile.TemporaryDirectory(prefix='mv2-parent-markers-') as temp:
                     directory = Path(temp) / 'agent'
                     launch_id = str(uuid4())

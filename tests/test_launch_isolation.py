@@ -8,7 +8,8 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents, runner, universe
+from multiverse import agents, runner, universe, harnesses
+import json
 from multiverse.cli import parser, run
 from multiverse.store import ack, append_message, inbox, read, write
 
@@ -55,6 +56,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 patch.dict(os.environ, {"MV2_TMUX_SOCKET": "/inherited/tmux.sock"}):
             first = agents.start(self.root, "test", "test", "pi", socket_path="/explicit/tmux.sock")
             directory = agents.directory(self.root, first["id"])
+            (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")
             for result in (first, agents.start(self.root, resume=first["id"])):
                 launch = directory / "launches" / result["runtime"]["launch_id"]
                 self.assertTrue((launch / "ready").exists())
@@ -72,6 +74,8 @@ class LaunchIsolationTest(unittest.TestCase):
                 patch.object(agents.shutil, "which", return_value="/fake/executable"), \
                 patch.object(agents, "observe", return_value={"live": "stopped"}):
             first = agents.start(self.root, "worker", "task", "pi")
+            directory = agents.directory(self.root, first["id"])
+            (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")
             metadata = read(self.root / "universe.json")
             metadata["workspace"] = str(other)
             write(self.root / "universe.json", metadata)
@@ -156,7 +160,7 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_all_bundled_adapters_clear_cross_harness_native_markers(self):
         for manifest in sorted(universe.TEMPLATES.glob("*/harnesses/*/harness.json")):
             with self.subTest(manifest=manifest.relative_to(universe.TEMPLATES)):
-                spec = read(manifest)
+                spec = harnesses.load(manifest.parents[2], manifest.parent.name).spec
                 launch = self.work / "marker-test" / "launches" / "launch"
                 identity = {"MV2_CLI": "/child/bin/mv2", "MV2_AGENT_ID": "child",
                             "MV2_LAUNCH_ID": "launch", "MV2_TMUX_SOCKET": "/actual/tmux.sock"}

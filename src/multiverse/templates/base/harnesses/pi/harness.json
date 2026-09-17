@@ -1,10 +1,6 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "adapter": "pi",
   "description": "Pi interactive sessions; optional extension for automatic inbox delivery.",
-  "tested_version": "0.84.3",
-  "spawn": ["pi", "--name", "{name}", "--session", "{session_file}", "--append-system-prompt", "{bootstrap_file}", "@{task_file}"],
-  "resume": ["pi", "--name", "{name}", "--session", "{session_file}", "--append-system-prompt", "{bootstrap_file}"],
-  "model_args": ["--model", "{model}"],
-  "unset_env": ["CODEX_THREAD_ID", "CLAUDECODE"],
-  "docs": "https://github.com/earendil-works/pi/tree/main/packages/coding-agent"
+  "settings": {}
 }

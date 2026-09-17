@@ -1,11 +1,6 @@
 {
-  "schema": 1,
+  "schema": 2,
+  "adapter": "claude",
   "description": "Claude Code; prompt-led coordination and an assigned native session UUID.",
-  "checked_cli_version": "2.1.231",
-  "session": "assigned",
-  "spawn": ["claude", "--session-id", "{session_id}", "--append-system-prompt", "{bootstrap}", "--add-dir", "{agent_dir}", "--", "{task}"],
-  "resume": ["claude", "--resume", "{session_id}", "--append-system-prompt", "{bootstrap}", "--add-dir", "{agent_dir}"],
-  "model_args": ["--model", "{model}"],
-  "unset_env": ["CODEX_THREAD_ID", "CLAUDECODE"],
-  "docs": "https://code.claude.com/docs/en/cli-reference"
+  "settings": {}
 }

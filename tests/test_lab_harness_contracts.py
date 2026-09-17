@@ -68,6 +68,8 @@ class LabHarnessContracts(unittest.TestCase):
                 if harness == 'codex':
                     native = str(uuid4())
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
+                if harness == 'pi':
+                    (directory / 'session.jsonl').write_text(__import__('json').dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
                 with patch('multiverse.agents.observe', return_value={'live': 'stopped'}):
                     resumed = agents.start(self.root, resume=row['id'], socket_path=self.socket)
                 argv = self.request(resumed)['argv']

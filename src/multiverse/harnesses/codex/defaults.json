@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "description": "Codex CLI; prompt-led coordination and explicit native session resume.",
+  "checked_cli_version": "0.154.0",
+  "session": "reported",
+  "spawn": [
+    "codex",
+    "--cd",
+    "{workspace}",
+    "--add-dir",
+    "{agent_dir}",
+    "-c",
+    "developer_instructions={bootstrap_json}",
+    "--",
+    "{task}"
+  ],
+  "resume": [
+    "codex",
+    "resume",
+    "--cd",
+    "{workspace}",
+    "--add-dir",
+    "{agent_dir}",
+    "-c",
+    "developer_instructions={bootstrap_json}",
+    "--",
+    "{session_id}"
+  ],
+  "model_args": [
+    "--model",
+    "{model}"
+  ],
+  "unset_env": [
+    "CODEX_THREAD_ID",
+    "CLAUDECODE"
+  ],
+  "bootstrap": "At startup, first run `\"$MV2_CLI\" session-bind --session-id \"$CODEX_THREAD_ID\"` to record this native session for resume. If the variable is absent, report that; never guess another session's ID.",
+  "docs": "https://developers.openai.com/codex/cli/reference/"
+}

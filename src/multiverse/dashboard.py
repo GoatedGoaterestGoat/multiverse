@@ -4,16 +4,17 @@ from hashlib import sha256
 import re
 
 from . import universe
+from .harnesses import load as load_harness
 from .store import read
-from .tools import attach, inspect, list_agents, resume, send, spawn, stop, subverse
+from .tools import attach, capabilities, deliver, inspect, list_agents, native_status, resume, send, spawn, stop, subverse
 from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "activity": ("Activity", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "tokens": ("Tokens", 8), "activity": ("Activity", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
-DEFAULT_COLUMNS = ["name", "harness", "live", "activity", "phase", "summary"]
+DEFAULT_COLUMNS = ["name", "harness", "live", "activity", "tokens", "phase", "summary"]
 
 
 def clean(value):
@@ -63,10 +64,8 @@ def harnesses(root):
     for path in sorted((root / "harnesses").glob("*/harness.json")):
         try:
             name = universe.slug(path.parent.name)
-            spec = read(path)
-            argv = spec.get("spawn")
-            if spec.get("schema") == 1 and isinstance(argv, list) and argv and all(isinstance(arg, str) for arg in argv):
-                available.append(name)
+            load_harness(root, name)
+            available.append(name)
         except (OSError, ValueError, AttributeError):
             continue
     return sorted(available, key=lambda name: ({"codex": 0, "claude": 1}.get(name, 2), name))
@@ -101,6 +100,15 @@ class LocalBackend:
 
     def send(self, root, reference, text):
         return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None})
+
+    def capabilities(self, root, reference, probe=False):
+        return capabilities.run(root, agent=reference, probe=probe)
+
+    def deliver(self, root, reference, message_id, retry=False, mode=None):
+        return deliver.run(root, agent=reference, message_id=message_id, retry=retry, mode=mode)
+
+    def native_status(self, root, reference, operation="usage"):
+        return native_status.run(root, agent=reference, operation=operation)
 
     def resume(self, root, reference):
         return resume.run(root, agent=reference)

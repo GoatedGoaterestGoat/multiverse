@@ -9,7 +9,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents
+from multiverse import agents, harnesses as adapters
 from multiverse.cli import parser
 from multiverse.dashboard import harnesses
 from multiverse.store import read, write
@@ -20,7 +20,7 @@ class HarnessFilesTest(BaseTest):
     def test_discovery_and_plain_defaults(self):
         self.assertEqual(harnesses(self.root), ["codex", "claude", "pi"])
         self.assertEqual(parser().parse_args(["spawn", "--name", "test", "--task", "test"]).harness, "codex")
-        self.assertNotIn("--extension", read(self.root / "harnesses/pi/harness.json")["spawn"])
+        self.assertNotIn("--extension", adapters.load(self.root, "pi").spec["spawn"])
         bad = self.root / "harnesses" / "broken"
         bad.mkdir()
         (bad / "harness.json").write_text("{unfinished")
@@ -59,8 +59,7 @@ class HarnessLaunchTest(TerminalBase):
             "print('HARNESS READY', flush=True)\nwhile True: time.sleep(1)\n")
         executable.chmod(0o755)
         spec = read(directory / "harness.json")
-        for mode in ("spawn", "resume"):
-            spec[mode][0] = str(executable)
+        spec["settings"]["executable"] = str(executable)
         write(directory / "harness.json", spec)
 
     def stop_agent(self, agent):

@@ -352,7 +352,7 @@ class MultiverseApp(App):
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
         if available < 110:
-            fields = [key for key in fields if key not in ("harness", "activity", "id", "updated_at")]
+            fields = [key for key in fields if key not in ("harness", "activity", "tokens", "id", "updated_at")]
         if self.draft:
             fields = ["name", "harness", "summary"]
         widths = {key: COLUMNS[key][1] for key in fields}
@@ -660,7 +660,7 @@ class MultiverseApp(App):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
                       ("live", "TERMINAL"), ("activity", "HARNESS ACTIVITY"), ("reason", "OBSERVATION"),
-                      ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
+                      ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields)
             self.push_screen(Details(row["name"], content))

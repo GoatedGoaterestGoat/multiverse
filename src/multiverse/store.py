@@ -50,10 +50,12 @@ def lock(path):
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 
-def append_message(agent_dir, text, sender, reply_to=None):
+def append_message(agent_dir, text, sender, reply_to=None, delivery="steer"):
     if not text.strip():
         raise ValueError("Message cannot be empty")
-    message = {"id": uid(), "at": now(), "from": sender, "text": text}
+    if delivery not in ("steer", "follow-up", "native-queue"):
+        raise ValueError("Unknown native delivery mode")
+    message = {"delivery": delivery, "id": uid(), "at": now(), "from": sender, "text": text}
     if reply_to:
         message["reply_to"] = reply_to
     agent_dir = Path(agent_dir)

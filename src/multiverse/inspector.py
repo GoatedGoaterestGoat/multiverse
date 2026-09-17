@@ -91,6 +91,7 @@ class Inspector(Vertical):
             live = row.get("live", "unknown")
             state.append(f" · {live}", style="#a6e3a1" if live == "alive" else "#f9e2af")
             state.append("\nActivity: " + clean(row.get("activity", "unknown")), style="#a6adc8")
+            state.append(" · Tokens: " + clean(row.get("tokens", "N/A")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()

@@ -243,11 +243,9 @@ class PiTest(TerminalBase):
         harness_dir = self.root / "harnesses" / "pi"
         spec = read(harness_dir / "harness.json")
         extra = ["--offline", "--no-extensions", "--no-skills", "--no-context-files", "--no-prompt-templates",
-                 "--extension", str(harness_dir / "extension.ts"),
                  "--no-approve", "--extension", str(Path(__file__).with_name("mock-provider.ts")),
                  "--provider", "mv2-test", "--model", "mv2-test"]
-        spec["spawn"] += extra
-        spec["resume"] += extra
+        spec["settings"].update(args=extra, inbox_bridge=True)
         write(harness_dir / "harness.json", spec)
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
             result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket)
