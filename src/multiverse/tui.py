@@ -883,7 +883,10 @@ class MultiverseApp(App):
                     # Textual resumes the terminal only after a normal exit.
                     # Report attach failures after leaving suspension.
                     try:
-                        await asyncio.to_thread(self.backend.attach, Path(agent["universe"]), agent["id"])
+                        # Suspend stops the terminal writer. Do not yield to UI
+                        # timers here: rendering can fill its queue and deadlock
+                        # the event loop before the driver can be resumed.
+                        self.backend.attach(Path(agent["universe"]), agent["id"])
                     except Exception as error:
                         attach_error = error
                 if attach_error is not None:

@@ -261,3 +261,33 @@ class AttachReturnTest(TerminalBase):
         self.read_until(master, b'tester')
         self.assertEqual(self.clients(), 'unrelated|')
         self.assert_agent_alive()
+
+    def test_detach_after_refreshes_resume_terminal_and_clean_shutdown(self):
+        # Accelerate the real dashboard timer: short attach tests never filled
+        # Textual's stopped writer queue when suspend incorrectly yielded.
+        code = (
+            'import sys; from pathlib import Path; '
+            f'sys.path.insert(0, {str(ROOT / "src")!r}); '
+            'from multiverse.tui import MultiverseApp; '
+            f'MultiverseApp(Path({str(self.root)!r}), refresh_interval=.05).run()'
+        )
+        master, process = self.client([sys.executable, '-c', code])
+        self.read_until(master, b'tester')
+        for _ in range(2):
+            # Report synchronized-output support, matching the user's terminal
+            # and exercising the _begin_update path from the reported stack.
+            os.write(master, b'\x1b[?2026;1$y')
+            self.open_agent(master)
+            end = time.monotonic() + 3
+            while time.monotonic() < end:
+                if select.select([master], [], [], .1)[0]:
+                    os.read(master, 65536)
+            os.write(master, b'\x02d')
+            self.read_until(master, b'tester')
+            self.assertEqual(self.clients(), '')
+            self.assertIsNone(process.poll())
+            self.assert_agent_alive()
+        # Input must be handled by the resumed dashboard, not echoed in cooked
+        # mode. Exit normally rather than using the repeated Ctrl-C workaround.
+        os.write(master, b'q')
+        self.assertEqual(self.wait_exit(master, process), 0)
