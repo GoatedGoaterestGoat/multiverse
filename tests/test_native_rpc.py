@@ -11,6 +11,9 @@ from websockets.sync.server import unix_serve
 
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.rpc import execute
+from multiverse import native
+from multiverse.harnesses.codex.control import plan as codex_plan
+from multiverse.harnesses.types import NativeContext
 
 
 class RpcTransportTest(unittest.TestCase):
@@ -48,6 +51,23 @@ class RpcTransportTest(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, 'acceptance may be unknown'):
             execute(RpcSpec(self.path, self.plan), timeout=.1)
         self.assertLess(time.monotonic() - started, 1)
+
+    def test_malformed_thread_is_a_failed_capability_not_an_exception(self):
+        def handler(connection):
+            request = json.loads(connection.recv())
+            connection.send(json.dumps({'id': request['id'], 'result': {}}))
+            connection.recv()  # initialized notification
+            request = json.loads(connection.recv())
+            connection.send(json.dumps({'id': request['id'], 'result': {'thread': None}}))
+        self.serve(handler)
+        ctx = NativeContext({'native_session_id': 'exact', 'workspace': self.temp.name})
+        spec = RpcSpec(self.path, lambda: codex_plan(ctx))
+        class Adapter:
+            def probes(self, context):
+                return {'native_control': spec}
+        observed = native.probe(Adapter(), self.temp.name, ctx)['native_control']
+        self.assertEqual(observed.state, 'error')
+        self.assertIn('thread must be an object', observed.reason)
 
     def test_native_permission_request_is_unanswered_even_from_async_caller(self):
         observed = []

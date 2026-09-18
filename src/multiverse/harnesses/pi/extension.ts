@@ -15,6 +15,7 @@ export default function multiverse(pi: any, run = exec) {
   let draining = false;
   let closed = false;
   let lastError = "";
+  let scanCursor = 0;
   let transcript = new TranscriptReceipts();
   const inFlight = new Set<string>();
 
@@ -36,8 +37,9 @@ export default function multiverse(pi: any, run = exec) {
     if (closed || draining || !context) return;
     draining = true;
     try {
-      const batch = JSON.parse(await cli("inbox"));
-      if (closed || !batch.messages.length) return;
+      const batch = JSON.parse(await cli("inbox", "--after", String(scanCursor)));
+      if (closed) return;
+      if (!batch.messages.length) { scanCursor = 0; return; }
       const persisted = () => transcript.scan(context.sessionManager.getSessionFile(), context.sessionManager.getSessionId());
       const before = await persisted();
       if (!before.complete) return;
@@ -67,10 +69,19 @@ export default function multiverse(pi: any, run = exec) {
       // Only native transcript persistence permits ack. A crash before persistence
       // leaves the inbox unread. A resumed bridge deduplicates persisted stable IDs.
       const confirmed = await persisted();
-      if (!confirmed.complete || !batch.messages.every((message: any) => confirmed.ids.has(message.id))) return;
-      await cli("ack", "--cursor", String(batch.cursor));
-      for (const message of batch.messages) inFlight.delete(message.id);
-      lastError = "";
+      if (!confirmed.complete) return;
+      // Scan beyond unsupported/unconfirmed records without acknowledging them.
+      // Only a contiguous persisted prefix at the actual unread frontier may ack.
+      let prefix = 0;
+      while (prefix < batch.messages.length && confirmed.ids.has(batch.messages[prefix].id)) prefix++;
+      if (prefix && batch.start_cursor === batch.ack_cursor) {
+        await cli("ack", "--cursor", String(batch.message_cursors[prefix - 1]));
+      }
+      for (const message of batch.messages) {
+        if (confirmed.ids.has(message.id)) inFlight.delete(message.id);
+      }
+      scanCursor = batch.has_more ? batch.cursor : 0;
+      if (prefix === batch.messages.length) lastError = "";
     } catch (error) { report(error); }
     finally { draining = false; }
   }
@@ -79,6 +90,7 @@ export default function multiverse(pi: any, run = exec) {
     context = ctx;
     closed = false;
     inFlight.clear();
+    scanCursor = 0;
     transcript = new TranscriptReceipts();
     if (timer) clearInterval(timer);
     // A native /new or session switch must not drain this agent's inbox elsewhere.

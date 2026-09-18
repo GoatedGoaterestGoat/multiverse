@@ -1,5 +1,5 @@
 """Acknowledge a previously read inbox byte cursor."""
-from .. import store
+from .. import agents, store
 from ._common import add_agent, callback
 
 def configure(parser):
@@ -9,7 +9,12 @@ def configure(parser):
 
 def run(root=None, *, agent=None, cursor):
     root, directory, launch_id = callback(root, agent)
-    return store.ack(directory, cursor)
+    # Serialize generation validation with launch replacement, then take the
+    # inbox lock. A callback validated before resume must not ack after it.
+    with store.lock(directory / ".launch.lock"):
+        if launch_id and agents.runtime(directory).get("launch_id") != launch_id:
+            raise ValueError("Outdated launch")
+        return store.ack(directory, cursor)
 
 
 if __name__ == "__main__":

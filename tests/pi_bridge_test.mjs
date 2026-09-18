@@ -25,6 +25,7 @@ async function fixture({ busy = false, failSend = false, failAck = false, wrongS
   const persistEntry = entry => appendFileSync(transcript, JSON.stringify(entry) + '\n');
   const events = {}, calls = [], accepted = [], warnings = [];
   let messages = [{ id: 'one', text: 'payload', reply_to: 'prior', delivery: 'steer' }];
+  let acknowledged = 0;
   let sends = 0;
   const entries = [];
   const pi = {
@@ -39,10 +40,16 @@ async function fixture({ busy = false, failSend = false, failAck = false, wrongS
   const run = async (_python, args) => {
     const command = args[3]; calls.push(args.slice(3));
     if (stale && command === 'session-bind') throw Error('Outdated launch');
-    if (command === 'inbox') return { stdout: JSON.stringify({ messages, cursor: 42 }) };
+    if (command === 'inbox') {
+      const start = Math.max(Number(args[5]), acknowledged);
+      const page = messages.slice(start, start + 50);
+      const cursor = start + page.length;
+      return { stdout: JSON.stringify({ messages: page, cursor, start_cursor: start, ack_cursor: acknowledged,
+        message_cursors: page.map((_, index) => start + index + 1), has_more: cursor < messages.length }) };
+    }
     if (command === 'ack') {
       if (failAck) throw Error('ack failed');
-      messages = [];
+      acknowledged = Number(args[5]);
     }
     return { stdout: '{}' };
   };
@@ -53,7 +60,7 @@ async function fixture({ busy = false, failSend = false, failAck = false, wrongS
   } };
   multiverse(pi, run);
   await events.session_start({}, ctx);
-  return { events, calls, accepted, warnings, entries, persistEntry, transcript, setMessages: value => { messages = value; },
+  return { events, calls, accepted, warnings, entries, persistEntry, transcript, setMessages: value => { messages = value; acknowledged = 0; },
     drain: async () => { await tick(); await flush(); } };
 }
 
@@ -114,6 +121,15 @@ try {
   assert.equal((await receiptReader.scan(partial.transcript, 'native-id')).complete, false);
   appendFileSync(partial.transcript, ',"customType":"multiverse-inbox","details":{"ids":["persisted"]}}\n');
   assert((await receiptReader.scan(partial.transcript, 'native-id')).ids.has('persisted'));
+  const paged = await fixture();
+  paged.setMessages(Array.from({ length: 103 }, (_, index) => ({ id: `page-${index}`,
+    delivery: index === 1 ? 'native-queue' : 'steer', text: 'paging probe' })));
+  for (let count = 0; count < 8; count++) await paged.drain();
+  assert.equal(paged.accepted.length, 102); // later pages progress, persisted IDs do not duplicate
+  assert(paged.accepted.some(item => item.message.details.ids.includes('page-102')));
+  assert(paged.calls.filter(call => call[0] === 'ack').every(call => Number(call[2]) === 1));
+  assert(paged.calls.some(call => call[0] === 'ack')); // contiguous prefix before unsupported stays ackable
+  assert(paged.warnings.some(value => value.includes('remains unread')));
   console.log('Pi bridge: idle, busy/tool-running native steering, follow-up, settled, shutdown, failed injection/ack, exact session and stale launch passed');
 } finally {
   for (const directory of directories) rmSync(directory, { recursive: true, force: true });

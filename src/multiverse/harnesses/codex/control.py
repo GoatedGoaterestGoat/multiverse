@@ -8,9 +8,25 @@ from pathlib import Path
 from ..types import NativeResult, RpcRequest
 
 
+def object_field(value, name):
+    field = value.get(name)
+    if not isinstance(field, dict):
+        raise ValueError(f'Native RPC {name} must be an object')
+    return field
+
+
+def records(value):
+    data = value.get('data')
+    if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+        raise ValueError('Native RPC data must be a list of objects')
+    return data
+
+
 def result(response):
     if 'error' in response:
-        error = response['error']
+        error = object_field(response, 'error')
+        if type(error.get('code')) is not int or not isinstance(error.get('message'), str):
+            raise ValueError('Native RPC error requires an integer code and text message')
         state = 'unavailable' if error.get('code') == -32601 else 'error'
         return NativeResult(state, f"Native RPC {error.get('code')}: {error.get('message')}", error.get('data'))
     value = response.get('result')
@@ -30,14 +46,16 @@ def plan(context, operation=None, text=''):
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
     if isinstance(observed, NativeResult):
         return observed
-    thread = observed.get('thread', {})
+    thread = object_field(observed, 'thread')
     if thread.get('id') != native_id:
         return NativeResult('error', 'Native server returned a different thread ID')
-    if not thread.get('cwd') or Path(thread['cwd']).resolve() != Path(context.properties['workspace']).resolve():
+    if not isinstance(thread.get('cwd'), str) or not thread['cwd'] or Path(thread['cwd']).resolve() != Path(context.properties['workspace']).resolve():
         return NativeResult('error', 'Native thread workspace differs from the saved agent workspace')
     if thread.get('canAcceptDirectInput') is False:
         return NativeResult('unavailable', 'Native thread does not accept direct input')
-    state = thread.get('status', {}).get('type')
+    state = object_field(thread, 'status').get('type')
+    if not isinstance(state, str):
+        raise ValueError('Native RPC thread status type must be text')
     if state not in ('idle', 'active'):
         return NativeResult('unavailable', f'Exact native thread is not controllable on this server ({state}); no resume attempted')
     if operation is None:
@@ -49,6 +67,7 @@ def plan(context, operation=None, text=''):
             observed = result((yield RpcRequest(method, params)))
             if isinstance(observed, NativeResult):
                 return observed
+            records(observed)
         return NativeResult('ok', 'Exact loaded thread and native queue observed')
     if not context.message_id:
         return NativeResult('error', 'A durable message ID is required for native input')
@@ -59,8 +78,8 @@ def plan(context, operation=None, text=''):
         accepted = result((yield RpcRequest('thread/queue/add', params)))
         if isinstance(accepted, NativeResult):
             return accepted
-        item = accepted.get('queuedSubmission', {})
-        if not item.get('id') or item.get('clientUserMessageId') != context.message_id:
+        item = object_field(accepted, 'queuedSubmission')
+        if not isinstance(item.get('id'), str) or not item['id'] or item.get('clientUserMessageId') != context.message_id:
             return NativeResult('error', 'Native queue receipt does not correlate with this message; acceptance is unknown')
         return NativeResult('native_queued', 'Native after-turn queue accepted the message; read and answer unconfirmed',
                             {'queued_submission_id': item['id'], 'client_user_message_id': context.message_id})
@@ -68,8 +87,8 @@ def plan(context, operation=None, text=''):
         'threadId': native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})))
     if isinstance(turns, NativeResult):
         return turns
-    data = turns.get('data', [])
-    if len(data) != 1 or data[0].get('status') != 'inProgress' or not data[0].get('id'):
+    data = records(turns)
+    if len(data) != 1 or data[0].get('status') != 'inProgress' or not isinstance(data[0].get('id'), str) or not data[0]['id']:
         return NativeResult('error', 'Active turn changed before steering; retry explicitly against current state')
     turn_id = data[0]['id']
     accepted = result((yield RpcRequest('turn/steer', {**params, 'expectedTurnId': turn_id})))

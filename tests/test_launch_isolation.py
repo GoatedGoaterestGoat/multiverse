@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -11,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import agents, runner, universe, harnesses
 import json
 from multiverse.cli import parser, run
-from multiverse.store import ack, append_message, inbox, read, write
+from multiverse.store import ack, append_message, inbox, read, write, lock
 
 
 class LaunchIsolationTest(unittest.TestCase):
@@ -45,6 +46,27 @@ class LaunchIsolationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Expected one agent"):
             run(args)
         self.assertEqual(list((self.root / "state" / "agents").iterdir()), before)
+
+    def test_inbox_pages_do_not_ack_skipped_messages(self):
+        agent = self.work / 'paged-agent'
+        agent.mkdir()
+        messages = [append_message(agent, f'内容 {index}', {}) for index in range(53)]
+        first = inbox(agent, after=0)
+        second = inbox(agent, after=first['cursor'])
+        self.assertEqual(first['messages'], messages[:50])
+        self.assertTrue(first['has_more'])
+        self.assertEqual(second['messages'], messages[50:])
+        self.assertFalse(second['has_more'])
+        self.assertEqual(second['ack_cursor'], 0)
+        self.assertEqual(inbox(agent)['messages'], messages[:50])
+        ack(agent, first['message_cursors'][0])
+        # A read cursor from an older sweep cannot resurrect acknowledged input.
+        self.assertEqual(inbox(agent, after=0)['messages'], messages[1:51])
+        with self.assertRaisesRegex(ValueError, 'Invalid inbox cursor'):
+            inbox(agent, after=first['cursor'] - 1)
+        with (agent / 'inbox.jsonl').open('ab') as out:
+            out.write(b'{"incomplete":')
+        self.assertFalse(inbox(agent, after=second['cursor'])['has_more'])
 
     def test_spawn_and_resume_publish_actual_socket_before_ready(self):
         terminal = {"socket": "/actual/tmux.sock", "session": "$1", "pane": "%1"}
@@ -156,6 +178,38 @@ class LaunchIsolationTest(unittest.TestCase):
         self.assertEqual(read(agent / "runtime.json"), runtime)
         self.assertEqual(inbox(agent)["messages"], [message])
         self.assertFalse((agent / "inbox.cursor").exists())
+
+    def test_ack_rechecks_generation_after_waiting_for_launch_lock(self):
+        from multiverse.tools import ack as ack_tool
+        agent = self.root / 'state/agents' / str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'race'})
+        write(agent / 'runtime.json', {'launch_id': 'old'})
+        message = append_message(agent, 'must remain unread', {})
+        cursor = inbox(agent)['cursor']
+        validated, errors = threading.Event(), []
+        original = ack_tool.callback
+        def callback(*args):
+            value = original(*args)
+            validated.set()
+            return value
+        def acknowledge():
+            try:
+                ack_tool.run(self.root, agent=agent.name, cursor=cursor)
+            except Exception as error:
+                errors.append(error)
+        with patch.object(ack_tool, 'callback', callback), patch.dict(os.environ, {'MV2_LAUNCH_ID': 'old'}):
+            with lock(agent / '.launch.lock'):
+                worker = threading.Thread(target=acknowledge)
+                worker.start()
+                self.assertTrue(validated.wait(2))
+                # Resume publishes its replacement while the old callback waits.
+                write(agent / 'runtime.json', {'launch_id': 'new'})
+            worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], ValueError)
+        self.assertIn('Outdated launch', str(errors[0]))
+        self.assertEqual(inbox(agent)['messages'], [message])
 
     def test_all_bundled_adapters_clear_cross_harness_native_markers(self):
         for manifest in sorted(universe.TEMPLATES.glob("*/harnesses/*/harness.json")):

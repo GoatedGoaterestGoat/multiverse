@@ -83,6 +83,20 @@ class CodexControlTest(unittest.TestCase):
         self.assertEqual(self.run_plan('steer').state, 'error')
         self.assertEqual([r.method for r in self.requests], ['initialize', 'thread/read'])
 
+    def test_malformed_native_shapes_are_diagnosable(self):
+        thread = {'id': self.ctx.properties['native_session_id'], 'cwd': '/tmp', 'status': None}
+        cases = [(None, 'thread/read', {'thread': None}),
+                 (None, 'thread/read', {'thread': thread}),
+                 (None, 'thread/queue/list', {'data': None}),
+                 ('steer', 'thread/turns/list', {'data': [None]}),
+                 ('follow_up', 'thread/queue/add', {'queuedSubmission': None})]
+        for operation, method, value in cases:
+            with self.subTest(method=method, value=value), self.assertRaisesRegex(ValueError, 'Native RPC'):
+                self.run_plan(operation, overrides={method: {'result': value}})
+        for error in [None, [], 'bad', {'code': [], 'message': 'bad'}, {'code': 0, 'message': None}]:
+            with self.subTest(error=error), self.assertRaisesRegex(ValueError, 'Native RPC'):
+                self.run_plan(None, overrides={'initialize': {'error': error}})
+
 
 if __name__ == '__main__':
     unittest.main()

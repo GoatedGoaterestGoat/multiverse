@@ -82,20 +82,31 @@ def _validate_cursor(data, cursor):
         raise ValueError("Invalid inbox cursor; refusing to skip messages")
 
 
-def inbox(agent_dir, limit=50):
+def inbox(agent_dir, limit=50, *, after=None):
     agent_dir = Path(agent_dir)
     with lock(agent_dir / ".inbox.lock"):
         path = agent_dir / "inbox.jsonl"
         data = path.read_bytes() if path.exists() else b""
         cursor = _cursor(agent_dir)
         _validate_cursor(data, cursor)
+        acknowledged = cursor
+        if after is not None:
+            _validate_cursor(data, after)
+            cursor = max(cursor, after)
+        start = cursor
         messages = []
+        cursors = []
         for line in data[cursor:].splitlines(keepends=True):
             if not line.endswith(b"\n") or len(messages) >= limit:
                 break
             messages.append(json.loads(line))
             cursor += len(line)
-        return {"messages": messages, "cursor": cursor}
+            cursors.append(cursor)
+        result = {"messages": messages, "cursor": cursor}
+        if after is not None:
+            result.update(start_cursor=start, ack_cursor=acknowledged, message_cursors=cursors,
+                          has_more=b"\n" in data[cursor:])
+        return result
 
 
 def ack(agent_dir, cursor):

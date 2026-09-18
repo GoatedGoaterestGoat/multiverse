@@ -143,6 +143,8 @@ Pi polling is `pending`; neither is read or answered. Queue acceptance never
 acks the durable inbox. A repeated accepted or failed/ambiguous native attempt
 is not automatically retried: `--retry` explicitly accepts possible duplication.
 Resuming cannot change the launch generation while native execution is in flight.
+Inbox acknowledgement validates its launch generation under the same launch lock,
+so an old callback waiting through resume cannot clear the new launch's inbox.
 
 The Pi bridge must be enabled to provide Pi's required native messaging; plain Pi
 retains lifecycle compatibility but reports those required capabilities unavailable.
@@ -157,7 +159,10 @@ persisted messages. A queued but unpersisted injection remains unread; the bridg
 does not repeatedly inject it during the same process. Native asynchronous errors
 appear in Pi diagnostics; restart/resume can retry unread messages. A crash can
 still produce duplicates, so receivers should correlate by message ID. Unsupported
-modes stay unread. A Pi `deliver --mode` override is unavailable because its bridge
+modes stay unread. The bridge scans one bounded page per poll, including pages
+beyond unsupported records. `inbox --after BYTE_CURSOR` is read-only pagination;
+it never acknowledges skipped records. Only a contiguous persisted prefix at the
+actual unread frontier can advance acknowledgement. A Pi `deliver --mode` override is unavailable because its bridge
 honors the mode already stored in the durable message.
 
 `interrupt`, `ask`, and usage requests explicitly return unavailable. `stop` still
