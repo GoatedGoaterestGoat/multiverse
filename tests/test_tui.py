@@ -155,6 +155,25 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.backend.messages[0]["to"], original)
             self.assertIn("\n", self.backend.messages[0]["text"])
 
+    async def test_empty_initial_prompt_can_spawn_and_failed_delivery_is_visible(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            original = len(self.backend.agents)
+            await pilot.press('n', 'ctrl+enter')
+            await self.settle(pilot)
+            self.assertEqual(len(self.backend.agents), original + 1)
+            self.assertEqual(self.backend.agents[-1]['task'], '')
+            failed = {'saved': True, 'state': 'unavailable', 'ok': False,
+                      'native_delivery': {'state': 'unavailable', 'reason': 'Native bridge is unavailable'}}
+            with patch.object(self.backend, 'send', return_value=failed):
+                await pilot.press('m')
+                self.app.screen.query_one('#field-text', TextArea).load_text('Keep this saved')
+                await pilot.press('ctrl+enter')
+                await self.settle(pilot)
+            status = str(self.app.query_one('#status', Static).render())
+            self.assertIn('Message saved', status)
+            self.assertIn('Native bridge is unavailable', status)
+
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]
         async with self.app.run_test(size=(110, 28)) as pilot:

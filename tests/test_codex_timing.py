@@ -9,6 +9,7 @@ import time
 import unittest
 from unittest.mock import patch
 
+from multiverse.tools import send
 from multiverse import agents, native
 from multiverse.store import append_message, read, write
 from test_multiverse import TerminalBase, until
@@ -99,11 +100,10 @@ class CodexTimingTest(TerminalBase):
         try:
             until(lambda: (work / 'tool-1-start').exists(), seconds=30)
             sent = time.time() * 1000
-            urgent = append_message(directory, 'URGENT_SAFE_BOUNDARY', {}, delivery='steer')
-            normal = append_message(directory, 'NORMAL_AFTER_TURN', {}, delivery='follow-up')
+            urgent = send.run(self.root, agent=result['id'], text='URGENT_SAFE_BOUNDARY', delivery='steer')
+            normal = send.run(self.root, agent=result['id'], text='NORMAL_AFTER_TURN', delivery='follow-up')
             for message in (urgent, normal):
-                receipt = native.deliver(self.root, result['id'], message['id'])
-                self.assertEqual(receipt['state'], 'native_queued', receipt)
+                self.assertEqual(message['state'], 'native_queued', message)
             until(lambda: len(records) >= 4, seconds=30)
             self.assertTrue('URGENT_SAFE_BOUNDARY' in json.dumps(records[1]['body']), 'Urgent input must reach the next request')
             self.assertFalse('NORMAL_AFTER_TURN' in json.dumps(records[1]['body']), 'Normal input must wait for turn completion')
@@ -124,7 +124,7 @@ class CodexTimingTest(TerminalBase):
             self.assertNotEqual(endpoint, old_endpoint)
             self.assertEqual(resumed['native_session_id'], original_native)
             self.assertEqual(resumed['workspace'], str(work))
-            until(lambda: native.capabilities(self.root, result['id'], run_probe=True)['follow_up']['state'] == 'supported', seconds=20)
+            until(lambda: native.capabilities(self.root, result['id'], run_probe=True)['send_follow_up']['state'] == 'supported', seconds=20)
             idle = append_message(directory, 'IDLE_AFTER_EXACT_RESUME', {}, delivery='follow-up')
             receipt = native.deliver(self.root, result['id'], idle['id'])
             self.assertEqual(receipt['state'], 'native_queued', receipt)

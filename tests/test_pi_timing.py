@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from multiverse import agents
+from multiverse.tools import send
 from multiverse.store import append_message, inbox, read, write
 from test_multiverse import TerminalBase, until
 
@@ -27,8 +28,10 @@ class PiTimingTest(TerminalBase):
         try:
             until(lambda: (directory / 'tool-1-start').exists(), seconds=25)
             sent = time.time() * 1000
-            urgent = append_message(directory, 'URGENT_SAFE_BOUNDARY', {}, delivery='steer')
-            normal = append_message(directory, 'NORMAL_AFTER_TURN', {}, delivery='follow-up')
+            urgent = send.run(self.root, agent=result['id'], text='URGENT_SAFE_BOUNDARY', delivery='steer')
+            normal = send.run(self.root, agent=result['id'], text='NORMAL_AFTER_TURN', delivery='follow-up')
+            for message in (urgent, normal):
+                self.assertEqual(message['state'], 'pending', message)
             timing = directory / 'timing.jsonl'
             until(lambda: len(timing.read_text().splitlines()) >= 4, seconds=25)
             records = [json.loads(line) for line in timing.read_text().splitlines()]

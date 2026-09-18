@@ -62,8 +62,9 @@ Python callers use, for example,
 `list_agents.run(root, recursive=True, json=True)`; results are returned and
 errors raised, while shell entry points format output and exit codes.
 
-This is a behavior-preserving extraction. `send`, `inbox` and `ack` still use the
-durable file protocol; no terminal keystroke delivery is introduced.
+`send` saves the durable record and attempts native delivery through the common
+adapter protocol. `ask`, `get-usage` and `observe` use the same tools from CLI and
+backend. Unsupported operations are explicit; no terminal keystroke delivery is introduced.
 
 ## Files and ownership
 
@@ -152,13 +153,15 @@ The title and accent style its group row and agents in the parent hierarchy. The
 
 ## Messages, commands and prompts
 
-`send` serializes concurrent appends under a file lock. Plain Codex, Claude and Pi adapters follow the short bootstrap: check the inbox at startup, between work steps and before finishing. **A queued message does not automatically wake an idle agent.** `inbox` peeks; `ack --cursor N` acknowledges the returned batch. Queued, read, and answered are different states. A crash around acknowledgement can cause duplicate delivery; IDs and `--reply-to` support correlation. This is a local, cooperative file protocol, not a security boundary or a distributed queue.
+`send` saves a stable message ID and immediately attempts native delivery. Choose `--delivery steer` (next safe boundary) or `--delivery follow-up` (next turn). Its result distinguishes saved, accepted, pending, unavailable and failed; acceptance is not reading or an answer. Failed/unavailable delivery retains the message and returns a nonzero CLI exit. Retry that same ID with `deliver --message-id ID --retry`, rather than creating another message. `--queue-only` skips the explicit attempt, but existing inbox consumers can still read it. `inbox` peeks; `ack --cursor N` acknowledges. IDs and `--reply-to` support correlation.
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core owns a native app-server for that launch and attaches the native TUI to it. `mv2 deliver` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core owns a native app-server for that launch and attaches the native TUI to it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
 
 ## Harness definitions
+
+Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `observe` returns its current identity and state. `ask` and `get-usage` are explicit operations and currently report unavailable for bundled providers.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 

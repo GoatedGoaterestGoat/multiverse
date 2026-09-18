@@ -13,7 +13,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import agents, harnesses, native, universe, usage
 from multiverse.dashboard import LocalBackend, harnesses as discover
-from multiverse.harnesses.types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeContext, NativeResult
+from multiverse.harnesses.types import CAPABILITIES, SessionHandle, Capability, CommandSpec, LaunchContext, NativeContext, NativeResult
 from multiverse.store import append_message, inbox, read, write
 from multiverse.tools import capabilities, deliver, native_status
 from test_multiverse import BaseTest
@@ -34,9 +34,9 @@ class AdapterContractTest(BaseTest):
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     self.assertEqual(adapter.launch(context), legacy.launch(context))
-                self.assertEqual(set(adapter.capabilities(NativeContext({}))), set(CAPABILITIES))
-                for required in ('launch', 'resume', 'steer', 'follow_up'):
-                    self.assertTrue(adapter.capabilities(NativeContext({}))[required].required)
+                self.assertEqual(set(adapter.capabilities(SessionHandle("agent", name, str(self.work)))), set(CAPABILITIES))
+                for required in ('spawn', 'resume', 'send_steer', 'send_follow_up'):
+                    self.assertTrue(adapter.capabilities(SessionHandle("agent", name, str(self.work)))[required].required)
 
     def test_configuration_is_declarative_and_never_rewritten(self):
         config = self.root / 'harnesses/codex/harness.json'
@@ -54,6 +54,26 @@ class AdapterContractTest(BaseTest):
         self.assertIn('local-model', result.argv)
         self.assertEqual(set(result.unset_env), {'CODEX_THREAD_ID', 'CLAUDECODE', 'CUSTOM_PARENT'})
         self.assertEqual(config.read_bytes(), original)
+
+    def test_builtins_accept_empty_initial_prompt_without_empty_native_turn(self):
+        for name in harnesses.BUILTINS:
+            with self.subTest(name=name):
+                adapter = harnesses.load(self.root, name)
+                values = {**self.values(), 'task': ''}
+                command = adapter.spawn(LaunchContext('spawn', values, 'chosen'))
+                self.assertNotIn('', command.argv)
+                self.assertNotIn('@' + values['task_file'], command.argv)
+                self.assertIn('chosen', command.argv)
+
+    def test_unsupported_side_questions_never_execute_native_commands(self):
+        for name in harnesses.BUILTINS:
+            with self.subTest(name=name), patch.object(native, 'execute') as execute, patch.object(native, 'execute_rpc') as rpc:
+                adapter = harnesses.load(self.root, name)
+                session = SessionHandle('agent', name, str(self.work), native_id=str(uuid4()))
+                result = adapter.ask(session, 'Side question', native.NativeExecutor(self.work))
+                self.assertEqual(result.state, 'unavailable')
+                execute.assert_not_called()
+                rpc.assert_not_called()
 
     def test_legacy_preserves_every_custom_argument_and_asset(self):
         path = self.root / 'harnesses/codex/harness.json'
@@ -136,7 +156,7 @@ class AdapterContractTest(BaseTest):
         self.assertEqual(argv[argv.index('--extension') + 1], str(harnesses.PACKAGES / 'pi/extension.ts'))
         for facts, expected in (({}, 'unavailable'), ({'state': 'stopped', 'native_bridge': 'pi-inbox-v1'}, 'unavailable'),
                                 ({'state': 'running', 'native_bridge': 'pi-inbox-v1'}, 'supported')):
-            caps = adapter.capabilities(NativeContext({}, facts))
+            caps = adapter.native_capabilities(NativeContext({}, facts))
             self.assertEqual(caps['steer'].state, expected)
             self.assertEqual(caps['follow_up'].state, expected)
             self.assertEqual(caps['ask'].state, 'unavailable')
@@ -145,12 +165,12 @@ class AdapterContractTest(BaseTest):
         adapter = harnesses.load(self.root, 'codex')
         props = {'native_session_id': str(uuid4()), 'workspace': str(self.work)}
         with patch.object(native, 'execute') as execute:
-            caps = adapter.capabilities(NativeContext(props))
+            caps = adapter.native_capabilities(NativeContext(props))
             execute.assert_not_called()
             self.assertEqual(caps['native_queue'].state, 'unavailable')
             execute.return_value = subprocess.CompletedProcess([], 0, 'Usage: queue --thread UUID --message TEXT', '')
             ctx = NativeContext(props, probes=native.probe(adapter, self.work))
-            caps = adapter.capabilities(ctx)
+            caps = adapter.native_capabilities(ctx)
             self.assertEqual(caps['native_queue'].state, 'supported')
             for name in ('steer', 'follow_up', 'wake', 'usage', 'interrupt', 'ask'):
                 self.assertEqual(caps[name].state, 'unavailable')
@@ -236,13 +256,13 @@ class NativeDeliveryTest(BaseTest):
 
     def test_optional_usage_failure_is_diagnosable_and_does_not_break_snapshot(self):
         for result in (NativeResult('unavailable', 'not installed'), NativeResult('error', 'broken pipe')):
-            with patch.object(harnesses.CodexAdapter, 'control', return_value=result):
+            with patch.object(harnesses.CodexAdapter, 'get_usage', return_value=result):
                 snapshot = LocalBackend().snapshot(self.root)
                 row = snapshot['agents'][0]
                 self.assertEqual(row['tokens'], 'N/A')
                 self.assertEqual(row['usage']['state'], result.state)
                 self.assertIn(result.reason, row['usage_detail'])
-        with patch.object(harnesses.CodexAdapter, 'control', side_effect=RuntimeError('adapter failed')):
+        with patch.object(harnesses.CodexAdapter, 'get_usage', side_effect=RuntimeError('adapter failed')):
             self.assertEqual(LocalBackend().snapshot(self.root)['agents'][0]['usage']['state'], 'error')
         self.assertEqual(usage.display({'state': 'ok', 'value': {'total_tokens': 0}}), '0')
         self.assertEqual(usage.display({'state': 'ok', 'value': {'total_tokens': None}}), 'N/A')

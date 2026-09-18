@@ -34,33 +34,4 @@ def load(root: Path, name: str) -> HarnessAdapter:
     settings = config.get('settings', {})
     if not isinstance(settings, dict):
         raise ValueError('Harness settings must be an object')
-    unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'inbox_bridge'}
-    if unknown:
-        raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
-    spec = json.loads((PACKAGES / adapter / 'defaults.json').read_text())
-    for key in ('model', 'unset_env'):
-        if key in settings:
-            spec[key] = settings[key]
-    executable = settings.get('executable', spec['spawn'][0])
-    if not isinstance(executable, str) or not executable or '\0' in executable:
-        raise ValueError('executable must be a nonempty string')
-    bridge = settings.get('inbox_bridge', False)
-    if not isinstance(bridge, bool) or (bridge and adapter not in ('pi', 'codex')):
-        raise ValueError('inbox_bridge is a boolean supported by Pi and Codex')
-    if bridge and adapter == 'codex':
-        for key in ('args', 'spawn_args', 'resume_args'):
-            if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon'
-                   for arg in arguments(settings.get(key, []), key)):
-                raise ValueError('inbox_bridge conflicts with a custom --remote or --no-daemon argument')
-    for mode in ('spawn', 'resume'):
-        argv = spec[mode]
-        argv[0] = executable
-        extra = [*arguments(settings.get('args', []), 'args'),
-                 *arguments(settings.get(mode + '_args', []), mode + '_args')]
-        if bridge and adapter == 'pi':
-            extra += ['--extension', str(PACKAGES / 'pi' / 'extension.ts')]
-        position = argv.index('--') if '--' in argv else 1
-        argv[position:position] = extra
-    result = BUILTINS[adapter](name, spec)
-    result.settings = settings
-    return result
+    return BUILTINS[adapter].configured(name, settings)

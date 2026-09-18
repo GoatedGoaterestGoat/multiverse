@@ -6,7 +6,7 @@ import re
 from . import universe
 from .harnesses import load as load_harness
 from .store import read
-from .tools import attach, capabilities, deliver, inspect, list_agents, native_status, resume, send, spawn, stop, subverse
+from .tools import ask, get_usage, observe, attach, capabilities, deliver, inspect, list_agents, native_status, resume, send, spawn, stop, subverse
 from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
@@ -95,11 +95,21 @@ class LocalBackend:
                 "columns": config["columns"], "widgets": config["widgets"], "agents": members}
 
     def spawn(self, root, values):
-        return spawn.run(root, name=values["name"], task=values["task"],
+        return spawn.run(root, name=values["name"], task=values.get("task", ""),
                          harness=values.get("harness") or "codex", model=values.get("model") or None)
 
-    def send(self, root, reference, text):
-        return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None})
+    def send(self, root, reference, text, delivery='steer', queue_only=False):
+        return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None},
+                        delivery=delivery, queue_only=queue_only)
+
+    def ask(self, root, reference, question):
+        return ask.run(root, agent=reference, question=question)
+
+    def get_usage(self, root, reference):
+        return get_usage.run(root, agent=reference)
+
+    def observe(self, root, reference):
+        return observe.run(root, agent=reference)
 
     def capabilities(self, root, reference, probe=False):
         return capabilities.run(root, agent=reference, probe=probe)

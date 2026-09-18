@@ -738,7 +738,13 @@ class MultiverseApp(App):
         succeeded, result = False, None
         try:
             result = await asyncio.to_thread(callback, *args)
-            self.set_status("Message queued; delivery and an answer may follow." if label == "Send message" else label + " complete.")
+            if label == "Send message":
+                receipt = (result or {}).get('native_delivery', {})
+                state = receipt.get('state', 'queued')
+                detail = receipt.get('reason', 'delivery and an answer may follow')
+                self.set_status(f"Message saved; {state}: {detail}", error=state in ('error', 'unavailable'))
+            else:
+                self.set_status(label + " complete.")
             succeeded = True
         except Exception as error:
             self.set_status(f"{label} failed: {error}", error=True)
@@ -811,7 +817,7 @@ class MultiverseApp(App):
         if not draft or self.operating:
             return
         values = {key: value.strip() for key, value in draft.values.items()}
-        for key in ("name", "harness", "task"):
+        for key in ("name", "harness"):
             try:
                 if not values[key]:
                     raise ValueError(f"{LABELS[key]} is required.")

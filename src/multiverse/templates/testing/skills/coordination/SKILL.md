@@ -7,7 +7,7 @@ Use `"$MV2_CLI" --help` for the CLI. Your current universe and identity are alre
 
 - `spawn --name worker --harness codex --task 'initial prompt'` starts an independent agent. Use `claude` for Claude Code or another name from the harness catalog.
 - `list --recursive` finds agents in this universe and its descendants. Use `-u /absolute/universe/path` before a command to target another universe. IDs are authoritative; unique names or ID prefixes also work.
-- `send AGENT --text 'message'` durably queues input. Plain adapters check their inbox at work checkpoints; a queued message does not wake an idle agent. Pi's optional extension provides automatic delivery. Use `--reply-to MESSAGE_ID` to correlate answers.
+- `send AGENT --text 'message'` saves and attempts native delivery. Use `--delivery steer` for a safe-boundary steer or `--delivery follow-up` for the next turn. Inspect the returned state: saved/accepted is not read/answered; unavailable/error retains the message. Retry the same ID with `deliver AGENT --message-id ID --retry`. Use `--reply-to MESSAGE_ID` to correlate answers.
 - `inspect AGENT` captures its pane. `attach AGENT` opens its terminal. Use tmux detach to return.
 - `resume AGENT` resumes its native session after it stops. `stop AGENT` terminates its terminal and running work; use only when appropriate.
 - `inbox` peeks at unread messages; after reading, `ack --cursor N` acknowledges the returned byte offset. Check at startup, between work steps and before finishing. The optional Pi extension handles this automatically. Acknowledgment does not mean completed work. After a crash, duplicate delivery is possible; message IDs let you recognize it.

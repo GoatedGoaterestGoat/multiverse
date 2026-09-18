@@ -66,7 +66,7 @@ class ToolsTest(unittest.TestCase):
 
     def test_message_roundtrip_across_tool_cli_and_tui_keeps_sender_and_cursor(self):
         message = "literal 'quoted'\n$(false) `false`"
-        first = json.loads(self.invoke("send", self.agent, "--stdin", text=message).stdout)
+        first = json.loads(self.invoke("send", self.agent, "--stdin", "--queue-only", text=message).stdout)
         self.assertEqual(first["state"], "queued")
         batch = json.loads(self.invoke("inbox", "--agent", self.agent, standalone=False).stdout)
         self.assertEqual(batch["messages"][0]["text"], message)
@@ -88,6 +88,16 @@ class ToolsTest(unittest.TestCase):
                 self.assertIn("Outdated launch", result.stderr)
         after = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
         self.assertEqual(before, after)
+
+    def test_unavailable_native_delivery_has_nonzero_exit_but_retains_message(self):
+        properties = read(self.directory / 'properties.json')
+        properties.update(harness='claude', workspace=str(self.work), native_session_id=str(uuid4()))
+        write(self.directory / 'properties.json', properties)
+        result = json.loads(self.invoke('send', self.agent, '--text', 'saved on failure', code=1).stdout)
+        self.assertEqual(result['state'], 'unavailable')
+        self.assertTrue(result['saved'])
+        batch = json.loads(self.invoke('inbox', '--agent', self.agent).stdout)
+        self.assertEqual(batch['messages'][0]['id'], result['id'])
 
     def test_init_and_tui_subverse_install_fresh_scoped_definitions(self):
         installed = json.loads(self.invoke("init", str(self.work / "fresh"), "--name", "fresh").stdout)

@@ -1,12 +1,40 @@
 """Codex interactive CLI lifecycle and exact-thread native queue specifications."""
-from ..legacy import LegacyAdapter
+from pathlib import Path
+from ..base import ConfiguredAdapter
 from functools import partial
 
-from ..types import Capability, CommandSpec, NativeEndpoint, NativeResult, RpcSpec, ServiceSpec
+from ..types import SessionHandle, Message, DeliveryMode, Executor, Capability, CommandSpec, NativeEndpoint, NativeResult, RpcSpec, ServiceSpec, CommandProbe
 from .control import plan
 
 
-class CodexAdapter(LegacyAdapter):
+class CodexAdapter(ConfiguredAdapter):
+    package = Path(__file__).parent
+    supports_bridge = True
+
+    def send(self, session: SessionHandle, message: Message, mode: DeliveryMode, executor: Executor) -> NativeResult:
+        from dataclasses import replace
+        operation = {'steer': 'steer', 'follow-up': 'follow_up', 'native-queue': 'native_queue'}.get(mode)
+        if operation is None:
+            return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
+        ctx = session.context(message_id=message.id)
+        ctx = replace(ctx, probes=executor.probe(self, ctx))
+        specification = self.control(operation, ctx, message.prompt())
+        if isinstance(specification, NativeResult):
+            return specification
+        if isinstance(specification, RpcSpec):
+            return executor.rpc(specification)
+        output = executor.command(specification)
+        return (NativeResult('native_queued', 'Accepted by Codex queue; read and answer unconfirmed')
+                if output.returncode == 0 else
+                NativeResult('error', f'Codex queue exited {output.returncode}: {output.stderr.strip() or output.stdout.strip()}'))
+
+    def configure_native(self):
+        if self.settings.get('inbox_bridge'):
+            for key in ('args', 'spawn_args', 'resume_args'):
+                if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon'
+                       for arg in self.settings.get(key, [])):
+                    raise ValueError('inbox_bridge conflicts with a custom --remote or --no-daemon argument')
+
     def validate_resume(self, properties, agent_dir):
         super().validate_resume(properties, agent_dir)
         settings = getattr(self, 'settings', {})
@@ -59,10 +87,10 @@ class CodexAdapter(LegacyAdapter):
                     and context.runtime.get('control_endpoint') == {'transport': 'unix-websocket', 'address': self.endpoint(context)}):
                 return {'native_control': self.rpc(context)}
             return {}
-        return {'native_queue': CommandSpec((self.spec['spawn'][0], 'queue', '--help'))}
+        return {'native_queue': CommandProbe(CommandSpec((self.spec['spawn'][0], 'queue', '--help')), queue_capability)}
 
-    def capabilities(self, context):
-        result = super().capabilities(context)
+    def native_capabilities(self, context):
+        result = super().native_capabilities(context)
         if self.endpoint(context) or getattr(self, 'settings', {}).get('inbox_bridge') or context.runtime.get('control_endpoint'):
             observed = context.probes.get('native_control', Capability('unavailable', 'Exact native endpoint has not been probed'))
             if context.runtime.get('control_endpoint') != {'transport': 'unix-websocket', 'address': self.endpoint(context)}:
@@ -81,7 +109,7 @@ class CodexAdapter(LegacyAdapter):
         return result
 
     def control(self, operation, context, text):
-        capability = self.capabilities(context).get(operation)
+        capability = self.native_capabilities(context).get(operation)
         if self.endpoint(context) and operation in ('steer', 'follow_up', 'native_queue') and capability.state == 'supported':
             self.session_id(context.properties['native_session_id'])
             return self.rpc(context, operation, text)
@@ -91,3 +119,13 @@ class CodexAdapter(LegacyAdapter):
                                 '--cd', context.properties['workspace']))
         return NativeResult('error' if capability and capability.state == 'error' else 'unavailable',
                             capability.reason if capability else f'Unknown capability: {operation}')
+
+
+def queue_capability(output):
+    if output.returncode:
+        detail = output.stderr.strip() or output.stdout.strip()
+        unsupported = any(word in detail.lower() for word in ('unrecognized subcommand', 'unknown command', 'unexpected argument'))
+        return Capability('unavailable' if unsupported else 'error', f'Native probe exited {output.returncode}: {detail}')
+    if all(flag in output.stdout for flag in ('--thread', '--message')):
+        return Capability('supported', mechanism='codex-queue')
+    return Capability('unavailable', 'Installed Codex help does not advertise the queue interface')

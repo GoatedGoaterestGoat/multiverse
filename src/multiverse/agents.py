@@ -8,7 +8,7 @@ import sys
 from uuid import UUID
 
 from . import universe, harnesses
-from .harnesses.types import LaunchContext
+from .harnesses.types import LaunchContext, SessionHandle
 from .store import lock, now, read, uid, write
 from .tmux import Tmux, observe, owned
 
@@ -84,10 +84,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         harness, model = properties["harness"], model or properties.get("model")
     else:
         universe.slug(name)
-        if not task or not task.strip():
-            raise ValueError("A task is required")
+        task = task or ""
         properties = {"id": uid(), "universe_id": read(root / "universe.json")["id"],
-                      "name": name, "task": task, "summary": task, "phase": "starting",
+                      "name": name, "task": task, "summary": "", "phase": "starting",
                       "harness": harness, "model": model, "created_at": now(), "updated_at": now()}
         agent_dir = root / "state" / "agents" / properties["id"]
     universe.slug(harness)
@@ -132,7 +131,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values['control_socket'] = str(service_dir / 'rpc.sock')
-        command = adapter.launch(LaunchContext(mode, values, model))
+        context = LaunchContext(mode, values, model)
+        command = adapter.resume(context) if resume else adapter.spawn(context)
         if command.service and command.service.ready_socket != values['control_socket']:
             raise ValueError('Native service must use the core-assigned private socket')
         argv = list(command.argv)
@@ -184,7 +184,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error
-    return {**properties, "universe": str(root), "runtime": runtime(agent_dir)}
+    return {**properties, "universe": str(root), "runtime": runtime(agent_dir),
+            "session": asdict(SessionHandle.from_records(properties, runtime(agent_dir), agent_dir))}
 
 
 def status(root, reference, phase=None, summary=None):

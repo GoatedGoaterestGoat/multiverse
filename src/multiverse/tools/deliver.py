@@ -1,10 +1,11 @@
-"""Attempt native follow-up delivery of an existing unread durable message; never ack it."""
+"""Recovery: retry native delivery of a previously saved message."""
 from .. import native, universe
 
 
 def configure(parser):
     parser.add_argument('agent')
     parser.add_argument('--message-id', required=True)
+    parser.add_argument('--mode', choices=('steer', 'follow-up', 'native-queue'))
     parser.add_argument('--retry', action='store_true', help='Retry explicitly; native acceptance can produce duplicates')
 
 
