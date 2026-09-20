@@ -17,7 +17,7 @@ class NativeServiceTest(TerminalBase):
             terminal = ('import time; print("OWNED TERMINAL",flush=True); time.sleep(30)')
             return CommandSpec((sys.executable, '-c', terminal), control_endpoint=NativeEndpoint('unix-websocket', endpoint),
                                service=ServiceSpec((sys.executable, '-c', service, endpoint), endpoint))
-        with patch.object(harnesses.CodexAdapter, 'launch', launch):
+        with patch.object(harnesses.CodexAdapter, 'spawn', launch):
             result = agents.start(self.root, 'failure', 'test', 'codex', socket_path=self.socket)
         directory = agents.directory(self.root, result['id'])
         endpoint = Path(result['runtime']['control_endpoint']['address'])

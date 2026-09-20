@@ -69,7 +69,7 @@ def bind_session(root, reference, session_id, launch_id=None):
             raise ValueError("Outdated launch")
         data = read(agent_dir / "properties.json")
         adapter = harnesses.load(root, data["harness"]) if data.get("harness") else None
-        session_id = adapter.session_id(session_id) if adapter else str(UUID(session_id))
+        session_id = adapter.validate_session_id(session_id) if adapter else str(UUID(session_id))
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
         data.update(native_session_id=session_id, updated_at=now())
@@ -144,7 +144,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if not cli_path:
             raise ValueError("Cannot locate mv2 CLI")
         env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
-               "MV2_LAUNCH_ID": launch_id, "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
+               "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
         properties.update(model=model, updated_at=now())
         write(agent_dir / "properties.json", properties)
         write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(), "started_at": now()})
@@ -152,7 +152,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         terminal = None
         service_directory_created = False
         try:
-            if command.service:
+            if command.control_endpoint:
                 service_dir.mkdir(mode=0o700)
                 service_directory_created = True
             runner = Path(__file__).with_name("runner.py")

@@ -72,9 +72,9 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(batch["messages"][0]["text"], message)
         self.invoke("ack", "--agent", self.agent, "--cursor", str(batch["cursor"]))
         LocalBackend().send(self.root, self.agent, "from dashboard")
-        batch = json.loads(self.invoke("inbox", "--agent", self.agent).stdout)
-        self.assertEqual([m["text"] for m in batch["messages"]], ["from dashboard"])
-        self.assertEqual(batch["messages"][0]["from"], {"name": "user", "agent_id": None})
+        batch = json.loads(self.invoke("inbox", "--agent", self.agent, "--all").stdout)
+        self.assertEqual([m["text"] for m in batch["messages"]], [message, "from dashboard"])
+        self.assertEqual(batch["messages"][-1]["from"], {"name": "user", "agent_id": None})
 
     def test_standalone_callbacks_reject_stale_launch_without_mutating_state(self):
         before = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
@@ -94,9 +94,10 @@ class ToolsTest(unittest.TestCase):
         properties.update(harness='claude', workspace=str(self.work), native_session_id=str(uuid4()))
         write(self.directory / 'properties.json', properties)
         result = json.loads(self.invoke('send', self.agent, '--text', 'saved on failure', code=1).stdout)
-        self.assertEqual(result['state'], 'unavailable')
+        self.assertEqual(result['state'], 'error')
+        self.assertIn('Pre-submission', result['native_delivery']['reason'])
         self.assertTrue(result['saved'])
-        batch = json.loads(self.invoke('inbox', '--agent', self.agent).stdout)
+        batch = json.loads(self.invoke('inbox', '--agent', self.agent, '--all').stdout)
         self.assertEqual(batch['messages'][0]['id'], result['id'])
 
     def test_init_and_tui_subverse_install_fresh_scoped_definitions(self):

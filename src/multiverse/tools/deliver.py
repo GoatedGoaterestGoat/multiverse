@@ -5,12 +5,12 @@ from .. import native, universe
 def configure(parser):
     parser.add_argument('agent')
     parser.add_argument('--message-id', required=True)
-    parser.add_argument('--mode', choices=('steer', 'follow-up', 'native-queue'))
-    parser.add_argument('--retry', action='store_true', help='Retry explicitly; native acceptance can produce duplicates')
+    parser.add_argument('--check', action='store_true', help='Reconcile native receipt without submitting')
+    parser.add_argument('--retry', action='store_true', help='Retry a definite failure; accepted or uncertain submissions are never blindly resent')
 
 
-def run(root=None, *, agent, message_id, retry=False, mode=None):
-    return native.deliver(universe.resolve(root), agent, message_id, retry, mode)
+def run(root=None, *, agent, message_id, retry=False, check=False):
+    return native.deliver(universe.resolve(root), agent, message_id, retry, check)
 
 
 if __name__ == '__main__':

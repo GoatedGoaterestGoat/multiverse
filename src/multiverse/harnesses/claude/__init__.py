@@ -1,15 +1,17 @@
-"""Claude native TUI lifecycle. Mods are not required or assumed installed."""
+"""Claude native terminal lifecycle; optional controls never assumed installed."""
 from pathlib import Path
 from ..base import ConfiguredAdapter
-from ..types import Capability
+from ..types import NativeResult
 
 
 class ClaudeAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
 
-    def native_capabilities(self, context):
-        result = super().native_capabilities(context)
-        for name in ('steer', 'follow_up', 'native_queue', 'wake', 'activity', 'usage', 'interrupt', 'ask'):
-            result[name] = Capability('unavailable', 'No verified Mods/channel bridge attached to this native TUI',
-                                      required=name in ('steer', 'follow_up'))
-        return result
+    def spawn(self, context):
+        return super().spawn(context)
+
+    def resume(self, context):
+        return super().resume(context)
+
+    def send(self, session, message, executor):
+        return NativeResult('unavailable', 'No verified Mods/channel bridge attached to this Claude terminal')

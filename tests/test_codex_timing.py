@@ -112,6 +112,10 @@ class CodexTimingTest(TerminalBase):
             for index in (1, 2):
                 self.assertTrue((work / f'tool-{index}-end').exists())
             self.assertTrue(str(self.root) in json.dumps(records[0]['body']), 'Bootstrap must reach the native conversation')
+            for message in (urgent, normal):
+                receipt = native.deliver(self.root, result['id'], message['id'], check=True)
+                self.assertEqual(receipt['state'], 'native_queued', receipt)
+                self.assertTrue(receipt['value']['transcript_confirmed'], receipt)
             print('Codex timing evidence:', json.dumps({'urgent_ms': records[1]['at'] - sent,
                   'normal_ms': records[3]['at'] - sent, 'tool_duration_ms': 4000}))
             original_native = read(directory / 'properties.json')['native_session_id']

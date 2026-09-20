@@ -2,33 +2,17 @@
 from pathlib import Path
 from ..base import ConfiguredAdapter
 from functools import partial
+from dataclasses import replace
 
-from ..types import SessionHandle, Message, DeliveryMode, Executor, Capability, CommandSpec, NativeEndpoint, NativeResult, RpcSpec, ServiceSpec, CommandProbe
-from .control import plan
+from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeEndpoint, NativeResult, RpcSpec, ServiceSpec
+from .protocol import check_connection, send_message, get_delivery
 
 
 class CodexAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
 
-    def send(self, session: SessionHandle, message: Message, mode: DeliveryMode, executor: Executor) -> NativeResult:
-        from dataclasses import replace
-        operation = {'steer': 'steer', 'follow-up': 'follow_up', 'native-queue': 'native_queue'}.get(mode)
-        if operation is None:
-            return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
-        ctx = session.context(message_id=message.id)
-        ctx = replace(ctx, probes=executor.probe(self, ctx))
-        specification = self.control(operation, ctx, message.prompt())
-        if isinstance(specification, NativeResult):
-            return specification
-        if isinstance(specification, RpcSpec):
-            return executor.rpc(specification)
-        output = executor.command(specification)
-        return (NativeResult('native_queued', 'Accepted by Codex queue; read and answer unconfirmed')
-                if output.returncode == 0 else
-                NativeResult('error', f'Codex queue exited {output.returncode}: {output.stderr.strip() or output.stdout.strip()}'))
-
-    def configure_native(self):
+    def _configure_launch(self):
         if self.settings.get('inbox_bridge'):
             for key in ('args', 'spawn_args', 'resume_args'):
                 if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon'
@@ -47,17 +31,9 @@ class CodexAdapter(ConfiguredAdapter):
                                  'Use spawn_args for initial grants; native resume retains saved permissions. '
                                  'Your configuration has not been changed.')
 
-    def endpoint(self, context=None):
-        settings = getattr(self, 'settings', {})
-        if settings.get('inbox_bridge') and context is not None:
-            endpoint = context.runtime.get('control_endpoint') or {}
-            if endpoint.get('transport') == 'unix-websocket':
-                return endpoint.get('address')
-        return None
-
-    def launch(self, context):
-        command = super().launch(context)
-        endpoint = self.endpoint()
+    def _launch_command(self, context):
+        command = super()._launch_command(context)
+        endpoint = None
         service = None
         if getattr(self, 'settings', {}).get('inbox_bridge'):
             endpoint = context.values['control_socket']
@@ -77,55 +53,39 @@ class CodexAdapter(ConfiguredAdapter):
             return CommandSpec(tuple(argv), command.unset_env, NativeEndpoint('unix-websocket', endpoint), service)
         return command
 
-    def rpc(self, context, operation=None, text=''):
-        return RpcSpec(self.endpoint(context),
-                       partial(plan, context, operation, text))
+    def spawn(self, context):
+        return super().spawn(context)
 
-    def probes(self, context=None):
-        if self.endpoint(context) or getattr(self, 'settings', {}).get('inbox_bridge'):
-            if (context and context.properties.get('native_session_id') and context.runtime.get('state') == 'running'
-                    and context.runtime.get('control_endpoint') == {'transport': 'unix-websocket', 'address': self.endpoint(context)}):
-                return {'native_control': self.rpc(context)}
-            return {}
-        return {'native_queue': CommandProbe(CommandSpec((self.spec['spawn'][0], 'queue', '--help')), queue_capability)}
+    def resume(self, context):
+        return super().resume(context)
 
-    def native_capabilities(self, context):
-        result = super().native_capabilities(context)
-        if self.endpoint(context) or getattr(self, 'settings', {}).get('inbox_bridge') or context.runtime.get('control_endpoint'):
-            observed = context.probes.get('native_control', Capability('unavailable', 'Exact native endpoint has not been probed'))
-            if context.runtime.get('control_endpoint') != {'transport': 'unix-websocket', 'address': self.endpoint(context)}:
-                observed = Capability('unavailable', 'Native endpoint does not match the recorded launch')
-            for name in ('steer', 'follow_up', 'native_queue'):
-                result[name] = Capability(observed.state, observed.reason, observed.mechanism,
-                                          required=name in ('steer', 'follow_up'))
-            return result
-        result['native_queue'] = context.probes.get('native_queue', Capability('unavailable', 'Native queue has not been probed'))
-        if not context.properties.get('native_session_id'):
-            result['native_queue'] = Capability('unavailable', 'No exact native thread ID recorded')
-        if any(getattr(self, 'settings', {}).get(key) for key in ('args', 'spawn_args', 'resume_args')):
-            result['native_queue'] = Capability('unavailable', 'Queue routing for custom launch arguments is not implemented')
-        # Queue acceptance alone does not establish wake, delivery, reading or completion.
-        result['wake'] = Capability('unavailable', 'Native queue does not confirm wake or execution')
+    def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
+        result = super().capabilities(session, executor)
+        available = (session.state == 'running' and session.native_id and session.endpoint
+                     and session.endpoint.transport == 'unix-websocket')
+        support = Capability('unavailable', 'No running Codex app-server session', required=True)
+        if available:
+            support = Capability('unavailable', 'Native API has not been checked', required=True)
+            if executor:
+                try:
+                    observed = executor.rpc(RpcSpec(session.endpoint.address, partial(check_connection, session)), timeout=5)
+                    support = Capability('supported' if observed.state == 'ok' else 'error' if observed.state == 'unknown' else observed.state,
+                                         observed.reason, 'codex-app-server', required=True)
+                except Exception as error:
+                    support = Capability('error', str(error), required=True)
+        result['send_steer'] = result['send_follow_up'] = support
+        result['get_delivery'] = replace(support, required=False)
         return result
 
-    def control(self, operation, context, text):
-        capability = self.native_capabilities(context).get(operation)
-        if self.endpoint(context) and operation in ('steer', 'follow_up', 'native_queue') and capability.state == 'supported':
-            self.session_id(context.properties['native_session_id'])
-            return self.rpc(context, operation, text)
-        if operation == 'native_queue' and capability.state == 'supported':
-            native = self.session_id(context.properties['native_session_id'])
-            return CommandSpec((self.spec['spawn'][0], 'queue', '--thread', native, '--message', text,
-                                '--cd', context.properties['workspace']))
-        return NativeResult('error' if capability and capability.state == 'error' else 'unavailable',
-                            capability.reason if capability else f'Unknown capability: {operation}')
+    def get_delivery(self, session, message_id, executor):
+        if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
+            return NativeResult('unavailable', 'No Codex app-server endpoint')
+        return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
 
-
-def queue_capability(output):
-    if output.returncode:
-        detail = output.stderr.strip() or output.stdout.strip()
-        unsupported = any(word in detail.lower() for word in ('unrecognized subcommand', 'unknown command', 'unexpected argument'))
-        return Capability('unavailable' if unsupported else 'error', f'Native probe exited {output.returncode}: {detail}')
-    if all(flag in output.stdout for flag in ('--thread', '--message')):
-        return Capability('supported', mechanism='codex-queue')
-    return Capability('unavailable', 'Installed Codex help does not advertise the queue interface')
+    def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
+        mode = message.delivery
+        if mode not in ('steer', 'follow-up'):
+            return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
+        if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
+            return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID')
+        return executor.rpc(RpcSpec(session.endpoint.address, partial(send_message, session, message, mode)))

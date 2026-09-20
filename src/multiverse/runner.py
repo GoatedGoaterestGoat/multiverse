@@ -37,6 +37,11 @@ def main():
             env.pop(key, None)
         env.update(request["env"])
         env["PATH"] = str(Path(env["MV2_CLI"]).parent) + os.pathsep + env.get("PATH", "")
+        if request.get('control_endpoint'):
+            endpoint = Path(request['control_endpoint']['address'])
+            if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
+                raise ValueError('Native control socket does not belong to this launch')
+            service_dir = endpoint.parent
         if request.get('service'):
             specification = request['service']
             ready = Path(specification['ready_socket'])

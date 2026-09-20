@@ -4,7 +4,7 @@ import json
 from string import Formatter
 from uuid import UUID
 
-from .types import NATIVE_CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeContext, NativeResult, SessionHandle, Message, DeliveryMode, Executor
+from .types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeResult, SessionHandle, Message, Executor
 
 FIELDS = {'name', 'agent_id', 'session_id', 'bootstrap', 'bootstrap_json', 'task', 'agent_dir',
           'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir'}
@@ -53,10 +53,10 @@ class ConfiguredAdapter:
             argv[position:position] = extra
         result = cls(name, spec)
         result.settings = settings
-        result.configure_native()
+        result._configure_launch()
         return result
 
-    def configure_native(self):
+    def _configure_launch(self):
         pass
 
     def __init__(self, name, spec):
@@ -78,7 +78,7 @@ class ConfiguredAdapter:
         if not isinstance(self.bootstrap, str) or (self.default_model is not None and not isinstance(self.default_model, str)):
             raise ValueError('bootstrap and model must be strings')
 
-    def session_id(self, value):
+    def validate_session_id(self, value):
         return str(UUID(value))
 
     def validate_resume(self, properties, agent_dir):
@@ -88,11 +88,11 @@ class ConfiguredAdapter:
             if not properties.get('native_session_id'):
                 raise ValueError('No native session ID recorded. Use `mv2 session-bind --agent AGENT --session-id UUID` '
                                  'with the ID from the harness, then resume. No latest-session fallback is used.')
-            self.session_id(properties['native_session_id'])
+            self.validate_session_id(properties['native_session_id'])
         elif any('{session_file}' in arg for arg in self.spec['resume']) and not (agent_dir / 'session.jsonl').is_file():
             raise ValueError('Native session file is missing; refusing to create a fresh session on resume')
 
-    def launch(self, context: LaunchContext):
+    def _launch_command(self, context: LaunchContext):
         if context.mode not in self.spec:
             raise ValueError(f'Harness does not support {context.mode}')
         values = {**context.values, 'model': context.model or ''}
@@ -109,38 +109,26 @@ class ConfiguredAdapter:
         unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset)
 
-    def native_capabilities(self, context: NativeContext):
-        result = {name: Capability('unavailable', 'No native interactive implementation',
-                                   required=name in ('launch', 'resume', 'steer', 'follow_up')) for name in NATIVE_CAPABILITIES}
-        result['launch'] = Capability('supported', mechanism='terminal', required=True)
-        if 'resume' in self.spec:
-            result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
-        return result
-
-    def probes(self, context=None):
-        return {}
-
-    def control(self, operation, context, text):
-        return NativeResult('unavailable', f'{operation} is unavailable for this native session')
-
     def spawn(self, context: LaunchContext) -> CommandSpec:
-        return self.launch(replace(context, mode='spawn'))
+        return self._launch_command(replace(context, mode='spawn'))
 
     def resume(self, context: LaunchContext) -> CommandSpec:
-        return self.launch(replace(context, mode='resume'))
+        return self._launch_command(replace(context, mode='resume'))
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
-        ctx = session.context()
-        if executor:
-            ctx = replace(ctx, probes=executor.probe(self, ctx))
-        native = self.native_capabilities(ctx)
-        mapping = {'spawn': 'launch', 'resume': 'resume', 'send_steer': 'steer',
-                   'send_follow_up': 'follow_up', 'ask': 'ask', 'get_usage': 'usage'}
-        return {**{key: native[value] for key, value in mapping.items()},
-                'observe': Capability('supported', 'Core launch state; native activity may be unknown')}
+        result = {name: Capability('unavailable', 'No native implementation',
+                    required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
+        result['spawn'] = Capability('supported', mechanism='terminal', required=True)
+        if 'resume' in self.spec:
+            result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
+        result['observe'] = Capability('supported', 'Core launch state; native activity may be unknown')
+        return result
 
-    def send(self, session: SessionHandle, message: Message, mode: DeliveryMode, executor: Executor) -> NativeResult:
+    def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
         return NativeResult('unavailable', 'No verified native message delivery for this session')
+
+    def get_delivery(self, session, message_id, executor):
+        return NativeResult('unavailable', 'Native receipt reconciliation is not implemented')
 
     def ask(self, session: SessionHandle, question: str, executor: Executor) -> NativeResult:
         return NativeResult('unavailable', 'No isolated native side-question implementation; main conversation unchanged')

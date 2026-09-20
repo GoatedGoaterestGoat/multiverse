@@ -7,7 +7,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents
+from multiverse import agents, native
 from multiverse.tools import send
 from multiverse.store import append_message, inbox, read, write
 from test_multiverse import TerminalBase, until
@@ -31,7 +31,7 @@ class PiTimingTest(TerminalBase):
             urgent = send.run(self.root, agent=result['id'], text='URGENT_SAFE_BOUNDARY', delivery='steer')
             normal = send.run(self.root, agent=result['id'], text='NORMAL_AFTER_TURN', delivery='follow-up')
             for message in (urgent, normal):
-                self.assertEqual(message['state'], 'pending', message)
+                self.assertEqual(message['state'], 'native_queued', message)
             timing = directory / 'timing.jsonl'
             until(lambda: len(timing.read_text().splitlines()) >= 4, seconds=25)
             records = [json.loads(line) for line in timing.read_text().splitlines()]
@@ -45,9 +45,13 @@ class PiTimingTest(TerminalBase):
             for index in (1, 2):
                 self.assertTrue((directory / f'tool-{index}-end').exists(), 'Tool must complete normally')
             until(lambda: not inbox(directory)['messages'])
-            native = (directory / 'session.jsonl').read_text()
-            self.assertIn(urgent['id'], native)
-            self.assertIn(normal['id'], native)
+            transcript_text = (directory / 'session.jsonl').read_text()
+            self.assertIn(urgent['id'], transcript_text)
+            self.assertIn(normal['id'], transcript_text)
+            for message in (urgent, normal):
+                receipt = native.deliver(self.root, result['id'], message['id'], check=True)
+                self.assertEqual(receipt['state'], 'native_queued', receipt)
+                self.assertTrue(receipt['value']['transcript_confirmed'], receipt)
             print('Pi timing evidence:', json.dumps({'urgent_ms': records[1]['at'] - sent,
                   'normal_ms': records[3]['at'] - sent, 'tool_duration_ms': 4000,
                   'urgent_before_second_tool': True, 'normal_after_final_turn': True}))

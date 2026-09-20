@@ -1,138 +1,83 @@
-// Exercise the shipped TypeScript bridge with deterministic native event/CLI fakes.
+// Native extension contract exercised through real Unix sockets, no model calls.
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, appendFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { connect } from 'node:net';
 import { join } from 'node:path';
 import { TranscriptReceipts } from '../src/multiverse/harnesses/pi/transcript.ts';
 import multiverse from '../src/multiverse/harnesses/pi/extension.ts';
-
-Object.assign(process.env, { MV2_AGENT_ID: 'agent', MV2_LAUNCH_ID: 'launch',
-  MV2_AGENT_DIR: '/tmp/mv2-bridge-agent', MV2_UNIVERSE: '/tmp/universe', MV2_CLI: '/tmp/mv2', MV2_PYTHON: 'python' });
-const directories = [];
-let tick;
-const originalSetInterval = global.setInterval;
-const originalClearInterval = global.clearInterval;
-global.setInterval = (fn) => { tick = fn; return { unref() {} }; };
-global.clearInterval = () => {};
-const flush = async () => { await new Promise(resolve => setImmediate(resolve)); };
-
-async function fixture({ busy = false, failSend = false, failAck = false, wrongSession = false, stale = false, persist = true } = {}) {
-  const directory = mkdtempSync(join(tmpdir(), 'mv2-pi-bridge-'));
-  directories.push(directory);
-  process.env.MV2_AGENT_DIR = directory;
-  const transcript = join(directory, 'session.jsonl');
-  writeFileSync(transcript, JSON.stringify({ type: 'session', id: 'native-id' }) + '\n');
-  const persistEntry = entry => appendFileSync(transcript, JSON.stringify(entry) + '\n');
-  const events = {}, calls = [], accepted = [], warnings = [];
-  let messages = [{ id: 'one', text: 'payload', reply_to: 'prior', delivery: 'steer' }];
-  let acknowledged = 0;
-  let sends = 0;
-  const entries = [];
-  const pi = {
-    on(name, fn) { events[name] = fn; }, registerCommand() {},
-    async sendMessage(message, options) {
-      sends++;
-      if (failSend) throw Error('native rejection');
-      accepted.push({ message, options });
-      if (persist) { entries.push({ type: "custom_message", ...message }); persistEntry(entries.at(-1)); }
-    },
-  };
-  const run = async (_python, args) => {
-    const command = args[3]; calls.push(args.slice(3));
-    if (stale && command === 'session-bind') throw Error('Outdated launch');
-    if (command === 'inbox') {
-      const start = Math.max(Number(args[5]), acknowledged);
-      const page = messages.slice(start, start + 50);
-      const cursor = start + page.length;
-      return { stdout: JSON.stringify({ messages: page, cursor, start_cursor: start, ack_cursor: acknowledged,
-        message_cursors: page.map((_, index) => start + index + 1), has_more: cursor < messages.length }) };
-    }
-    if (command === 'ack') {
-      if (failAck) throw Error('ack failed');
-      acknowledged = Number(args[5]);
-    }
+const directories = [], fixtures = [];
+const originalInterval = global.setInterval;
+global.setInterval = () => { throw Error('No periodic polling permitted'); };
+async function fixture({ failSend = false, wrongSession = false, stale = false } = {}) {
+  const directory = mkdtempSync('/tmp/mv2-pi-'); directories.push(directory);
+  const file = join(directory, 'session.jsonl'), socket = join(directory, 'control.sock');
+  writeFileSync(file, JSON.stringify({ type: 'session', id: 'native' }) + '\n');
+  Object.assign(process.env, { MV2_AGENT_ID: 'agent', MV2_LAUNCH_ID: 'launch', MV2_AGENT_DIR: directory,
+    MV2_CONTROL_SOCKET: socket, MV2_UNIVERSE: '/tmp/u', MV2_CLI: '/tmp/mv2', MV2_PYTHON: 'python' });
+  const events = {}, calls = [], sent = [], warnings = [];
+  let currentFile = wrongSession ? '/other/file' : file;
+  const pi = { on(name, fn) { events[name] = fn; }, registerCommand() {},
+    sendMessage(message, options) {
+      if (failSend) throw Error('native failure');
+      sent.push({ message, options });
+    } };
+  const run = async (_, args) => {
+    calls.push(args.slice(3));
+    assert(!['inbox', 'ack', 'claim-inbox'].includes(args[3]));
+    if (stale && args[3] === 'session-bind') throw Error('Outdated launch');
     return { stdout: '{}' };
   };
-  const ctx = { isIdle: () => !busy, ui: { notify: value => warnings.push(value) }, sessionManager: {
-    getSessionFile: () => wrongSession ? '/other/session.jsonl' : transcript,
-    getSessionId: () => 'native-id',
-    getEntries: () => entries,
-  } };
   multiverse(pi, run);
-  await events.session_start({}, ctx);
-  return { events, calls, accepted, warnings, entries, persistEntry, transcript, setMessages: value => { messages = value; acknowledged = 0; },
-    drain: async () => { await tick(); await flush(); } };
+  await events.session_start({}, { ui: { notify: value => warnings.push(value) }, sessionManager: {
+    getSessionId: () => 'native', getSessionFile: () => currentFile } });
+  const request = (fields = {}) => new Promise((resolve, reject) => {
+    const client = connect(socket); let data = '';
+    client.setTimeout(2000, () => { client.destroy(); reject(Error('timeout')); });
+    client.on('error', reject);
+    client.on('connect', () => client.write(JSON.stringify({ operation: 'send', launch_id: 'launch',
+      native_id: 'native', message_id: 'one', text: 'literal $(false) 日本語', mode: 'steer', ...fields }) + '\n'));
+    client.on('data', chunk => { data += chunk; });
+    client.on('end', () => { try { resolve(JSON.parse(data)); } catch (e) { reject(e); } });
+  });
+  const f = { events, calls, sent, warnings, request, file, changeFile: value => { currentFile = value; } };
+  fixtures.push(f); return f;
 }
-
 try {
-  for (const busy of [false, true]) {
-    const f = await fixture({ busy });
-    await f.drain();
-    assert.equal(f.accepted.length, 1);
-    assert.equal(f.accepted[0].options.deliverAs, 'steer');
-    assert.equal(f.accepted[0].options.triggerTurn, true);
-    assert.equal(JSON.parse(f.accepted[0].message.content.split('\n')[1])[0].reply_to, 'prior');
-    assert(f.calls.some(call => call[0] === 'ack'));
-    await f.events.agent_start();
-    await f.events.agent_settled();
-    assert.deepEqual(f.calls.filter(call => call[0] === 'runtime-update').map(call => call[2]), ['idle', 'working', 'idle']);
-    await f.events.session_shutdown();
-    f.setMessages([{ id: 'after-close' }]);
-    await f.drain();
-    assert.equal(f.accepted.length, 1);
-  }
-  const follow = await fixture({ busy: true });
-  follow.setMessages([{ id: 'follow', delivery: 'follow-up' }]);
-  await follow.drain();
-  assert.equal(follow.accepted[0].options.deliverAs, 'followUp');
-  const rejected = await fixture({ failSend: true });
-  await rejected.drain();
-  assert(!rejected.calls.some(call => call[0] === 'ack'));
-  assert(rejected.warnings.some(value => value.includes('native rejection')));
-  const unacked = await fixture({ failAck: true });
-  await unacked.drain(); await unacked.drain();
-  assert.equal(unacked.accepted.length, 1); // persisted IDs prevent duplicate native injection
-  const delayed = await fixture({ busy: true, persist: false });
-  await delayed.drain(); await delayed.drain();
-  assert.equal(delayed.accepted.length, 1);
-  assert(!delayed.calls.some(call => call[0] === 'ack'));
-  delayed.entries.push({ type: 'custom_message', ...delayed.accepted[0].message });
-  await delayed.drain();
-  assert(!delayed.calls.some(call => call[0] === 'ack')); // in-memory entries are not disk evidence
-  delayed.persistEntry(delayed.entries.at(-1));
-  await delayed.events.agent_settled(); // finalization race: persistence can arrive later
-  await delayed.drain();
-  assert(delayed.calls.some(call => call[0] === 'ack'));
-  assert.equal(delayed.accepted.length, 1);
+  const f = await fixture();
+  const [urgent, normal] = await Promise.all([f.request(), f.request({ message_id: 'two', mode: 'follow-up' })]);
+  assert.equal(urgent.state, 'native_queued'); assert.equal(normal.state, 'native_queued');
+  assert.deepEqual(f.sent.map(x => x.options.deliverAs), ['steer', 'followUp']);
+  assert.equal(f.sent[0].message.content, 'literal $(false) 日本語');
+  assert.equal((await f.request()).state, 'native_queued'); assert.equal(f.sent.length, 2);
+  assert.equal((await f.request({ launch_id: 'stale', message_id: 'bad' })).state, 'error');
+  assert.equal((await f.request({ native_id: 'other', message_id: 'bad' })).state, 'error');
+  assert.equal((await f.request({ mode: 'unknown', message_id: 'bad' })).state, 'error');
+  assert.equal(f.sent.length, 2);
+  appendFileSync(f.file, JSON.stringify({ type: 'custom_message', customType: 'multiverse-inbox', details: { ids: ['persisted'] } }) + '\n');
+  const persisted = await f.request({ message_id: 'persisted' });
+  assert.equal(persisted.value.transcript_confirmed, true); assert.equal(f.sent.length, 2);
+  await f.events.agent_start(); await f.events.agent_settled();
+  assert.deepEqual(f.calls.filter(c => c[0] === 'runtime-update').map(c => c[2]), ['idle', 'working', 'idle']);
+  f.changeFile('/other/session');
+  assert.equal((await f.request({ message_id: 'changed' })).state, 'error');
+  const broken = await fixture({ failSend: true });
+  assert.equal((await broken.request()).state, 'unknown');
+  // Unknown outcome is not retried by core; extension must not call native twice.
+  await broken.request(); assert.equal(broken.sent.length, 0);
   for (const options of [{ wrongSession: true }, { stale: true }]) {
-    const blocked = await fixture(options);
-    await blocked.drain();
-    assert.equal(blocked.accepted.length, 0);
-    assert(blocked.warnings.length);
+    const blocked = await fixture(options); await assert.rejects(blocked.request());
   }
-  const corrupt = await fixture();
-  writeFileSync(corrupt.transcript, JSON.stringify({ type: 'session', id: 'other' }) + '\n');
   const reader = new TranscriptReceipts();
-  await assert.rejects(reader.scan(corrupt.transcript, 'native-id'), /identity mismatch/);
-  await assert.rejects(reader.scan(corrupt.transcript, 'native-id'), /identity mismatch/);
-  const partial = await fixture();
-  const receiptReader = new TranscriptReceipts();
-  appendFileSync(partial.transcript, '{"type":"custom_message"');
-  assert.equal((await receiptReader.scan(partial.transcript, 'native-id')).complete, false);
-  appendFileSync(partial.transcript, ',"customType":"multiverse-inbox","details":{"ids":["persisted"]}}\n');
-  assert((await receiptReader.scan(partial.transcript, 'native-id')).ids.has('persisted'));
-  const paged = await fixture();
-  paged.setMessages(Array.from({ length: 103 }, (_, index) => ({ id: `page-${index}`,
-    delivery: index === 1 ? 'native-queue' : 'steer', text: 'paging probe' })));
-  for (let count = 0; count < 8; count++) await paged.drain();
-  assert.equal(paged.accepted.length, 102); // later pages progress, persisted IDs do not duplicate
-  assert(paged.accepted.some(item => item.message.details.ids.includes('page-102')));
-  assert(paged.calls.filter(call => call[0] === 'ack').every(call => Number(call[2]) === 1));
-  assert(paged.calls.some(call => call[0] === 'ack')); // contiguous prefix before unsupported stays ackable
-  assert(paged.warnings.some(value => value.includes('remains unread')));
-  console.log('Pi bridge: idle, busy/tool-running native steering, follow-up, settled, shutdown, failed injection/ack, exact session and stale launch passed');
+  const file = f.file;
+  appendFileSync(file, '{"type":"custom_message"');
+  assert.equal((await reader.scan(file, 'native')).complete, false);
+  appendFileSync(file, ',"customType":"multiverse-inbox","details":{"ids":["late"]}}\n');
+  assert((await reader.scan(file, 'native')).ids.has('late'));
+  const wrong = new TranscriptReceipts();
+  await assert.rejects(wrong.scan(file, 'different'), /identity mismatch/);
+  console.log('Pi socket: concurrent modes, dedup, transcript evidence, exact identity, failures, no inbox polling/ack passed');
 } finally {
-  for (const directory of directories) rmSync(directory, { recursive: true, force: true });
-  global.setInterval = originalSetInterval;
-  global.clearInterval = originalClearInterval;
+  for (const f of fixtures) await f.events.session_shutdown();
+  for (const d of directories) rmSync(d, { recursive: true, force: true });
+  global.setInterval = originalInterval;
 }

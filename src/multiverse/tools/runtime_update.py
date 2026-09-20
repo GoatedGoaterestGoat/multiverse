@@ -6,7 +6,7 @@ def configure(parser):
     add_agent(parser)
     parser.add_argument("--activity", choices=("idle", "working", "unknown"), required=True)
 
-    parser.add_argument("--bridge", choices=("pi-inbox-v1", "none"))
+    parser.add_argument("--bridge", choices=("pi-inbox-v1", "pi-socket-v1", "none"))
 
 def run(root=None, *, agent=None, activity, bridge=None):
     root, directory, launch_id = callback(root, agent)

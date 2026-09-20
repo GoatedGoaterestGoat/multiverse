@@ -36,14 +36,14 @@ class FourthAdapter:
     def validate_resume(self, properties, directory):
         assert properties['native_session_id']
 
-    def session_id(self, value):
+    def validate_session_id(self, value):
         return value
 
     def capabilities(self, session, executor=None):
         return {key: Capability('supported') for key in CAPABILITIES}
 
-    def send(self, session, message, mode, executor):
-        self.calls.append(('send', session, message, mode))
+    def send(self, session, message, executor):
+        self.calls.append(('send', session, message, message.delivery))
         if self.failure:
             raise RuntimeError(self.failure)
         return NativeResult('native_queued', value={'message_id': message.id})
@@ -64,6 +64,7 @@ class OperationTest(BaseTest):
     def setUp(self):
         super().setUp()
         self.adapter = FourthAdapter()
+        self.enterContext(patch.object(native, 'owned'))
         self.loader = self.enterContext(patch.object(harnesses, 'load', return_value=self.adapter))
         self.enterContext(patch.object(agents, 'observe', return_value={'live': 'stopped'}))
         backend = Mock()
@@ -99,7 +100,7 @@ class OperationTest(BaseTest):
             self.assertEqual(message.sender, {'agent_id': 'sender'})
             self.assertEqual(message.text, 'literal $(false)')
             self.assertEqual(actual_mode, mode)
-        self.assertEqual(len(inbox(self.directory)['messages']), 2)  # accepted is not ack
+        self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)  # accepted is not ack
 
     def test_queue_only_failure_and_retry_do_not_lose_or_duplicate_records(self):
         queued = send.run(self.root, agent=self.agent, text='later', queue_only=True)
@@ -107,19 +108,19 @@ class OperationTest(BaseTest):
         self.assertEqual(len(self.adapter.calls), 1)  # only spawn
         self.adapter.failure = 'connection lost'
         failed = send.run(self.root, agent=self.agent, text='save despite failure')
-        self.assertEqual(failed['state'], 'error')
+        self.assertEqual(failed['state'], 'unknown')
         self.assertTrue(failed['saved'])
         self.assertFalse(failed['ok'])
         calls = len(self.adapter.calls)
         receipt = native.deliver(self.root, self.agent, failed['id'])
         self.assertTrue(receipt['reused'])
         self.assertEqual(len(self.adapter.calls), calls)
-        self.assertEqual(len(inbox(self.directory)['messages']), 2)
+        self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
         self.adapter.failure = None
         retried = native.deliver(self.root, self.agent, failed['id'], retry=True)
-        self.assertEqual(retried['state'], 'native_queued')
+        self.assertEqual(retried['state'], 'unknown')
         self.assertEqual(retried['message_id'], failed['id'])
-        self.assertEqual(len(inbox(self.directory)['messages']), 2)
+        self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
 
     def test_ask_usage_observe_share_tools_without_main_conversation_mutation(self):
         properties = read(self.directory / 'properties.json')

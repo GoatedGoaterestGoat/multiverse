@@ -12,8 +12,10 @@ from websockets.sync.server import unix_serve
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.rpc import execute
 from multiverse import native
-from multiverse.harnesses.codex.control import plan as codex_plan
-from multiverse.harnesses.types import NativeContext
+from multiverse.harnesses.codex.protocol import check_connection
+from multiverse.harnesses.types import SessionHandle, NativeEndpoint
+from multiverse.harnesses.codex import CodexAdapter
+from unittest.mock import patch
 
 
 class RpcTransportTest(unittest.TestCase):
@@ -60,12 +62,12 @@ class RpcTransportTest(unittest.TestCase):
             request = json.loads(connection.recv())
             connection.send(json.dumps({'id': request['id'], 'result': {'thread': None}}))
         self.serve(handler)
-        ctx = NativeContext({'native_session_id': 'exact', 'workspace': self.temp.name})
-        spec = RpcSpec(self.path, lambda: codex_plan(ctx))
-        class Adapter:
-            def probes(self, context):
-                return {'native_control': spec}
-        observed = native.probe(Adapter(), self.temp.name, ctx)['native_control']
+        session = SessionHandle('agent', 'codex', self.temp.name, native_id='exact', state='running',
+                                endpoint=NativeEndpoint('unix-websocket', self.path))
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+        executor = native.NativeExecutor(self.temp.name)
+        with patch.object(executor, 'check_session'):
+            observed = adapter.capabilities(session, executor)['send_steer']
         self.assertEqual(observed.state, 'error')
         self.assertIn('thread must be an object', observed.reason)
 

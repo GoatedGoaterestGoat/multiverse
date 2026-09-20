@@ -1,30 +1,50 @@
 """Pi interactive lifecycle with an opt-in, source-owned extension."""
 from pathlib import Path
 import json
+from dataclasses import replace
 
 from ..base import ConfiguredAdapter
-from ..types import SessionHandle, Message, DeliveryMode, Executor, Capability, NativeResult
+from ..types import SessionHandle, Message, Executor, Capability, NativeResult, NativeEndpoint
 
 
 class PiAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
 
-    def configure_native(self):
-        if self.settings.get('inbox_bridge'):
-            for mode in ('spawn', 'resume'):
-                self.spec[mode][1:1] = ['--extension', str(self.package / 'extension.ts')]
+    def spawn(self, context):
+        return self._with_extension(super().spawn(context), context)
 
-    def send(self, session: SessionHandle, message: Message, mode: DeliveryMode, executor: Executor) -> NativeResult:
-        if mode != message.delivery:
-            return NativeResult('unavailable', 'The bridge honors the saved delivery mode; overrides are unsupported')
-        operation = {'steer': 'steer', 'follow-up': 'follow_up'}.get(mode)
-        if operation is None:
-            return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
-        result = self.control(operation, session.context(message_id=message.id), message.prompt())
-        if result.state == 'pending':
-            executor.check_session()
+    def resume(self, context):
+        return self._with_extension(super().resume(context), context)
+
+    def _with_extension(self, command, context):
+        if not self.settings.get('inbox_bridge'):
+            return command
+        return replace(command,
+            argv=(command.argv[0], '--extension', str(self.package / 'extension.ts'), *command.argv[1:]),
+            control_endpoint=NativeEndpoint('unix-json', context.values['control_socket']))
+
+    def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
+        result = super().capabilities(session, executor)
+        connected = (session.state == 'running' and session.bridge == 'pi-socket-v1'
+                     and session.native_id and session.endpoint and session.endpoint.transport == 'unix-json')
+        support = Capability('supported', mechanism='pi-socket-v1', required=True) if connected else Capability(
+            'unavailable', 'Pi extension socket has not registered for this launch', required=True)
+        result['send_steer'] = result['send_follow_up'] = support
+        result['get_delivery'] = replace(support, required=False)
         return result
+
+    def get_delivery(self, session, message_id, executor):
+        return executor.request(session, {'operation': 'get_delivery', 'message_id': message_id})
+
+    def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
+        mode = message.delivery
+        if mode not in ('steer', 'follow-up'):
+            return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
+        if self.capabilities(session)['send_steer'].state != 'supported':
+            return NativeResult('unavailable', 'Pi extension socket is not registered')
+        return executor.request(session, {'operation': 'send', 'message_id': message.id,
+                                         'text': message.prompt(), 'mode': mode})
 
     def validate_resume(self, properties, agent_dir):
         super().validate_resume(properties, agent_dir)
@@ -33,25 +53,8 @@ class PiAdapter(ConfiguredAdapter):
                 header = json.loads(handle.readline(65536))
                 if header.get('type') != 'session':
                     raise ValueError('Missing Pi session header')
-                native = self.session_id(header['id'])
+                native = self.validate_session_id(header['id'])
                 if properties.get('native_session_id') not in (None, native):
                     raise ValueError('Pi session file belongs to a different native session')
             except (ValueError, KeyError, AttributeError) as error:
                 raise ValueError(f'Invalid Pi resume target: {error}') from error
-
-    def native_capabilities(self, context):
-        result = super().native_capabilities(context)
-        bridge = (context.runtime.get('native_bridge') == 'pi-inbox-v1'
-                  and context.runtime.get('state') == 'running')
-        for name in ('steer', 'follow_up', 'wake', 'activity'):
-            result[name] = (Capability('supported', mechanism='pi-inbox-v1', required=name in ('steer', 'follow_up')) if bridge else
-                            Capability('unavailable', 'Pi inbox bridge has not registered for this launch',
-                                       required=name in ('steer', 'follow_up')))
-        return result
-
-    def control(self, operation, context, text):
-        if operation == 'activity' and self.native_capabilities(context)['activity'].state == 'supported':
-            return NativeResult('ok', value=context.runtime.get('activity', 'unknown'))
-        if operation in ('steer', 'follow_up', 'wake') and self.native_capabilities(context)[operation].state == 'supported':
-            return NativeResult('pending', 'The Pi bridge polls the durable inbox at native safe boundaries; no delivery confirmed')
-        return super().control(operation, context, text)

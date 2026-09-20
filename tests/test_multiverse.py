@@ -16,6 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe
+from multiverse.tools import send
 from multiverse.store import ack, append_message, inbox, read, write
 from multiverse.tmux import Tmux, observe
 from multiverse.dashboard import LocalBackend, columns, hierarchy
@@ -253,7 +254,8 @@ class PiTest(TerminalBase):
         log = agent_dir / "mock-requests.jsonl"
         try:
             until(lambda: log.exists(), seconds=25)
-            first = append_message(agent_dir, "INBOX_SENTINEL", {"name": "test"})
+            first = send.run(self.root, agent=result["id"], text="INBOX_SENTINEL", sender={"name": "test"})
+            self.assertEqual(first["state"], "native_queued", first)
             until(lambda: "INBOX_SENTINEL" in log.read_text(), seconds=20)
             until(lambda: not inbox(agent_dir)["messages"])
             self.assertIn(first["id"], (agent_dir / "session.jsonl").read_text())
@@ -267,7 +269,9 @@ class PiTest(TerminalBase):
             before = len(log.read_text().splitlines())
             with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
                 agents.start(self.root, resume=result["id"], socket_path=self.socket)
-            append_message(agent_dir, "AFTER_RESUME", {"name": "test"})
+            until(lambda: agents.runtime(agent_dir).get("native_bridge") == "pi-socket-v1", seconds=20)
+            sent = send.run(self.root, agent=result["id"], text="AFTER_RESUME", sender={"name": "test"})
+            self.assertEqual(sent["state"], "native_queued", sent)
             until(lambda: "AFTER_RESUME" in log.read_text(), seconds=25)
             self.assertEqual(len(log.read_text().splitlines()), before + 1)
             self.assertIn("First test turn", log.read_text().splitlines()[-1])

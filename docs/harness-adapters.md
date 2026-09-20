@@ -80,7 +80,7 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `send_steer`, `send_follow_up`, `ask`,
-`get_usage`, and `observe`. Support may depend on configuration and a registered,
+`get_usage`, `observe`, and `get_delivery`. Support may depend on configuration and a registered,
 running native session. Discovery returns supported/unavailable/error plus a reason.
 
 `send` first persists the message with a stable UUID, sender and optional
@@ -89,23 +89,55 @@ running native session. Discovery returns supported/unavailable/error plus a rea
 and a nonzero CLI exit while retaining the saved message and its ID. Do not
 repeat `send` to retry that same message: that creates a new UUID.
 
-- `native_queued`: native transport accepted it; reading and an answer are unconfirmed.
-- `pending`: the registered native bridge will consume it; delivery is unconfirmed.
-- `unavailable`: no implementation is available for this session/mode.
-- `error`: the attempt failed; acceptance may be ambiguous.
+One logical inbox lives in `inbox.jsonl` (immutable messages) and
+`inbox-state.json` (delivery attempts, receipts and per-ID acknowledgements).
+The state sidecar is core-owned; providers have no mailbox or retry database.
 
-`--queue-only` retains the old append-only behavior without invoking the adapter.
-It does not pause an already registered inbox consumer: a Pi bridge or an agent
-checking its inbox can still consume that record. Explicit retry is a recovery
-operation: `mv2 deliver worker --message-id UUID --retry`. An ambiguous/accepted
-attempt is not automatically replayed. Recovery also retains `--mode native-queue`
-for Codex's plain CLI queue, whose timing is unspecified; this is not advertised
-as steering or follow-up. The old `native-status` command is a compatibility shim;
-new callers use named operations.
+| Submission state | Meaning |
+| --- | --- |
+| pending | Saved; no completed submission attempt. |
+| submitting | Attempt persisted before calling native API; a crash makes acceptance unknown. |
+| accepted | Native API accepted; may still be queued inside the harness. |
+| failed | Definite rejection or pre-submission failure; explicit retry permitted. |
+| unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
-Core serializes delivery against resume and stores receipts with exact recipient
-native ID and launch generation. Inbox acknowledgement rechecks generation under
-the launch lock. Queue acceptance never implies acknowledgement or completion.
+The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
+map to failed. Transcript confirmation, explicit acknowledgement, and a correlated
+reply are independent evidence, never inferred from acceptance.
+
+```sh
+mv2 inbox                         # unread manual messages only
+mv2 inbox --all                    # full history, delivery attempts and acknowledgements
+mv2 ack --message-id UUID          # acknowledge exactly this message (repeatable)
+mv2 send worker --text 'Later' --delivery inbox-only
+mv2 deliver worker --message-id UUID --retry  # definite failure only
+mv2 deliver worker --message-id UUID --check  # reconcile without submitting
+```
+
+`--queue-only` is a compatibility alias for `inbox-only`. Native-assigned messages
+never also appear in ordinary mailbox reads, including failed/pending submissions.
+They remain inspectable through `inbox --all`. No automatic switch to manual
+handling occurs. Each native message contains its ID, sender, text, delivery mode,
+and reply correlation; the agent acknowledges the ID after handling it.
+
+Per-recipient sends serialize persistence and submission. Urgent messages may
+overtake native follow-ups; acknowledgements therefore use individual IDs.
+Legacy cursor ack still works for manual messages only and cannot clear native
+messages it skipped. Existing schema-less logs retain manual semantics without
+rewriting their contents. Existing `native-delivery.json` receipts remain readable for compatibility;
+accepted or uncertain old attempts are not replayed. New attempts use inbox state.
+
+Retries preserve exact native session identity, allow a new launch of that same
+session, and refuse a different session. Core persists the attempt before the
+native call and merges receipts without overwriting concurrent acknowledgements.
+Pi supports receipt reconciliation against its exact transcript and current
+in-process acceptance records. Missing evidence remains unknown. Codex checks up to 100 queued submissions and 20 recent turns by exact client
+message ID; absence remains unknown and requires investigation. Accepted submissions are never automatically resubmitted.
+
+The old `native-status` command remains a tool compatibility shim. Adapters expose
+feature methods directly, with no `control`, `native_capabilities`, `probes`, or
+`NativeContext` conversion layer. `validate_session_id` explicitly validates an
+ID; it does not discover a session.
 
 ## Configuration and compatibility
 
@@ -136,13 +168,14 @@ Remote resume inherits native permissions: put initial permission/profile flags
 in `spawn_args`. Custom resume overrides rejected by native Codex are diagnosed,
 never silently removed. Plain compatibility launches do not acquire bridge controls.
 
-Pi's source extension is opt-in and retains the interactive TUI. After exact
-session/launch registration it polls every 1.5 seconds and uses native
-`sendMessage` with `steer` or `followUp`. Only exact-session on-disk custom-message
-IDs allow acknowledgement. It scans bounded pages beyond unsupported records,
-acknowledges only contiguous persisted prefixes, and deduplicates persisted IDs
-on resume. In-memory acceptance alone is insufficient. Asynchronous failures
-stay unread; a crash before a receipt can still cause duplicate delivery.
+Pi's opt-in extension retains the native interactive terminal. It listens on a
+core-assigned private Unix socket and receives actual messages with exact native
+session and launch IDs. `sendMessage` uses the saved `steer`/`followUp` mode.
+There are no polling timers, inbox reads, or acknowledgements in the extension.
+Native acceptance is deduplicated in process; a bounded exact-transcript reader
+recognizes persisted IDs across launches. Socket loss leaves acceptance unknown.
+Core owns the private socket directory lifecycle. Pi's separate headless RPC mode
+is not substituted for its interactive terminal.
 
 ## Implemented capabilities and verification limits
 
@@ -152,6 +185,7 @@ stay unread; a crash before a receipt can still cause duplicate delivery.
 | Safe-boundary steer | Yes | Unavailable | Yes | Unavailable |
 | After-turn send / idle wake | Yes | Unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
+| Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
 | Native activity | Unknown | Unknown | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Unavailable | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |

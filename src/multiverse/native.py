@@ -3,12 +3,15 @@
 Durable send/inbox/ack never depend on these best-effort operations.
 """
 from dataclasses import asdict
+import json
+import socket
 import os
 import subprocess
+import time
 
 from . import agents, harnesses
-from .harnesses.types import Capability, NativeResult, CommandSpec, RpcSpec, SessionHandle, Message
-from .store import inbox, lock, now, read, write
+from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message
+from .store import lock, now, read, message_record, update_message
 from .tmux import owned
 
 
@@ -27,30 +30,9 @@ def execute_rpc(spec, workspace, timeout=10):
     return run(spec, timeout)
 
 
-def probe(adapter, workspace, ctx=None):
-    result = {}
-    for name, command in adapter.probes(ctx).items():
-        try:
-            if isinstance(command, RpcSpec):
-                observed = execute_rpc(command, workspace, timeout=5)
-                result[name] = Capability('supported' if observed.state == 'ok' else observed.state,
-                                          observed.reason, mechanism='native-rpc')
-                continue
-            output = execute(command.command, workspace, timeout=5)
-            result[name] = command.interpret(output)
-        except FileNotFoundError as error:
-            result[name] = Capability('unavailable', str(error))
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-            result[name] = Capability('error', str(error))
-    return result
-
-
 class NativeExecutor:
     def __init__(self, workspace, properties=None, facts=None):
         self.workspace, self.properties, self.facts = workspace, properties, facts
-
-    def probe(self, adapter, context):
-        return probe(adapter, self.workspace, context)
 
     def check_session(self):
         if self.properties is None or self.facts is None:
@@ -64,6 +46,42 @@ class NativeExecutor:
     def rpc(self, specification, timeout=10):
         self.check_session()
         return execute_rpc(specification, self.workspace, timeout)
+
+    def request(self, session, payload, timeout=10):
+        self.check_session()
+        if not session.endpoint or session.endpoint.transport != 'unix-json':
+            return NativeResult('unavailable', 'No local extension socket')
+        request = {**payload, 'launch_id': session.launch_id, 'native_id': session.native_id}
+        wire = (json.dumps(request, ensure_ascii=False) + '\n').encode()
+        if len(wire) > 1024 * 1024:
+            return NativeResult('error', 'Native request exceeds 1 MiB')
+        deadline = time.monotonic() + timeout
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(timeout)
+            try:
+                connection.connect(session.endpoint.address)
+            except OSError as error:
+                return NativeResult('error', f'Extension connection failed before submission: {error}')
+            connection.sendall(wire)
+            data = b''
+            while b'\n' not in data:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Extension request deadline exceeded; acceptance unknown')
+                connection.settimeout(remaining)
+                part = connection.recv(65536)
+                if not part:
+                    raise RuntimeError('Extension disconnected; acceptance unknown')
+                data += part
+                if len(data) > 1024 * 1024:
+                    raise ValueError('Extension response exceeds 1 MiB')
+            value = json.loads(data.split(b'\n', 1)[0])
+            if (value.get('launch_id') != session.launch_id or value.get('native_id') != session.native_id
+                    or value.get('message_id') != payload.get('message_id')):
+                raise ValueError('Extension receipt identity mismatch; acceptance unknown')
+            if value.get('state') not in ('ok', 'native_queued', 'unavailable', 'error', 'unknown'):
+                raise ValueError('Invalid extension receipt state')
+            return NativeResult(value['state'], value.get('reason', ''), value.get('value'))
 
 
 def context(root, reference):
@@ -121,30 +139,76 @@ def control(root, reference, operation_name):
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 
-def deliver(root, reference, message_id, retry=False, mode=None):
+def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
-    # A resume cannot change generations while a queue operation is in flight.
+    # Recipient submission is serialized with generation changes. Inbox operations
+    # take their own shorter lock, so ack cannot overwrite delivery evidence.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
-        _, adapter, session, executor = context(root, directory.name)
-        batch = inbox(directory, limit=100000)
-        message = next((item for item in batch['messages'] if item['id'] == message_id), None)
-        if message is None:
-            raise ValueError('Message is not in this agent\'s unread inbox; refusing native delivery')
-        receipts = directory / 'native-delivery.json'
-        history = read(receipts) if receipts.exists() else {}
-        previous = history.get(message_id, [])
-        if previous and previous[-1]['state'] in ('native_queued', 'error') and not retry:
-            return {**previous[-1], 'reused': True,
-                    'retry_note': 'Use --retry to attempt again; acceptance may cause duplicate delivery'}
-        mode = mode or message.get('delivery', 'steer')
+        message, tracking = message_record(directory, message_id)
         try:
-            result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                                   message.get('reply_to'), message.get('delivery', 'steer')), mode, executor)
+            _, adapter, session, executor = context(root, directory.name)
         except Exception as error:
-            result = NativeResult('error', f'{error}; acceptance may be unknown; retry can duplicate')
-        receipt = {**result.to_dict(), 'ok': result.state not in ('unavailable', 'error'), 'message_id': message_id, 'native_session_id': session.native_id,
-                   'mode': mode, 'agent_id': session.agent_id, 'launch_id': session.launch_id, 'at': now()}
-        history[message_id] = [*previous, receipt]
-        write(receipts, history)
-        # Native queue acceptance is not inbox acknowledgment.
+            receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
+                       'reason': f'Cannot load recipient adapter: {error}', 'at': now()}
+            if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
+                update_message(directory, message_id, submission_state='failed',
+                               attempts=[*tracking.get('attempts', []), receipt])
+            return receipt
+        if check:
+            target = tracking.get('target_session') or message.get('target_session')
+            if target and target != session.native_id:
+                raise ValueError('Message targets a different native session; refusing reconciliation')
+            try:
+                result = adapter.get_delivery(session, message_id, executor)
+                if result.state == 'native_queued':
+                    changes = {'submission_state': 'accepted', 'native_receipt': result.value}
+                    if (result.value or {}).get('transcript_confirmed'):
+                        changes['transcript_confirmed_at'] = now()
+                    update_message(directory, message_id, **changes)
+                return {**result.to_dict(), 'message_id': message_id, 'ok': result.state not in ('error', 'unknown', 'unavailable')}
+            except Exception as error:
+                return {**NativeResult('error', f'Receipt check failed: {error}').to_dict(), 'ok': False}
+        selected_mode = message.get('delivery', 'inbox-only')
+        if selected_mode not in ('steer', 'follow-up'):
+            raise ValueError('Native delivery requires steer or follow-up')
+        target = tracking.get('target_session') or message.get('target_session')
+        if target and target != session.native_id:
+            raise ValueError('Message targets a different native session; refusing delivery')
+        previous = tracking.get('attempts', [])
+        state = tracking.get('submission_state', 'pending')
+        if tracking.get('acknowledged_at') or state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
+            receipt = previous[-1] if previous else {'state': 'unavailable', 'reason': 'Message already acknowledged'}
+            if state == 'accepted':
+                receipt = {**receipt, 'state': 'native_queued', 'reason': 'Native acceptance recorded; no resend',
+                           'value': tracking.get('native_receipt')}
+            if state == 'submitting':
+                receipt = {**receipt, 'state': 'unknown', 'reason': 'Previous submission was interrupted; acceptance unknown'}
+                update_message(directory, message_id, submission_state='unknown')
+            return {**receipt, 'reused': True, 'ok': receipt['state'] not in ('error', 'unavailable', 'unknown')}
+        try:
+            executor.check_session()
+        except Exception as error:
+            result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id}
+            update_message(directory, message_id, submission_state='failed', attempts=[*previous, result])
+            return result
+        attempt = {'state': 'unknown', 'reason': 'Submission in progress', 'message_id': message_id,
+                   'native_session_id': session.native_id, 'mode': selected_mode, 'agent_id': session.agent_id,
+                   'launch_id': session.launch_id, 'at': now()}
+        # Persist BEFORE the native call: a crash cannot turn uncertain submission
+        # into pending and silently replay it on restart.
+        update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
+                       attempts=[*previous, attempt])
+        try:
+            if not session.native_id:
+                result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
+            else:
+                result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
+                                      message.get('reply_to'), selected_mode), executor)
+        except Exception as error:
+            result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
+        receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
+        state = {'native_queued': 'accepted', 'ok': 'accepted', 'pending': 'pending',
+                 'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]
+        update_message(directory, message_id, submission_state=state, attempts=[*previous, receipt],
+                       native_receipt=result.value)
         return receipt
