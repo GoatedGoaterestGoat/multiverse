@@ -115,9 +115,13 @@ class ConfiguredAdapter:
     def resume(self, context: LaunchContext) -> CommandSpec:
         return self._launch_command(replace(context, mode='resume'))
 
+    def stop(self, session: SessionHandle, executor: Executor) -> NativeResult:
+        return NativeResult('ok', 'Core stops the owned terminal process')
+
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
+        result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
             result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)

@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from uuid import uuid4
 
-from multiverse.harnesses.codex.protocol import check_connection, send_message, get_delivery
+from multiverse.harnesses.codex.protocol import check_connection, send_message, get_delivery, stop_session, environment_exclusions
 from multiverse.harnesses.types import SessionHandle, Message
 
 
@@ -23,8 +23,11 @@ class CodexControlTest(unittest.TestCase):
             'thread/queue/list': {'data': []},
             'thread/queue/add': {'queuedSubmission': {'id': 'queue-item', 'clientUserMessageId': self.message.id}},
             'turn/steer': {'turnId': 'exact-turn'},
+            'turn/interrupt': {}, 'thread/backgroundTerminals/clean': {},
+            'thread/queue/delete': {'deleted': True},
         }
-        generator = check_connection(self.ctx) if operation is None else send_message(self.ctx, self.message, operation)
+        generator = (check_connection(self.ctx) if operation is None else
+                     stop_session(self.ctx) if operation == 'stop' else send_message(self.ctx, self.message, operation))
         request = next(generator)
         while True:
             self.requests.append(request)
@@ -106,6 +109,36 @@ class CodexControlTest(unittest.TestCase):
             else:
                 self.assertEqual(result.state, 'native_queued')
                 self.assertIs(result.value['transcript_confirmed'], expected)
+
+    def test_stop_cancels_exact_queue_and_turn_without_stopping_server(self):
+        result = self.run_plan('stop', overrides={'thread/queue/list': {'result': {'data': [
+            {'id': 'queued-item', 'clientUserMessageId': self.message.id}]}}})
+        self.assertEqual(result.state, 'ok')
+        self.assertEqual(result.value['cancelled_message_ids'], [self.message.id])
+        for request in self.requests[1:]:
+            self.assertEqual(request.params['threadId'], self.ctx.native_id)
+        interrupt = next(r for r in self.requests if r.method == 'turn/interrupt')
+        self.assertEqual(interrupt.params['turnId'], 'exact-turn')
+        self.assertEqual(self.requests[-1].method, 'thread/backgroundTerminals/clean')
+
+    def test_stop_limits_and_wrong_thread_fail_before_mutation(self):
+        for overrides in (
+            {'thread/queue/list': {'result': {'data': [], 'nextCursor': 'more'}}},
+            {'thread/read': {'result': {'thread': {'id': str(uuid4()), 'cwd': '/tmp', 'status': {'type': 'active'}}}}},
+        ):
+            self.requests.clear()
+            self.assertEqual(self.run_plan('stop', overrides=overrides).state, 'error')
+            self.assertFalse(any(r.method in ('thread/queue/delete', 'turn/interrupt', 'thread/backgroundTerminals/clean')
+                                 for r in self.requests))
+
+    def test_stop_partial_failure_preserves_queue_cancellation_evidence(self):
+        result = self.run_plan('stop', overrides={
+            'thread/queue/list': {'result': {'data': [{'id': 'q', 'clientUserMessageId': self.message.id}]}},
+            'turn/interrupt': {'error': {'code': -32603, 'message': 'native failure'}},
+        })
+        self.assertEqual(result.state, 'error')
+        self.assertEqual(result.value['cancelled_message_ids'], [self.message.id])
+        self.assertNotIn('thread/backgroundTerminals/clean', [r.method for r in self.requests])
 
     def test_malformed_native_shapes_are_diagnosable(self):
         thread = {'id': self.ctx.native_id, 'cwd': '/tmp', 'status': None}

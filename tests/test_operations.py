@@ -33,6 +33,10 @@ class FourthAdapter:
         self.calls.append(('resume', context))
         return CommandSpec((sys.executable, '-c', 'pass'))
 
+    def stop(self, session, executor):
+        self.calls.append(('stop', session))
+        return NativeResult('ok')
+
     def validate_resume(self, properties, directory):
         assert properties['native_session_id']
 

@@ -27,7 +27,9 @@ async def _execute(spec, timeout):
                     await connection.send(payload)
 
                 request = next(plan)
-                for identifier in range(1, 17):
+                if not 1 <= spec.max_requests <= 256:
+                    raise ValueError('Native RPC request budget must be between 1 and 256')
+                for identifier in range(1, spec.max_requests + 1):
                     await send({'jsonrpc': '2.0', 'id': identifier, 'method': request.method, 'params': request.params})
                     while True:
                         value = json.loads(await connection.recv())
@@ -48,7 +50,7 @@ async def _execute(spec, timeout):
                         if not isinstance(done.value, NativeResult):
                             raise ValueError('Native RPC plan did not return a NativeResult')
                         return done.value
-                raise ValueError('Native RPC plan exceeds 16 requests')
+                raise ValueError(f'Native RPC plan exceeds {spec.max_requests} requests')
     except WebSocketException as error:
         raise RuntimeError(f'Native RPC transport failed: {error}; acceptance may be unknown') from error
     except TimeoutError as error:

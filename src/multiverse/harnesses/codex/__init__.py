@@ -1,11 +1,13 @@
 """Codex interactive CLI lifecycle and exact-thread native queue specifications."""
 from pathlib import Path
+import json
+import tomllib
 from ..base import ConfiguredAdapter
 from functools import partial
 from dataclasses import replace
 
-from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeEndpoint, NativeResult, RpcSpec, ServiceSpec
-from .protocol import check_connection, send_message, get_delivery
+from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec
+from .protocol import check_connection, send_message, get_delivery, environment_exclusions, stop_session
 
 
 class CodexAdapter(ConfiguredAdapter):
@@ -33,31 +35,61 @@ class CodexAdapter(ConfiguredAdapter):
 
     def _launch_command(self, context):
         command = super()._launch_command(context)
-        endpoint = None
-        service = None
-        if getattr(self, 'settings', {}).get('inbox_bridge'):
-            endpoint = context.values['control_socket']
-            service = ServiceSpec((self.spec['spawn'][0], 'app-server', '--listen', 'unix://' + endpoint), endpoint)
-        if endpoint:
-            argv = list(command.argv)
-            if context.mode == 'resume':
-                # The source-owned spawn grant is persisted by native Codex.
-                # Remote resume inherits it and rejects repeating --add-dir.
-                # Remove only this built-in pair; user preferences stay literal.
-                position = argv.index('--add-dir')
-                if argv[position + 1] != context.values['agent_dir']:
-                    raise ValueError('Unexpected built-in Codex writable directory')
-                del argv[position:position + 2]
-            position = argv.index('--') if '--' in argv else len(argv)
-            argv[position:position] = ['--remote', 'unix://' + endpoint]
-            return CommandSpec(tuple(argv), command.unset_env, NativeEndpoint('unix-websocket', endpoint), service)
-        return command
+        if not getattr(self, 'settings', {}).get('inbox_bridge'):
+            return command
+        argv = list(command.argv)
+        if context.mode == 'resume':
+            # Native resume retains the original writable grant.
+            position = argv.index('--add-dir')
+            if argv[position + 1] != context.values['agent_dir']:
+                raise ValueError('Unexpected built-in Codex writable directory')
+            del argv[position:position + 2]
+        position = argv.index('--') if '--' in argv else len(argv)
+        options = ['--remote', 'unix://' + context.endpoint.address if context.endpoint else 'unix://']
+        if context.executor:
+            observed = context.executor.rpc(RpcSpec(context.endpoint.address,
+                partial(environment_exclusions, context.values['workspace'])))
+            if observed.state != 'ok':
+                raise ValueError(f'Cannot isolate shared native session environment: {observed.reason}')
+            excludes = list(observed.value)
+            # Preserve literal per-launch exclusions as well as native project/user config.
+            for index, arg in enumerate(argv[:position]):
+                value = argv[index + 1] if arg in ('-c', '--config') and index + 1 < len(argv) else (
+                    arg[len('--config='):] if arg.startswith('--config=') else
+                    arg[2:].removeprefix('=') if arg.startswith('-c') and not arg.startswith('--') else '')
+                key, _, literal = value.partition('=')
+                if key == 'shell_environment_policy.exclude':
+                    extra = tomllib.loads('value=' + literal)['value']
+                    if not isinstance(extra, list) or any(not isinstance(v, str) for v in extra):
+                        raise ValueError('shell_environment_policy.exclude must be an array of strings')
+                    excludes.extend(extra)
+                elif key == 'shell_environment_policy':
+                    raise ValueError('Shared daemon mode requires individual shell_environment_policy keys; configuration unchanged')
+            excludes = list(dict.fromkeys([*excludes, 'MV2_*', *command.unset_env]))
+            options += ['-c', 'shell_environment_policy.exclude=' + json.dumps(excludes)]
+        # Tools run in the daemon, not the terminal process. Forward only this
+        # launch's identity explicitly; never inherit another client's MV2_*.
+        for key, value in context.environment.items():
+            if key.startswith('MV2_') or key == 'PATH':
+                options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
+        argv[position:position] = options
+        return CommandSpec(tuple(argv), command.unset_env,
+                           shared_service=SharedServiceSpec(
+                               (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
+                               {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}))
 
     def spawn(self, context):
         return super().spawn(context)
 
     def resume(self, context):
         return super().resume(context)
+
+    def stop(self, session, executor):
+        if not session.endpoint:
+            return super().stop(session, executor)
+        if not session.native_id:
+            return NativeResult('unavailable', 'Bind the exact native session ID before stopping shared-server work')
+        return executor.rpc(RpcSpec(session.endpoint.address, partial(stop_session, session), max_requests=140))
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
@@ -75,6 +107,8 @@ class CodexAdapter(ConfiguredAdapter):
                     support = Capability('error', str(error), required=True)
         result['send_steer'] = result['send_follow_up'] = support
         result['get_delivery'] = replace(support, required=False)
+        if session.endpoint:
+            result['stop'] = replace(support, required=False)
         return result
 
     def get_delivery(self, session, message_id, executor):

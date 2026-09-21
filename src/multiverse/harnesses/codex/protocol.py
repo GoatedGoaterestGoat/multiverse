@@ -135,3 +135,65 @@ def get_delivery(session, message_id):
                 return NativeResult('native_queued', 'Message observed in native thread history',
                                     {'turn_id': turn.get('id'), 'transcript_confirmed': True})
     return NativeResult('unknown', 'No receipt found in bounded native queue/history lookup; no resend attempted')
+
+
+def environment_exclusions(workspace):
+    """Read only the effective exclusion list; never change native config."""
+    initialized = result((yield RpcRequest('initialize', {
+        'clientInfo': {'name': 'multiverse', 'version': '1'},
+        'capabilities': {'experimentalApi': True},
+    })))
+    if isinstance(initialized, NativeResult):
+        return initialized
+    observed = result((yield RpcRequest('config/read', {'cwd': workspace, 'includeLayers': False})))
+    if isinstance(observed, NativeResult):
+        return observed
+    policy = object_field(observed, 'config').get('shell_environment_policy') or {}
+    excludes = policy.get('exclude') or []
+    if not isinstance(excludes, list) or any(not isinstance(v, str) for v in excludes):
+        return NativeResult('error', 'Native shell environment exclusions are malformed')
+    return NativeResult('ok', value=excludes)
+
+
+def stop_session(session):
+    """Explicit stop cancels only the exact thread; never shuts down its server."""
+    cancelled = []
+    def failure(observed):
+        return NativeResult(observed.state, observed.reason, {'cancelled_message_ids': cancelled})
+    thread = yield from _thread(session)
+    if isinstance(thread, NativeResult):
+        return failure(thread)
+    # Bound work before any mutation. Core holds the recipient's launch lock,
+    # so concurrent Multiverse sends cannot replenish this queue during stop.
+    queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 128})))
+    if isinstance(queued, NativeResult):
+        return failure(queued)
+    items = records(queued)
+    if queued.get('nextCursor') or len(items) > 128:
+        return NativeResult('error', 'Native queue exceeds bounded stop limit (128); terminal left attached')
+    for item in items:
+        if not isinstance(item.get('id'), str) or not item['id']:
+            return failure(NativeResult('error', 'Malformed native queue ID; stop incomplete'))
+        deleted = result((yield RpcRequest('thread/queue/delete', {
+            'threadId': session.native_id, 'queuedSubmissionId': item['id']})))
+        if isinstance(deleted, NativeResult):
+            return failure(deleted)
+        if deleted.get('deleted') is True and isinstance(item.get('clientUserMessageId'), str):
+            cancelled.append(item['clientUserMessageId'])
+    turns = result((yield RpcRequest('thread/turns/list', {
+        'threadId': session.native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})))
+    if isinstance(turns, NativeResult):
+        return failure(turns)
+    for turn in records(turns):
+        if turn.get('status') == 'inProgress':
+            if not isinstance(turn.get('id'), str) or not turn['id']:
+                return failure(NativeResult('error', 'Malformed active turn ID'))
+            interrupted = result((yield RpcRequest('turn/interrupt', {
+                'threadId': session.native_id, 'turnId': turn['id']})))
+            if isinstance(interrupted, NativeResult):
+                return failure(interrupted)
+    cleaned = result((yield RpcRequest('thread/backgroundTerminals/clean', {'threadId': session.native_id})))
+    if isinstance(cleaned, NativeResult):
+        return failure(cleaned)
+    return NativeResult('ok', 'Native turn cancellation and background-terminal cleanup requested',
+                        {'cancelled_message_ids': cancelled})

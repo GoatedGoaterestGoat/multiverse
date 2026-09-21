@@ -1,28 +1,63 @@
-"""A native service failure stops only the terminal owned by its core launch."""
+"""Shared services survive terminal failure/exit and receive no agent identity."""
+import json
 from pathlib import Path
+import socket
 import sys
 from unittest.mock import patch
 
 from multiverse import agents, harnesses
-from multiverse.harnesses.types import CommandSpec, NativeEndpoint, ServiceSpec
+from multiverse.harnesses.types import CommandSpec, SharedServiceSpec
+from multiverse.store import read
 from test_multiverse import TerminalBase, until
 
 
 class NativeServiceTest(TerminalBase):
-    def test_native_service_failure_is_diagnosable_and_cleans_private_socket(self):
+    def test_shared_service_survives_terminal_exit_and_scrubs_identity(self):
+        address = self.work / 'shared.sock'
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(address))
+        self.addCleanup(listener.close)
+        info = {'socketPath': str(address), 'cliVersion': '1', 'appServerVersion': '1'}
+        seen = self.work / 'daemon-env.json'
+        starter = ('import json,os,pathlib; pathlib.Path(' + repr(str(seen)) + ').write_text('
+                   'json.dumps({k:v for k,v in os.environ.items() if k.startswith("MV2_") or k in ("CODEX_THREAD_ID","CLAUDECODE")})); '
+                   'print(' + repr(json.dumps(info)) + ')')
         def launch(adapter, context):
-            endpoint = context.values['control_socket']
-            service = ('import socket,sys,time; s=socket.socket(socket.AF_UNIX); '
-                       's.bind(sys.argv[1]); s.listen(); time.sleep(1); sys.exit(7)')
-            terminal = ('import time; print("OWNED TERMINAL",flush=True); time.sleep(30)')
-            return CommandSpec((sys.executable, '-c', terminal), control_endpoint=NativeEndpoint('unix-websocket', endpoint),
-                               service=ServiceSpec((sys.executable, '-c', service, endpoint), endpoint))
+            return CommandSpec((sys.executable, '-c', 'print("DONE",flush=True)'),
+                               shared_service=SharedServiceSpec((sys.executable, '-c', starter), 'socketPath',
+                                                                ('cliVersion', 'appServerVersion')))
         with patch.object(harnesses.CodexAdapter, 'spawn', launch):
-            result = agents.start(self.root, 'failure', 'test', 'codex', socket_path=self.socket)
+            result = agents.start(self.root, 'exit', 'test', 'codex', socket_path=self.socket)
         directory = agents.directory(self.root, result['id'])
-        endpoint = Path(result['runtime']['control_endpoint']['address'])
-        facts = until(lambda: (r if (r := agents.runtime(directory)).get('state') == 'failed' else None))
-        self.assertIn('Native service exited 7', facts['error'])
-        self.assertIn('native-service.log', facts['error'])
-        until(lambda: not endpoint.parent.exists())
-        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
+        facts = until(lambda: (r if (r := agents.runtime(directory)).get('state') == 'stopped' else None))
+        self.assertEqual(read(seen), {})
+        self.assertEqual(facts['control_endpoint']['address'], str(address))
+        self.assertTrue(address.exists())
+        self.assertNotIn('service_pid', facts)
+
+    def test_shared_service_errors_never_launch_terminal_or_remove_socket(self):
+        address = self.work / 'shared.sock'
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(address))
+        self.addCleanup(listener.close)
+        cases = [
+            ('import sys; sys.stderr.write("native installation missing"); sys.exit(7)', 'native installation missing'),
+            ('print("not json")', 'Expecting value'),
+            ('print(\'{"socketPath":"relative","cliVersion":"1","appServerVersion":"1"}\')', 'absolute Unix socket'),
+            ('print(' + repr(json.dumps({'socketPath': str(address), 'cliVersion': '2', 'appServerVersion': '1'})) + ')', 'version mismatch'),
+        ]
+        for index, (starter, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                marker = self.work / f'terminal-{index}'
+                def launch(adapter, context):
+                    return CommandSpec((sys.executable, '-c', f'open({str(marker)!r},"w").close()'),
+                                       shared_service=SharedServiceSpec((sys.executable, '-c', starter), 'socketPath',
+                                                                        ('cliVersion', 'appServerVersion')))
+                with patch.object(harnesses.CodexAdapter, 'spawn', launch):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        agents.start(self.root, f'error-{index}', 'test', 'codex', socket_path=self.socket)
+                directory = agents.directory(self.root, f'error-{index}')
+                facts = until(lambda: (r if (r := agents.runtime(directory)).get('state') == 'failed' else None))
+                self.assertIn(expected, facts['error'])
+                self.assertFalse(marker.exists())
+                self.assertTrue(address.exists())

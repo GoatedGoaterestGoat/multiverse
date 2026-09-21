@@ -18,9 +18,15 @@ class NativeEndpoint:
 
 
 @dataclass(frozen=True)
-class ServiceSpec:
+class SharedServiceSpec:
+    """Idempotent native startup command returning a JSON Unix socket address.
+
+    Core may start/connect, but never owns, stops or restarts this service.
+    """
     argv: tuple[str, ...]
-    ready_socket: str
+    socket_field: str
+    version_fields: tuple[str, str]
+    environment: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -28,7 +34,7 @@ class CommandSpec:
     argv: tuple[str, ...]
     unset_env: tuple[str, ...] = ('CODEX_THREAD_ID', 'CLAUDECODE')
     control_endpoint: NativeEndpoint | None = None
-    service: ServiceSpec | None = None
+    shared_service: SharedServiceSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -42,6 +48,7 @@ class RpcSpec:
     """A bounded adapter protocol; core owns the local WebSocket transport."""
     socket_path: str
     plan: Callable[[], Generator[RpcRequest, Mapping[str, Any], 'NativeResult']]
+    max_requests: int = 16
 
 
 @dataclass(frozen=True)
@@ -49,6 +56,9 @@ class LaunchContext:
     mode: Literal['spawn', 'resume']
     values: Mapping[str, str]
     model: str | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
+    endpoint: NativeEndpoint | None = None
+    executor: 'Executor | None' = None
 
 
 @dataclass(frozen=True)
@@ -62,7 +72,7 @@ class NativeResult:
 
 
 DeliveryMode = Literal['steer', 'follow-up']
-CAPABILITIES = ('spawn', 'resume', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'observe', 'get_delivery')
+CAPABILITIES = ('spawn', 'resume', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'observe', 'get_delivery')
 
 
 @dataclass(frozen=True)
@@ -124,6 +134,7 @@ class HarnessAdapter(Protocol):
 
     def spawn(self, context: LaunchContext) -> CommandSpec: ...
     def resume(self, context: LaunchContext) -> CommandSpec: ...
+    def stop(self, session: SessionHandle, executor: Executor) -> NativeResult: ...
     def validate_session_id(self, value: str) -> str: ...
     def validate_resume(self, properties: Mapping[str, Any], agent_dir: Path) -> None: ...
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]: ...

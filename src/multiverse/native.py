@@ -4,13 +4,15 @@ Durable send/inbox/ack never depend on these best-effort operations.
 """
 from dataclasses import asdict
 import json
+from pathlib import Path
+import stat
 import socket
 import os
 import subprocess
 import time
 
 from . import agents, harnesses
-from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message
+from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint
 from .store import lock, now, read, message_record, update_message
 from .tmux import owned
 
@@ -23,6 +25,25 @@ def execute(command: CommandSpec, workspace, timeout=10):
     env = environment(command)
     # Never use a shell: message text and native IDs remain literal argv values.
     return subprocess.run(command.argv, cwd=workspace, env=env, text=True, capture_output=True, timeout=timeout)
+
+
+def start_shared_service(specification, workspace, log_path, unset_env):
+    """Ask the native owner to start/reuse its daemon. Never stop or restart it."""
+    command = CommandSpec(specification.argv, unset_env)
+    env = {**environment(command), **specification.environment}
+    result = subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30)
+    log_path.write_text(result.stdout + result.stderr)
+    if result.returncode:
+        raise RuntimeError(f'Shared native service startup failed: {result.stderr.strip()}; see {log_path}')
+    info = json.loads(result.stdout)
+    address = info[specification.socket_field]
+    if not isinstance(address, str) or not Path(address).is_absolute() or not stat.S_ISSOCK(Path(address).stat().st_mode):
+        raise ValueError('Shared native service did not return an absolute Unix socket')
+    versions = [info.get(key) for key in specification.version_fields]
+    if any(not isinstance(v, str) or not v for v in versions) or versions[0] != versions[1]:
+        raise RuntimeError('Native CLI/daemon version mismatch; update or restart explicitly when sessions are safe')
+    return NativeEndpoint('unix-websocket', address)
 
 
 def execute_rpc(spec, workspace, timeout=10):
@@ -93,6 +114,21 @@ def context(root, reference):
             NativeExecutor(properties['workspace'], properties, facts))
 
 
+def stop(root, reference):
+    directory, adapter, session, executor = context(root, reference)
+    result = adapter.stop(session, executor)
+    for message_id in (result.value or {}).get('cancelled_message_ids', []):
+        try:
+            message_record(directory, message_id)
+        except ValueError:
+            continue  # Native input from another client is not a core inbox record.
+        update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
+                       last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
+    if result.state != 'ok':
+        raise RuntimeError(f'Native stop incomplete; terminal left attached: {result.reason}')
+    return result
+
+
 def capabilities(root, reference, run_probe=False):
     _, adapter, session, executor = context(root, reference)
     return {name: asdict(value) for name, value in adapter.capabilities(session, executor if run_probe else None).items()}
@@ -154,6 +190,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 update_message(directory, message_id, submission_state='failed',
                                attempts=[*tracking.get('attempts', []), receipt])
             return receipt
+        if tracking.get('submission_state') == 'cancelled':
+            return {**tracking['last_receipt'], 'message_id': message_id, 'reused': True, 'ok': False}
         if check:
             target = tracking.get('target_session') or message.get('target_session')
             if target and target != session.native_id:

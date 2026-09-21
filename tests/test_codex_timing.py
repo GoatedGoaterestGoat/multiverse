@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import threading
 import time
 import unittest
@@ -71,6 +72,9 @@ class CodexTimingTest(TerminalBase):
         self.addCleanup(server.shutdown)
         native_home = self.work / 'native-home'
         native_home.mkdir()
+        managed = native_home / 'packages/standalone/current/codex'
+        managed.parent.mkdir(parents=True)
+        managed.symlink_to(Path(shutil.which('codex')).resolve())
         (native_home / 'config.toml').write_text(
             'model = "gpt-5.6-terra"\nmodel_provider = "mv2-test"\n'
             '[model_providers.mv2-test]\nname = "Offline test"\n'
@@ -83,18 +87,22 @@ class CodexTimingTest(TerminalBase):
         write(path, spec)
         test_env = dict(CODEX_HOME=str(native_home), NO_COLOR='1', NO_PROXY='127.0.0.1,localhost',
                         HTTP_PROXY='', HTTPS_PROXY='', ALL_PROXY='', http_proxy='', https_proxy='', all_proxy='')
+        daemon_env = {**os.environ, **test_env}
+        self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=daemon_env,
+                                               capture_output=True, timeout=20))
         with patch.dict(os.environ, test_env):
             result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket)
         self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
         directory = agents.directory(self.root, result['id'])
-        endpoint = Path(result['runtime']['control_endpoint']['address'])
+        endpoint = Path(until(lambda: agents.runtime(directory).get('control_endpoint'), seconds=30)['address'])
 
         def stop_owned():
             try:
                 if agents.listing(self.root)[0]['live'] == 'alive':
                     agents.terminal_action(self.root, result['id'], 'stop')
             finally:
-                until(lambda: not endpoint.parent.exists(), seconds=10)
+                until(lambda: agents.listing(self.root)[0]['live'] == 'stopped', seconds=10)
+                self.assertTrue(endpoint.exists(), 'Terminal exit must leave shared daemon running')
 
         self.addCleanup(stop_owned)
         try:
@@ -124,8 +132,8 @@ class CodexTimingTest(TerminalBase):
             with patch.dict(os.environ, test_env):
                 resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
             self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
-            endpoint = Path(resumed['runtime']['control_endpoint']['address'])
-            self.assertNotEqual(endpoint, old_endpoint)
+            endpoint = Path(until(lambda: agents.runtime(directory).get('control_endpoint'), seconds=30)['address'])
+            self.assertEqual(endpoint, old_endpoint)
             self.assertEqual(resumed['native_session_id'], original_native)
             self.assertEqual(resumed['workspace'], str(work))
             until(lambda: native.capabilities(self.root, result['id'], run_probe=True)['send_follow_up']['state'] == 'supported', seconds=20)

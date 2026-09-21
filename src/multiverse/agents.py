@@ -131,10 +131,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values['control_socket'] = str(service_dir / 'rpc.sock')
-        context = LaunchContext(mode, values, model)
+        context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})})
         command = adapter.resume(context) if resume else adapter.spawn(context)
-        if command.service and command.service.ready_socket != values['control_socket']:
-            raise ValueError('Native service must use the core-assigned private socket')
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
@@ -145,6 +143,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError("Cannot locate mv2 CLI")
         env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
                "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
+        # Persist adapter-selected storage so resume cannot accidentally switch
+        # accounts/history when launched by a different monitor environment.
+        if command.shared_service:
+            env.update(command.shared_service.environment)
+            properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
         write(agent_dir / "properties.json", properties)
         write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(), "started_at": now()})
@@ -152,6 +155,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         terminal = None
         service_directory_created = False
         try:
+            shared_endpoint = None
+            if command.shared_service:
+                from .native import start_shared_service
+                shared_endpoint = start_shared_service(command.shared_service, workdir,
+                                                       launch / 'native-service.log', command.unset_env)
             if command.control_endpoint:
                 service_dir.mkdir(mode=0o700)
                 service_directory_created = True
@@ -164,11 +172,20 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
             env["MV2_TMUX_SOCKET"] = terminal["socket"]
-            endpoint = asdict(command.control_endpoint) if command.control_endpoint else None
+            env['PATH'] = str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')
+            executor = None
+            if command.shared_service:
+                from .native import NativeExecutor
+                executor = NativeExecutor(workdir, properties, runtime(agent_dir))
+            context = LaunchContext(mode, values, model, env, shared_endpoint, executor)
+            if command.shared_service:
+                command = adapter.resume(context) if resume else adapter.spawn(context)
+            argv = list(command.argv)
+            endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint)
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
-                                           "service": asdict(command.service) if command.service else None})
+                                           "shared_service": bool(command.shared_service)})
             (launch / "ready").touch()
         except Exception as error:
             if service_directory_created:
@@ -208,7 +225,13 @@ def terminal_action(root, reference, action):
     if action == "inspect":
         return backend.run("capture-pane", "-p", "-S", "-100", "-t", pane)
     if action == "stop":
-        backend.run("kill-pane", "-t", pane)
-        update_runtime(agent_dir, facts["launch_id"], state="stopped", activity="unknown", stopped_at=now())
-        return {"id": agent_dir.name, "state": "stopped"}
+        with lock(agent_dir / '.launch.lock'):
+            # Recheck ownership under the same lock used by send/resume.
+            facts = runtime(agent_dir)
+            backend, pane = owned(read(agent_dir / 'properties.json'), facts)
+            from .native import stop
+            stop(root, reference)
+            backend.run("kill-pane", "-t", pane)
+            update_runtime(agent_dir, facts["launch_id"], state="stopped", activity="unknown", stopped_at=now())
+            return {"id": agent_dir.name, "state": "stopped"}
     return backend, pane

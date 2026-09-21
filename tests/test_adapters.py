@@ -7,7 +7,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
@@ -99,7 +99,8 @@ class AdapterContractTest(BaseTest):
         adapter = harnesses.load(self.root, 'codex')
         values = {**self.values(), 'control_socket': '/tmp/owned/rpc.sock'}
         command = adapter.spawn(LaunchContext('spawn', values, 'chosen'))
-        self.assertEqual(command.service.ready_socket, values['control_socket'])
+        self.assertEqual(command.shared_service.argv[-3:], ('app-server', 'daemon', 'start'))
+        self.assertIsNone(command.control_endpoint)
         self.assertIn('/custom', command.argv)
         self.assertIn('workspace-write', command.argv)
         self.assertIn('chosen', command.argv)
@@ -109,6 +110,31 @@ class AdapterContractTest(BaseTest):
         self.assertIn('/custom', resumed.argv, 'User arguments must never be silently removed')
         self.assertNotIn(values['agent_dir'], resumed.argv, 'Native resume inherits the source-owned writable grant')
         self.assertEqual(path.read_bytes(), original)
+
+    def test_shared_daemon_launch_preserves_environment_preferences_and_literal_prompt(self):
+        path = self.root / 'harnesses/codex/harness.json'
+        config = read(path)
+        config['settings'] = {'inbox_bridge': True, 'unset_env': ['PARENT_ONLY'],
+                              'spawn_args': ['-cshell_environment_policy.exclude=["CUSTOM_EXCLUDED"]']}
+        write(path, config)
+        before = path.read_bytes()
+        adapter = harnesses.load(self.root, 'codex')
+        executor = Mock()
+        executor.rpc.return_value = NativeResult('ok', value=['USER_EXCLUDED'])
+        values = {**self.values(), 'task': '--config=shell_environment_policy=literal-prompt'}
+        environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current',
+                       'MV2_UNIVERSE': str(self.root), 'PATH': '/literal/tools'}
+        command = adapter.spawn(LaunchContext('spawn', values, 'chosen', environment,
+                                             NativeEndpoint('unix-websocket', '/native/socket'), executor))
+        argv = command.argv
+        self.assertEqual(argv[argv.index('--remote') + 1], 'unix:///native/socket')
+        excludes = next(v for v in argv if v.startswith('shell_environment_policy.exclude='))
+        self.assertEqual(json.loads(excludes.partition('=')[2]),
+                         ['USER_EXCLUDED', 'CUSTOM_EXCLUDED', 'MV2_*', 'CODEX_THREAD_ID', 'CLAUDECODE', 'PARENT_ONLY'])
+        self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="current"', argv)
+        self.assertEqual(argv[-1], values['task'])
+        self.assertEqual(command.shared_service.environment['CODEX_HOME'], environment['CODEX_HOME'])
+        self.assertEqual(path.read_bytes(), before)
 
     def test_malformed_and_unknown_settings_fail_cleanly_and_discovery_survives(self):
         path = self.root / 'harnesses/codex/harness.json'

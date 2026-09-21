@@ -5,6 +5,7 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | Operation | Contract |
 | --- | --- |
 | `spawn` | Start a native terminal in the saved workspace; the initial prompt is optional. |
+| `stop` | Cancel native work where the terminal is only a client, then close the owned terminal; never stop a shared daemon. |
 | `resume` | Reopen the exact saved conversation, never the latest or a replacement session. |
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
@@ -58,7 +59,7 @@ UI, or fallback that invokes another model to forward a message.
 
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
-`stop` remain shared terminal operations. Reported phase/summary are separate
+`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
 from observed liveness. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
@@ -158,15 +159,56 @@ there is no automatic rewrite or migration. Compare source defaults and transfer
 all local preferences before opting into schema 2. Retain schema 1 for custom
 behavior schema 2 cannot express. Existing universes are never overwritten.
 
-Codex bridge mode starts an owned native app-server and connects the native TUI
-to its private Unix WebSocket. Exact thread ID/workspace are checked before
-queueing or steering. Urgent busy input uses `turn/steer` with `expectedTurnId`;
-normal/idle input uses `thread/queue/add`. Races return errors without fresh-turn
-or resume fallback. Approvals remain unanswered by the delivery client. Core
-bounds transport requests, frames and deadlines and cleans up its service on exit.
-Remote resume inherits native permissions: put initial permission/profile flags
-in `spawn_args`. Custom resume overrides rejected by native Codex are diagnosed,
-never silently removed. Plain compatibility launches do not acquire bridge controls.
+Codex bridge mode uses the shared native daemon for the current OS user and
+`CODEX_HOME`. Spawn/resume invokes `codex app-server daemon start`, reads its JSON
+socket address, and connects the native TUI with `--remote unix://<returned socket>`. Concurrent
+monitors use Codex's native startup lock; there is no server per agent, project,
+or dashboard. Opening/closing a dashboard does not start/stop the daemon. Core
+never invokes daemon stop, restart, bootstrap, install or update. Codex's own
+configured daemon update policy remains authoritative. A missing
+managed standalone installation or a CLI/daemon version mismatch fails with a
+diagnostic; it is never repaired by disrupting other clients. Codex owns daemon
+persistence and native history. No Multiverse-specific Codex home is created.
+
+The selected Codex home is saved for exact resume even if another monitor has a
+different environment. Agent workspace, model and initial permissions remain
+per-thread. The shared server must not inherit an agent identity: startup scrubs
+`MV2_*`, native parent IDs and configured exclusions. Before terminal launch the
+adapter reads native effective environment exclusions, preserves them, adds
+identity exclusions, and passes the current launch's `MV2_*` values through
+per-thread shell configuration. Native configuration files are never rewritten.
+Other daemon process environment (provider credentials, proxies and environment
+used by integrations) remains shared; it does not change to match each monitor.
+Different process-level environments require separately configured native homes.
+
+Exact thread ID/workspace are checked before queueing or steering. Urgent busy
+input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
+`thread/queue/add`. Races return errors without fresh-turn or resume fallback.
+Approvals remain unanswered by the delivery client. Core bounds transport
+requests, frames and deadlines. Remote resume inherits native permissions: put
+initial permission/profile flags in `spawn_args`. Unsupported resume overrides
+are diagnosed, never silently removed. Whole-table `shell_environment_policy`
+CLI overrides are rejected in bridge mode; individual keys remain supported.
+Plain compatibility launches do not acquire bridge controls.
+
+Explicit `stop` holds the recipient's launch lock, deletes its pending native
+queue entries, interrupts its exact active turn and cleans its native background
+terminals before closing its terminal. Confirmed queue cancellations are recorded
+by message ID in the core inbox and cannot be replayed with `deliver --retry`.
+Stop is bounded to 128 native queued submissions; errors leave the terminal
+attached with a diagnostic. This requires a bound native session ID and a
+reachable server. Closing a terminal by other means only disconnects its client
+and can leave native work running. Closing a dashboard or detaching tmux never
+calls native stop.
+
+A daemon crash can interrupt every thread it hosts. Multiverse does not restart
+it from status reads or sends and never automatically resumes conversations.
+Explicit resume reloads saved history, not old live processes/PTYs. One shared
+daemon also shares resource pressure and a version upgrade's impact. SSH use is
+local to the remote host: run Multiverse and Codex there. Cross-host routing and
+shared-filesystem distributed ownership are not implemented. Existing standalone
+live sessions are not killed/migrated automatically, and native session IDs must
+not be independently adopted by two universes.
 
 Pi's opt-in extension retains the native interactive terminal. It listens on a
 core-assigned private Unix socket and receives actual messages with exact native
@@ -182,6 +224,7 @@ is not substituted for its interactive terminal.
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |
 | --- | --- | --- | --- | --- |
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
+| Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
 | Safe-boundary steer | Yes | Unavailable | Yes | Unavailable |
 | After-turn send / idle wake | Yes | Unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
