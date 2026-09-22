@@ -5,10 +5,9 @@ from pathlib import Path
 import shutil
 import socket
 import sys
-from uuid import UUID
 
 from . import universe, harnesses
-from .harnesses.types import LaunchContext, SessionHandle
+from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id
 from .store import lock, now, read, uid, write
 from .tmux import Tmux, observe, owned
 
@@ -68,8 +67,7 @@ def bind_session(root, reference, session_id, launch_id=None):
         if launch_id and runtime(agent_dir).get("launch_id") != launch_id:
             raise ValueError("Outdated launch")
         data = read(agent_dir / "properties.json")
-        adapter = harnesses.load(root, data["harness"]) if data.get("harness") else None
-        session_id = adapter.validate_session_id(session_id) if adapter else str(UUID(session_id))
+        session_id = normalize_session_id(session_id)
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
         data.update(native_session_id=session_id, updated_at=now())
@@ -97,8 +95,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     session_mode = adapter.session_mode
     if not resume and session_mode == "assigned":
         properties["native_session_id"] = properties["id"]
-    if resume:
-        adapter.validate_resume(properties, agent_dir)
     if not shutil.which("tmux"):
         raise ValueError("tmux is required to spawn agents")
     # A universe can contain agents assigned to different worktrees. Resume in
@@ -115,12 +111,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
         launch = agent_dir / "launches" / launch_id
-        launch.mkdir(parents=True)
         bootstrap = universe.bootstrap(root, properties)
         if adapter.bootstrap:
             bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
-        (launch / "bootstrap.md").write_text(bootstrap)
-        (launch / "task.md").write_text(properties["task"])
         values = {"name": properties["name"], "agent_id": properties["id"],
                   "session_id": properties.get("native_session_id", ""),
                   "bootstrap": bootstrap, "bootstrap_json": json.dumps(bootstrap, ensure_ascii=False),
@@ -137,6 +130,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
+        launch.mkdir(parents=True)
+        (launch / "bootstrap.md").write_text(bootstrap)
+        (launch / "task.md").write_text(properties["task"])
         cli = Path(__file__).resolve().parents[2] / "bin" / "mv2"
         invoked = Path(sys.argv[0]).resolve()
         cli_path = str(cli) if cli.exists() else str(invoked) if invoked.name == "mv2" and invoked.is_file() else shutil.which("mv2")

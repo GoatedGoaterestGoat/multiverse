@@ -84,7 +84,8 @@ class LabHarnessContracts(unittest.TestCase):
 
     def test_unbound_codex_cannot_resume(self):
         row = self.start()
-        with self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
+        with patch('multiverse.agents.observe', return_value={'live': 'stopped'}), \
+                self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
             agents.start(self.root, resume=row['id'], socket_path=self.socket)
 
     def test_h002_empty_ack_and_existing_message_boundaries(self):

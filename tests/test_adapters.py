@@ -21,10 +21,14 @@ from test_multiverse import BaseTest
 
 class AdapterContractTest(BaseTest):
     def values(self):
-        return dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
+        values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                     bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
-                    agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', session_file='/agent/session.jsonl',
+                    agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', session_file=str(self.work / 'agent/session.jsonl'),
                     bootstrap_file='/launch/bootstrap.md', task_file='/launch/task.md', workspace=str(self.work), model='chosen', control_socket='/tmp/owned/rpc.sock')
+        session_file = Path(values['session_file'])
+        session_file.parent.mkdir(exist_ok=True)
+        session_file.write_text(json.dumps({'type': 'session', 'id': values['session_id']}) + '\n')
+        return values
 
     def session(self, name, values):
         return SessionHandle(values['agent_id'], name, values['workspace'],
@@ -111,9 +115,14 @@ class AdapterContractTest(BaseTest):
         self.assertIn('workspace-write', command.argv)
         self.assertIn('chosen', command.argv)
         with self.assertRaisesRegex(ValueError, 'saved permissions'):
-            adapter.validate_resume({'native_session_id': str(uuid4())}, self.work)
+            adapter.resume(self.session('codex', values), LaunchContext('resume', values, 'chosen'))
+        self.assertEqual(path.read_bytes(), original)
+        # Initial grants are allowed in spawn_args and inherited on resume.
+        spec['settings']['spawn_args'] += spec['settings'].pop('args')
+        write(path, spec)
+        original = path.read_bytes()
+        adapter = harnesses.load(self.root, 'codex')
         resumed = adapter.resume(self.session('codex', values), LaunchContext('resume', values, 'chosen'))
-        self.assertIn('/custom', resumed.argv, 'User arguments must never be silently removed')
         self.assertNotIn(values['agent_dir'], resumed.argv, 'Native resume inherits the source-owned writable grant')
         self.assertEqual(path.read_bytes(), original)
 
@@ -143,8 +152,20 @@ class AdapterContractTest(BaseTest):
                 values = self.values()
                 session = self.session(name, values)
                 missing = replace(session, session_file=None) if name == 'pi' else replace(session, native_id=None)
-                with self.assertRaisesRegex(ValueError, 'exact native session'):
+                with self.assertRaisesRegex(ValueError, 'native session ID|session file is missing'):
                     adapter.resume(missing, LaunchContext('resume', values))
+
+    def test_resume_checks_and_normalizes_saved_uuid_without_a_separate_validation_call(self):
+        for name in ('codex', 'claude'):
+            with self.subTest(name=name):
+                adapter = harnesses.load(self.root, name)
+                values = self.values()
+                session = self.session(name, values)
+                context = LaunchContext('resume', values)
+                command = adapter.resume(replace(session, native_id=session.native_id.upper()), context)
+                self.assertIn(session.native_id, command.argv)
+                with self.assertRaisesRegex(ValueError, 'must be a UUID'):
+                    adapter.resume(replace(session, native_id='invalid'), context)
 
     def test_shared_daemon_launch_preserves_environment_preferences_and_literal_prompt(self):
         path = self.root / 'harnesses/codex/harness.json'
@@ -190,21 +211,25 @@ class AdapterContractTest(BaseTest):
 
     def test_pi_exact_session_file_required_and_native_id_preserved(self):
         adapter = harnesses.load(self.root, 'pi')
-        directory = self.work / 'agent'
-        directory.mkdir()
+        values = self.values()
+        session_file = Path(values['session_file'])
+        session = replace(self.session('pi', values), native_id=None)
+        context = LaunchContext('resume', values)
+        session_file.unlink()
         with self.assertRaisesRegex(ValueError, 'missing'):
-            adapter.validate_resume({}, directory)
-        for contents in ('', 'not json', '{}', '{"type":"session","id":"bad"}'):
-            (directory / 'session.jsonl').write_text(contents)
+            adapter.resume(session, context)
+        for contents in ('', 'not json', '{}', '{"type":"session","id":"bad"}', '{"type":"session","id":123}'):
+            session_file.write_text(contents)
             with self.assertRaises(ValueError):
-                adapter.validate_resume({}, directory)
+                adapter.resume(session, context)
         native_id = str(uuid4())
-        write(directory / 'session.jsonl', {'type': 'session', 'id': native_id})
         # Native files are JSONL, not pretty-printed JSON.
-        (directory / 'session.jsonl').write_text(json.dumps({'type': 'session', 'id': native_id}) + '\n')
-        adapter.validate_resume({'native_session_id': native_id}, directory)
+        session_file.write_text(json.dumps({'type': 'session', 'id': native_id}) + '\n')
+        command = adapter.resume(replace(session, native_id=native_id.upper()), context)
+        self.assertIn(str(session_file), command.argv)
+        adapter.resume(session, context)  # A valid Pi file can precede UUID binding.
         with self.assertRaisesRegex(ValueError, 'different native'):
-            adapter.validate_resume({'native_session_id': str(uuid4())}, directory)
+            adapter.resume(replace(session, native_id=str(uuid4())), context)
 
     def test_pi_bridge_is_source_owned_opt_in_and_requires_current_handshake(self):
         path = self.root / 'harnesses/pi/harness.json'

@@ -5,6 +5,7 @@ from dataclasses import replace
 
 from ..base import ConfiguredAdapter
 from ..types import SessionHandle, Message, Executor, Capability, NativeResult, NativeEndpoint
+from ..types import normalize_session_id
 
 
 class PiAdapter(ConfiguredAdapter):
@@ -15,7 +16,18 @@ class PiAdapter(ConfiguredAdapter):
         return self._with_extension(super().spawn(context), context)
 
     def resume(self, session, context):
-        return self._with_extension(super().resume(session, context), context)
+        command = super().resume(session, context)
+        with Path(session.session_file).open() as handle:
+            try:
+                header = json.loads(handle.readline(65536))
+                if header.get('type') != 'session':
+                    raise ValueError('Missing Pi session header')
+                native = normalize_session_id(header['id'])
+                if session.native_id is not None and normalize_session_id(session.native_id) != native:
+                    raise ValueError('Pi session file belongs to a different native session')
+            except (ValueError, KeyError, AttributeError) as error:
+                raise ValueError(f'Invalid Pi resume target: {error}') from error
+        return self._with_extension(command, context)
 
     def _with_extension(self, command, context):
         if not self.settings.get('inbox_bridge'):
@@ -45,16 +57,3 @@ class PiAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', 'Pi extension socket is not registered')
         return executor.request(session, {'operation': 'send', 'message_id': message.id,
                                          'text': message.prompt(), 'mode': mode})
-
-    def validate_resume(self, properties, agent_dir):
-        super().validate_resume(properties, agent_dir)
-        with (agent_dir / 'session.jsonl').open() as handle:
-            try:
-                header = json.loads(handle.readline(65536))
-                if header.get('type') != 'session':
-                    raise ValueError('Missing Pi session header')
-                native = self.validate_session_id(header['id'])
-                if properties.get('native_session_id') not in (None, native):
-                    raise ValueError('Pi session file belongs to a different native session')
-            except (ValueError, KeyError, AttributeError) as error:
-                raise ValueError(f'Invalid Pi resume target: {error}') from error

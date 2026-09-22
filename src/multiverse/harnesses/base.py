@@ -1,10 +1,11 @@
 """Shared argv rendering and default operations; provider behavior stays in provider packages."""
 from dataclasses import replace
 import json
+from pathlib import Path
 from string import Formatter
-from uuid import UUID
 
 from .types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeResult, SessionHandle, Message, Executor
+from .types import normalize_session_id
 
 FIELDS = {'name', 'agent_id', 'session_id', 'bootstrap', 'bootstrap_json', 'task', 'agent_dir',
           'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir'}
@@ -78,20 +79,6 @@ class ConfiguredAdapter:
         if not isinstance(self.bootstrap, str) or (self.default_model is not None and not isinstance(self.default_model, str)):
             raise ValueError('bootstrap and model must be strings')
 
-    def validate_session_id(self, value):
-        return str(UUID(value))
-
-    def validate_resume(self, properties, agent_dir):
-        if 'resume' not in self.spec:
-            raise ValueError('Harness does not support resume')
-        if self.session_mode != 'file':
-            if not properties.get('native_session_id'):
-                raise ValueError('No native session ID recorded. Use `mv2 session-bind --agent AGENT --session-id UUID` '
-                                 'with the ID from the harness, then resume. No latest-session fallback is used.')
-            self.validate_session_id(properties['native_session_id'])
-        elif any('{session_file}' in arg for arg in self.spec['resume']) and not (agent_dir / 'session.jsonl').is_file():
-            raise ValueError('Native session file is missing; refusing to create a fresh session on resume')
-
     def _launch_command(self, context: LaunchContext):
         if context.mode not in self.spec:
             raise ValueError(f'Harness does not support {context.mode}')
@@ -113,14 +100,19 @@ class ConfiguredAdapter:
         return self._launch_command(replace(context, mode='spawn'))
 
     def resume(self, session: SessionHandle, context: LaunchContext) -> CommandSpec:
+        if 'resume' not in self.spec:
+            raise ValueError('Harness does not support resume')
         if session.harness != self.name:
             raise ValueError('Resume session belongs to a different harness')
         if self.session_mode != 'file' and not session.native_id:
-            raise ValueError('An exact native session ID is required to resume')
-        if any('{session_file}' in arg for arg in self.spec.get('resume', [])) and not session.session_file:
-            raise ValueError('An exact native session file is required to resume')
+            raise ValueError('No native session ID recorded. Bind the exact native session ID with '
+                             '`mv2 session-bind --agent AGENT --session-id UUID` before resuming; no fallback is used.')
+        native_id = normalize_session_id(session.native_id) if session.native_id is not None else ''
+        if any('{session_file}' in arg for arg in self.spec['resume']):
+            if not session.session_file or not Path(session.session_file).is_file():
+                raise ValueError('Native session file is missing; refusing to create a fresh session on resume')
         values = {**context.values, 'agent_id': session.agent_id,
-                  'session_id': session.native_id or '', 'session_file': session.session_file or '',
+                  'session_id': native_id, 'session_file': session.session_file or '',
                   'workspace': session.workspace}
         return self._launch_command(replace(context, mode='resume', values=values))
 

@@ -29,18 +29,14 @@ class FourthAdapter:
         return CommandSpec((sys.executable, '-c', 'pass'))
 
     def resume(self, session, context):
+        if not session.native_id:
+            raise ValueError('Missing saved native session')
         self.calls.append(('resume', session, context))
         return CommandSpec((sys.executable, '-c', 'pass'))
 
     def stop(self, session, executor):
         self.calls.append(('stop', session))
         return NativeResult('ok')
-
-    def validate_resume(self, properties, directory):
-        assert properties['native_session_id']
-
-    def validate_session_id(self, value):
-        return value
 
     def capabilities(self, session, executor=None):
         return {key: Capability('supported') for key in CAPABILITIES}
@@ -91,6 +87,27 @@ class OperationTest(BaseTest):
         self.assertEqual(target.workspace, first['workspace'])
         self.assertEqual(target.session_file, first['session_file'])
         self.assertEqual(target.launch_id, first['launch_id'])
+
+    def test_rejected_resume_preserves_saved_state_and_creates_no_launch(self):
+        properties = (self.directory / 'properties.json').read_bytes()
+        runtime = (self.directory / 'runtime.json').read_bytes()
+        launches = list((self.directory / 'launches').iterdir())
+        with patch.object(self.adapter, 'resume', side_effect=ValueError('Invalid saved session')), \
+                patch.object(agents, 'Tmux') as terminal:
+            with self.assertRaisesRegex(ValueError, 'Invalid saved session'):
+                LocalBackend().resume(self.root, self.agent)
+            terminal.assert_not_called()
+        self.assertEqual((self.directory / 'properties.json').read_bytes(), properties)
+        self.assertEqual((self.directory / 'runtime.json').read_bytes(), runtime)
+        self.assertEqual(list((self.directory / 'launches').iterdir()), launches)
+
+    def test_binding_normalizes_uuid_without_an_adapter_validation_hook(self):
+        bound = agents.bind_session(self.root, self.agent, self.agent.upper())
+        self.assertEqual(bound['native_session_id'], self.agent)
+        for invalid in ('not-a-uuid', None, 123):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'must be a UUID'):
+                agents.bind_session(self.root, self.agent, invalid)
+        self.assertEqual(read(self.directory / 'properties.json'), bound)
 
     def test_one_send_persists_then_routes_both_modes_and_literal_identity(self):
         for mode in ('steer', 'follow-up'):

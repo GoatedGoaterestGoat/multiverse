@@ -55,9 +55,11 @@ Launch operations return process specifications; core owns actual process/tmux
 creation. `spawn(context)` takes launch options; `resume(session, context)` also
 takes the exact saved `SessionHandle`. The session supplies the authoritative
 agent/native IDs, session file and workspace; launch options cannot override
-that identity. Core validates the saved target before launching. The injected
-executor owns subprocess/RPC deadlines and terminal ownership checks; the provider interprets native replies. Internal command/RPC
-plans are never public send results. There is no new model loop, simulated chat
+that identity. `resume()` validates the saved target before returning its command;
+core does not create a launch record or start a process if it rejects the target.
+The injected executor owns subprocess/RPC deadlines and terminal ownership
+checks; the provider interprets native replies. Internal command/RPC plans are
+never public send results. There is no new model loop, simulated chat
 UI, or fallback that invokes another model to forward a message.
 
 Core owns universes, agent IDs, launch generations, environment scrubbing,
@@ -142,8 +144,11 @@ The old `native-status` command remains a tool compatibility shim for usage.
 Its activity operation reports unavailable and points callers to `list`; there
 is no native activity query or adapter `observe` operation. Adapters expose
 feature methods directly, with no `control`, `native_capabilities`, `probes`, or
-`NativeContext` conversion layer. `validate_session_id` explicitly validates an
-ID; it does not discover a session.
+`NativeContext` conversion layer. Resume validation is part of `resume()`, not
+a separate adapter method. Binding and built-in resume use the shared
+`normalize_session_id()` UUID helper; it validates an ID without discovering a
+session. Pi additionally checks its exact session-file header, while Codex
+checks unsupported resume permission overrides before any native RPC.
 
 ## Configuration and compatibility
 

@@ -21,8 +21,7 @@ class CodexAdapter(ConfiguredAdapter):
                        for arg in self.settings.get(key, [])):
                     raise ValueError('inbox_bridge conflicts with a custom --remote or --no-daemon argument')
 
-    def validate_resume(self, properties, agent_dir):
-        super().validate_resume(properties, agent_dir)
+    def resume(self, session, context):
         settings = getattr(self, 'settings', {})
         if settings.get('inbox_bridge'):
             permission_flags = {'--sandbox', '-s', '--ask-for-approval', '-a', '--add-dir', '--approve-for-me',
@@ -32,6 +31,7 @@ class CodexAdapter(ConfiguredAdapter):
                 raise ValueError('Codex native remote resume rejects explicit permission/profile overrides. '
                                  'Use spawn_args for initial grants; native resume retains saved permissions. '
                                  'Your configuration has not been changed.')
+        return super().resume(session, context)
 
     def _launch_command(self, context):
         command = super()._launch_command(context)
