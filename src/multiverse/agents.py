@@ -50,7 +50,7 @@ def listing(root, recursive=False):
                 facts = runtime(path.parent)
                 observation = observe(properties, facts, snapshots)
                 from . import native, usage
-                measured = native.observation(scope, properties, facts)
+                measured = native.usage_snapshot(scope, properties, facts)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
                              "activity": facts.get("activity", "unknown") if observation["live"] == "alive" else "—",
@@ -112,6 +112,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         previous = runtime(agent_dir)
         if previous and observe(properties, previous)["live"] != "stopped":
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
+        session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
         launch = agent_dir / "launches" / launch_id
         launch.mkdir(parents=True)
@@ -132,7 +133,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values['control_socket'] = str(service_dir / 'rpc.sock')
         context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})})
-        command = adapter.resume(context) if resume else adapter.spawn(context)
+        command = adapter.resume(session, context) if resume else adapter.spawn(context)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
@@ -179,7 +180,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 executor = NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor)
             if command.shared_service:
-                command = adapter.resume(context) if resume else adapter.spawn(context)
+                command = adapter.resume(session, context) if resume else adapter.spawn(context)
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint)

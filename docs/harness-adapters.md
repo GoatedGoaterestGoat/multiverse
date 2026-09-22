@@ -11,14 +11,14 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
 | `ask` | Answer an isolated side question without adding it to the main conversation. |
 | `get_usage` | Return measured cumulative session usage, or an explicit unavailable/error result. |
-| `observe` | Report launch/session state and available native activity; unknown remains unknown. |
 
 `harnesses/types.py` defines `HarnessAdapter`, `SessionHandle`, `Message`, results
 and the execution boundary. A handle contains the stable Multiverse agent ID,
 provider name, exact native ID/session file, saved workspace, and current launch
 ID. Core derives it from authoritative properties/runtime records; it does not
 maintain another copy of those records. Spawn/resume return `session` in their
-result. `observe` exposes the current handle after asynchronous identity binding.
+result. `list` reads current core identity, process state and reported activity after
+asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID; Pi owns an
 exact session file and its bridge reports its UUID. Codex currently still uses
@@ -50,10 +50,13 @@ assets and native probe interpretation live in their provider folders. The
 registry only resolves the configured implementation. A provider need not inherit
 from the rendering base: the contract test uses an independent fourth provider.
 
-Adapters return native results from `send`, `ask`, `get_usage` and `observe`.
+Adapters return native results from `send`, `ask` and `get_usage`.
 Launch operations return process specifications; core owns actual process/tmux
-creation. The injected executor owns subprocess/RPC deadlines and terminal
-ownership checks; the provider interprets native replies. Internal command/RPC
+creation. `spawn(context)` takes launch options; `resume(session, context)` also
+takes the exact saved `SessionHandle`. The session supplies the authoritative
+agent/native IDs, session file and workspace; launch options cannot override
+that identity. Core validates the saved target before launching. The injected
+executor owns subprocess/RPC deadlines and terminal ownership checks; the provider interprets native replies. Internal command/RPC
 plans are never public send results. There is no new model loop, simulated chat
 UI, or fallback that invokes another model to forward a message.
 
@@ -73,15 +76,15 @@ mv2 send worker --text 'Consider this now' --delivery steer
 mv2 send worker --text 'Next, inspect the tests' --delivery follow-up
 mv2 ask worker --question 'What would this alternative cost?'
 mv2 get-usage worker
-mv2 observe worker
+mv2 list --json
 mv2 capabilities --agent worker --probe
 ```
 
 The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
-Public capabilities are `spawn`, `resume`, `send_steer`, `send_follow_up`, `ask`,
-`get_usage`, `observe`, and `get_delivery`. Support may depend on configuration and a registered,
+Public capabilities are `spawn`, `resume`, `stop`, `send_steer`, `send_follow_up`,
+`ask`, `get_usage`, and `get_delivery`. Support may depend on configuration and a registered,
 running native session. Discovery returns supported/unavailable/error plus a reason.
 
 `send` first persists the message with a stable UUID, sender and optional
@@ -135,7 +138,9 @@ Pi supports receipt reconciliation against its exact transcript and current
 in-process acceptance records. Missing evidence remains unknown. Codex checks up to 100 queued submissions and 20 recent turns by exact client
 message ID; absence remains unknown and requires investigation. Accepted submissions are never automatically resubmitted.
 
-The old `native-status` command remains a tool compatibility shim. Adapters expose
+The old `native-status` command remains a tool compatibility shim for usage.
+Its activity operation reports unavailable and points callers to `list`; there
+is no native activity query or adapter `observe` operation. Adapters expose
 feature methods directly, with no `control`, `native_capabilities`, `probes`, or
 `NativeContext` conversion layer. `validate_session_id` explicitly validates an
 ID; it does not discover a session.

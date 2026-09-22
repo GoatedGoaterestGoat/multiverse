@@ -10,8 +10,5 @@ class ClaudeAdapter(ConfiguredAdapter):
     def spawn(self, context):
         return super().spawn(context)
 
-    def resume(self, context):
-        return super().resume(context)
-
     def send(self, session, message, executor):
         return NativeResult('unavailable', 'No verified Mods/channel bridge attached to this Claude terminal')

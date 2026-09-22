@@ -1,5 +1,5 @@
 """Independent adapter contracts and core native execution with no provider calls."""
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import os
 from pathlib import Path
@@ -26,6 +26,10 @@ class AdapterContractTest(BaseTest):
                     agent_dir=str(self.work / 'agent'), harness_dir='/local/harness', session_file='/agent/session.jsonl',
                     bootstrap_file='/launch/bootstrap.md', task_file='/launch/task.md', workspace=str(self.work), model='chosen', control_socket='/tmp/owned/rpc.sock')
 
+    def session(self, name, values):
+        return SessionHandle(values['agent_id'], name, values['workspace'],
+                             native_id=values['session_id'], session_file=values['session_file'])
+
     def test_builtins_and_legacy_have_equivalent_launches(self):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):
@@ -33,7 +37,8 @@ class AdapterContractTest(BaseTest):
                 legacy = harnesses.LegacyAdapter(name, read(harnesses.PACKAGES / name / 'defaults.json'))
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
-                    self.assertEqual(getattr(adapter, mode)(context), getattr(legacy, mode)(context))
+                    args = (self.session(name, context.values), context) if mode == 'resume' else (context,)
+                    self.assertEqual(getattr(adapter, mode)(*args), getattr(legacy, mode)(*args))
                 self.assertEqual(set(adapter.capabilities(SessionHandle("agent", name, str(self.work)))), set(CAPABILITIES))
                 for required in ('spawn', 'resume', 'send_steer', 'send_follow_up'):
                     self.assertTrue(adapter.capabilities(SessionHandle("agent", name, str(self.work)))[required].required)
@@ -47,7 +52,8 @@ class AdapterContractTest(BaseTest):
         write(config, data)
         original = config.read_bytes()
         adapter = harnesses.load(self.root, 'codex')
-        result = adapter.resume(LaunchContext('resume', self.values(), adapter.default_model))
+        values = self.values()
+        result = adapter.resume(self.session('codex', values), LaunchContext('resume', values, adapter.default_model))
         self.assertEqual(result.argv[0], '/custom/codex')
         self.assertIn('/custom/worktree', result.argv)
         self.assertIn('read-only', result.argv)
@@ -106,10 +112,39 @@ class AdapterContractTest(BaseTest):
         self.assertIn('chosen', command.argv)
         with self.assertRaisesRegex(ValueError, 'saved permissions'):
             adapter.validate_resume({'native_session_id': str(uuid4())}, self.work)
-        resumed = adapter.resume(LaunchContext('resume', values, 'chosen'))
+        resumed = adapter.resume(self.session('codex', values), LaunchContext('resume', values, 'chosen'))
         self.assertIn('/custom', resumed.argv, 'User arguments must never be silently removed')
         self.assertNotIn(values['agent_dir'], resumed.argv, 'Native resume inherits the source-owned writable grant')
         self.assertEqual(path.read_bytes(), original)
+
+    def test_resume_uses_explicit_session_not_launch_template_identity(self):
+        for name in harnesses.BUILTINS:
+            adapter = harnesses.load(self.root, name)
+            legacy = harnesses.LegacyAdapter(name, {
+                'spawn': ['custom'],
+                'resume': ['custom', '{agent_id}', '{session_id}', '{session_file}', '{workspace}'],
+            })
+            values = self.values()
+            session = self.session(name, values)
+            other = {**values, 'agent_id': 'wrong-agent', 'session_id': str(uuid4()),
+                     'session_file': '/wrong/session.jsonl', 'workspace': '/wrong/worktree'}
+            for implementation in (adapter, legacy):
+                with self.subTest(name=name, implementation=type(implementation).__name__):
+                    expected = implementation.resume(session, LaunchContext('resume', values, 'chosen'))
+                    actual = implementation.resume(session, LaunchContext('resume', other, 'chosen'))
+                    self.assertEqual(actual, expected)
+                    with self.assertRaisesRegex(ValueError, 'different harness'):
+                        implementation.resume(replace(session, harness='another'), LaunchContext('resume', values))
+
+    def test_resume_never_falls_back_to_launch_template_session(self):
+        for name in harnesses.BUILTINS:
+            with self.subTest(name=name):
+                adapter = harnesses.load(self.root, name)
+                values = self.values()
+                session = self.session(name, values)
+                missing = replace(session, session_file=None) if name == 'pi' else replace(session, native_id=None)
+                with self.assertRaisesRegex(ValueError, 'exact native session'):
+                    adapter.resume(missing, LaunchContext('resume', values))
 
     def test_shared_daemon_launch_preserves_environment_preferences_and_literal_prompt(self):
         path = self.root / 'harnesses/codex/harness.json'

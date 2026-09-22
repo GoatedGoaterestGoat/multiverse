@@ -14,8 +14,8 @@ class PiAdapter(ConfiguredAdapter):
     def spawn(self, context):
         return self._with_extension(super().spawn(context), context)
 
-    def resume(self, context):
-        return self._with_extension(super().resume(context), context)
+    def resume(self, session, context):
+        return self._with_extension(super().resume(session, context), context)
 
     def _with_extension(self, command, context):
         if not self.settings.get('inbox_bridge'):

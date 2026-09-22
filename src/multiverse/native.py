@@ -134,13 +134,13 @@ def capabilities(root, reference, run_probe=False):
     return {name: asdict(value) for name, value in adapter.capabilities(session, executor if run_probe else None).items()}
 
 
-def observation(root, properties, facts, operation='usage'):
+def usage_snapshot(root, properties, facts):
     """Nonblocking snapshot: optional failures are data, never UI exceptions."""
     try:
         adapter = harnesses.load(root, properties['harness'])
         directory = root / 'state' / 'agents' / properties['id']
         session = SessionHandle.from_records(properties, facts, directory)
-        return (adapter.get_usage(session) if operation == 'usage' else adapter.observe(session)).to_dict()
+        return adapter.get_usage(session).to_dict()
     except Exception as error:
         return NativeResult('error', str(error)).to_dict()
 
@@ -156,11 +156,6 @@ def operation(root, reference, name, question=''):
                 result = adapter.ask(session, question, executor)
             elif name == 'get_usage':
                 result = adapter.get_usage(session, executor)
-            elif name == 'observe':
-                result = adapter.observe(session, executor)
-                if result.state == 'ok':
-                    result = NativeResult('ok', result.reason, {**(result.value or {}),
-                        **agents.observe(executor.properties, executor.facts)})
             else:
                 return NativeResult('unavailable', f'Unknown operation: {name}').to_dict()
             return result.to_dict()
@@ -170,8 +165,10 @@ def operation(root, reference, name, question=''):
 
 def control(root, reference, operation_name):
     """Compatibility for the old native-status tool; new callers use named operations."""
-    if operation_name in ('usage', 'activity'):
-        return operation(root, reference, {'usage': 'get_usage', 'activity': 'observe'}[operation_name])
+    if operation_name == 'usage':
+        return operation(root, reference, 'get_usage')
+    if operation_name == 'activity':
+        return NativeResult('unavailable', 'Native activity is not implemented; use list for core launch state').to_dict()
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 

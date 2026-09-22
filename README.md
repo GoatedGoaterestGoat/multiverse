@@ -63,7 +63,7 @@ Python callers use, for example,
 errors raised, while shell entry points format output and exit codes.
 
 `send` saves the durable record and attempts native delivery through the common
-adapter protocol. `ask`, `get-usage` and `observe` use the same tools from CLI and
+adapter protocol. `ask` and `get-usage` use the same tools from CLI and
 backend. Unsupported operations are explicit; no terminal keystroke delivery is introduced.
 
 ## Files and ownership
@@ -157,11 +157,11 @@ The title and accent style its group row and agents in the parent hierarchy. The
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core owns a native app-server for that launch and attaches the native TUI to it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
 
 ## Harness definitions
 
-Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `observe` returns its current identity and state. `ask` and `get-usage` are explicit operations and currently report unavailable for bundled providers.
+Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations and currently report unavailable for bundled providers.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 

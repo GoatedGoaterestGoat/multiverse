@@ -1,5 +1,4 @@
 """Operation contract: an unknown provider works without edits to tools or UI."""
-from dataclasses import asdict
 from pathlib import Path
 import sys
 from unittest.mock import Mock, patch
@@ -10,7 +9,7 @@ from multiverse.cli import parser
 from multiverse.dashboard import LocalBackend
 from multiverse.harnesses.types import CAPABILITIES, Capability, CommandSpec, NativeResult, SessionHandle
 from multiverse.store import inbox, read, write
-from multiverse.tools import ask, get_usage, observe, send, spawn
+from multiverse.tools import ask, get_usage, send, spawn
 from test_multiverse import BaseTest
 
 
@@ -29,8 +28,8 @@ class FourthAdapter:
         self.calls.append(('spawn', context))
         return CommandSpec((sys.executable, '-c', 'pass'))
 
-    def resume(self, context):
-        self.calls.append(('resume', context))
+    def resume(self, session, context):
+        self.calls.append(('resume', session, context))
         return CommandSpec((sys.executable, '-c', 'pass'))
 
     def stop(self, session, executor):
@@ -60,9 +59,6 @@ class FourthAdapter:
         self.calls.append(('get_usage', session))
         return NativeResult('ok', value={'native_session_id': session.native_id, 'total_tokens': 0})
 
-    def observe(self, session, executor=None):
-        return NativeResult('ok', value={'session': asdict(session), 'activity': 'idle'})
-
 
 class OperationTest(BaseTest):
     def setUp(self):
@@ -89,6 +85,12 @@ class OperationTest(BaseTest):
             self.assertEqual(resumed[key], first[key])
         self.assertNotEqual(resumed['launch_id'], first['launch_id'])
         self.assertEqual([call[0] for call in self.adapter.calls], ['spawn', 'resume'])
+        target = self.adapter.calls[-1][1]
+        self.assertIsInstance(target, SessionHandle)
+        self.assertEqual(target.native_id, first['native_id'])
+        self.assertEqual(target.workspace, first['workspace'])
+        self.assertEqual(target.session_file, first['session_file'])
+        self.assertEqual(target.launch_id, first['launch_id'])
 
     def test_one_send_persists_then_routes_both_modes_and_literal_identity(self):
         for mode in ('steer', 'follow-up'):
@@ -126,13 +128,12 @@ class OperationTest(BaseTest):
         self.assertEqual(retried['message_id'], failed['id'])
         self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
 
-    def test_ask_usage_observe_share_tools_without_main_conversation_mutation(self):
+    def test_ask_usage_share_tools_without_main_conversation_mutation(self):
         properties = read(self.directory / 'properties.json')
         question = 'What about this edge case?'
         self.assertEqual(ask.run(self.root, agent=self.agent, question=question),
                          LocalBackend().ask(self.root, self.agent, question))
         self.assertEqual(get_usage.run(self.root, agent=self.agent), LocalBackend().get_usage(self.root, self.agent))
-        self.assertEqual(observe.run(self.root, agent=self.agent), LocalBackend().observe(self.root, self.agent))
         self.assertEqual(read(self.directory / 'properties.json'), properties)
         self.assertEqual(inbox(self.directory)['messages'], [])
         self.assertFalse((self.directory / 'native-delivery.json').exists())

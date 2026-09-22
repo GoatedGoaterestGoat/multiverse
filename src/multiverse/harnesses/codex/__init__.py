@@ -81,9 +81,6 @@ class CodexAdapter(ConfiguredAdapter):
     def spawn(self, context):
         return super().spawn(context)
 
-    def resume(self, context):
-        return super().resume(context)
-
     def stop(self, session, executor):
         if not session.endpoint:
             return super().stop(session, executor)

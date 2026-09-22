@@ -1,5 +1,5 @@
 """Shared argv rendering and default operations; provider behavior stays in provider packages."""
-from dataclasses import asdict, replace
+from dataclasses import replace
 import json
 from string import Formatter
 from uuid import UUID
@@ -112,8 +112,17 @@ class ConfiguredAdapter:
     def spawn(self, context: LaunchContext) -> CommandSpec:
         return self._launch_command(replace(context, mode='spawn'))
 
-    def resume(self, context: LaunchContext) -> CommandSpec:
-        return self._launch_command(replace(context, mode='resume'))
+    def resume(self, session: SessionHandle, context: LaunchContext) -> CommandSpec:
+        if session.harness != self.name:
+            raise ValueError('Resume session belongs to a different harness')
+        if self.session_mode != 'file' and not session.native_id:
+            raise ValueError('An exact native session ID is required to resume')
+        if any('{session_file}' in arg for arg in self.spec.get('resume', [])) and not session.session_file:
+            raise ValueError('An exact native session file is required to resume')
+        values = {**context.values, 'agent_id': session.agent_id,
+                  'session_id': session.native_id or '', 'session_file': session.session_file or '',
+                  'workspace': session.workspace}
+        return self._launch_command(replace(context, mode='resume', values=values))
 
     def stop(self, session: SessionHandle, executor: Executor) -> NativeResult:
         return NativeResult('ok', 'Core stops the owned terminal process')
@@ -125,7 +134,6 @@ class ConfiguredAdapter:
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
             result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
-        result['observe'] = Capability('supported', 'Core launch state; native activity may be unknown')
         return result
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
@@ -139,7 +147,3 @@ class ConfiguredAdapter:
 
     def get_usage(self, session: SessionHandle, executor: Executor | None = None) -> NativeResult:
         return NativeResult('unavailable', 'No measured native session usage collector')
-
-    def observe(self, session: SessionHandle, executor: Executor | None = None) -> NativeResult:
-        return NativeResult('ok', value={'session': asdict(session),
-                                        'state': session.state, 'activity': session.activity})
