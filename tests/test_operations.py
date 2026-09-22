@@ -9,7 +9,7 @@ from multiverse.cli import parser
 from multiverse.dashboard import LocalBackend
 from multiverse.harnesses.types import CAPABILITIES, Capability, CommandSpec, NativeResult, SessionHandle
 from multiverse.store import inbox, read, write
-from multiverse.tools import ask, get_usage, send, spawn
+from multiverse.tools import ask, deliver, get_usage, send, spawn
 from test_multiverse import BaseTest
 
 
@@ -46,6 +46,10 @@ class FourthAdapter:
         if self.failure:
             raise RuntimeError(self.failure)
         return NativeResult('native_queued', value={'message_id': message.id})
+
+    def get_delivery(self, session, message_id, executor):
+        self.calls.append(('get_delivery', session, message_id))
+        return NativeResult('native_queued', value={'message_id': message_id, 'transcript_confirmed': True})
 
     def ask(self, session, question, executor):
         self.calls.append(('ask', session, question))
@@ -144,6 +148,15 @@ class OperationTest(BaseTest):
         self.assertEqual(retried['state'], 'unknown')
         self.assertEqual(retried['message_id'], failed['id'])
         self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
+
+    def test_backend_delivery_recovery_matches_tools_without_resubmitting(self):
+        message = send.run(self.root, agent=self.agent, text='Check my receipt', delivery='follow-up')
+        backend = LocalBackend()
+        self.assertEqual(backend.deliver(self.root, self.agent, message['id'], check=True),
+                         deliver.run(self.root, agent=self.agent, message_id=message['id'], check=True))
+        self.assertEqual(backend.deliver(self.root, self.agent, message['id'], retry=True),
+                         deliver.run(self.root, agent=self.agent, message_id=message['id'], retry=True))
+        self.assertEqual(len([call for call in self.adapter.calls if call[0] == 'send']), 1)
 
     def test_ask_usage_share_tools_without_main_conversation_mutation(self):
         properties = read(self.directory / 'properties.json')

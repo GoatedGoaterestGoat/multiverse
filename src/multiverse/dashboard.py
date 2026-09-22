@@ -111,8 +111,8 @@ class LocalBackend:
     def capabilities(self, root, reference, probe=False):
         return capabilities.run(root, agent=reference, probe=probe)
 
-    def deliver(self, root, reference, message_id, retry=False, mode=None):
-        return deliver.run(root, agent=reference, message_id=message_id, retry=retry, mode=mode)
+    def deliver(self, root, reference, message_id, retry=False, check=False):
+        return deliver.run(root, agent=reference, message_id=message_id, retry=retry, check=check)
 
     def native_status(self, root, reference, operation="usage"):
         return native_status.run(root, agent=reference, operation=operation)
