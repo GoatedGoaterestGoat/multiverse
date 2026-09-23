@@ -17,7 +17,14 @@ uv sync
 
 The checkout-only example in `examples/tui_demo.py` has a project universe, PR review and CAD subverses, nested verification, and sample agents. Its actions operate entirely in memory; it needs no tmux, model account or existing universe. The checkout launcher automatically uses `.venv` after setup.
 
-For real work:
+For real work, run `mv2` (or `./bin/mv2` from the checkout) without a command to
+open the dashboard. It reuses the current or nearest parent universe; if none
+exists, it initializes `.multiverse/` in the current directory with the bundled
+base template. This does not launch any agents. Explicit `-u` and
+`MV2_UNIVERSE` selections are respected and must already exist. Commands such as
+`mv2 tui`, `mv2 init` and `mv2 --help` retain their existing behavior.
+
+For example:
 
 ```sh
 ./bin/mv2 init /path/to/project

@@ -1,7 +1,10 @@
 """Compatibility command line; each action lives in tools/<name>.py."""
 import argparse
+import os
+from pathlib import Path
 from importlib import import_module
 
+from . import universe
 from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
@@ -16,9 +19,9 @@ def tool(action):
 
 
 def parser():
-    result = argparse.ArgumentParser(description="Local prompt-led universes. No daemon or MCP required.")
+    result = argparse.ArgumentParser(description="Local prompt-led universes. With no command, open the dashboard.")
     add_universe(result)
-    commands = result.add_subparsers(dest="action", required=True)
+    commands = result.add_subparsers(dest="action")
     for action in COMMANDS:
         module = tool(action)
         module.configure(commands.add_parser(action, help=module.__doc__))
@@ -28,6 +31,15 @@ def parser():
 def run(args):
     values = vars(args).copy()
     action = values.pop("action")
+    if action is None:
+        action = "tui"
+        if values["root"] is None and not os.environ.get("MV2_UNIVERSE"):
+            try:
+                values["root"] = universe.resolve()
+            except universe.UniverseNotFoundError:
+                cwd = Path.cwd()
+                values["root"] = universe.create(cwd / ".multiverse", cwd.name,
+                                                template=str(universe.TEMPLATES / "base"), workdir=cwd)
     return tool(action).run(**values)
 
 
