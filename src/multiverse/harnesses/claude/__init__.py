@@ -40,11 +40,12 @@ class ClaudeAdapter(ConfiguredAdapter):
         if not session and found != 'absent':
             raise ValueError('New Claude identity could not be verified absent in accessible storage. ' + RECOVERY)
         argv = list(command.argv)
+        options = argv[:argv.index('--')] if '--' in argv else argv
         flag = '--resume' if session else '--session-id'
-        if argv.count(flag) != 1 or argv[argv.index(flag) + 1:argv.index(flag) + 2] != [session_id]:
+        if options.count(flag) != 1 or options[options.index(flag) + 1:options.index(flag) + 2] != [session_id]:
             raise ValueError('Claude launch recipe must target exactly the recorded session UUID')
         if any(arg.split('=')[0] in ('--continue', '-c', '-r', '--fork-session', '--worktree', '-w', '--no-session-persistence')
-               or arg.startswith(('--resume=', '--session-id=')) for arg in argv) or ('--resume' in argv and '--session-id' in argv):
+               or arg.startswith(('--resume=', '--session-id=')) for arg in options) or ('--resume' in options and '--session-id' in options):
             raise ValueError('Claude launch options conflict with exact persistent session identity')
         if fresh:
             # Keep all local resume flags, bootstrap and model; never replay the original task.

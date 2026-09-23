@@ -90,6 +90,15 @@ class AdapterContractTest(BaseTest):
                 self.assertNotIn('@' + values['task_file'], command.argv)
                 self.assertIn('chosen', command.argv)
 
+    def test_claude_session_option_words_after_terminator_remain_literal_prompts(self):
+        adapter = harnesses.load(self.root, 'claude')
+        for prompt in ('--resume', '--session-id', '--continue', '--fork-session', '--worktree'):
+            with self.subTest(prompt=prompt):
+                values = {**self.values(), 'task': prompt}
+                command = adapter.spawn(LaunchContext('spawn', values, environment=self.claude_env))
+                self.assertEqual(command.argv[-2:], ('--', prompt))
+                self.assertFalse(command.claude_session['never_initialized'])
+
     def test_unsupported_side_questions_never_execute_native_commands(self):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name), patch.object(native, 'execute') as execute, patch.object(native, 'execute_rpc') as rpc:
