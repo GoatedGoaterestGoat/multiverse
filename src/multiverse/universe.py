@@ -16,6 +16,10 @@ def slug(name):
     return name
 
 
+class UniverseNotFoundError(ValueError):
+    """No universe exists at the selected path or its ancestors."""
+
+
 def resolve(path=None):
     path = Path(path or os.environ.get("MV2_UNIVERSE", Path.cwd())).resolve()
     for directory in (path, *path.parents):
@@ -24,7 +28,7 @@ def resolve(path=None):
                 if read(candidate / "universe.json").get("schema") != 1:
                     raise ValueError(f"Unsupported universe schema: {candidate}")
                 return candidate
-    raise ValueError(f"No universe found at or above {path}; run mv2 init")
+    raise UniverseNotFoundError(f"No universe found at or above {path}; run mv2 init")
 
 
 def workspace(root):
