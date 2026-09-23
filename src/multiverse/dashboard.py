@@ -120,6 +120,9 @@ class LocalBackend:
     def resume(self, root, reference):
         return resume.run(root, agent=reference)
 
+    def start_empty(self, root, reference):
+        return resume.run(root, agent=reference, start_empty=True)
+
     def stop(self, root, reference):
         return stop.run(root, agent=reference)
 

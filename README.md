@@ -129,6 +129,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | n / m | Spawn in selected group / message selected agent |
 | g | Create a subverse inside the selected group |
 | s / r | Stop after confirmation / resume |
+| e | Start empty Claude conversation after confirmation |
 | v / p | Full details / show or hide inspector |
 | ? / q | Keyboard help / quit dashboard |
 | F5 / Ctrl-p | Refresh / command palette |
@@ -177,7 +178,11 @@ A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` arg
 | `{model}` | Explicit model override; omitted flags use the native default |
 | `{session_file}`, `{session_id}` | File-based session path or recorded native UUID |
 
-`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Activity remains `unknown` unless reported; liveness still comes from tagged tmux panes.
+`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude verifies saved history before resuming that UUID; assignment alone does not establish a saved conversation. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Activity remains `unknown` unless reported; liveness still comes from tagged tmux panes.
+
+Claude launches pin their provider HOME/storage and workspace. A known unused session can restart with the same `--session-id`; missing previously used history, inaccessible storage, or older records without storage provenance block automatic recovery. `mv2 resume AGENT --start-empty` (dashboard `e`, **Start empty conversation**) explicitly assigns a new Claude UUID to the same agent, retaining old history and identity records. It does not replay the original task. These checks also apply to schema-1 Claude definitions without rewriting their configuration.
+
+Claude launch failures retain an exit code and bounded, sanitized common-error descriptions per launch. `mv2 inspect AGENT` and the dashboard inspector can show those diagnostics after the pane disappears. Raw terminal output and credentials are not saved; unrecognized errors retain only their exit code.
 
 Existing schema-1 definitions and assets remain authoritative and are never rewritten on package update. Opting into schema 2 is explicit: preserve every local model, argument, permission and workspace preference; keep schema 1 for behavior that cannot be represented. No live-universe migration is automatic.
 

@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from .claude import ClaudeAdapter
+from .claude import ClaudeAdapter, LegacyClaudeAdapter
 from .codex import CodexAdapter
 from .legacy import LegacyAdapter, arguments
 from .pi import PiAdapter
@@ -22,7 +22,7 @@ def load(root: Path, name: str) -> HarnessAdapter:
         raise ValueError('Harness configuration must be an object')
     if config.get('schema') == 1:
         # A legacy file is authoritative; do not rewrite arguments, permissions or assets.
-        return LegacyAdapter(name, config)
+        return (LegacyClaudeAdapter if name == 'claude' else LegacyAdapter)(name, config)
     if config.get('schema') != 2:
         raise ValueError('Unsupported harness schema')
     unknown = set(config) - {'schema', 'adapter', 'description', 'settings'}

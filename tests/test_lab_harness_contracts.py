@@ -27,7 +27,8 @@ class LabHarnessContracts(unittest.TestCase):
         self.backend.return_value.create.return_value = {
             'socket': self.socket, 'session': '$offline', 'pane': '%offline'}
         self.patches.enter_context(patch('multiverse.agents.shutil.which', return_value=sys.executable))
-        self.patches.enter_context(patch.dict(os.environ, MV2_TMUX_SOCKET=self.socket))
+        self.patches.enter_context(patch.dict(os.environ, MV2_TMUX_SOCKET=self.socket,
+                                            HOME=str(self.work / 'home'), CLAUDE_CONFIG_DIR=str(self.work / 'claude')))
 
     def start(self, **kwargs):
         return agents.start(self.root, name='offline', task='literal $(false) `false`\nquoted',
@@ -68,6 +69,12 @@ class LabHarnessContracts(unittest.TestCase):
                 if harness == 'codex':
                     native = str(uuid4())
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
+                if harness == 'claude':
+                    from multiverse.harnesses.claude.history import location
+                    path = location(row['native_environment'], row['workspace'], native)
+                    path.parent.mkdir(parents=True)
+                    path.write_text(__import__('json').dumps({'type': 'user', 'sessionId': native,
+                                                             'cwd': row['workspace'], 'message': 'saved'}) + '\n')
                 if harness == 'pi':
                     (directory / 'session.jsonl').write_text(__import__('json').dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
                 with patch('multiverse.agents.observe', return_value={'live': 'stopped'}):

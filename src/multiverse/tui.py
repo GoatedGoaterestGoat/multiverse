@@ -31,6 +31,7 @@ AGENTS & GROUPS
 n              New agent in the selected group
 m              Message the selected agent
 s / r          Stop (with confirmation) / resume
+e              Start empty Claude conversation (with confirmation)
 v              Full agent details or group configuration
 p              Show / hide the inspector
 g              New subverse inside the selected group
@@ -215,7 +216,7 @@ class MultiverseApp(App):
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), Binding("p", "preview", "Preview", show=False),
-        Binding("r", "resume", "Resume", show=False), Binding("s", "stop", "Stop", show=False),
+        Binding("r", "resume", "Resume", show=False), Binding("e", "start_empty", "Start empty conversation", show=False), Binding("s", "stop", "Stop", show=False),
         Binding("g", "subverse", "New subverse", show=False), Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -872,6 +873,19 @@ class MultiverseApp(App):
         if self.ready() and self.selected and self.selected["live"] == "stopped":
             agent = dict(self.selected)
             self.submit_operation("Resume agent", self.backend.resume, Path(agent["universe"]), agent["id"])
+
+    def action_start_empty(self):
+        if self.ready() and self.selected and self.selected["live"] == "stopped":
+            agent = dict(self.selected)
+            if not agent.get('start_empty_supported', agent.get('harness') == 'claude'):
+                self.set_status("Start empty conversation is only supported for Claude.")
+                return
+            self.push_screen(Form(f'Start empty conversation for {agent["name"]}?', description=
+                                  "Ctrl+Enter assigns a new Claude UUID. Agent identity stays the same; old history is retained. "
+                                  "The original task is not replayed. Esc cancels."),
+                             lambda values: self.submit_operation("Start empty conversation", self.backend.start_empty,
+                                                                  Path(agent["universe"]), agent["id"])
+                             if values is not None else None)
 
     def action_attach(self):
         if self.ready() and self.selected and self.selected["live"] == "alive":

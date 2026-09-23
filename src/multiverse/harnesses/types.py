@@ -43,6 +43,8 @@ class CommandSpec:
     unset_env: tuple[str, ...] = ('CODEX_THREAD_ID', 'CLAUDECODE')
     control_endpoint: NativeEndpoint | None = None
     shared_service: SharedServiceSpec | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
+    claude_session: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -100,6 +102,8 @@ class SessionHandle:
     endpoint: NativeEndpoint | None = None
     bridge: str | None = None
     activity: str = 'unknown'
+    native_environment: Mapping[str, str] = field(default_factory=dict)
+    resume_evidence: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -108,7 +112,8 @@ class SessionHandle:
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
-                   runtime.get('native_bridge'), runtime.get('activity', 'unknown'))
+                   runtime.get('native_bridge'), runtime.get('activity', 'unknown'),
+                   properties.get('native_environment', {}), runtime.get('claude_session', {}))
 
 @dataclass(frozen=True)
 class Message:

@@ -20,6 +20,14 @@ from test_multiverse import BaseTest
 
 
 class AdapterContractTest(BaseTest):
+    def setUp(self):
+        super().setUp()
+        self.claude_env = {'HOME': str(self.work / 'home'), 'CLAUDE_CONFIG_DIR': str(self.work / 'claude')}
+        patcher = patch.dict(os.environ, self.claude_env)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        (self.work / 'claude/projects').mkdir(parents=True)
+
     def values(self):
         values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                     bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
@@ -31,14 +39,21 @@ class AdapterContractTest(BaseTest):
         return values
 
     def session(self, name, values):
+        if name == 'claude':
+            from multiverse.harnesses.claude.history import location
+            path = location(self.claude_env, values['workspace'], values['session_id'])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({'type': 'user', 'sessionId': values['session_id'],
+                                       'cwd': values['workspace'], 'message': {'content': 'saved'}}) + '\n')
         return SessionHandle(values['agent_id'], name, values['workspace'],
-                             native_id=values['session_id'], session_file=values['session_file'])
+                             native_id=values['session_id'], session_file=values['session_file'], native_environment=self.claude_env)
 
     def test_builtins_and_legacy_have_equivalent_launches(self):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):
                 adapter = harnesses.load(self.root, name)
-                legacy = harnesses.LegacyAdapter(name, read(harnesses.PACKAGES / name / 'defaults.json'))
+                legacy_type = harnesses.LegacyClaudeAdapter if name == 'claude' else harnesses.LegacyAdapter
+                legacy = legacy_type(name, read(harnesses.PACKAGES / name / 'defaults.json'))
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     args = (self.session(name, context.values), context) if mode == 'resume' else (context,)

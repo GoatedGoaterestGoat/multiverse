@@ -45,6 +45,15 @@ class HarnessFilesTest(BaseTest):
 
 
 class HarnessLaunchTest(TerminalBase):
+    def setUp(self):
+        super().setUp()
+        self.home = self.work / 'home'
+        self.home.mkdir()
+        self.storage = self.home / '.claude'
+        self.environment = patch.dict(os.environ, {'HOME': str(self.home), 'CLAUDE_CONFIG_DIR': str(self.storage)})
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+
     def fake_cli(self, harness, report=True):
         directory = self.root / "harnesses" / harness
         executable = directory / "fake-cli"
@@ -57,6 +66,8 @@ class HarnessLaunchTest(TerminalBase):
             "Path(os.environ['MV2_AGENT_DIR'], 'seen.json').write_text(json.dumps({'argv': args, "
             "'parent_markers': [key for key in ('CODEX_THREAD_ID', 'CLAUDECODE') if key in os.environ]}))\n"
             "print('HARNESS READY', flush=True)\nwhile True: time.sleep(1)\n")
+        if harness == 'claude':
+            executable.write_text(f'#!{sys.executable}\n' + (Path(__file__).parent / 'fixtures/fake_claude.py').read_text())
         executable.chmod(0o755)
         spec = read(directory / "harness.json")
         spec["settings"]["executable"] = str(executable)
@@ -64,6 +75,9 @@ class HarnessLaunchTest(TerminalBase):
 
     def stop_agent(self, agent):
         agents.terminal_action(self.root, agent["id"], "stop")
+        directory = agents.directory(self.root, agent['id'])
+        if agent['harness'] == 'claude':
+            until(lambda: agents.runtime(directory).get('claude_session', {}).get('closed'))
         time.sleep(0.1)
 
     def test_codex_and_claude_launch_literals_models_and_exact_resume(self):

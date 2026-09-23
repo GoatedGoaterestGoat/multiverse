@@ -54,11 +54,21 @@ def matches(pane, properties, runtime):
     )))
 
 
+def stopped_reason(runtime, fallback="Recorded pane is absent"):
+    diagnostic = runtime.get('diagnostics', {})
+    if diagnostic.get('launch_id') == runtime.get('launch_id'):
+        messages = diagnostic.get('messages', [])
+        code = runtime.get('exit_code', diagnostic.get('exit_code'))
+        if messages or (code not in (None, 0) and runtime.get('state') != 'stopped'):
+            return f"Claude exited ({code if code is not None else 'unknown'}). " + ('; '.join(messages) or 'No recognized safe diagnostic was emitted.')
+    return runtime.get('error') or fallback
+
+
 def observe(properties, runtime, snapshots=None):
     terminal = runtime.get("tmux")
     if not terminal:
         return {"live": "stopped" if runtime.get("state") in ("stopped", "failed") else "unknown",
-                "reason": runtime.get("error", "No recorded pane")}
+                "reason": stopped_reason(runtime, "No recorded pane")}
     if runtime.get("host") != socket.gethostname():
         return {"live": "unknown", "reason": "State belongs to a different host"}
     backend = Tmux(terminal["socket"])
@@ -72,10 +82,10 @@ def observe(properties, runtime, snapshots=None):
         return {"live": "unknown", "reason": error}
     pane = panes.get(terminal["pane"])
     if not pane:
-        return {"live": "stopped", "reason": "Recorded pane is absent"}
+        return {"live": "stopped", "reason": stopped_reason(runtime)}
     if not matches(pane, properties, runtime):
         return {"live": "stopped", "reason": "Pane belongs to a different launch"}
-    return {"live": "stopped" if pane["pane_dead"] == "1" else "alive", "reason": ""}
+    return {"live": "stopped" if pane["pane_dead"] == "1" else "alive", "reason": stopped_reason(runtime) if pane["pane_dead"] == "1" else ""}
 
 
 def owned(properties, runtime):

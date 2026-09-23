@@ -241,6 +241,21 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 await self.settle(pilot)
             self.assertEqual([call[0] for call in self.backend.calls], ["stop", "resume", "attach"])
 
+    async def test_start_empty_requires_confirmation_and_keeps_original_target(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            agent = self.app.selected
+            agent.update(harness='claude', live='stopped')
+            reference = agent['id']
+            with patch.object(self.backend, 'start_empty', create=True, return_value={}) as start:
+                await pilot.press('e')
+                self.assertIsInstance(self.app.screen, Form)
+                await pilot.press('escape')
+                start.assert_not_called()
+                await pilot.press('e', 'ctrl+enter')
+                await self.settle(pilot)
+                start.assert_called_once_with(self.backend.root, reference)
+
     async def test_create_nested_subverse_and_quit_do_not_stop_agents(self):
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)

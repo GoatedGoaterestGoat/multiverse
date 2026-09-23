@@ -44,9 +44,13 @@ def main():
                 raise ValueError('Native control socket does not belong to this launch')
             service_dir = endpoint.parent
         update_runtime(agent_dir, launch.name, state="running", activity="unknown")
-        process = subprocess.Popen(request["argv"], env=env)
-        update_runtime(agent_dir, launch.name, pid=process.pid)
-        code = process.wait()
+        if request.get('claude_session'):
+            from multiverse.claude_terminal import run
+            code = run(request['argv'], env, launch, request['claude_session'])
+        else:
+            process = subprocess.Popen(request["argv"], env=env)
+            update_runtime(agent_dir, launch.name, pid=process.pid)
+            code = process.wait()
         update_runtime(agent_dir, launch.name, state="stopped" if code == 0 else "failed", exit_code=code,
                        activity="unknown", stopped_at=now())
         return code
