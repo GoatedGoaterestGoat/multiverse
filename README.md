@@ -134,6 +134,8 @@ Pause over a row for 300 ms to inspect it: current work, harness/model, observed
 
 `g` inserts a subverse draft row the same way, asking only for a name. It inherits the parent's workspace and uses the base template; `mv2 subverse --template --workspace` covers other choices. Messages still use a compact form.
 
+`x` marks the selected agent or subverse for moving. Arrow keys, folding and clicks keep working; Enter or `x` on a group moves it there, and on an agent it moves into that agent's universe. Esc cancels, and a refused destination keeps the move pending so another can be chosen. `d` deletes to the trash after a confirmation that names what goes, including the agent count for a subverse. Both refuse running agents and the universe currently shown as the top; they call the same tools as `mv2 move` and `mv2 remove`.
+
 Filesystem and tmux work run outside the UI event loop. Stable agent keys preserve selection across refreshes. New agents and subverses belong to the selected group; selecting an agent targets its group. Drafts and dialogs capture the intended universe and recipient before submitting an action. Rendering and I/O are separated in `tui.py` and `dashboard.py` for testing.
 
 ### Agent identity

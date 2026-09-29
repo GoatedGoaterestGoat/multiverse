@@ -25,7 +25,7 @@ Enter          Enter a subverse; attach to a live agent
 Backspace      Return to the previous universe, restoring its context
 Tab            Move between hierarchy, local view and artifact links
 /              Search every subverse, including folded groups
-Esc            Clear search, or close the current dialog
+Esc            Clear search, cancel a move, or close the current dialog
 
 AGENTS & GROUPS
 n              New agent in the selected group
@@ -34,6 +34,8 @@ s / r          Stop (with confirmation) / resume
 v              Full agent details or group configuration
 p              Show / hide the inspector
 g              New subverse inside the selected group (inline, name only)
+x              Move the selected agent or subverse: choose a group, then Enter or x
+d              Delete the selected agent or subverse (to trash, with confirmation)
 F5             Refresh
 q              Quit the dashboard; agents keep running
 
@@ -211,7 +213,7 @@ class MultiverseApp(App):
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New agent"), Binding("g", "subverse", "New subverse"),
-        Binding("m", "message", "Message"),
+        Binding("m", "message", "Message"), Binding("x", "cut", "Move"), Binding("d", "remove", "Delete"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), Binding("p", "preview", "Preview", show=False),
@@ -236,6 +238,7 @@ class MultiverseApp(App):
         self.hover_key = self.hover_timer = self.leave_timer = None
         self.inspector = None
         self.draft = None
+        self.moving = None  # The row being moved while a destination is chosen.
         self._harness_options = None
         self.scan_count = 0
         self._table_signature = None
@@ -284,7 +287,11 @@ class MultiverseApp(App):
         status.set_class(error, "error")
 
     def ready(self):
-        return len(self.screen_stack) == 1 and not self.operating and self.draft is None
+        return len(self.screen_stack) == 1 and not self.operating and self.draft is None and self.moving is None
+
+    def navigable(self):
+        """Moving through the tree stays possible while a move destination is chosen."""
+        return self.ready() or (self.moving is not None and len(self.screen_stack) == 1 and not self.operating)
 
     def check_action(self, action, parameters):
         if action == "filter":
@@ -391,6 +398,10 @@ class MultiverseApp(App):
         table = self.query_one("#agents", DataTable)
         rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else self.cell(row, field)
                                   for field in fields]) for row in projected]
+        if self.moving:
+            for key, cells in rendered:
+                if key == self.moving["key"]:
+                    cells[0].append("  ⇢ moving", style="italic #f9e2af")
         signature = (list(widths.items()), rendered)
         if signature != self._table_signature:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
@@ -531,9 +542,11 @@ class MultiverseApp(App):
             self.queue_inspector(key, "selection", min(0.12, self.hover_delay))
 
     def click_row(self, key, chain):
-        if not self.ready():
+        if not self.navigable():
             return
         self.show_selection(key)
+        if self.moving:
+            return
         row = self.visible_rows.get(key)
         if row and row["kind"] == "group":
             self.enter_scope(Path(row["path"])) if chain == 2 else self.action_fold()
@@ -547,6 +560,12 @@ class MultiverseApp(App):
             self.show_selection(key)
 
     def action_open(self):
+        if self.moving and self.navigable() and self.focused is self.query_one("#agents"):
+            table = self.query_one("#agents", DataTable)
+            if 0 <= table.cursor_row < table.row_count:
+                self.show_selection(str(table.ordered_rows[table.cursor_row].key.value))
+                self.place()
+            return
         if self.ready() and self.focused is self.query_one("#agents"):
             # RowHighlighted is queued. A fast arrow+Enter can arrive before it,
             # so activation must use the actual cursor rather than its observer.
@@ -596,7 +615,7 @@ class MultiverseApp(App):
         self.refresh_snapshot()
 
     def action_fold(self):
-        if not self.ready():
+        if not self.navigable():
             return
         row = self.visible_rows.get(self.selected_key)
         if row and row["kind"] == "group":
@@ -610,6 +629,8 @@ class MultiverseApp(App):
             self.populate_table()
 
     def action_tree_left(self):
+        if not self.navigable():
+            return
         row = self.visible_rows.get(self.selected_key)
         if row and row["kind"] == "group" and row["expanded"] and not self.query_one("#filter", Input).value:
             self.action_fold()
@@ -617,6 +638,8 @@ class MultiverseApp(App):
             self.select_key(row["parent_key"])
 
     def action_tree_right(self):
+        if not self.navigable():
+            return
         row = self.visible_rows.get(self.selected_key)
         if row and row["kind"] == "group":
             if not row["expanded"]:
@@ -646,6 +669,9 @@ class MultiverseApp(App):
     def action_clear_filter(self):
         if self.draft:
             self.cancel_draft()
+            return
+        if self.moving and not self.operating:
+            self.cancel_move()
             return
         self.hide_inspector()
         self.query_one("#filter", Input).value = ""
@@ -883,6 +909,73 @@ class MultiverseApp(App):
                                         (), kind="subverse"),
                              f"New subverse in {self.scope_name(root)} · Enter create · Esc cancel")
 
+    def movable(self, row, verb):
+        """Explain why a row cannot be moved or deleted; the backend rechecks on disk."""
+        if row["kind"] == "group" and Path(row["path"]) == self.root:
+            return (f"Go back to the parent universe to {verb} {clean(row['name'])}." if self.history
+                    else f"The top-level universe cannot be {verb}d here.")
+        running = row["alive"] if row["kind"] == "group" else int(row["live"] == "alive")
+        if running:
+            what = f"{running} running agent{'s' if running != 1 else ''} inside" if row["kind"] == "group" else "it"
+            return f"Stop {what} first (s), then {verb} {clean(row['name'])}."
+        return None
+
+    def action_cut(self):
+        if self.moving:
+            self.place()
+            return
+        row = self.visible_rows.get(self.selected_key)
+        if not self.ready() or not row or row["kind"] not in ("agent", "group"):
+            return
+        if problem := self.movable(row, "move"):
+            self.set_status(problem, error=True)
+            return
+        self.hide_inspector()
+        self.moving = dict(row)
+        self.set_status(f"Moving {clean(row['name'])} · choose a group · Enter or x places it · Esc cancels")
+        self.populate_table()
+
+    def cancel_move(self):
+        self.moving = None
+        self.set_status("")
+        self.populate_table()
+
+    def place(self):
+        if not self.navigable():
+            return
+        moving, destination = self.moving, self.target_scope()
+        if moving["kind"] == "agent":
+            self.submit_operation("Move agent", self.backend.move_agent, Path(moving["universe"]), moving["id"],
+                                  destination, after=lambda result: self.moved(agent_key(result), destination))
+        else:
+            self.submit_operation("Move subverse", self.backend.move_subverse, Path(moving["path"]), destination,
+                                  after=lambda result: self.moved(group_key(Path(result["universe"])), destination))
+
+    def moved(self, key, destination):
+        self.moving = None
+        self.collapsed.discard(str(destination))
+        self.selected_key = key
+
+    def action_remove(self):
+        row = self.visible_rows.get(self.selected_key)
+        if not self.ready() or not row or row["kind"] not in ("agent", "group"):
+            return
+        if problem := self.movable(row, "delete"):
+            self.set_status(problem, error=True)
+            return
+        name = clean(row["name"])
+        if row["kind"] == "agent":
+            detail = f"{name} moves to this universe's trash with its inbox and launch history."
+            callback, args, label = self.backend.remove_agent, (Path(row["universe"]), row["id"]), "Delete agent"
+        else:
+            count = row["total"]
+            detail = (f"{name}, its subverses and {count} agent{'s' if count != 1 else ''} move to the parent universe's trash.")
+            callback, args, label = self.backend.remove_subverse, (Path(row["path"]),), "Delete subverse"
+        self.push_screen(Form(f"Delete {name}?", description=
+                              f"{detail} mv2 trash lists it; mv2 trash --empty deletes permanently. "
+                              "Ctrl+Enter deletes. Esc cancels."),
+                         lambda values: self.submit_operation(label, callback, *args) if values is not None else None)
+
     def action_message(self):
         if self.ready() and self.selected:
             agent = dict(self.selected)
@@ -938,6 +1031,8 @@ class MultiverseApp(App):
             self.screen.dismiss(None)
         elif self.draft and not self.operating:
             self.cancel_draft()
+        elif self.moving and not self.operating:
+            self.cancel_move()
         elif not self.operating:
             self.exit()
         else:
