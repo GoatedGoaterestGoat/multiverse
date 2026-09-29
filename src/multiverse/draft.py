@@ -1,13 +1,15 @@
-"""In-memory agent draft, edited directly in the hierarchy like the V1 monitor."""
+"""In-memory agent or subverse draft, edited directly in the hierarchy like the V1 monitor."""
 from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
 
-from .dashboard import agent_key, clean
+from .dashboard import agent_key, clean, group_key
 
 FIELDS = ("name", "harness", "model")
 LABELS = {"name": "Name", "harness": "Harness", "model": "Model"}
+# A dot-prefixed name can never be a real subverse, so the draft row cannot collide.
+PENDING = ".draft"
 
 
 @dataclass
@@ -16,6 +18,7 @@ class AgentDraft:
     previous_key: str | None
     values: dict
     harnesses: tuple[str, ...]
+    kind: str = "agent"
     active: str = "name"
     cursor: int = 0
     select_all: bool = True
@@ -24,8 +27,26 @@ class AgentDraft:
         self.cursor = len(self.values[self.active])
 
     @property
+    def fields(self):
+        return FIELDS if self.kind == "agent" else ("name",)
+
+    @property
+    def path(self):
+        return self.scope / "subverses" / PENDING
+
+    @property
     def key(self):
+        if self.kind == "subverse":
+            return group_key(self.path)
         return agent_key({"universe": str(self.scope), "id": "__draft__"})
+
+    def label(self):
+        return "Subverse name" if self.kind == "subverse" else LABELS[self.active]
+
+    def focus_column(self, column):
+        """Focus the field shown in a clicked table column."""
+        column = "model" if column == "summary" else column
+        self.focus(column if column in self.fields else "name")
 
     def focus(self, name):
         self.active = name
@@ -45,7 +66,8 @@ class AgentDraft:
     def edit(self, event):
         key, value = event.key, self.values[self.active]
         if key in ("tab", "shift+tab"):
-            self.focus(FIELDS[(FIELDS.index(self.active) + (-1 if key == "shift+tab" else 1)) % len(FIELDS)])
+            fields = self.fields
+            self.focus(fields[(fields.index(self.active) + (-1 if key == "shift+tab" else 1)) % len(fields)])
         elif self.active == "harness":
             if self.harnesses and key in ("left", "up", "right", "down", "space", "home", "end"):
                 current = self.values["harness"]
@@ -85,6 +107,10 @@ class AgentDraft:
                 text = Text(clean(self.values[name]) + " ", style="#cdd6f4")
                 text.stylize("reverse", self.cursor, self.cursor + 1)
         return text
+
+    def group(self, accent):
+        return {"path": str(self.path), "parent": str(self.scope), "name": self.values["name"], "harnesses": [],
+                "description": "", "accent": accent, "alive": 0, "blocked": 0, "total": 0}
 
     def row(self):
         return {"id": "__draft__", "universe": str(self.scope), "name": self.values["name"],

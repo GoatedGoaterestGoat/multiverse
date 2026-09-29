@@ -11,7 +11,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static, TextArea
 
 from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hierarchy
-from .draft import AgentDraft, FIELDS, LABELS
+from .draft import AgentDraft, LABELS
 from .inspector import Inspector
 from .universe import slug
 from .views import LocalView
@@ -33,7 +33,7 @@ m              Message the selected agent
 s / r          Stop (with confirmation) / resume
 v              Full agent details or group configuration
 p              Show / hide the inspector
-g              New subverse inside the selected group
+g              New subverse inside the selected group (inline, name only)
 F5             Refresh
 q              Quit the dashboard; agents keep running
 
@@ -153,7 +153,7 @@ class AgentTable(DataTable):
                 column = event.style.meta.get("column", -1)
                 if 0 <= column < len(self.ordered_columns):
                     field = str(self.ordered_columns[column].key.value)
-                    self.app.draft.focus("model" if field == "summary" else field if field in FIELDS else "name")
+                    self.app.draft.focus_column(field)
                     self.app.populate_table()
             return
         # Textual's default emits RowSelected only on an already selected cell.
@@ -210,12 +210,13 @@ class MultiverseApp(App):
     BINDINGS = [
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
-        Binding("n", "spawn", "New"), Binding("m", "message", "Message"),
+        Binding("n", "spawn", "New agent"), Binding("g", "subverse", "New subverse"),
+        Binding("m", "message", "Message"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), Binding("p", "preview", "Preview", show=False),
         Binding("r", "resume", "Resume", show=False), Binding("s", "stop", "Stop", show=False),
-        Binding("g", "subverse", "New subverse", show=False), Binding("f5", "refresh", "Refresh", show=False),
+        Binding("f5", "refresh", "Refresh", show=False),
     ]
 
     def __init__(self, root, backend=None, *, refresh_interval=1.5, hover_delay=0.3):
@@ -341,7 +342,10 @@ class MultiverseApp(App):
         self.set_class(self.draft is not None, "drafting")
         search = self.query_one("#filter", Input).value
         data = self.snapshot
-        if self.draft:
+        if self.draft and self.draft.kind == "subverse":
+            accent = next((g["accent"] for g in data["groups"] if g["path"] == str(self.draft.scope)), "#a6adc8")
+            data = {**data, "groups": [*data["groups"], self.draft.group(accent)]}
+        elif self.draft:
             self.draft.harnesses = tuple(self.scope_harnesses(self.draft.scope))
             data = {**data, "agents": [*data["agents"], self.draft.row()]}
         projected = hierarchy(data, self.collapsed, search)
@@ -353,13 +357,13 @@ class MultiverseApp(App):
         if available < 110:
             fields = [key for key in fields if key not in ("harness", "activity", "tokens", "id", "updated_at")]
         if self.draft:
-            fields = ["name", "harness", "summary"]
+            fields = ["name", "harness", "summary"] if self.draft.kind == "agent" else ["name", "summary"]
         widths = {key: COLUMNS[key][1] for key in fields}
         widths.update(name=26 if available >= 68 else 23)
         for key, width in (("live", 7), ("phase", 8), ("harness", 7), ("activity", 9)):
             if key in widths:
                 widths[key] = width
-        if self.draft:
+        if self.draft and "harness" in widths:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
         flexible = next((key for key in ("summary", "task") if key in fields), None)
         if flexible:
@@ -412,6 +416,8 @@ class MultiverseApp(App):
             label.append("+ ", style="#94e2d5")
             label.append_text(self.draft.cell("name"))
             return label
+        if self.draft.kind == "subverse":
+            return Text("New subverse · Enter creates · Esc cancels", style="#7f849c")
         if field == "summary":
             return Text("Model: ", style="#7f849c") + self.draft.cell("model")
         return self.draft.cell(field)
@@ -489,7 +495,7 @@ class MultiverseApp(App):
                 hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
                 self.query_one("#selection", Static).update(f"Harness: {value} ▾ · {hint}")
                 return
-            label = Text(f"{LABELS[self.draft.active]}: ", style="#94e2d5")
+            label = Text(f"{self.draft.label()}: ", style="#94e2d5")
             value = self.draft.cell(self.draft.active)
             # Keep the insertion point visible while editing a long value.
             budget = max(8, self.size.width - len(label.plain) - 4)
@@ -767,26 +773,37 @@ class MultiverseApp(App):
             if not options:
                 self.set_status(f"No harnesses configured in {self.scope_name(root)}.", error=True)
                 return
-            self.hide_inspector()
-            previous = self.selected_key
-            self.query_one("#filter", Input).value = ""
-            self.query_one("#filter").display = False
             names = {a["name"] for a in self.snapshot["agents"] if Path(a["universe"]) == root}
-            name, number = "worker", 2
-            while name in names:
-                name, number = f"worker-{number}", number + 1
             harness = next((name for name in ("codex", "claude") if name in options), options[0])
-            self.draft = AgentDraft(root, previous, {"name": name, "harness": harness, "model": ""}, tuple(options))
-            self.selected_key = self.draft.key
-            scope = root
-            while scope.is_relative_to(self.root):
-                self.collapsed.discard(str(scope))
-                if scope == self.root:
-                    break
-                scope = scope.parent.parent
-            self.set_status(f"New in {self.scope_name(root)} · Tab field · Ctrl+Enter create · Esc cancel")
-            self.populate_table()
-            self.query_one("#agents", DataTable).focus()
+            self.start_draft(AgentDraft(root, self.selected_key, {"name": self.unused("worker", names), "harness": harness,
+                                                                  "model": ""}, tuple(options)),
+                             f"New agent in {self.scope_name(root)} · Tab field · Enter create · Esc cancel")
+
+    @staticmethod
+    def unused(base, names):
+        name, number = base, 2
+        while name in names:
+            name, number = f"{base}-{number}", number + 1
+        return name
+
+    def subverse_names(self, root):
+        return {Path(g["path"]).name for g in self.snapshot["groups"] if g["parent"] == str(root)}
+
+    def start_draft(self, draft, message):
+        self.hide_inspector()
+        self.query_one("#filter", Input).value = ""
+        self.query_one("#filter").display = False
+        self.draft = draft
+        self.selected_key = draft.key
+        scope = draft.scope
+        while scope.is_relative_to(self.root):
+            self.collapsed.discard(str(scope))
+            if scope == self.root:
+                break
+            scope = scope.parent.parent
+        self.set_status(message)
+        self.populate_table()
+        self.query_one("#agents", DataTable).focus()
 
     def draft_key(self, event):
         if self.operating:
@@ -816,6 +833,19 @@ class MultiverseApp(App):
         if not draft or self.operating:
             return
         values = {key: value.strip() for key, value in draft.values.items()}
+        if draft.kind == "subverse":
+            try:
+                if not values["name"]:
+                    raise ValueError("Subverse name is required.")
+                slug(values["name"])
+                if values["name"] in self.subverse_names(draft.scope):
+                    raise ValueError("That subverse already exists here.")
+            except ValueError as error:
+                self.set_status(str(error), error=True)
+                self.populate_table()
+                return
+            self.submit_operation("Create subverse", self.backend.subverse, draft.scope, values, after=self.created_group)
+            return
         for key in ("name", "harness"):
             try:
                 if not values[key]:
@@ -840,17 +870,18 @@ class MultiverseApp(App):
         self.selected_key = agent_key({**agent, "universe": str(scope)})
 
     def created_group(self, path):
+        self.draft = None
         self.collapsed.discard(str(path.parent.parent))
         self.selected_key = group_key(path)
 
     def action_subverse(self):
         if self.ready():
             root = self.target_scope()
-            fields = [("name", "Subverse name", "", False, True), ("template", "Template", "base", False, True),
-                      ("workspace", "Workspace (inherit if empty)", "", False, False)]
-            self.push_screen(Form("New subverse", fields, f"Inside {self.scope_name(root)}"),
-                             lambda values: self.submit_operation("Create subverse", self.backend.subverse, root, values,
-                                                                  after=self.created_group) if values is not None else None)
+            if not self.snapshot:
+                return
+            self.start_draft(AgentDraft(root, self.selected_key, {"name": self.unused("subverse", self.subverse_names(root))},
+                                        (), kind="subverse"),
+                             f"New subverse in {self.scope_name(root)} · Enter create · Esc cancel")
 
     def action_message(self):
         if self.ready() and self.selected:
