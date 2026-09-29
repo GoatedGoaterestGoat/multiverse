@@ -56,7 +56,7 @@ class RelocateTests(unittest.TestCase):
 
     def test_move_agent_accepts_subverse_path_and_never_launched_agents(self):
         self.agent(self.root, "fresh", launched=False)
-        relocate.move_agent(self.root, "fresh", "lab/deep")
+        relocate.move_agent(self.root, "fresh", relocate.exact("lab/deep", self.root))
         self.assertEqual(agents.directory(self.deep, "fresh").parent.parent.parent, self.deep)
 
     def test_move_agent_refusals(self):
@@ -143,20 +143,23 @@ class RelocateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "top-level"):
             relocate.remove_subverse(self.root)
         self.assertEqual(len(relocate.trash(self.root)["entries"]), 1)
-        self.assertEqual(len(relocate.trash(self.root, empty=True)["emptied"]), 1)
+        self.assertEqual(len(relocate.trash(self.root, empty=True)["entries"]), 1)
         self.assertFalse(entry.exists())
-        self.assertEqual(relocate.trash(self.root)["entries"], [])
+        self.assertEqual(relocate.trash(self.root), {"entries": [], "emptied": False})
 
-    def test_trash_names_do_not_collide(self):
+    def test_trash_names_do_not_collide_and_have_no_timezone_suffix(self):
         for _ in range(2):
             self.agent(self.lab, "worker")
             with self.live():
                 relocate.remove_agent(self.lab, "worker")
-        self.assertEqual(len(list((self.lab / "trash").iterdir())), 2)
+        names = sorted(p.name for p in (self.lab / "trash").iterdir())
+        self.assertEqual(len(names), 2)
+        self.assertRegex(names[0], r"^\d{8}T\d{6}-worker-")
 
     def test_cli_move_remove_and_trash(self):
         self.agent(self.lab, "worker")
         commands = (["-u", str(self.lab), "move", "worker", str(self.review)],
+                    # Both names resolve from -u, not from the subverse's own parent.
                     ["-u", str(self.root), "move", "--subverse", "lab", "review"],
                     ["-u", str(self.review), "remove", "worker"],
                     ["-u", str(self.root), "remove", "--subverse", "review/lab"],
@@ -167,6 +170,11 @@ class RelocateTests(unittest.TestCase):
         self.assertEqual(results[1]["universe"], str(self.review / "subverses/lab"))
         self.assertEqual({e["name"] for e in results[4]["entries"]}, {"worker", "lab"})
         json.dumps(results)
+
+    def test_cli_resolves_nested_target_and_destination_from_the_same_universe(self):
+        # deep's parent is lab, but "review" names a subverse of the -u universe.
+        result = run(parser().parse_args(["-u", str(self.root), "move", "--subverse", "lab/deep", "review"]))
+        self.assertEqual(result["universe"], str(self.review / "subverses/deep"))
 
 
 if __name__ == "__main__":

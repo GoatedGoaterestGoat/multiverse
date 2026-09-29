@@ -7,6 +7,7 @@ system prompt, runner and tmux tags. Removal is a move into the containing
 universe's trash directory, so it can be undone by moving the entry back.
 """
 from contextlib import ExitStack
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
@@ -23,8 +24,9 @@ RECORD = ".removed.json"
 def exact(value, root=None):
     """A universe directory named exactly, never an ancestor found by searching.
 
-    Accepts a universe directory, a workspace containing `.multiverse`, or a
-    subverse path such as `cad-lab/verification` relative to `root`.
+    Accepts a universe directory, a workspace containing `.multiverse`, or,
+    when `root` is given, a subverse path such as `cad-lab/verification`
+    relative to it. Operations below take exact paths; callers resolve names.
     """
     path = Path(value).expanduser()
     for candidate in (path, path / ".multiverse"):
@@ -85,8 +87,7 @@ def _subverse(path):
 
 
 def _entry(container, name):
-    stamp = now().replace(":", "").replace("-", "").split(".")[0]
-    base = f"{stamp}-{name}"
+    base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S-") + name
     entry, number = container / TRASH / base, 2
     while entry.exists():
         entry, number = container / TRASH / f"{base}-{number}", number + 1
@@ -95,7 +96,7 @@ def _entry(container, name):
 
 
 def move_agent(root, reference, destination):
-    root, destination = exact(root), exact(destination, root)
+    root, destination = exact(root), exact(destination)
     agent_dir = directory(root, reference)
     properties = read(agent_dir / "properties.json")
     if destination == root:
@@ -119,7 +120,7 @@ def move_agent(root, reference, destination):
 
 def move_subverse(path, destination):
     path = _subverse(path)
-    destination = exact(destination, universe.parent(path))
+    destination = exact(destination)
     if destination == path or destination.is_relative_to(path):
         raise ValueError("A subverse cannot be moved into itself")
     if destination == universe.parent(path):
@@ -175,4 +176,4 @@ def trash(root, empty=False):
     if empty:
         for entry in entries:
             shutil.rmtree(entry["trash"])
-    return {"emptied" if empty else "entries": entries}
+    return {"entries": entries, "emptied": empty}

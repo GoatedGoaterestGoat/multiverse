@@ -9,7 +9,9 @@ def configure(parser):
 
 
 def run(root=None, *, target, destination, subverse=False):
+    # Relative names resolve from the chosen universe, for targets and destinations alike.
     root = universe.resolve(root)
+    destination = relocate.exact(destination, root)
     if subverse:
         return relocate.move_subverse(relocate.exact(target, root), destination)
     return relocate.move_agent(root, target, destination)
