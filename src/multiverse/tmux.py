@@ -59,8 +59,7 @@ def observe(properties, runtime, snapshots=None):
     if not terminal:
         return {"live": "stopped" if runtime.get("state") in ("stopped", "failed") else "unknown",
                 "reason": runtime.get("error", "No recorded pane")}
-    if runtime.get("host") != socket.gethostname():
-        return {"live": "unknown", "reason": "State belongs to a different host"}
+    different_host = runtime.get("host") != socket.gethostname()
     backend = Tmux(terminal["socket"])
     if snapshots is not None:
         if terminal["socket"] not in snapshots:
@@ -68,9 +67,15 @@ def observe(properties, runtime, snapshots=None):
         panes, error = snapshots[terminal["socket"]]
     else:
         panes, error = backend.snapshot()
+    pane = panes.get(terminal["pane"])
+    # Hostnames can change with the network (notably on macOS). An exact
+    # universe/agent/launch match on the local socket proves ownership even
+    # after a rename. Without that evidence, foreign state remains unknown,
+    # so it cannot enable control or a duplicate launch.
+    if different_host and (error or not matches(pane, properties, runtime)):
+        return {"live": "unknown", "reason": "State belongs to a different host"}
     if error:
         return {"live": "unknown", "reason": error}
-    pane = panes.get(terminal["pane"])
     if not pane:
         return {"live": "stopped", "reason": "Recorded pane is absent"}
     if not matches(pane, properties, runtime):
