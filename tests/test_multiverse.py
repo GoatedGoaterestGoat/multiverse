@@ -196,6 +196,20 @@ class TerminalTest(TerminalBase):
             agents.terminal_action(self.root, result["id"], "stop")
         self.assertIn(pane, self.backend.snapshot()[0])
 
+    def test_hostname_change_preserves_owned_pane_and_duplicate_launch_guard(self):
+        result, agent_dir = self.spawn()
+        agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertIn('FAKE READY', agents.terminal_action(self.root, result['id'], 'inspect'))
+        with self.assertRaisesRegex(ValueError, 'refusing a duplicate launch'):
+            agents.start(self.root, resume=result['id'], socket_path=self.socket)
+        pane = result['runtime']['tmux']['pane']
+        self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'unknown')
+        with self.assertRaises(ValueError):
+            agents.terminal_action(self.root, result['id'], 'stop')
+        self.assertIn(pane, self.backend.snapshot()[0])
+
     def test_dashboard_can_close_without_stopping_agent(self):
         self.spawn()
         master, slave = pty.openpty()

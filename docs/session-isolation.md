@@ -6,7 +6,9 @@ actual tmux socket is recorded before the ready barrier releases the runner.
 This keeps nested work on the server owning the child pane without carrying the
 parent's agent identity into that child.
 
-Pane control checks universe, agent and launch tags, plus the recorded host.
+Pane control checks universe, agent and launch tags on the recorded local tmux
+socket. A hostname change is accepted only when all three tags match; without
+that local evidence, state recorded on a different host remains unknown.
 Session binding validates a native UUID, rejects stale launch callbacks and
 refuses to replace an agent's already-bound UUID. Codex resume fails if no native
 session is recorded; it never falls back to the latest session. CLI callbacks
