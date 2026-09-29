@@ -62,7 +62,10 @@ class AdapterContractTest(BaseTest):
         self.assertIn('/custom/worktree', result.argv)
         self.assertIn('read-only', result.argv)
         self.assertIn('local-model', result.argv)
+        # Settings replace the default list, so a harness can opt back into NO_COLOR.
         self.assertEqual(set(result.unset_env), {'CODEX_THREAD_ID', 'CLAUDECODE', 'CUSTOM_PARENT'})
+        default = harnesses.load(self.root, 'claude').spawn(LaunchContext('spawn', values, None))
+        self.assertIn('NO_COLOR', default.unset_env)
         self.assertEqual(config.read_bytes(), original)
 
     def test_builtins_accept_empty_initial_prompt_without_empty_native_turn(self):

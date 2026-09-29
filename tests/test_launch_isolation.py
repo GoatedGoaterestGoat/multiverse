@@ -224,13 +224,18 @@ class LaunchIsolationTest(unittest.TestCase):
                 process = Mock(pid=123)
                 process.wait.return_value = 0
                 with patch.object(sys, "argv", ["runner", str(launch)]), \
-                        patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-codex", "CLAUDECODE": "parent-claude"}, clear=True), \
+                        patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-codex", "CLAUDECODE": "parent-claude",
+                                                "NO_COLOR": "1", "TERM": "tmux-256color"}, clear=True), \
                         patch.object(runner, "update_runtime"), \
                         patch.object(runner.subprocess, "Popen", return_value=process) as popen:
                     self.assertEqual(runner.main(), 0)
                 env = popen.call_args.kwargs["env"]
                 self.assertNotIn("CODEX_THREAD_ID", env)
                 self.assertNotIn("CLAUDECODE", env)
+                # The tmux server keeps the environment of whatever first started it,
+                # often a tool shell exporting NO_COLOR. Agent panes are interactive.
+                self.assertNotIn("NO_COLOR", env)
+                self.assertEqual(env["TERM"], "tmux-256color")
                 self.assertEqual({key: value for key, value in env.items() if key.startswith("MV2_")}, identity)
 
 

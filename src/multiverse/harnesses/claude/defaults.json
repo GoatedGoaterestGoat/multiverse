@@ -29,7 +29,8 @@
   ],
   "unset_env": [
     "CODEX_THREAD_ID",
-    "CLAUDECODE"
+    "CLAUDECODE",
+    "NO_COLOR"
   ],
   "docs": "https://code.claude.com/docs/en/cli-reference"
 }
