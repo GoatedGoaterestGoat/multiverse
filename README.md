@@ -95,6 +95,7 @@ project/.multiverse/
       session.jsonl             # native Pi conversation
       launches/<uuid>/          # exact bootstrap, task and argv for each launch
   subverses/pr-review/           # the same structure, recursively
+  trash/<stamp>-<name>/          # removed agents and subverses, ignored by Git
 ```
 
 Everything belongs to the universe, including its live state. Definitions and runtime have separate directories so a clean template install can exclude old conversations and processes. JSON describes current state, JSONL records messages, and Markdown holds prompts. Lock files and temporary files are implementation details.
@@ -102,6 +103,20 @@ Everything belongs to the universe, including its live state. Definitions and ru
 `init --template NAME` looks for `~/.multiverse/templates/NAME`, then a bundled template; an explicit directory also works. `subverse NAME --template PATH` uses the same installer. It copies definitions, generates fresh IDs recursively, and starts with empty state. It does not silently update existing universes. Templates are trusted local files and may contain executable adapters; symlinks are rejected.
 
 Subverses inherit the parent's workspace **at creation**, using a relative path. They receive their own clean definitions and IDs, with no implicit ongoing prompt inheritance. `subverse NAME --workspace /path/to/worktree` can target a worktree. The universe remains in the parent tree when that worktree is removed; `doctor` reports the missing workspace. A universe can have a manager agent, but none is mandatory or auto-created.
+
+### Moving and removing
+
+The dashboard renders the directory tree, so rearranging it is a directory move:
+
+```sh
+mv2 move worker cad-lab/verification        # agent into a subverse of this universe
+mv2 move --subverse cad-lab ../other/.multiverse
+mv2 remove worker                            # into this universe's trash/
+mv2 remove --subverse pr-review
+mv2 trash                                    # list; --empty deletes permanently
+```
+
+Destinations are universe directories or subverse paths such as `cad-lab/verification`, never an ancestor found by searching upward. Everything moved or removed must be stopped, including every agent inside a subverse: a running agent has its directory in its environment, system prompt and tmux tags. An agent keeps its inbox, launches and native session binding; only its universe ID changes, and the destination must configure its harness. A moved subverse keeps its IDs, and relative workspaces are recomputed for the new depth. Removal writes a `.removed.json` record with the original path; moving the entry back restores it. Native harness histories outside `.multiverse` are never touched. Top-level universes cannot be moved or removed with these commands.
 
 ## The Textual dashboard
 
@@ -115,7 +130,11 @@ One-line headers and footer hints leave the terminal for agents. There are no ac
 
 Pause over a row for 300 ms to inspect it: current work, harness/model, observed activity, reported phase, and a live pane capture. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Keyboard selection opens the same view; `p` toggles it and Escape dismisses it. Moving into the inspector keeps it open for reading and scrolling. Hovering never changes the selected agent or the target of actions. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
 
-`n` inserts a draft row in the selected group, following the original Multiverse monitor's inline creation pattern. Type over the suggested name; Tab cycles through name, harness, initial prompt, and optional model. Harness opens an inline selector populated from that group's `harnesses/*/harness.json`: arrows choose, Enter confirms, or click an option. Codex is preferred, then Claude, then the first configured adapter. It is not a free-text field. The initial prompt is the first instruction sent to the agent, not a scheduled job or workflow name. Enter in a text field creates the agent; Ctrl+Enter submits from any field, Escape discards, and Shift+Enter or paste allows multiline prompts. Creation failures retain the draft for correction. No agent starts before submission. Messages and subverse creation still use compact forms.
+`n` inserts a draft row in the selected group, following the original Multiverse monitor's inline creation pattern. Type over the suggested name; Tab cycles through name, harness, and optional model. New agents start idle with no initial prompt; message them with `m` once they are running. Harness opens an inline selector populated from that group's `harnesses/*/harness.json`: arrows choose, Enter confirms, or click an option. Codex is preferred, then Claude, then the first configured adapter. It is not a free-text field. Enter in a text field creates the agent; Ctrl+Enter submits from any field, and Escape discards. Creation failures retain the draft for correction. No agent starts before submission.
+
+`g` inserts a subverse draft row the same way, asking only for a name. It inherits the parent's workspace and uses the base template; `mv2 subverse --template --workspace` covers other choices. Messages still use a compact form.
+
+`x` marks the selected agent or subverse for moving. Arrow keys, folding and clicks keep working; Enter or `x` on a group moves it there, and on an agent it moves into that agent's universe. Esc cancels, and a refused destination keeps the move pending so another can be chosen. `d` deletes to the trash after a confirmation that names what goes, including the agent count for a subverse. Both refuse running agents and the universe currently shown as the top; they call the same tools as `mv2 move` and `mv2 remove`.
 
 Filesystem and tmux work run outside the UI event loop. Stable agent keys preserve selection across refreshes. New agents and subverses belong to the selected group; selecting an agent targets its group. Drafts and dialogs capture the intended universe and recipient before submitting an action. Rendering and I/O are separated in `tui.py` and `dashboard.py` for testing.
 

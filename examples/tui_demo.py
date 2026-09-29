@@ -55,8 +55,8 @@ class DemoBackend:
     def spawn(self, root, values):
         with self.lock:
             row = {"id": uid(), "name": values["name"], "universe": str(root), "harness": values.get("harness", "codex"),
-                   "live": "alive", "activity": "idle", "phase": "starting", "summary": values["task"],
-                   "task": values["task"], "runtime": {}}
+                   "live": "alive", "activity": "idle", "phase": "starting", "summary": values.get("task", ""),
+                   "task": values.get("task", ""), "model": values.get("model") or None, "runtime": {}}
             self.agents.append(row)
             return deepcopy(row)
 
@@ -77,6 +77,32 @@ class DemoBackend:
         with self.lock:
             agent = self.find(root, reference)
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
+
+    # Moves and removals are unchecked here; the real rules live in multiverse.relocate.
+    def move_agent(self, root, reference, destination):
+        with self.lock:
+            agent = self.find(root, reference)
+            agent["universe"] = str(destination)
+            return deepcopy(agent)
+
+    def move_subverse(self, path, destination):
+        with self.lock:
+            target = destination / "subverses" / path.name
+            self.scopes = {target / p.relative_to(path) if p.is_relative_to(path) else p: meta
+                           for p, meta in self.scopes.items()}
+            for agent in self.agents:
+                if within(agent, path):
+                    agent["universe"] = str(target / Path(agent["universe"]).relative_to(path))
+            return {"universe": str(target)}
+
+    def remove_agent(self, root, reference):
+        with self.lock:
+            self.agents.remove(self.find(root, reference))
+
+    def remove_subverse(self, path):
+        with self.lock:
+            self.agents = [a for a in self.agents if not within(a, path)]
+            self.scopes = {p: meta for p, meta in self.scopes.items() if not p.is_relative_to(path)}
 
     def subverse(self, root, values):
         with self.lock:
