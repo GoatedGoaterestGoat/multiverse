@@ -55,8 +55,8 @@ class DemoBackend:
     def spawn(self, root, values):
         with self.lock:
             row = {"id": uid(), "name": values["name"], "universe": str(root), "harness": values.get("harness", "codex"),
-                   "live": "alive", "activity": "idle", "phase": "starting", "summary": values["task"],
-                   "task": values["task"], "runtime": {}}
+                   "live": "alive", "activity": "idle", "phase": "starting", "summary": values.get("task", ""),
+                   "task": values.get("task", ""), "model": values.get("model") or None, "runtime": {}}
             self.agents.append(row)
             return deepcopy(row)
 

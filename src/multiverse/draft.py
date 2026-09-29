@@ -6,8 +6,8 @@ from rich.text import Text
 
 from .dashboard import agent_key, clean
 
-FIELDS = ("name", "harness", "task", "model")
-LABELS = {"name": "Name", "harness": "Harness", "task": "Initial prompt", "model": "Model"}
+FIELDS = ("name", "harness", "model")
+LABELS = {"name": "Name", "harness": "Harness", "model": "Model"}
 
 
 @dataclass
@@ -71,15 +71,13 @@ class AgentDraft:
             elif key == "delete":
                 self.values[self.active] = value[:self.cursor] + value[self.cursor + 1:]
             self.select_all = False
-        elif key in ("shift+enter", "alt+enter") and self.active == "task":
-            self.insert("\n")
         elif event.character and event.character.isprintable():
             self.insert(event.character)
 
     def cell(self, name):
         if name == "harness":
             return Text(clean(self.values[name]) + " ▾", style="reverse" if name == self.active else "#a6adc8")
-        text = Text(clean(self.values[name]) or ("Initial prompt…" if name == "task" else "default"), style="#a6adc8")
+        text = Text(clean(self.values[name]) or "default", style="#a6adc8")
         if name == self.active:
             if self.select_all:
                 text.stylize("reverse")
@@ -90,5 +88,5 @@ class AgentDraft:
 
     def row(self):
         return {"id": "__draft__", "universe": str(self.scope), "name": self.values["name"],
-                "harness": self.values["harness"], "summary": self.values["task"], "task": self.values["task"],
+                "harness": self.values["harness"], "summary": "", "task": "",
                 "live": "new", "phase": "draft", "activity": "—"}

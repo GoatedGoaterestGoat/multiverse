@@ -44,10 +44,9 @@ Esc              Cancel
 
 INLINE NEW AGENT
 n                Add a draft row in the selected group
-Tab / Shift-Tab  Name → harness → initial prompt → model
+Tab / Shift-Tab  Name → harness → model
 ↑ / ↓           Choose a configured harness; Enter confirms it
 Enter            Create; Esc discards the draft
-Shift+Enter      New line in the initial prompt (pasting also works)
 
 MOUSE
 Pause over a row for details and a live pane preview.
@@ -154,7 +153,7 @@ class AgentTable(DataTable):
                 column = event.style.meta.get("column", -1)
                 if 0 <= column < len(self.ordered_columns):
                     field = str(self.ordered_columns[column].key.value)
-                    self.app.draft.focus("task" if field == "summary" else field if field in FIELDS else "name")
+                    self.app.draft.focus("model" if field == "summary" else field if field in FIELDS else "name")
                     self.app.populate_table()
             return
         # Textual's default emits RowSelected only on an already selected cell.
@@ -414,8 +413,7 @@ class MultiverseApp(App):
             label.append_text(self.draft.cell("name"))
             return label
         if field == "summary":
-            return (Text("Model: ") + self.draft.cell("model") if self.draft.active == "model"
-                    else self.draft.cell("task"))
+            return Text("Model: ", style="#7f849c") + self.draft.cell("model")
         return self.draft.cell(field)
 
     def scope_harnesses(self, scope):
@@ -455,7 +453,7 @@ class MultiverseApp(App):
         event.stop()
         if self.draft and not self.operating and event.option_index < len(self.draft.harnesses):
             self.draft.values["harness"] = self.draft.harnesses[event.option_index]
-            self.draft.focus("task")
+            self.draft.focus("model")
             self.populate_table()
             self.query_one("#agents", DataTable).focus()
 
@@ -493,7 +491,7 @@ class MultiverseApp(App):
                 return
             label = Text(f"{LABELS[self.draft.active]}: ", style="#94e2d5")
             value = self.draft.cell(self.draft.active)
-            # Keep the insertion point visible while editing a long task.
+            # Keep the insertion point visible while editing a long value.
             budget = max(8, self.size.width - len(label.plain) - 4)
             start = max(0, self.draft.cursor - budget + 1)
             label.append_text(value[start:start + budget])
@@ -662,7 +660,8 @@ class MultiverseApp(App):
                       ("live", "TERMINAL"), ("activity", "HARNESS ACTIVITY"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
-            content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields)
+            content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields
+                                    if key != "task" or row.get(key))
             self.push_screen(Details(row["name"], content))
 
     def action_preview(self):
@@ -777,7 +776,7 @@ class MultiverseApp(App):
             while name in names:
                 name, number = f"worker-{number}", number + 1
             harness = next((name for name in ("codex", "claude") if name in options), options[0])
-            self.draft = AgentDraft(root, previous, {"name": name, "harness": harness, "task": "", "model": ""}, tuple(options))
+            self.draft = AgentDraft(root, previous, {"name": name, "harness": harness, "model": ""}, tuple(options))
             self.selected_key = self.draft.key
             scope = root
             while scope.is_relative_to(self.root):
@@ -796,7 +795,7 @@ class MultiverseApp(App):
             self.cancel_draft()
         elif event.key == "enter" and self.draft.active == "harness":
             if self.draft.values["harness"] in self.draft.harnesses:
-                self.draft.focus("task")
+                self.draft.focus("model")
                 self.populate_table()
         elif event.key in ("enter", "ctrl+enter"):
             self.commit_draft()
