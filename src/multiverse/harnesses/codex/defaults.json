@@ -32,7 +32,8 @@
   ],
   "unset_env": [
     "CODEX_THREAD_ID",
-    "CLAUDECODE"
+    "CLAUDECODE",
+    "NO_COLOR"
   ],
   "bootstrap": "At startup, first run `\"$MV2_CLI\" session-bind --session-id \"$CODEX_THREAD_ID\"` to record this native session for resume. If the variable is absent, report that; never guess another session's ID.",
   "docs": "https://developers.openai.com/codex/cli/reference/"

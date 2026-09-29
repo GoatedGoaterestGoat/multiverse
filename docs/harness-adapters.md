@@ -162,6 +162,9 @@ Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args
 and `unset_env`. Codex and Pi additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
+Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
+whatever first started it, often an agent's tool shell, and agent panes are
+interactive terminals. Setting `unset_env` replaces this list, which opts back in.
 No adapter reads credentials or changes installed native configuration.
 
 Existing schema-1 manifests, custom bootstrap and assets remain authoritative;
