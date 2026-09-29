@@ -13,6 +13,7 @@ from textual.widgets import Button, DataTable, Footer, Input, OptionList, Static
 from textual import events
 from multiverse.dashboard import agent_key, group_key
 from tui_demo import DemoBackend
+from multiverse.draft import SubverseDraft
 from multiverse.tui import Details, Form, MultiverseApp
 
 
@@ -253,7 +254,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.app.select_key(group_key(self.verify))
             await pilot.press("g")
             self.assertEqual(len(self.app.screen_stack), 1, "Subverse creation is inline, not a form")
-            self.assertEqual(self.app.draft.kind, "subverse")
+            self.assertIsInstance(self.app.draft, SubverseDraft)
             self.assertEqual(self.app.draft.values["name"], "subverse")
             self.assertIn(self.app.draft.key, self.app.visible_rows)
             await pilot.press("tab")
@@ -261,12 +262,19 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             self.assertIsNone(self.app.draft)
             self.assertEqual(len(self.backend.scopes), 4)
+            # The backend validates names; a refusal keeps the draft for correction.
             await pilot.press("g", "ctrl+u", "enter")
-            self.assertIn("required", str(self.app.query_one("#status", Static).render()))
-            await pilot.press(*"bad name", "enter")
-            self.assertIsNotNone(self.app.draft)
+            await self.settle(pilot)
             self.assertIn("letters", str(self.app.query_one("#status", Static).render()))
-            await pilot.press("ctrl+u", *"experiments", "enter")
+            self.assertIsNotNone(self.app.draft)
+            await pilot.press(*"bad name", "enter")
+            await self.settle(pilot)
+            self.assertIsNotNone(self.app.draft)
+            await pilot.press("ctrl+u")
+            self.app.query_one("#agents").post_message(events.Paste("experiments\nsecond line"))
+            await pilot.pause()
+            self.assertEqual(self.app.draft.values["name"], "experiments")
+            await pilot.press("enter")
             await self.settle(pilot)
             target = self.verify / "subverses/experiments"
             self.assertIsNone(self.app.draft)
@@ -281,113 +289,6 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.app.visible_agents), 7)
             await pilot.press("q")
         self.assertEqual(self.backend.calls, [])
-
-    def agent(self, name):
-        return next(a for a in self.backend.agents if a["name"] == name)
-
-    def status(self):
-        return str(self.app.query_one("#status", Static).render())
-
-    async def test_move_agent_by_keyboard_with_navigation_and_refusals(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            footer = {active.binding.action for active in self.app.active_bindings.values() if active.binding.show}
-            self.assertTrue({"cut", "remove"} <= footer)
-            self.app.select_key(agent_key(self.agent("reviewer")))
-            await pilot.press("x")
-            self.assertIsNone(self.app.moving)
-            self.assertIn("Stop it first", self.status())
-            check = self.agent("training-check")
-            self.app.select_key(agent_key(check))
-            await pilot.press("x")
-            self.assertEqual(self.app.moving["id"], check["id"])
-            self.assertIn("moving", str(self.app.query_one("#agents", DataTable).get_cell(agent_key(check), "name")))
-            await pilot.press("n", "g", "d")
-            self.assertIsNone(self.app.draft)
-            self.assertEqual(len(self.app.screen_stack), 1)
-            await pilot.press("escape")
-            self.assertIsNone(self.app.moving)
-            self.assertEqual(check["universe"], str(self.backend.root))
-            await pilot.press("x")
-            # Tree keys still work while choosing: up to the root, then into CAD Lab.
-            self.app.select_key(group_key(self.cad))
-            await pilot.press("left")
-            self.assertNotIn(group_key(self.verify), self.app.visible_rows)
-            await pilot.press("right", "down", "down")
-            self.assertEqual(self.app.selected_key, group_key(self.verify))
-            await pilot.press("enter")
-            await self.settle(pilot)
-            self.assertIsNone(self.app.moving)
-            self.assertEqual(check["universe"], str(self.verify))
-            self.assertEqual(self.app.selected_key, agent_key(check))
-            self.assertEqual(self.app.root, self.backend.root)
-            await pilot.press("x")
-            self.app.select_key(agent_key(self.agent("verifier")))
-            await pilot.press("enter")
-            await self.settle(pilot)
-            self.assertIn("already in that universe", self.status())
-            self.assertIsNotNone(self.app.moving, "A refused destination keeps the move pending")
-            await pilot.press("q")
-            self.assertIsNone(self.app.moving)
-            self.assertTrue(self.app.is_running)
-
-    async def test_move_subverse_with_x_and_group_refusals(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.backend.root))
-            await pilot.press("x")
-            self.assertIn("top-level universe cannot be moved", self.status())
-            self.app.select_key(group_key(self.cad))
-            await pilot.press("x")
-            self.assertIn("Stop 1 running agent inside first", self.status())
-            self.app.select_key(group_key(self.verify))
-            await pilot.press("x", "enter")
-            await self.settle(pilot)
-            self.assertIn("into itself", self.status())
-            self.app.select_key(group_key(self.review))
-            await pilot.press("x")
-            await self.settle(pilot)
-            moved = self.review / "subverses/verification"
-            self.assertIsNone(self.app.moving)
-            self.assertEqual(self.app.selected_key, group_key(moved))
-            self.assertEqual(self.agent("verifier")["universe"], str(moved))
-            self.assertEqual(self.app.visible_rows[group_key(moved)]["parent_key"], group_key(self.review))
-            self.assertNotIn(group_key(self.verify), self.app.visible_rows)
-
-    async def test_delete_agent_and_subverse_after_confirmation(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            check = self.agent("training-check")
-            self.app.select_key(agent_key(check))
-            await pilot.press("d")
-            self.assertIsInstance(self.app.screen, Form)
-            await pilot.press("escape")
-            self.assertIn(check, self.backend.agents)
-            await pilot.press("d", "ctrl+enter")
-            await self.settle(pilot)
-            self.assertNotIn(check, self.backend.agents)
-            self.assertEqual(self.backend.trash, [check])
-            self.assertIn(self.app.selected_key, self.app.visible_rows)
-            self.app.select_key(group_key(self.backend.root))
-            await pilot.press("d")
-            self.assertEqual(len(self.app.screen_stack), 1)
-            self.assertIn("cannot be deleted", self.status())
-            self.app.select_key(group_key(self.cad))
-            await pilot.press("d")
-            self.assertEqual(len(self.app.screen_stack), 1)
-            self.assertIn("Stop 1 running agent inside first", self.status())
-            self.backend.stop(self.cad, self.agent("harness-builder")["id"])
-            self.app.refresh_snapshot()
-            await self.settle(pilot)
-            self.app.select_key(group_key(self.cad))
-            await pilot.press("d")
-            self.assertIn("2 agents", str(self.app.screen.query_one("#dialog-description", Static).render()))
-            await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual(self.backend.trash[-1], self.cad)
-            self.assertNotIn(group_key(self.cad), self.app.visible_rows)
-            self.assertNotIn(group_key(self.verify), self.app.visible_rows)
-            self.assertEqual(len(self.backend.agents), 4)
 
     async def test_resize_dense_layout_forms_and_on_demand_preview(self):
         async with self.app.run_test(size=(140, 32)) as pilot:

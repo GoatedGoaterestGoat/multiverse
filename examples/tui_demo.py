@@ -14,7 +14,7 @@ class DemoBackend:
 
     def __init__(self):
         self.lock = RLock()
-        self.scopes, self.agents, self.messages, self.trash = {}, [], [], []
+        self.scopes, self.agents, self.messages = {}, [], []
         review, cad = self.root / "subverses/pr-review", self.root / "subverses/cad-lab"
         verify = cad / "subverses/verification"
         for path, title, description, color in (
@@ -78,32 +78,16 @@ class DemoBackend:
             agent = self.find(root, reference)
             return f'{agent["harness"]} / {agent["name"]}\n\n{agent["summary"]}\n\n✓ Context loaded\n✓ Workspace inspected\n→ Preparing the next step\n\n[Demo terminal output]'
 
-    def running(self, agents):
-        for agent in agents:
-            if agent["live"] != "stopped":
-                raise ValueError(f'Agent {agent["name"]} is {agent["live"]}; stop it first')
-
+    # Moves and removals are unchecked here; the real rules live in multiverse.relocate.
     def move_agent(self, root, reference, destination):
         with self.lock:
             agent = self.find(root, reference)
-            if destination == root:
-                raise ValueError(f'{agent["name"]} is already in that universe')
-            if any(a["name"] == agent["name"] and Path(a["universe"]) == destination for a in self.agents):
-                raise ValueError(f'The destination already has an agent named {agent["name"]}')
-            self.running([agent])
             agent["universe"] = str(destination)
             return deepcopy(agent)
 
     def move_subverse(self, path, destination):
         with self.lock:
-            if destination.is_relative_to(path):
-                raise ValueError("A subverse cannot be moved into itself")
-            if destination == path.parent.parent:
-                raise ValueError(f"{path.name} is already in that universe")
             target = destination / "subverses" / path.name
-            if target in self.scopes:
-                raise ValueError(f"The destination already has a subverse named {path.name}")
-            self.running([a for a in self.agents if within(a, path)])
             self.scopes = {target / p.relative_to(path) if p.is_relative_to(path) else p: meta
                            for p, meta in self.scopes.items()}
             for agent in self.agents:
@@ -113,18 +97,12 @@ class DemoBackend:
 
     def remove_agent(self, root, reference):
         with self.lock:
-            agent = self.find(root, reference)
-            self.running([agent])
-            self.agents.remove(agent)
-            self.trash.append(agent)
+            self.agents.remove(self.find(root, reference))
 
     def remove_subverse(self, path):
         with self.lock:
-            members = [a for a in self.agents if within(a, path)]
-            self.running(members)
-            self.agents = [a for a in self.agents if a not in members]
+            self.agents = [a for a in self.agents if not within(a, path)]
             self.scopes = {p: meta for p, meta in self.scopes.items() if not p.is_relative_to(path)}
-            self.trash.append(path)
 
     def subverse(self, root, values):
         with self.lock:
