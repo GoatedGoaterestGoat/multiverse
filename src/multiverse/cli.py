@@ -9,7 +9,7 @@ from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "attach", "inspect", "send", "inbox", "ack", "status",
+            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "status",
             "runtime-update", "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
 
 

@@ -95,6 +95,7 @@ project/.multiverse/
       session.jsonl             # native Pi conversation
       launches/<uuid>/          # exact bootstrap, task and argv for each launch
   subverses/pr-review/           # the same structure, recursively
+  trash/<stamp>-<name>/          # removed agents and subverses, ignored by Git
 ```
 
 Everything belongs to the universe, including its live state. Definitions and runtime have separate directories so a clean template install can exclude old conversations and processes. JSON describes current state, JSONL records messages, and Markdown holds prompts. Lock files and temporary files are implementation details.
@@ -102,6 +103,20 @@ Everything belongs to the universe, including its live state. Definitions and ru
 `init --template NAME` looks for `~/.multiverse/templates/NAME`, then a bundled template; an explicit directory also works. `subverse NAME --template PATH` uses the same installer. It copies definitions, generates fresh IDs recursively, and starts with empty state. It does not silently update existing universes. Templates are trusted local files and may contain executable adapters; symlinks are rejected.
 
 Subverses inherit the parent's workspace **at creation**, using a relative path. They receive their own clean definitions and IDs, with no implicit ongoing prompt inheritance. `subverse NAME --workspace /path/to/worktree` can target a worktree. The universe remains in the parent tree when that worktree is removed; `doctor` reports the missing workspace. A universe can have a manager agent, but none is mandatory or auto-created.
+
+### Moving and removing
+
+The dashboard renders the directory tree, so rearranging it is a directory move:
+
+```sh
+mv2 move worker cad-lab/verification        # agent into a subverse of this universe
+mv2 move --subverse cad-lab ../other/.multiverse
+mv2 remove worker                            # into this universe's trash/
+mv2 remove --subverse pr-review
+mv2 trash                                    # list; --empty deletes permanently
+```
+
+Destinations are universe directories or subverse paths such as `cad-lab/verification`, never an ancestor found by searching upward. Everything moved or removed must be stopped, including every agent inside a subverse: a running agent has its directory in its environment, system prompt and tmux tags. An agent keeps its inbox, launches and native session binding; only its universe ID changes, and the destination must configure its harness. A moved subverse keeps its IDs, and relative workspaces are recomputed for the new depth. Removal writes a `.removed.json` record with the original path; moving the entry back restores it. Native harness histories outside `.multiverse` are never touched. Top-level universes cannot be moved or removed with these commands.
 
 ## The Textual dashboard
 

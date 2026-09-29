@@ -53,7 +53,7 @@ def create(destination, name, template="base", workdir=None):
     staging = Path(tempfile.mkdtemp(prefix=".mv2-init-", dir=destination.parent))
     try:
         shutil.copytree(source, staging, dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns("state", "__pycache__", ".git"))
+                        ignore=shutil.ignore_patterns("state", "trash", "__pycache__", ".git"))
         roots = [staging, *sorted((staging / "subverses").rglob("universe.json"))]
         for item in roots:
             directory = item.parent if item.name == "universe.json" else item

@@ -6,7 +6,8 @@ import re
 from . import universe
 from .harnesses import load as load_harness
 from .store import read
-from .tools import ask, get_usage, attach, capabilities, deliver, inspect, list_agents, native_status, resume, send, spawn, stop, subverse
+from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, list_agents, move, native_status, remove,
+                    resume, send, spawn, stop, subverse)
 from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
@@ -128,6 +129,18 @@ class LocalBackend:
 
     def attach(self, root, reference):
         return attach.run(root, agent=reference)
+
+    def move_agent(self, root, reference, destination):
+        return move.run(root, target=reference, destination=str(destination))
+
+    def move_subverse(self, path, destination):
+        return move.run(universe.parent(path), target=str(path), destination=str(destination), subverse=True)
+
+    def remove_agent(self, root, reference):
+        return remove.run(root, target=reference)
+
+    def remove_subverse(self, path):
+        return remove.run(universe.parent(path), target=str(path), subverse=True)
 
     def subverse(self, root, values):
         result = subverse.run(root, name=values["name"], template=values.get("template") or "base",
