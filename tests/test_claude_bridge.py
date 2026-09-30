@@ -14,7 +14,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses, native, universe
-from multiverse.harnesses.claude import MOD
+from multiverse.harnesses.claude import MOD, measured_usage
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
 from multiverse.tools import runtime_update, send
@@ -167,6 +167,45 @@ class ClaudeBridgeTest(BaseTest):
         with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'previous'}), self.assertRaisesRegex(ValueError, 'Outdated launch'):
             runtime_update.run(self.root, agent=agent, activity='working')
         self.assertEqual(read(directory / 'runtime.json')['activity'], 'waiting')
+
+    def response(self, id, input_tokens, output_tokens, cache_read=0, cache_write=0, block='text'):
+        usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,
+                 'cache_read_input_tokens': cache_read, 'cache_creation_input_tokens': cache_write}
+        return json.dumps({'type': 'assistant', 'timestamp': f'2026-09-30T00:00:0{len(id)}Z',
+                           'message': {'id': id, 'usage': usage, 'content': [{'type': block}]}}) + '\n'
+
+    def test_usage_is_measured_once_per_response_across_the_session_and_its_subagents(self):
+        adapter = self.bridge(False)
+        native_id = str(uuid4())
+        project = self.config / 'projects' / '-work-project'
+        project.mkdir(parents=True)
+        main = project / f'{native_id}.jsonl'
+        # One response is recorded once per content block, each with the same usage.
+        main.write_text(json.dumps({'type': 'user', 'message': {'content': 'hi'}}) + '\n'
+                        + self.response('msg_1', 10, 5, cache_read=100, cache_write=20, block='thinking')
+                        + self.response('msg_1', 10, 5, cache_read=100, cache_write=20) + 'not json\n')
+        session = SessionHandle('agent', 'claude', str(self.work), native_id=native_id)
+        result = adapter.get_usage(session)
+        self.assertEqual(result.state, 'ok')
+        self.assertEqual({key: result.value[key] for key in ('input_tokens', 'cached_input_tokens', 'cache_write_tokens',
+                                                             'output_tokens', 'total_tokens')},
+                         {'input_tokens': 130, 'cached_input_tokens': 100, 'cache_write_tokens': 20,
+                          'output_tokens': 5, 'total_tokens': 135})
+        self.assertEqual(adapter.capabilities(session)['get_usage'].state, 'supported')
+        # Growth is read incrementally; an unfinished line waits for its newline.
+        partial = self.response('msg_2', 1, 2)
+        with main.open('a') as handle:
+            handle.write(partial[:20])
+        self.assertEqual(measured_usage(native_id).total_tokens, 135)
+        with main.open('a') as handle:
+            handle.write(partial[20:])
+        subagents = project / native_id / 'subagents'
+        subagents.mkdir(parents=True)
+        (subagents / 'agent-a.jsonl').write_text(self.response('msg_3', 40, 60))
+        self.assertEqual(measured_usage(native_id).total_tokens, 135 + 3 + 100)
+        self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()))).state,
+                         'unavailable')
+        self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work))).state, 'unavailable')
 
     def test_executor_writes_only_to_a_line_inbox(self):
         executor = native.NativeExecutor(self.work, {}, {})

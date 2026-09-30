@@ -189,7 +189,7 @@ There are no added model tools. Agents use `$MV2_CLI` through their ordinary she
 
 ## Harness definitions
 
-Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations and currently report unavailable for bundled providers.
+Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` reports unavailable for bundled providers; `get-usage` measures Claude sessions from their transcripts and reports unavailable for the others.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 

@@ -266,6 +266,11 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
+Claude usage is measured from the session's own transcript under Claude's
+`projects` directory, plus any subagent transcripts: each response's recorded
+usage, counted once per response ID. It works with or without the bridge. The
+adapter reads each transcript once, then only what was appended.
+
 Claude sends no receipt, so an accepted `send` means written to the inbox.
 Follow-up delivery and receipt reconciliation are not implemented. The mod was
 tested against Claude Code 2.1.285; the mod API may change between releases.
@@ -281,7 +286,7 @@ tested against Claude Code 2.1.285; the mod API may change between releases.
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
 | Native activity | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
-| Measured cumulative usage | Unavailable | Unavailable | Unavailable | Unavailable |
+| Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
 
 Unsupported usage displays N/A, not zero. The usage representation includes
