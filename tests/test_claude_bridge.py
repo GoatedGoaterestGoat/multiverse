@@ -17,7 +17,7 @@ from multiverse import harnesses, native, universe
 from multiverse.harnesses.claude import MOD
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
-from multiverse.tools import send
+from multiverse.tools import runtime_update, send
 from test_multiverse import BaseTest
 
 TOKEN = '0123456789abcdef0123456789abcdef'
@@ -72,9 +72,9 @@ class ClaudeBridgeTest(BaseTest):
                     harness_dir='/local/harness', session_file='', bootstrap_file='', task_file='',
                     workspace=str(self.work), model='', control_socket=self.socket)
 
-    def session(self, state='running', endpoint=True):
+    def session(self, state='running', endpoint=True, bridge='claude-mod-v1'):
         return SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()), state=state,
-                             endpoint=NativeEndpoint('unix-lines', self.socket) if endpoint else None)
+                             endpoint=NativeEndpoint('unix-lines', self.socket) if endpoint else None, bridge=bridge)
 
     def test_bridge_is_opt_in_and_launches_the_mod_on_the_launch_socket(self):
         plain = self.bridge(False).spawn(LaunchContext('spawn', self.values()))
@@ -121,7 +121,8 @@ class ClaudeBridgeTest(BaseTest):
         follow_up = Message('id', 'body', delivery='follow-up', framed='Message from user:\nbody')
         self.assertEqual(adapter.send(self.session(), follow_up, executor).state, 'unavailable')
         steer = Message('id', 'body', framed='Message from user:\nbody')
-        for session in (self.session(state='stopped'), self.session(endpoint=False)):
+        # A stopped launch, one without an inbox, and one whose mod never registered.
+        for session in (self.session(state='stopped'), self.session(endpoint=False), self.session(bridge=None)):
             self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'unavailable')
             self.assertEqual(adapter.send(session, steer, executor).state, 'unavailable')
         # Claude has not bound the inbox and published its key yet.
@@ -137,6 +138,7 @@ class ClaudeBridgeTest(BaseTest):
         write(directory / 'properties.json', {'id': recipient, 'name': 'worker', 'harness': 'claude',
                                               'workspace': str(self.work), 'native_session_id': native_id})
         write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running',
+                                           'native_bridge': 'claude-mod-v1',
                                            'control_endpoint': {'transport': 'unix-lines', 'address': self.socket}})
         write(self.root / 'state/agents' / sender / 'properties.json', {'id': sender, 'name': 'reviewer'})
         inbox = Inbox(self.socket)
@@ -151,6 +153,20 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(frame['session_id'], native_id)
         self.assertEqual(frame['msg_id'], result['id'])
         self.assertEqual(frame['message']['content'], '<<MV2>>Message from reviewer:\nPlease rebase<</MV2>>')
+
+    def test_mod_registers_its_bridge_and_reports_waiting_for_the_current_launch(self):
+        agent = str(uuid4())
+        directory = self.root / 'state/agents' / agent
+        write(directory / 'properties.json', {'id': agent, 'name': 'worker', 'harness': 'claude'})
+        write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
+        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
+            runtime_update.run(self.root, agent=agent, activity='idle', bridge='claude-mod-v1')
+            runtime_update.run(self.root, agent=agent, activity='waiting')
+        facts = read(directory / 'runtime.json')
+        self.assertEqual((facts['native_bridge'], facts['activity']), ('claude-mod-v1', 'waiting'))
+        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'previous'}), self.assertRaisesRegex(ValueError, 'Outdated launch'):
+            runtime_update.run(self.root, agent=agent, activity='working')
+        self.assertEqual(read(directory / 'runtime.json')['activity'], 'waiting')
 
     def test_executor_writes_only_to_a_line_inbox(self):
         executor = native.NativeExecutor(self.work, {}, {})

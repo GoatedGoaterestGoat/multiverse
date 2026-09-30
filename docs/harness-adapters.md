@@ -257,9 +257,18 @@ shows the model the text alone:
   restored. It reaches the model as an ordinary prompt. If that fails, the mod
   submits the text as its own prompt instead.
 
+The mod also registers the `claude-mod-v1` bridge for its launch (steering is
+reported unavailable until it has) and reports activity through `mv2
+runtime-update`: `working` while a main-loop turn runs; `waiting` while an
+`AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
+elicitation waits on the person; `idle` otherwise. A permission prompt is matched
+to its call through the engine's `ask` verdict and ends when the call finishes, is
+denied, or (Bash) draws its progress row; an approved call that runs briefly
+without a progress row can read `waiting` until it finishes.
+
 Claude sends no receipt, so an accepted `send` means written to the inbox.
 Follow-up delivery and receipt reconciliation are not implemented. The mod was
-tested against Claude Code 2.1.280; the mod API may change between releases.
+tested against Claude Code 2.1.285; the mod API may change between releases.
 
 ## Implemented capabilities and verification limits
 
@@ -271,7 +280,7 @@ tested against Claude Code 2.1.280; the mod API may change between releases.
 | After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
-| Native activity | Unknown | Unknown | Lifecycle events | Unknown |
+| Native activity | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Unavailable | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
 

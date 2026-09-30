@@ -4,7 +4,9 @@ With `inbox_bridge`, each launch binds Claude's peer inbox at the core-assigned
 socket and loads the multiverse mod (`mod/`). `send` writes one steering
 message to that inbox at `next` priority, its text tagged for the mod. The mod
 shows the model the text alone: mid-turn it removes Claude's peer wrapper from
-the queued message; otherwise it types the text in as a prompt.
+the queued message; otherwise it types the text in as a prompt. The mod
+registers the `claude-mod-v1` bridge for its launch and reports the session's
+activity: working, waiting (a permission prompt or question) or idle.
 """
 from dataclasses import replace
 import hashlib
@@ -63,9 +65,10 @@ class ClaudeAdapter(ConfiguredAdapter):
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
         connected = (getattr(self, 'settings', {}).get('inbox_bridge') and session.state == 'running'
-                     and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines')
+                     and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines'
+                     and session.bridge == 'claude-mod-v1')
         result['send_steer'] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if connected
-                                else Capability('unavailable', 'Claude inbox bridge is not running for this launch',
+                                else Capability('unavailable', 'The multiverse mod has not registered for this launch',
                                                 required=True))
         result['send_follow_up'] = Capability('unavailable', 'Claude follow-up delivery is not implemented yet',
                                               required=True)
@@ -75,7 +78,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         if message.delivery != 'steer':
             return NativeResult('unavailable', 'Claude follow-up delivery is not implemented yet')
         if self.capabilities(session)['send_steer'].state != 'supported':
-            return NativeResult('unavailable', 'Claude inbox bridge is not running for this launch')
+            return NativeResult('unavailable', 'The multiverse mod has not registered for this launch')
         token = peer_token(session.endpoint.address)
         if token is None:
             return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')

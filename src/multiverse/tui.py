@@ -485,7 +485,8 @@ class MultiverseApp(App):
             return Text(value, style=f'{color} on #1e1e2e')
         value = clean(row.get(field, "—"))
         color = {"alive": "#a6e3a1", "stopped": "#7f849c", "unknown": "#f9e2af",
-                 "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa"}.get(value, "#a6adc8")
+                 "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
+                 "waiting": "#fab387"}.get(value, "#a6adc8")
         return Text(value, style=color)
 
     def show_selection(self, key):

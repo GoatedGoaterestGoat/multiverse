@@ -10,3 +10,4 @@ dist/
 /.artifacts/
 /.run/
 /multiverse-v2
+/src/multiverse/harnesses/claude/mod/tsconfig.json
