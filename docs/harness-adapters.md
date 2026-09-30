@@ -285,7 +285,7 @@ tested against Claude Code 2.1.285; the mod API may change between releases.
 | After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
-| Native activity | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
+| Native status (`activity` field) | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
 
