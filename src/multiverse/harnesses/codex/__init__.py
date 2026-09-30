@@ -6,8 +6,9 @@ from ..base import ConfiguredAdapter
 from functools import partial
 from dataclasses import replace
 
-from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec
-from .protocol import check_connection, send_message, get_delivery, environment_exclusions, stop_session
+from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint
+from .launch import launch_settings
+from .protocol import check_connection, send_message, get_delivery, stop_session
 
 
 class CodexAdapter(ConfiguredAdapter):
@@ -38,20 +39,19 @@ class CodexAdapter(ConfiguredAdapter):
         if not getattr(self, 'settings', {}).get('inbox_bridge'):
             return command
         argv = list(command.argv)
-        if context.mode == 'resume':
-            # Native resume retains the original writable grant.
-            position = argv.index('--add-dir')
-            if argv[position + 1] != context.values['agent_dir']:
-                raise ValueError('Unexpected built-in Codex writable directory')
-            del argv[position:position + 2]
+        from .launch import remote_arguments
+        argv, bootstrap, roots = remote_arguments(argv, context)
         position = argv.index('--') if '--' in argv else len(argv)
-        options = ['--remote', 'unix://' + context.endpoint.address if context.endpoint else 'unix://']
+        workspace_policy = {}
+        options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
         if context.executor:
             observed = context.executor.rpc(RpcSpec(context.endpoint.address,
-                partial(environment_exclusions, context.values['workspace'])))
+                partial(launch_settings, context.values['workspace'])))
             if observed.state != 'ok':
                 raise ValueError(f'Cannot isolate shared native session environment: {observed.reason}')
-            excludes = list(observed.value)
+            excludes = list(observed.value['exclude'])
+            roots = list(dict.fromkeys([*observed.value['writable_roots'], *roots]))
+            workspace_policy = observed.value.get('workspace_policy', {})
             # Preserve literal per-launch exclusions as well as native project/user config.
             for index, arg in enumerate(argv[:position]):
                 value = argv[index + 1] if arg in ('-c', '--config') and index + 1 < len(argv) else (
@@ -74,9 +74,19 @@ class CodexAdapter(ConfiguredAdapter):
                 options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
         argv[position:position] = options
         return CommandSpec(tuple(argv), command.unset_env,
+                           control_endpoint=NativeEndpoint('unix-websocket', context.values['control_socket']),
+                           rpc_proxy=RpcProxySpec(context.values['control_socket'],
+                               context.endpoint.address if context.endpoint else '',
+                               {'bootstrap': bootstrap, 'roots': roots, 'workspace_policy': workspace_policy,
+                                'workspace': context.values['workspace'],
+                                'native_id': context.values.get('session_id') if context.mode == 'resume' else None}),
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
                                {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}))
+
+    def launch_proxy(self, settings):
+        from .launch import LaunchProtocol
+        return LaunchProtocol(settings)
 
     def spawn(self, context):
         return super().spawn(context)

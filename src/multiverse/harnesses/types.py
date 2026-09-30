@@ -39,6 +39,14 @@ class SharedServiceSpec:
 
 
 @dataclass(frozen=True)
+class RpcProxySpec:
+    """Launch-local relay; adapter settings describe pure protocol transforms."""
+    socket_path: str
+    upstream_path: str
+    settings: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """`environment` is set for the launched process; core identity variables win."""
     argv: tuple[str, ...]
@@ -46,6 +54,7 @@ class CommandSpec:
     control_endpoint: NativeEndpoint | None = None
     shared_service: SharedServiceSpec | None = None
     environment: Mapping[str, str] = field(default_factory=dict)
+    rpc_proxy: 'RpcProxySpec | None' = None
 
 
 @dataclass(frozen=True)

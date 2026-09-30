@@ -184,7 +184,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
-                                           "shared_service": bool(command.shared_service)})
+                                           "shared_service": bool(command.shared_service),
+                                           "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None})
             (launch / "ready").touch()
         except Exception as error:
             if service_directory_created:

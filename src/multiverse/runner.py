@@ -12,7 +12,7 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from multiverse.agents import update_runtime
+from multiverse.agents import update_runtime, bind_session
 from multiverse.store import now, read
 
 
@@ -74,7 +74,7 @@ class StatusWatcher:
                         return
                     native_id = session.native_id
                     task = asyncio.create_task(rpc.watch(*specification, self._publish))
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1)
         finally:
             if task is not None:
                 task.cancel()
@@ -88,6 +88,7 @@ def main():
     process = None
     service_dir = None
     watcher = None
+    proxy = None
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -107,12 +108,20 @@ def main():
         cli_prefix = str(Path(env["MV2_CLI"]).parent) + os.pathsep
         if not env.get("PATH", "").startswith(cli_prefix):
             env["PATH"] = cli_prefix + env.get("PATH", "")
-        if request.get('control_endpoint') and not request.get('shared_service'):
-            endpoint = Path(request['control_endpoint']['address'])
+        if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
+            endpoint = Path(request['rpc_proxy']['socket_path'] if request.get('rpc_proxy') else request['control_endpoint']['address'])
             if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
                 raise ValueError('Native control socket does not belong to this launch')
             service_dir = endpoint.parent
         update_runtime(agent_dir, launch.name, state="running", status="unknown")
+        if request.get('rpc_proxy'):
+            from multiverse import harnesses, rpc
+            properties = read(agent_dir / 'properties.json')
+            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
+            proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
+                lambda native_id: bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name),
+                lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error))
+            proxy.start()
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
         if request.get('shared_service'):
@@ -130,6 +139,8 @@ def main():
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error))
         return 1
     finally:
+        if proxy is not None:
+            proxy.close()
         if watcher is not None:
             watcher.close()
         if process is not None and process.poll() is None:

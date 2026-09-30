@@ -23,7 +23,7 @@ class RoleTemplatesTest(unittest.TestCase):
                     self.assertFalse((clone / "state" / "private-session.json").exists())
                     self.assertEqual(universe.workspace(clone), work)
                     self.assertEqual(read(clone / "harnesses/codex/harness.json"),
-                                     read(universe.TEMPLATES / "base/harnesses/codex/harness.json"))
+                                     read(universe.TEMPLATES / name / "harnesses/codex/harness.json"))
                     self.assertFalse(any(path.is_symlink() for path in clone.rglob("*")))
 
     def test_bootstrap_is_short_and_workflows_load_only_on_request(self):

@@ -175,13 +175,15 @@ behavior schema 2 cannot express. Existing universes are never overwritten.
 
 Codex bridge mode uses the shared native daemon for the current OS user and
 `CODEX_HOME`. Spawn/resume invokes `codex app-server daemon start`, reads its JSON
-socket address, and connects the native TUI with `--remote unix://<returned socket>`. Concurrent
-monitors use Codex's native startup lock; there is no server per agent, project,
+socket address, and connects the native TUI through a private launch relay to that
+socket using `--remote unix://...`. Concurrent
+monitors use Codex's native startup lock; there is no native app-server process per agent, project,
 or dashboard. Opening/closing a dashboard does not start/stop the daemon. Core
 never invokes daemon stop, restart, bootstrap, install or update. Codex's own
-configured daemon update policy remains authoritative. A missing
-managed standalone installation or a CLI/daemon version mismatch fails with a
-diagnostic; it is never repaired by disrupting other clients. Codex owns daemon
+configured daemon update policy remains authoritative. Codex 0.159.2 can install
+its daemon package from the installed CLI during native startup, including a
+Homebrew CLI. A CLI/daemon version mismatch fails with a diagnostic; it is never
+repaired by disrupting other clients. Codex owns daemon
 persistence and native history. No Multiverse-specific Codex home is created.
 
 The selected Codex home is saved for exact resume even if another monitor has a
@@ -203,7 +205,27 @@ requests, frames and deadlines. Remote resume inherits native permissions: put
 initial permission/profile flags in `spawn_args`. Unsupported resume overrides
 are diagnosed, never silently removed. Whole-table `shell_environment_policy`
 CLI overrides are rejected in bridge mode; individual keys remain supported.
-Plain compatibility launches do not acquire bridge controls.
+Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
+`developer_instructions` CLI override from remote thread requests. The adapter
+therefore returns an optional `RpcProxySpec` in its `CommandSpec`. Core serializes
+it in the launch request, creates a private 0700 socket directory, and starts the
+relay in the runner before starting the TUI. The provider supplies pure request
+and reply interpretation; core owns WebSocket connections, backpressure, size
+limits, error recording, exact session binding and cleanup.
+
+The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
+requests, preserving existing developer instructions. Initial writable roots from
+mv2, user arguments and native configuration are combined in the thread request,
+so external state directories remain supported without the rejected CLI flag.
+Resume keeps the saved permission grant. Other traffic, including approvals,
+passes through to the native TUI. A malformed launch request gets an explicit
+RPC error and a runtime diagnostic; it is never forwarded without its bootstrap.
+The relay records the exact thread ID/workspace from the matching native reply
+before passing it to the TUI, so bridge launches do not rely on prompt-driven
+`session-bind`. Switching or forking into a different thread requires a separate
+Multiverse launch. The relay closes with the launch and never restarts the shared
+daemon or reconnects automatically. Plain launches have no relay. The development
+template enables the bridge by default; existing universes must opt in explicitly.
 
 Explicit `stop` holds the recipient's launch lock, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background

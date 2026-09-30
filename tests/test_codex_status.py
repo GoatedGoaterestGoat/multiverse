@@ -134,10 +134,10 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
         await self.task
         self.assertEqual(self.observed[-1], 'unknown')
 
-    async def test_notification_during_snapshot_not_lost(self):
+    async def test_snapshot_supersedes_earlier_notification(self):
         self.before_snapshot = [self.event({'type': 'active', 'activeFlags': ['waitingOnUserInput']})]
         await self.start_stream()
-        self.assertEqual(self.observed, ['waiting'])
+        self.assertEqual(self.observed, ['idle'])
 
     async def test_wrong_identity_rejects_even_matching_early_event(self):
         self.thread_id = 'other'

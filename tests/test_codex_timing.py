@@ -76,7 +76,7 @@ class CodexTimingTest(TerminalBase):
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())
         (native_home / 'config.toml').write_text(
-            'model = "gpt-5.6-terra"\nmodel_provider = "mv2-test"\n'
+            'model = "gpt-6-sol"\nmodel_provider = "mv2-test"\n'
             '[model_providers.mv2-test]\nname = "Offline test"\n'
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             'wire_api = "responses"\nrequires_openai_auth = false\n'

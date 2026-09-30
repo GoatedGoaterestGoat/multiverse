@@ -113,8 +113,8 @@ class AdapterContractTest(BaseTest):
         values = {**self.values(), 'control_socket': '/tmp/owned/rpc.sock'}
         command = adapter.spawn(LaunchContext('spawn', values, 'chosen'))
         self.assertEqual(command.shared_service.argv[-3:], ('app-server', 'daemon', 'start'))
-        self.assertIsNone(command.control_endpoint)
-        self.assertIn('/custom', command.argv)
+        self.assertEqual(command.control_endpoint.address, values['control_socket'])
+        self.assertIn('/custom', command.rpc_proxy.settings['roots'])
         self.assertIn('workspace-write', command.argv)
         self.assertIn('chosen', command.argv)
         with self.assertRaisesRegex(ValueError, 'saved permissions'):
@@ -179,15 +179,16 @@ class AdapterContractTest(BaseTest):
         before = path.read_bytes()
         adapter = harnesses.load(self.root, 'codex')
         executor = Mock()
-        executor.rpc.return_value = NativeResult('ok', value=['USER_EXCLUDED'])
+        executor.rpc.return_value = NativeResult('ok', value={'exclude': ['USER_EXCLUDED'], 'writable_roots': []})
         values = {**self.values(), 'task': '--config=shell_environment_policy=literal-prompt'}
         environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current',
                        'MV2_UNIVERSE': str(self.root), 'PATH': '/literal/tools'}
         command = adapter.spawn(LaunchContext('spawn', values, 'chosen', environment,
                                              NativeEndpoint('unix-websocket', '/native/socket'), executor))
         argv = command.argv
-        self.assertEqual(argv[argv.index('--remote') + 1], 'unix:///native/socket')
-        excludes = next(v for v in argv if v.startswith('shell_environment_policy.exclude='))
+        self.assertEqual(argv[argv.index('--remote') + 1], 'unix://' + values['control_socket'])
+        self.assertEqual(command.rpc_proxy.upstream_path, '/native/socket')
+        excludes = [v for v in argv if v.startswith('shell_environment_policy.exclude=')][-1]
         self.assertEqual(json.loads(excludes.partition('=')[2]),
                          ['USER_EXCLUDED', 'CUSTOM_EXCLUDED', 'MV2_*', 'CODEX_THREAD_ID', 'CLAUDECODE', 'PARENT_ONLY'])
         self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="current"', argv)
