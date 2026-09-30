@@ -130,7 +130,7 @@ The [r/unixporn Catppuccin setups](https://www.reddit.com/r/unixporn/comments/1f
 
 One-line headers and footer hints leave the terminal for agents. There are no action buttons. Search opens with `/`, includes folded descendants, and keeps matching ancestors visible. Escape clears it and restores the existing folds. `v` opens full details. At smaller widths, secondary columns disappear; the demo's entire hierarchy fits at 60×20 with the inspector closed. `NO_COLOR` is respected.
 
-Pause over a row for 300 ms to inspect it: current work, harness/model, observed activity, reported phase, and a live pane capture. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Keyboard selection opens the same view; `p` toggles it and Escape dismisses it. Moving into the inspector keeps it open for reading and scrolling. Hovering never changes the selected agent or the target of actions. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
+Press `p` to open the inspector: current work, harness/model, status, reported phase, and a live pane capture. It opens and closes only with `p` (Escape also closes it); hovering or selecting a row never opens it. While open it follows the selected row. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
 
 `n` inserts a draft row in the selected group, following the original Multiverse monitor's inline creation pattern. Type over the suggested name; Tab cycles through name, harness, and optional model. New agents start idle with no initial prompt; message them with `m` once they are running. Harness opens an inline selector populated from that group's `harnesses/*/harness.json`: arrows choose, Enter confirms, or click an option. Codex is preferred, then Claude, then the first configured adapter. It is not a free-text field. Enter in a text field creates the agent; Ctrl+Enter submits from any field, and Escape discards. Creation failures retain the draft for correction. No agent starts before submission.
 
@@ -144,7 +144,7 @@ Filesystem and tmux work run outside the UI event loop. Stable agent keys preser
 
 The TUI reads `properties.json` to discover agents and their reported work. It reconciles `runtime.json` with `tmux list-panes` to observe whether each launch is alive. Each pane carries three tags: universe ID, agent ID and launch ID. A readable window/session name is only a label. Renaming it does not change identity; a reused pane ID cannot impersonate an old launch. Unknown or inaccessible state is shown as unknown.
 
-`LIVE` comes from tmux, `ACTIVITY` comes from the harness, and `PHASE`/`SUMMARY` come from the model. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
+`LIVE` comes from tmux, `STATUS` (`working`, `waiting` or `idle`) comes from the harness, and `PHASE`/`SUMMARY` come from the model. A `waiting` agent needs you: a permission prompt, a question or a plan approval is open. Waiting agents are marked with an orange `●` and status badge, and groups and the header count them (`2 waiting`) alongside blocked agents. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
 
 The dashboard is a reader and command client. Quit it and agents continue. The default tmux server is named `multiverse-v2`, separate from existing sessions; `MV2_TMUX_SOCKET` can select an explicit socket. Attach/inspect/stop verify pane ownership first. `stop` terminates the pane and its running work.
 
@@ -165,7 +165,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | Enter / Escape in a draft | Confirm harness or create / discard the new agent |
 | Escape / Ctrl-Enter | Cancel / submit a form |
 
-Mouse: pause over a row to inspect; click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
+Mouse: click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
 
 Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to return to the dashboard that opened it. This also works when the dashboard runs inside tmux: the host terminal opens the agent client and reattaches to the exact dashboard pane when that client exits. The dashboard's selection/state and agent process remain alive. On the dashboard itself, detach works normally. Custom prefixes and bindings are preserved; uppercase L remains tmux's stock last-session action. Each universe can customize `views/default.json`:
 
@@ -216,7 +216,7 @@ Existing schema-1 definitions and assets remain authoritative and are never rewr
 ./bin/mv2 -u /path/to/project doctor
 ```
 
-The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, hover delays, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
+The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -p test_tui.py -v

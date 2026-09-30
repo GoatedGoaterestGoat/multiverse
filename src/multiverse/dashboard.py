@@ -12,7 +12,7 @@ from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "tokens": ("Tokens", 8), "activity": ("Activity", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "tokens": ("Tokens", 8), "activity": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
 DEFAULT_COLUMNS = ["name", "harness", "live", "activity", "tokens", "phase", "summary"]
@@ -56,6 +56,7 @@ def within(item, root):
 def counts(items):
     return {"total": len(items), "alive": sum(a.get("live") == "alive" for a in items),
             "blocked": sum(a.get("phase") == "blocked" for a in items),
+            "waiting": sum(a.get("activity") == "waiting" for a in items),
             "unknown": sum(a.get("live") == "unknown" for a in items)}
 
 

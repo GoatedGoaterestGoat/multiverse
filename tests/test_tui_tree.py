@@ -36,7 +36,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
             patcher = patch.object(module, "observe", observed)
             patcher.start()
             self.addCleanup(patcher.stop)
-        self.app = MultiverseApp(self.root, LocalBackend(), refresh_interval=0, hover_delay=0.03)
+        self.app = MultiverseApp(self.root, LocalBackend(), refresh_interval=0)
 
     def tearDown(self):
         self.temp.cleanup()

@@ -14,7 +14,8 @@ from textual import events
 from multiverse.dashboard import agent_key, group_key
 from tui_demo import DemoBackend
 from multiverse.draft import SubverseDraft
-from multiverse.tui import Details, Form, MultiverseApp
+from multiverse.tui import Details, Form, KEYS, MultiverseApp
+from multiverse.dashboard import COLUMNS
 
 
 class RecordingBackend(DemoBackend):
@@ -39,7 +40,7 @@ class RecordingBackend(DemoBackend):
 class DashboardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.backend = RecordingBackend()
-        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, hover_delay=0.03)
+        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
         self.review = self.backend.root / "subverses/pr-review"
         self.cad = self.backend.root / "subverses/cad-lab"
         self.verify = self.cad / "subverses/verification"
@@ -323,40 +324,39 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(self.app.screen, Details)
             await pilot.press("escape")
 
-    async def test_hover_inspects_without_retargeting_and_can_be_read_with_mouse(self):
+    async def test_hover_never_opens_inspector_and_p_follows_selection(self):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             original = self.app.selected_key
             reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
             index = list(self.app.visible_rows).index(agent_key(reviewer))
             await pilot.hover("#agents", offset=(6, index + 1))
-            await pilot.pause(0.08)
-            await self.settle(pilot)
-            self.assertEqual(self.app.inspector.row["id"], reviewer["id"])
+            await pilot.pause(0.4)
+            self.assertIsNone(self.app.inspector.row)
             self.assertEqual(self.app.selected_key, original)
-            self.assertIn("Context loaded", str(self.app.query_one("#preview", Static).render()))
-            self.assertGreaterEqual(self.app.query_one("#inspector").region.x, self.app.query_one("#agents").region.right)
-            await pilot.hover("#inspect-work")
-            await pilot.pause(0.22)
-            self.assertIsNotNone(self.app.inspector.row)
-            await pilot.hover("#masthead")
-            await pilot.pause(0.22)
+            await pilot.press("j")
+            await pilot.pause(0.3)
             self.assertIsNone(self.app.inspector.row)
             self.assertEqual(self.backend.calls, [])
-
-    async def test_hover_delay_keyboard_inspection_and_compact_drawer(self):
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.settle(pilot)
-            self.app.hover_delay = 0.25
-            with patch.object(self.backend, "inspect", wraps=self.backend.inspect) as inspect:
-                await pilot.hover("#agents", offset=(6, 3))
-                await pilot.hover("#masthead")
-                await pilot.pause(0.3)
-                inspect.assert_not_called()
-            await pilot.press("j")
-            await pilot.pause(0.16)
+            await pilot.press("p")
             await self.settle(pilot)
             self.assertEqual(self.app.inspector.row["key"], self.app.selected_key)
+            self.assertGreaterEqual(self.app.query_one("#inspector").region.x, self.app.query_one("#agents").region.right)
+            await pilot.hover("#masthead")
+            await pilot.pause(0.3)
+            self.assertIsNotNone(self.app.inspector.row)
+            await pilot.press("j")
+            await pilot.pause(0.3)
+            await self.settle(pilot)
+            self.assertEqual(self.app.inspector.row["key"], self.app.selected_key)
+            await pilot.press("p")
+            self.assertIsNone(self.app.inspector.row)
+
+    async def test_compact_drawer_and_escape_close(self):
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            await pilot.press("j", "p")
+            await self.settle(pilot)
             for width, height in ((80, 24), (60, 20)):
                 await pilot.resize_terminal(width, height)
                 await pilot.pause()
@@ -369,6 +369,32 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.assertGreaterEqual(self.app.query_one("#pane-scroll").region.height, 2)
             await pilot.press("escape")
             self.assertIsNone(self.app.inspector.row)
+
+    async def test_waiting_agents_stand_out_and_groups_count_them(self):
+        reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
+        reviewer["activity"] = "waiting"
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            self.assertIn("1 waiting", str(self.app.query_one("#totals", Static).render()))
+            row = self.app.visible_rows[agent_key(reviewer)]
+            name, status = MultiverseApp.cell(row, "name"), MultiverseApp.cell(row, "activity")
+            self.assertIn("●", name.plain)
+            self.assertEqual(status.plain, "waiting")
+            self.assertIn("#fab387", str(status.style))
+            group = self.app.visible_rows[group_key(self.review)]
+            self.assertTrue(MultiverseApp.cell(group, "summary").plain.startswith("1 waiting"))
+            quiet = self.app.visible_rows[agent_key(next(a for a in self.backend.agents if a["name"] != "reviewer" and a["live"] == "alive"))]
+            self.assertNotIn("●", MultiverseApp.cell(quiet, "name").plain)
+
+    async def test_user_facing_text_says_status(self):
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            self.assertEqual(COLUMNS["activity"][0], "Status")
+            self.assertNotIn("ctivity", KEYS)
+            self.assertIn("Inspector", [b.description for b in self.app.BINDINGS if b.show])
+            await pilot.press("p")
+            await self.settle(pilot)
+            self.assertIn("Status:", str(self.app.query_one("#inspect-state", Static).render()))
 
     async def test_preview_refresh_discards_delayed_result_and_does_not_read_stopped_agent(self):
         entered, release = Event(), Event()
@@ -390,9 +416,8 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("p")
                 await asyncio.to_thread(entered.wait, 1)
                 try:
-                    index = list(self.app.visible_rows).index(agent_key(reviewer))
-                    await pilot.hover("#agents", offset=(6, index + 1))
-                    await pilot.pause(0.08)
+                    self.app.select_key(agent_key(reviewer))
+                    await pilot.pause(0.3)
                     self.assertEqual(self.app.inspector.row["id"], reviewer["id"])
                 finally:
                     release.set()
@@ -413,14 +438,14 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             with patch.object(self.backend, "inspect", side_effect=OSError("Pane unavailable")) as inspect:
-                index = list(self.app.visible_rows).index(group_key(self.review))
-                await pilot.hover("#agents", offset=(6, index + 1))
-                await pilot.pause(0.08)
+                self.app.select_key(group_key(self.review))
+                await pilot.press("p")
+                await pilot.pause(0.1)
                 self.assertEqual(self.app.inspector.row["kind"], "group")
                 self.assertIn("2/2 live", str(self.app.query_one("#inspect-state", Static).render()))
                 inspect.assert_not_called()
-                await pilot.hover("#agents", offset=(6, index + 2))
-                await pilot.pause(0.08)
+                self.app.select_key(list(self.app.visible_rows)[list(self.app.visible_rows).index(group_key(self.review)) + 1])
+                await pilot.pause(0.3)
                 await self.settle(pilot)
                 self.assertIn("Pane unavailable", str(self.app.query_one("#preview", Static).render()))
                 self.assertFalse(self.app.operating)

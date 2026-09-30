@@ -32,7 +32,7 @@ n              New agent in the selected group
 m              Message the selected agent
 s / r          Stop (with confirmation) / resume
 v              Full agent details or group configuration
-p              Show / hide the inspector
+p              Show / hide the inspector (opens only with this key)
 g              New subverse inside the selected group (inline, name only)
 x              Move the selected agent or subverse: choose a group, then Enter or x
 d              Delete the selected agent or subverse (to trash, with confirmation)
@@ -51,7 +51,6 @@ Tab / Shift-Tab  Name → harness → model
 Enter            Create; Esc discards the draft
 
 MOUSE
-Pause over a row for details and a live pane preview.
 Click a group to fold / expand; double-click to enter it.
 Click the breadcrumb to return to the previous universe.
 Double-click an agent to attach. Scroll the list normally.
@@ -165,26 +164,13 @@ class AgentTable(DataTable):
         if 0 <= row < self.row_count and not event.style.meta.get("out_of_bounds"):
             self.app.click_row(str(self.ordered_rows[row].key.value), event.chain)
 
-    def _on_mouse_move(self, event):
-        super()._on_mouse_move(event)
-        row = event.style.meta.get("row", -1)
-        if 0 <= row < self.row_count and not event.style.meta.get("out_of_bounds"):
-            self.app.hover_row(str(self.ordered_rows[row].key.value))
-        else:
-            self.app.leave_inspector()
-
-    def _on_leave(self, event):
-        super()._on_leave(event)
-        self.app.leave_inspector()
-
     def on_key(self, event):
         if self.app.draft:
             event.stop()
             event.prevent_default()
             self.app.draft_key(event)
         elif event.key in ("up", "down", "left", "right", "j", "k", "h", "l", "home", "end", "pageup", "pagedown"):
-            self.app.cancel_inspector_timers()
-            self.app.hover_key = None
+            self.app.cancel_inspector_timer()
 
     def on_paste(self, event):
         if self.app.draft:
@@ -213,15 +199,15 @@ class MultiverseApp(App):
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New agent"), Binding("g", "subverse", "New subverse"),
-        Binding("m", "message", "Message"), Binding("x", "cut", "Move"), Binding("d", "remove", "Delete"),
+        Binding("m", "message", "Message"), Binding("p", "preview", "Inspector"), Binding("x", "cut", "Move"), Binding("d", "remove", "Delete"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
-        Binding("v", "details", "Details", show=False), Binding("p", "preview", "Preview", show=False),
+        Binding("v", "details", "Details", show=False), 
         Binding("r", "resume", "Resume", show=False), Binding("s", "stop", "Stop", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
-    def __init__(self, root, backend=None, *, refresh_interval=1.5, hover_delay=0.3):
+    def __init__(self, root, backend=None, *, refresh_interval=1.5):
         super().__init__()
         self.root = Path(root)
         self.backend = backend or LocalBackend()
@@ -234,8 +220,7 @@ class MultiverseApp(App):
         self.visible_agents = {}
         self.collapsed = set()
         self.scanning = self.operating = False
-        self.hover_delay = hover_delay
-        self.hover_key = self.hover_timer = self.leave_timer = None
+        self.inspector_timer = None
         self.inspector = None
         self.draft = None
         self.moving = None  # The row being moved while a destination is chosen.
@@ -323,7 +308,7 @@ class MultiverseApp(App):
             breadcrumb.update("‹ Back · " + " / ".join(trail))
             totals = self.snapshot["counts"]
             self.query_one("#totals", Static).update(
-                f'{totals["alive"]} live · {totals["blocked"]} blocked · {totals["total"]} agents')
+                f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents')
             await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
             if generation != self._scope_generation:
                 return
@@ -476,17 +461,22 @@ class MultiverseApp(App):
                 label.append(guide, style=f"not bold {accent}")
             label.append(("▾ " if row["expanded"] else "▸ ") if group else "  ")
             label.append(clean(row["name"]))
+            if not group and row.get("activity") == "waiting":
+                label.append(" ●", style="bold #fab387")
             return label
         if row["kind"] == "group":
             value = {"live": f'{row["alive"]}/{row["total"]}',
                      "phase": "",
-                     "summary": (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]),
+                     "summary": (f'{row["waiting"]} waiting · ' if row["waiting"] else "")
+                                + (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]),
                      "task": clean(row["description"])}.get(field, "")
             return Text(value, style=f'{color} on #1e1e2e')
         value = clean(row.get(field, "—"))
         color = {"alive": "#a6e3a1", "stopped": "#7f849c", "unknown": "#f9e2af",
                  "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
                  "waiting": "#fab387"}.get(value, "#a6adc8")
+        if field == "activity" and value == "waiting":
+            return Text(value, style="bold #11111b on #fab387")
         return Text(value, style=color)
 
     def show_selection(self, key):
@@ -532,7 +522,8 @@ class MultiverseApp(App):
             return
         if key in self.visible_rows:
             self.show_selection(key)
-            self.queue_inspector(key, "selection", min(0.12, self.hover_delay))
+            if self.inspector.row:
+                self.queue_inspector(key)
 
     def click_row(self, key, chain):
         if not self.navigable():
@@ -592,7 +583,6 @@ class MultiverseApp(App):
 
     def switch_scope(self, root, context=None):
         self.hide_inspector()
-        self.hover_key = None
         self.root = root
         self._scope_generation += 1
         self.snapshot = self.selected = None
@@ -686,7 +676,7 @@ class MultiverseApp(App):
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
-                      ("live", "TERMINAL"), ("activity", "HARNESS ACTIVITY"), ("reason", "OBSERVATION"),
+                      ("live", "TERMINAL"), ("activity", "HARNESS STATUS"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields
@@ -698,51 +688,27 @@ class MultiverseApp(App):
             if self.inspector.row:
                 self.hide_inspector()
             else:
-                self.cancel_inspector_timers()
-                self.open_inspector(self.selected_key, "selection")
+                self.cancel_inspector_timer()
+                self.open_inspector(self.selected_key)
 
-    def cancel_inspector_timers(self):
-        for timer in (self.hover_timer, self.leave_timer):
-            if timer:
-                timer.stop()
-        self.hover_timer = self.leave_timer = None
+    def cancel_inspector_timer(self):
+        if self.inspector_timer:
+            self.inspector_timer.stop()
+            self.inspector_timer = None
 
-    def queue_inspector(self, key, mode, delay):
-        if not self.ready():
-            return
-        self.cancel_inspector_timers()
-        self.hover_timer = self.set_timer(delay, lambda: self.open_inspector(key, mode))
+    def queue_inspector(self, key):
+        """Retarget an already open inspector after the selection settles."""
+        if self.ready():
+            self.cancel_inspector_timer()
+            self.inspector_timer = self.set_timer(0.12, lambda: self.open_inspector(key))
 
-    def open_inspector(self, key, mode):
-        self.hover_timer = None
+    def open_inspector(self, key):
+        self.inspector_timer = None
         if self.ready() and (row := self.visible_rows.get(key)):
-            self.inspector.show(row, mode)
-
-    def hover_row(self, key):
-        if not self.ready():
-            return
-        if self.leave_timer:
-            self.leave_timer.stop()
-            self.leave_timer = None
-        if key != self.hover_key:
-            self.hover_key = key
-            self.queue_inspector(key, "hover", self.hover_delay)
-
-    def keep_inspector(self):
-        self.cancel_inspector_timers()
-
-    def leave_inspector(self):
-        self.hover_key = None
-        self.cancel_inspector_timers()
-        self.leave_timer = self.set_timer(0.18, self.dismiss_hover)
-
-    def dismiss_hover(self):
-        self.leave_timer = None
-        if self.inspector.mode == "hover":
-            self.inspector.close()
+            self.inspector.show(row)
 
     def hide_inspector(self, *, restore_focus=True):
-        self.cancel_inspector_timers()
+        self.cancel_inspector_timer()
         self.inspector.close()
         if restore_focus:
             self.query_one("#agents", DataTable).focus()
