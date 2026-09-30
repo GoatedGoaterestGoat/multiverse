@@ -231,6 +231,43 @@ class ClaudeBridgeTest(BaseTest):
                          ('native_queued', True, 'mid-turn'))
         self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
 
+    def answer_when_asked(self, agent_dir, record):
+        """Play the mod: answer the question the adapter wrote, as a file."""
+        executor = Mock()
+
+        def write_lines(session, lines):
+            question_id = json.loads(lines[1])['msg_id']
+            (agent_dir / 'claude-asks').mkdir(parents=True, exist_ok=True)
+            if record is not None:
+                (agent_dir / 'claude-asks' / f'{question_id}.json').write_text(json.dumps({'id': question_id, **record}))
+            return NativeResult('ok')
+        executor.write_lines.side_effect = write_lines
+        return executor
+
+    def test_ask_answers_from_the_mods_fork_without_touching_the_conversation(self):
+        adapter = self.bridge()
+        self.publish_key()
+        agent_dir = self.work / 'agent'
+        session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()), state='running',
+                                endpoint=NativeEndpoint('unix-lines', self.socket), bridge='claude-mod-v1',
+                                session_file=str(agent_dir / 'session.jsonl'))
+        self.assertEqual(adapter.capabilities(session)['ask'].state, 'supported')
+        executor = self.answer_when_asked(agent_dir, {'answered': True, 'text': 'About an hour.',
+                                                      'usage': {'input_tokens': 3, 'output_tokens': 4}})
+        result = adapter.ask(session, 'How long will this take?', executor)
+        self.assertEqual((result.state, result.value['answer']), ('ok', 'About an hour.'))
+        frame = json.loads(executor.write_lines.call_args.args[1][1])
+        self.assertEqual(frame['priority'], 'next')
+        self.assertEqual(frame['message']['content'], f'<<MV2 ask id={frame["msg_id"]}>>How long will this take?<</MV2>>')
+        self.assertEqual(list((agent_dir / 'claude-asks').iterdir()), [])  # the answer is consumed
+        nothing = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'nothing-to-fork'}))
+        self.assertEqual(nothing.state, 'unavailable')
+        failed = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'api-error'}))
+        self.assertEqual(failed.state, 'error')
+        with patch('multiverse.harnesses.claude.ASK_TIMEOUT', 0.3):
+            self.assertEqual(adapter.ask(session, 'Still there?', self.answer_when_asked(agent_dir, None)).state, 'unknown')
+        self.assertEqual(adapter.ask(self.session(bridge=None), 'Hello?', Mock()).state, 'unavailable')
+
     def test_executor_writes_only_to_a_line_inbox(self):
         executor = native.NativeExecutor(self.work, {}, {})
         with patch.object(executor, 'check_session'):

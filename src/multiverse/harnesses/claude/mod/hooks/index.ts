@@ -15,21 +15,25 @@ import { registerUsage } from './usage'
 //   turn as a wrapped peer prompt, so prompt.submit drops it and submits it.
 // When a message's row enters the conversation, the mod writes a receipt in the
 // agent's directory for `mv2 deliver --check`.
+// A question tagged `ask` never enters the conversation: the mod answers it
+// with $.model.fork over the session's own transcript and writes the answer in
+// the agent's directory for `mv2 ask`.
 //
 // It also reports this session's status to Multiverse: working while a
 // main-loop turn runs, waiting while a permission prompt, a question or an MCP
 // elicitation waits on the person, idle otherwise.
 
 // `<<MV2>>` alone is the first version's tag, still found in older history.
-const TAG = /<<MV2(?: (steer|follow-up))?(?: id=([0-9a-fA-F-]{36}))?>>([\s\S]*)<<\/MV2>>/
+const TAG = /<<MV2(?: (steer|follow-up|ask))?(?: id=([0-9a-fA-F-]{36}))?>>([\s\S]*)<<\/MV2>>/
 
-type Message = { text: string; mode: "steer" | "follow-up"; id?: string }
+type Message = { text: string; mode: "steer" | "follow-up" | "ask"; id?: string }
 
 // The tagged message in a text; undefined when the text carries none.
 function tagged(text: string): Message | undefined {
   const match = TAG.exec(text)
   if (match === null) return undefined
-  return { text: match[3] ?? "", mode: match[1] === "follow-up" ? "follow-up" : "steer", id: match[2] }
+  const mode = match[1] === "follow-up" || match[1] === "ask" ? match[1] : "steer"
+  return { text: match[3] ?? "", mode, id: match[2] }
 }
 
 // Main-loop turn state: turn.start fires for the main loop only, and a
@@ -116,6 +120,19 @@ async function receipt($: EngineInterface, id: string | undefined, route: string
   if (id === undefined || !directory) return
   const at = await $.clock.now()
   await $.fs.write(`${directory}/claude-receipts/${id}.json`, JSON.stringify({ id, route, at }) + "\n")
+}
+
+// Answer a side question over the session's own transcript; nothing is added
+// to the conversation.
+async function answer($: EngineInterface, message: Message) {
+  const directory = await $.env.get("MV2_AGENT_DIR")
+  if (message.id === undefined || !directory) return
+  const result = await $.model.fork({ prompt: message.text })
+  const at = await $.clock.now()
+  const record = result.isAnswered
+    ? { id: message.id, answered: true, text: result.text, usage: result.usage, at }
+    : { id: message.id, answered: false, reason: result.reason, usage: "usage" in result ? result.usage : undefined, at }
+  await $.fs.write(`${directory}/claude-asks/${message.id}.json`, JSON.stringify(record) + "\n")
 }
 
 function text(content: readonly { type: string; text?: unknown }[]): string {
@@ -206,6 +223,13 @@ export const register: Register = (on) => {
   on("session.receive", { origin: { kind: "peer" } }, async ($, e, next) => {
     const message = tagged(e.text)
     if (message === undefined) return next(e)
+    if (message.mode === "ask") {
+      // The fork may take a while; leave the hook first.
+      $.clock.after(0, () => {
+        answer($, message).catch((error) => $.ui.log(`multiverse: question not answered: ${String(error)}`))
+      })
+      return { consumed: "Multiverse question answered by the multiverse plugin" }
+    }
     if (message.mode === "follow-up" || !turnRunning) {
       submit($, message)
       return { consumed: "Multiverse message submitted by the multiverse plugin" }

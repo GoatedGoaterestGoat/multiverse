@@ -281,6 +281,16 @@ When a message's row enters the conversation, the mod writes
 reads it: `mv2 deliver --check` then records the message as accepted and
 transcript-confirmed. A message without a receipt stays `unknown`.
 
+`mv2 ask` sends the question tagged `<<MV2 ask id=UUID>>` over the same inbox.
+The mod consumes it in `session.receive`, so nothing enters the conversation,
+and answers with `$.model.fork`: one tool-less completion over the session's own
+transcript as the main thread last sent it, reusing its prompt cache. It writes
+`claude-asks/<id>.json` in the agent's directory, which the adapter waits for (up
+to 120 s) and removes. Before the session's first response, or right after
+`/clear`, there is nothing to answer from and `ask` reports unavailable. Core
+resolves the session under the launch lock but waits for the answer outside it,
+so sends and stop are not held.
+
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
 reported unavailable until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
@@ -312,7 +322,7 @@ may change between releases.
 | Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
-| Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
+| Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
 
 Unsupported usage displays N/A, not zero. The usage representation includes
 cache-inclusive input, output, total, optional cache subsets, source, timestamp

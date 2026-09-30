@@ -17,6 +17,8 @@ import os
 from pathlib import Path
 import re
 import threading
+import time
+from uuid import uuid4
 
 from ..base import ConfiguredAdapter
 from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
@@ -28,6 +30,7 @@ MOD = Path(__file__).parent / 'mod'
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
 CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
+ASK_TIMEOUT = 120
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 
 
@@ -141,6 +144,8 @@ class ClaudeAdapter(ConfiguredAdapter):
                                             required=True))
         if getattr(self, 'settings', {}).get('inbox_bridge') and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
+        if connected and session.session_file:
+            result['ask'] = Capability('supported', mechanism='claude-model-fork')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
@@ -187,6 +192,41 @@ class ClaudeAdapter(ConfiguredAdapter):
         if written.state != 'ok':
             return written
         return NativeResult('native_queued', 'Written to the Claude session inbox; the mod reports delivery')
+
+    def ask(self, session, question, executor):
+        """Answer a side question with $.model.fork over the session's transcript.
+
+        The question travels tagged `ask` over the peer inbox; the mod consumes it,
+        so nothing enters the conversation, and writes claude-asks/<id>.json.
+        """
+        if self.capabilities(session)['ask'].state != 'supported':
+            return NativeResult('unavailable', 'The multiverse mod has not registered for this launch')
+        token = peer_token(session.endpoint.address)
+        if token is None:
+            return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
+        question_id = str(uuid4())
+        answer = Path(session.session_file).parent / 'claude-asks' / f'{question_id}.json'
+        frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': question_id,
+                 'message': {'role': 'user', 'content': f'<<MV2 ask id={question_id}>>{question}{CLOSE}'}}
+        written = executor.write_lines(session, [json.dumps({'type': 'auth', 'token': token}),
+                                                 json.dumps(frame, ensure_ascii=False)])
+        if written.state != 'ok':
+            return written
+        deadline = time.monotonic() + ASK_TIMEOUT
+        while time.monotonic() < deadline:
+            try:
+                record = json.loads(answer.read_text())
+            except (OSError, ValueError):  # not written yet, or mid-write
+                time.sleep(0.2)
+                continue
+            answer.unlink(missing_ok=True)
+            if record.get('answered'):
+                return NativeResult('ok', 'Answered over the session transcript; nothing was added to it',
+                                    {'answer': record.get('text', ''), 'usage': record.get('usage')})
+            if record.get('reason') == 'nothing-to-fork':
+                return NativeResult('unavailable', 'The session has no response to answer from yet')
+            return NativeResult('error', f'Claude did not answer: {record.get("reason", "unknown reason")}')
+        return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
 
     def get_delivery(self, session, message_id, executor=None):
         """The mod's receipt, written when the message's row entered the conversation."""

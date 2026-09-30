@@ -187,20 +187,20 @@ def usage_snapshot(root, properties, facts):
 
 def operation(root, reference, name, question=''):
     directory = agents.directory(root, reference)
-    with lock(directory / '.launch.lock'):
-        try:
+    try:
+        if name == 'ask' and not question.strip():
+            raise ValueError('A side question is required')
+        with lock(directory / '.launch.lock'):
             _, adapter, session, executor = context(root, directory.name)
-            if name == 'ask':
-                if not question.strip():
-                    raise ValueError('A side question is required')
-                result = adapter.ask(session, question, executor)
-            elif name == 'get_usage':
-                result = adapter.get_usage(session, executor)
-            else:
+            if name == 'get_usage':
+                return adapter.get_usage(session, executor).to_dict()
+            if name != 'ask':
                 return NativeResult('unavailable', f'Unknown operation: {name}').to_dict()
-            return result.to_dict()
-        except Exception as error:
-            return NativeResult('error', str(error)).to_dict()
+        # An answer can take a while: wait outside the launch lock so sends and
+        # stop are not held. The question still targets this exact session.
+        return adapter.ask(session, question, executor).to_dict()
+    except Exception as error:
+        return NativeResult('error', str(error)).to_dict()
 
 
 def control(root, reference, operation_name):
