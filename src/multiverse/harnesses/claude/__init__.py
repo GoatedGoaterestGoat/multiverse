@@ -92,6 +92,22 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def context_usage(native_id):
+    """Tokens in the latest main-thread request (input + cache written + cache read), or None.
+
+    Subagent transcripts are excluded: they have their own context windows.
+    """
+    mains = sorted((claude_home() / 'projects').glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
+    if not mains:
+        return None
+    with _transcripts_lock:
+        responses = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read().responses
+    if not responses:
+        return None
+    latest = list(responses.values())[-1]
+    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+
+
 def measured_usage(native_id):
     """Cumulative usage of the session and its subagents, from their transcripts."""
     projects = claude_home() / 'projects'
@@ -165,6 +181,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         except (OSError, ValueError, TypeError):
             pass
         usage = measured_usage(session.native_id)
+        # Before the mod reports (or without it) the request size comes from the transcript; the window is unknown.
+        if not isinstance(reported.get('context'), dict) or reported['context'].get('tokens') is None:
+            tokens = context_usage(session.native_id)
+            if tokens is not None:
+                reported['context'] = {**(reported.get('context') or {}), 'tokens': tokens}
         if usage is None:
             if reported:
                 return NativeResult('ok', 'Reported by the multiverse mod', {'native_session_id': session.native_id, **reported})

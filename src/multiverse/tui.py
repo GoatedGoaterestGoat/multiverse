@@ -10,7 +10,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static, TextArea
 
-from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hierarchy
+from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hierarchy, rate_limits
 from .draft import AgentDraft, SubverseDraft
 from .inspector import Inspector
 from .universe import slug
@@ -307,8 +307,10 @@ class MultiverseApp(App):
             breadcrumb.display = bool(self.history)
             breadcrumb.update("‹ Back · " + " / ".join(trail))
             totals = self.snapshot["counts"]
+            limits = rate_limits(snapshot["agents"])
             self.query_one("#totals", Static).update(
-                f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents')
+                (limits + " · " if limits else "")
+                + f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents')
             await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
             if generation != self._scope_generation:
                 return
@@ -343,7 +345,7 @@ class MultiverseApp(App):
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
         if available < 110:
-            fields = [key for key in fields if key not in ("harness", "status", "tokens", "id", "updated_at")]
+            fields = [key for key in fields if key not in ("harness", "status", "context", "cost", "id", "updated_at")]
         if self.draft:
             fields = list(self.draft.columns)
         widths = {key: COLUMNS[key][1] for key in fields}
@@ -475,6 +477,8 @@ class MultiverseApp(App):
         color = {"alive": "#a6e3a1", "stopped": "#7f849c", "unknown": "#f9e2af",
                  "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
                  "waiting": "#fab387"}.get(value, "#a6adc8")
+        if field == "context" and row.get("context_level"):
+            return Text(value, style={"warn": "#f9e2af", "high": "bold #f38ba8"}[row["context_level"]])
         if field == "status" and value == "waiting":
             return Text(value, style="bold #11111b on #fab387")
         return Text(value, style=color)

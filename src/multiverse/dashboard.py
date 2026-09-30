@@ -3,7 +3,9 @@ from pathlib import Path
 from hashlib import sha256
 import re
 
-from . import universe
+from datetime import datetime, timezone
+
+from . import universe, usage
 from .harnesses import load as load_harness
 from .store import read
 from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, list_agents, move, native_status, remove,
@@ -12,12 +14,12 @@ from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "tokens": ("Tokens", 8), "status": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
-DEFAULT_COLUMNS = ["name", "harness", "live", "status", "tokens", "phase", "summary"]
+DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
 # Former column keys that views written for older versions still use.
-COLUMN_ALIASES = {"activity": "status"}
+COLUMN_ALIASES = {"activity": "status", "tokens": "context"}
 
 
 def clean(value):
@@ -50,6 +52,31 @@ def view(root):
 
 def columns(root):
     return view(root)["columns"]
+
+
+def with_usage(agent):
+    """Display fields from the agent's native usage reading."""
+    reading = agent.get("usage") if isinstance(agent.get("usage"), dict) else {}
+    return {**agent, "context": usage.context_display(reading), "context_level": usage.context_level(reading),
+            "cost": usage.cost_display(reading), "context_line": usage.context_line(reading)}
+
+
+def rate_limits(items):
+    """Account-wide windows from the newest reading among live agents, unexpired: '5h 34% · 7d 12%'."""
+    now = datetime.now(timezone.utc)
+    best = {}
+    for agent in items:
+        if agent.get("live") != "alive" or not isinstance(agent.get("usage"), dict):
+            continue
+        for label, percent, resets, reported in usage.rate_limit_windows(agent["usage"]):
+            try:
+                if resets and datetime.fromisoformat(resets.replace("Z", "+00:00")) <= now:
+                    continue
+            except ValueError:
+                pass
+            if label not in best or str(reported or "") >= best[label][1]:
+                best[label] = (percent, str(reported or ""))
+    return " · ".join(f"{label} {best[label][0]:.0f}%" for label in ("5h", "7d") if label in best)
 
 
 def within(item, root):
@@ -183,7 +210,7 @@ def hierarchy(data, collapsed=(), search=""):
         for agent in members[path]:
             if matched or query in " ".join(clean(agent.get(k, "")) for k in
                     ("name", "id", "task", "summary", "phase", "live", "status", "harness")).casefold():
-                descendants.append({**agent, "kind": "agent", "key": agent_key(agent),
+                descendants.append({**with_usage(agent), "kind": "agent", "key": agent_key(agent),
                                     "parent_key": group_key(path), "depth": depth + 1, "accent": group["accent"]})
         for child in children[path]:
             descendants.extend(visit(child, depth + 1, matched))

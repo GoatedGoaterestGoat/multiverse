@@ -43,7 +43,7 @@ Footer { background: #181825; }
 .inspecting #inspector { display: block; }
 #inspect-name { height: 1; }
 #inspect-meta { height: 1; color: #7f849c; }
-#inspect-state { height: auto; max-height: 3; color: #a6adc8; }
+#inspect-state { height: auto; max-height: 4; color: #a6adc8; }
 #inspect-label { height: 1; margin-top: 1; color: #7f849c; }
 #inspect-work { height: auto; max-height: 4; color: #cdd6f4; }
 #inspect-group { height: 1fr; margin-top: 1; }
@@ -64,7 +64,7 @@ Footer { background: #181825; }
 .drawer #inspector { width: 100%; max-width: 100%; height: 12; max-height: 60%; border-left: none; border-top: solid #45475a; }
 .drawer #inspect-label { display: none; }
 .drawer #inspect-meta { display: none; }
-.drawer #inspect-state { max-height: 2; }
+.drawer #inspect-state { max-height: 3; }
 .drawer #inspect-work { max-height: 2; }
 .drawer #pane-scroll { margin-top: 0; }
 .short.drawer #inspect-work { max-height: 1; }

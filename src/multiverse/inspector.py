@@ -83,8 +83,8 @@ class Inspector(Vertical):
             live = row.get("live", "unknown")
             state.append(f" · {live}", style="#a6e3a1" if live == "alive" else "#f9e2af")
             state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
-            state.append(" · Tokens: " + clean(row.get("tokens", "N/A")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
+            state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 self.query_one("#preview", Static).update(clean(row.get("reason") or "No live pane. Resume a stopped agent with r."))
