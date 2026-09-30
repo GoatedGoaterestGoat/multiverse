@@ -114,9 +114,10 @@ class FilesTest(BaseTest):
         with self.assertRaises(ValueError):
             append_message(agent, "must not hide corruption", {})
 
-    def test_foreign_host_is_unknown(self):
-        result = observe({}, {"host": "some-other-host", "tmux": {"pane": "%1", "socket": "/tmp/nope"}})
-        self.assertEqual(result["live"], "unknown")
+    def test_missing_local_server_is_stopped_despite_old_hostname(self):
+        with patch.object(Tmux, "snapshot", return_value=({}, None)):
+            result = observe({}, {"host": "some-other-host", "tmux": {"pane": "%1", "socket": "/tmp/nope"}})
+        self.assertEqual(result["live"], "stopped")
 
     def test_subverse_view_is_local_and_parent_shows_summary(self):
         child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
@@ -205,10 +206,25 @@ class TerminalTest(TerminalBase):
             agents.start(self.root, resume=result['id'], socket_path=self.socket)
         pane = result['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'unknown')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
         with self.assertRaises(ValueError):
             agents.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
+
+    def test_missing_pane_after_hostname_change_can_resume_same_session(self):
+        result, agent_dir = self.spawn()
+        native_id = '00000000-0000-4000-8000-000000000001'
+        agents.bind_session(self.root, result['id'], native_id)
+        self.backend.run('kill-pane', '-t', result['runtime']['tmux']['pane'])
+        until(lambda: not self.backend.snapshot()[0])
+        agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname', state='running')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
+        time.sleep(0.1)
+        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
+        self.assertEqual(resumed['native_session_id'], native_id)
+        self.assertEqual(resumed['id'], result['id'])
+        self.assertNotEqual(resumed['runtime']['launch_id'], result['runtime']['launch_id'])
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
 
     def test_dashboard_can_close_without_stopping_agent(self):
         self.spawn()
