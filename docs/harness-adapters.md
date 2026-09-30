@@ -260,18 +260,26 @@ passes `--messaging-socket-path` (the core-assigned private socket),
 `crossSessionInbound: accept` (Claude otherwise holds peer messages for approval
 when the session skips permission prompts) and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
 (mods are early access). `send` reads the key Claude publishes for that socket and
-writes one message at `next` priority, addressed to the exact session UUID, its
-framed text between `<<MV2>>` and `<</MV2>>`. The mod acts only on tagged text and
-shows the model the text alone:
+writes one message at `next` priority, addressed to the exact session UUID. Its
+framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`:
+the mode, which the mod honors, and the message ID for its receipt. The mod acts
+only on tagged text and shows the model the text alone:
 
-- Mid-turn it merges at the next tool result as a queued command; the mod removes
-  Claude's peer wrapper and the tags from what the model reads. Claude's transcript
-  and terminal keep the original record, tags included.
-- Arriving while idle, or queued with no tool result after it, it is taken before it
-  becomes a wrapped peer prompt and typed in: the draft is saved, the prompt box
-  filled and checked, Enter sent to the agent's own tmux pane, and the draft
-  restored. It reaches the model as an ordinary prompt. If that fails, the mod
-  submits the text as its own prompt instead.
+- A steer arriving mid-turn loses its tags in `session.receive`, so the queued
+  message shows clean in the terminal. It merges at the next tool result as a
+  queued command, and `session.append` stores that row without Claude's peer
+  wrapper, so the model, the transcript and later resumes read the text alone.
+- A steer arriving while idle, and every follow-up, is taken in `session.receive`
+  and submitted with `$.prompt.submit({ text, asUser: true })`: the model reads it
+  bare, as the person's own words, in a turn of its own once the current turn has
+  ended. A steer queued mid-turn that no tool result took would start its own turn
+  as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
+  The terminal shows these as ordinary prompts; the transcript names the plugin.
+
+When a message's row enters the conversation, the mod writes
+`claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
+reads it: `mv2 deliver --check` then records the message as accepted and
+transcript-confirmed. A message without a receipt stays `unknown`.
 
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
 reported unavailable until it has) and reports status through `python -m
@@ -288,9 +296,9 @@ Claude usage is measured from the session's own transcript under Claude's
 usage, counted once per response ID. It works with or without the bridge. The
 adapter reads each transcript once, then only what was appended.
 
-Claude sends no receipt, so an accepted `send` means written to the inbox.
-Follow-up delivery and receipt reconciliation are not implemented. The mod was
-tested against Claude Code 2.1.286; the mod API may change between releases.
+An accepted `send` means written to the Claude session inbox; the receipt
+confirms delivery. The mod was tested against Claude Code 2.1.286; the mod API
+may change between releases.
 
 ## Implemented capabilities and verification limits
 
@@ -299,9 +307,9 @@ tested against Claude Code 2.1.286; the mod API may change between releases.
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
 | Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
 | Safe-boundary steer | Yes | Bridge: peer inbox + mod | Yes | Unavailable |
-| After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
+| After-turn send / idle wake | Yes | Bridge: follow-up after the turn; idle wake | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
-| Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
+| Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |

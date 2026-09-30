@@ -102,7 +102,8 @@ class ClaudeBridgeTest(BaseTest):
         session = self.session()
         executor = Mock()
         executor.write_lines.return_value = NativeResult('ok')
-        message = Message('message-id', 'body', {}, None, 'steer', 'Message from reviewer:\nbody')
+        message_id = str(uuid4())
+        message = Message(message_id, 'body', {}, None, 'steer', 'Message from reviewer:\nbody')
         self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'supported')
         result = adapter.send(session, message, executor)
         self.assertEqual(result.state, 'native_queued')
@@ -111,19 +112,25 @@ class ClaudeBridgeTest(BaseTest):
         auth, frame = (json.loads(line) for line in lines)
         self.assertEqual(auth, {'type': 'auth', 'token': TOKEN})
         self.assertEqual(frame, {'type': 'user', 'priority': 'next', 'session_id': session.native_id,
-                                 'msg_id': 'message-id',
-                                 'message': {'role': 'user', 'content': '<<MV2>>Message from reviewer:\nbody<</MV2>>'}})
+                                 'msg_id': message_id,
+                                 'message': {'role': 'user', 'content': f'<<MV2 steer id={message_id}>>'
+                                                                        'Message from reviewer:\nbody<</MV2>>'}})
+        # Follow-up travels at `next` too; the tag tells the mod to wait for the turn to end.
+        follow_up = Message(message_id, 'body', delivery='follow-up', framed='Message from reviewer:\nbody')
+        self.assertEqual(adapter.capabilities(session)['send_follow_up'].state, 'supported')
+        self.assertEqual(adapter.send(session, follow_up, executor).state, 'native_queued')
+        frame = json.loads(executor.write_lines.call_args.args[1][1])
+        self.assertEqual(frame['priority'], 'next')
+        self.assertTrue(frame['message']['content'].startswith(f'<<MV2 follow-up id={message_id}>>'))
 
-    def test_follow_up_and_unready_sessions_are_unavailable_without_writing(self):
+    def test_unready_sessions_are_unavailable_without_writing(self):
         adapter = self.bridge()
         executor = Mock()
-        self.assertEqual(adapter.capabilities(self.session())['send_follow_up'].state, 'unavailable')
-        follow_up = Message('id', 'body', delivery='follow-up', framed='Message from user:\nbody')
-        self.assertEqual(adapter.send(self.session(), follow_up, executor).state, 'unavailable')
-        steer = Message('id', 'body', framed='Message from user:\nbody')
+        steer = Message(str(uuid4()), 'body', framed='Message from user:\nbody')
         # A stopped launch, one without an inbox, and one whose mod never registered.
         for session in (self.session(state='stopped'), self.session(endpoint=False), self.session(bridge=None)):
-            self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'unavailable')
+            for name in ('send_steer', 'send_follow_up'):
+                self.assertEqual(adapter.capabilities(session)[name].state, 'unavailable')
             self.assertEqual(adapter.send(session, steer, executor).state, 'unavailable')
         # Claude has not bound the inbox and published its key yet.
         self.assertEqual(adapter.send(self.session(), steer, executor).state, 'unavailable')
@@ -152,7 +159,8 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(auth['token'], TOKEN)
         self.assertEqual(frame['session_id'], native_id)
         self.assertEqual(frame['msg_id'], result['id'])
-        self.assertEqual(frame['message']['content'], '<<MV2>>Message from reviewer:\nPlease rebase<</MV2>>')
+        self.assertEqual(frame['message']['content'],
+                         f'<<MV2 steer id={result["id"]}>>Message from reviewer:\nPlease rebase<</MV2>>')
 
     def test_mod_registers_its_bridge_and_reports_waiting_for_the_current_launch(self):
         agent = str(uuid4())
@@ -206,6 +214,22 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()))).state,
                          'unavailable')
         self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work))).state, 'unavailable')
+
+    def test_delivery_is_confirmed_only_by_the_mods_receipt(self):
+        adapter = self.bridge()
+        agent_dir = self.work / 'agent'
+        session = SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()),
+                                session_file=str(agent_dir / 'session.jsonl'))
+        self.assertEqual(adapter.capabilities(session)['get_delivery'].state, 'supported')
+        message_id = str(uuid4())
+        self.assertEqual(adapter.get_delivery(session, message_id).state, 'unknown')
+        (agent_dir / 'claude-receipts').mkdir(parents=True)
+        (agent_dir / 'claude-receipts' / f'{message_id}.json').write_text(
+            json.dumps({'id': message_id, 'route': 'mid-turn', 'at': 1790000000000}))
+        result = adapter.get_delivery(session, message_id)
+        self.assertEqual((result.state, result.value['transcript_confirmed'], result.value['route']),
+                         ('native_queued', True, 'mid-turn'))
+        self.assertEqual(adapter.get_delivery(session, '../../escape').state, 'error')
 
     def test_executor_writes_only_to_a_line_inbox(self):
         executor = native.NativeExecutor(self.work, {}, {})

@@ -19,12 +19,15 @@ import re
 import threading
 
 from ..base import ConfiguredAdapter
-from ..types import Capability, NativeEndpoint, NativeResult
+from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
 from ...usage import Usage
 
 MOD = Path(__file__).parent / 'mod'
-# The mod acts only on text between these tags and removes them.
-OPEN, CLOSE = '<<MV2>>', '<</MV2>>'
+# The mod acts only on text between these tags and removes them. The opening
+# tag names the delivery mode, which the mod honors, and the message ID for its
+# receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
+CLOSE = '<</MV2>>'
+MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 
 
@@ -132,11 +135,12 @@ class ClaudeAdapter(ConfiguredAdapter):
         connected = (getattr(self, 'settings', {}).get('inbox_bridge') and session.state == 'running'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines'
                      and session.bridge == 'claude-mod-v1')
-        result['send_steer'] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if connected
-                                else Capability('unavailable', 'The multiverse mod has not registered for this launch',
-                                                required=True))
-        result['send_follow_up'] = Capability('unavailable', 'Claude follow-up delivery is not implemented yet',
-                                              required=True)
+        for name in ('send_steer', 'send_follow_up'):
+            result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if connected
+                            else Capability('unavailable', 'The multiverse mod has not registered for this launch',
+                                            required=True))
+        if getattr(self, 'settings', {}).get('inbox_bridge') and session.session_file:
+            result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
         return result
@@ -163,17 +167,37 @@ class ClaudeAdapter(ConfiguredAdapter):
         return NativeResult('ok', 'Measured from the Claude session transcript', {**asdict(usage), **reported})
 
     def send(self, session, message, executor):
-        if message.delivery != 'steer':
-            return NativeResult('unavailable', 'Claude follow-up delivery is not implemented yet')
+        mode = MODES.get(message.delivery)
+        if mode is None:
+            return NativeResult('unavailable', f'Unknown delivery mode: {message.delivery}')
         if self.capabilities(session)['send_steer'].state != 'supported':
             return NativeResult('unavailable', 'The multiverse mod has not registered for this launch')
         token = peer_token(session.endpoint.address)
         if token is None:
             return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
+        # Always `next`: the mod decides from the tag when a follow-up runs.
+        try:
+            opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}>>'
+        except ValueError:
+            opening = f'<<MV2 {mode}>>'  # no receipt without a UUID
         frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': message.id,
-                 'message': {'role': 'user', 'content': OPEN + (message.framed or message.text) + CLOSE}}
+                 'message': {'role': 'user', 'content': opening + (message.framed or message.text) + CLOSE}}
         written = executor.write_lines(session, [json.dumps({'type': 'auth', 'token': token}),
                                                  json.dumps(frame, ensure_ascii=False)])
         if written.state != 'ok':
             return written
-        return NativeResult('native_queued', 'Written to the Claude session inbox; Claude sends no receipt')
+        return NativeResult('native_queued', 'Written to the Claude session inbox; the mod reports delivery')
+
+    def get_delivery(self, session, message_id, executor=None):
+        """The mod's receipt, written when the message's row entered the conversation."""
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
+        try:
+            receipt = Path(session.session_file).parent / 'claude-receipts' / f'{normalize_session_id(message_id)}.json'
+        except ValueError:
+            return NativeResult('error', 'Message ID must be a UUID')
+        if not receipt.is_file():
+            return NativeResult('unknown', 'No delivery receipt from the multiverse mod yet')
+        value = json.loads(receipt.read_text())
+        return NativeResult('native_queued', 'Delivered into the Claude conversation',
+                            {'transcript_confirmed': True, 'route': value.get('route'), 'delivered_at_ms': value.get('at')})
