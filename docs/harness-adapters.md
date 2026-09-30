@@ -212,6 +212,10 @@ it in the launch request, creates a private 0700 socket directory, and starts th
 relay in the runner before starting the TUI. The provider supplies pure request
 and reply interpretation; core owns WebSocket connections, backpressure, size
 limits, error recording, exact session binding and cleanup.
+Interactive relay messages have a separate 64 MiB limit and a two-frame receive
+queue: native resume replies include conversation history and can exceed the
+1 MiB budget used for small control RPCs. Oversized messages still close the
+connection with a runtime diagnostic.
 
 The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
 requests, preserving existing developer instructions. Initial writable roots from

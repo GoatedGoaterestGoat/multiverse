@@ -94,7 +94,7 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
                     await self.received.put(payload)
             except Exception:
                 pass
-        self.server = await unix_serve(server, self.spec['upstream_path'])
+        self.server = await unix_serve(server, self.spec['upstream_path'], max_size=64 * 1024 * 1024)
         self.proxy = None
         self.client = None
 
@@ -112,7 +112,7 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         self.proxy = rpc.LaunchProxy(self.spec, self.protocol,
             lambda native_id: agents.bind_session(self.root, 'agent', native_id, 'launch'), self.errors.append)
         await asyncio.to_thread(self.proxy.start)
-        self.client = await unix_connect(self.spec['socket_path'])
+        self.client = await unix_connect(self.spec['socket_path'], max_size=64 * 1024 * 1024)
         await asyncio.wait_for(self.connected.wait(), 2)
 
     async def receive(self):
@@ -157,6 +157,38 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         reply = '{"id":99,"result":{"decision":"decline"}}'
         await self.client.send(reply)
         self.assertEqual(await self.receive(), reply)
+
+    async def test_large_resume_history_and_following_frames_keep_connection_open(self):
+        self.settings['native_id'] = self.native_id
+        await self.connect()
+        await self.client.send(json.dumps({'id': 3, 'method': 'thread/resume',
+                                          'params': {'threadId': self.native_id}}))
+        await self.receive()
+        # A real resumed session returned 12,405,815 bytes and repeatedly hit
+        # the old 1 MiB limit, making the native TUI reconnect indefinitely.
+        response = json.dumps({'id': 3, 'result': {'thread': {
+            'id': self.native_id, 'cwd': str(self.root), 'turns': [
+                {'items': [{'type': 'commandExecution', 'aggregatedOutput': 'x' * (13 * 1024 * 1024)}]}]}}})
+        await self.upstream.send(response)
+        self.assertEqual(await asyncio.wait_for(self.client.recv(), 5), response)
+        self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
+        # Large client messages (e.g. images) must also survive the relay.
+        payload = json.dumps({'method': 'future/method', 'params': {'text': 'x' * (2 * 1024 * 1024)}})
+        await self.client.send(payload)
+        self.assertEqual(await self.receive(), payload)
+        await self.upstream.send('{"method":"thread/status/changed","params":{}}')
+        self.assertEqual(await self.client.recv(), '{"method":"thread/status/changed","params":{}}')
+        self.assertEqual(self.errors, [])
+
+    async def test_relay_still_bounds_oversized_native_messages(self):
+        from unittest.mock import patch
+        with patch.object(rpc.LaunchProxy, 'MAX_MESSAGE_SIZE', 1024):
+            await self.connect()
+            await self.upstream.send(json.dumps({'method': 'future/event', 'text': 'x' * 2048}))
+            await asyncio.wait_for(self.client.wait_closed(), 2)
+            await asyncio.to_thread(self.proxy.close)
+            self.assertTrue(self.errors)
+            self.assertEqual(self.upstream.close_code, 1009)
 
     async def test_malformed_launch_fails_visibly_without_forwarding(self):
         await self.connect()

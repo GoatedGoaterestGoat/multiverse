@@ -131,6 +131,11 @@ async def watch(spec, interpret, publish, timeout=5):
 
 class LaunchProxy:
     """A runner-owned local relay into a shared service, with adapter transforms."""
+    # Interactive replies can contain an entire resumed conversation, including
+    # tool output and images. The small control-RPC budget is inappropriate here.
+    MAX_MESSAGE_SIZE = 64 * 1024 * 1024
+    MAX_QUEUE = 2
+
     def __init__(self, spec, protocol, bind, record_error=lambda error: None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
@@ -168,7 +173,7 @@ class LaunchProxy:
     async def _serve(self):
         from websockets.asyncio.server import unix_serve
         async with unix_serve(self._connection, self.spec['socket_path'], compression=None,
-                              close_timeout=.2, max_size=1024 * 1024, max_queue=8):
+                              close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE, max_queue=self.MAX_QUEUE):
             self.ready.set()
             while not self.stopped.is_set():
                 await asyncio.sleep(.1)
@@ -176,7 +181,8 @@ class LaunchProxy:
     async def _connection(self, client):
         try:
             async with unix_connect(self.spec['upstream_path'], compression=None, open_timeout=5,
-                                    close_timeout=.2, max_size=1024 * 1024, max_queue=8) as upstream:
+                                    close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE,
+                                    max_queue=self.MAX_QUEUE) as upstream:
                 async def forward(source, target, outgoing):
                     try:
                         async for payload in source:
@@ -204,8 +210,8 @@ class LaunchProxy:
                                     self.bind(native_id)
                             if value is not original:
                                 encoded = json.dumps(value, ensure_ascii=False)
-                                if len(encoded.encode()) > 1024 * 1024:
-                                    raise ValueError('Native relay frame exceeds 1 MiB')
+                                if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
+                                    raise ValueError('Native relay message exceeds size limit')
                                 payload = encoded.encode() if isinstance(payload, bytes) else encoded
                             await target.send(payload)
                     finally:
