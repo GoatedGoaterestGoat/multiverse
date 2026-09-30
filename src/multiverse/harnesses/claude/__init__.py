@@ -142,12 +142,25 @@ class ClaudeAdapter(ConfiguredAdapter):
         return result
 
     def get_usage(self, session, executor=None):
+        """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
+        from ... import agents
         if not session.native_id:
             return NativeResult('unavailable', 'No Claude session ID recorded')
+        reported = {}
+        try:
+            facts = agents.runtime(Path(session.session_file).parent)
+            mod = facts.get('usage')
+            if isinstance(mod, dict) and session.launch_id and facts.get('launch_id') == session.launch_id:
+                reported = {key: mod[key] for key in ('context', 'cost_usd', 'rate_limits') if key in mod}
+                reported['context_reported_at'] = mod.get('reported_at')
+        except (OSError, ValueError, TypeError):
+            pass
         usage = measured_usage(session.native_id)
         if usage is None:
+            if reported:
+                return NativeResult('ok', 'Reported by the multiverse mod', {'native_session_id': session.native_id, **reported})
             return NativeResult('unavailable', 'Claude has not written a transcript for this session yet')
-        return NativeResult('ok', 'Measured from the Claude session transcript', asdict(usage))
+        return NativeResult('ok', 'Measured from the Claude session transcript', {**asdict(usage), **reported})
 
     def send(self, session, message, executor):
         if message.delivery != 'steer':
