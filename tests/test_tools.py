@@ -79,7 +79,7 @@ class ToolsTest(unittest.TestCase):
     def test_standalone_callbacks_reject_stale_launch_without_mutating_state(self):
         before = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
         callbacks = (("inbox", ()), ("ack", ("--cursor", "0")),
-                     ("status", ("--phase", "done")), ("runtime-update", ("--activity", "idle")),
+                     ("report", ("--phase", "done")), ("runtime-update", ("--status", "idle")),
                      ("session-bind", ("--session-id", str(uuid4()))))
         for action, args in callbacks:
             with self.subTest(action=action):

@@ -91,7 +91,7 @@ project/.multiverse/
   state/                        # local, ignored by Git
     agents/<uuid>/
       properties.json           # identity, task, reported phase and summary
-      runtime.json              # launch generation, host, pane, observed activity
+      runtime.json              # launch generation, host, pane, reported status
       inbox.jsonl               # append-only messages with IDs and reply references
       inbox.cursor              # acknowledged byte offset
       session.jsonl             # native Pi conversation

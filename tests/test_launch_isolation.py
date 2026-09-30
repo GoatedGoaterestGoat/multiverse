@@ -161,13 +161,13 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_stale_cli_callbacks_cannot_read_ack_bind_or_change_current_launch(self):
         agent = self.root / "state/agents" / str(uuid4())
         properties = {"id": agent.name, "name": "callback", "phase": "working"}
-        runtime = {"launch_id": "current", "activity": "working"}
+        runtime = {"launch_id": "current", "status": "working"}
         write(agent / "properties.json", properties)
         write(agent / "runtime.json", runtime)
         message = append_message(agent, "for current launch", {})
         cursor = inbox(agent)["cursor"]
         actions = (["inbox"], ["ack", "--cursor", str(cursor)],
-                   ["status", "--phase", "done"], ["runtime-update", "--activity", "idle"],
+                   ["report", "--phase", "done"], ["runtime-update", "--status", "idle"],
                    ["session-bind", "--session-id", str(uuid4())])
         for action in actions:
             with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):

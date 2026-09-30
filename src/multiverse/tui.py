@@ -343,12 +343,12 @@ class MultiverseApp(App):
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
         if available < 110:
-            fields = [key for key in fields if key not in ("harness", "activity", "tokens", "id", "updated_at")]
+            fields = [key for key in fields if key not in ("harness", "status", "tokens", "id", "updated_at")]
         if self.draft:
             fields = list(self.draft.columns)
         widths = {key: COLUMNS[key][1] for key in fields}
         widths.update(name=26 if available >= 68 else 23)
-        for key, width in (("live", 7), ("phase", 8), ("harness", 7), ("activity", 9)):
+        for key, width in (("live", 7), ("phase", 8), ("harness", 7), ("status", 9)):
             if key in widths:
                 widths[key] = width
         if self.draft and "harness" in widths:
@@ -461,7 +461,7 @@ class MultiverseApp(App):
                 label.append(guide, style=f"not bold {accent}")
             label.append(("▾ " if row["expanded"] else "▸ ") if group else "  ")
             label.append(clean(row["name"]))
-            if not group and row.get("activity") == "waiting":
+            if not group and row.get("status") == "waiting":
                 label.append(" ●", style="bold #fab387")
             return label
         if row["kind"] == "group":
@@ -475,7 +475,7 @@ class MultiverseApp(App):
         color = {"alive": "#a6e3a1", "stopped": "#7f849c", "unknown": "#f9e2af",
                  "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
                  "waiting": "#fab387"}.get(value, "#a6adc8")
-        if field == "activity" and value == "waiting":
+        if field == "status" and value == "waiting":
             return Text(value, style="bold #11111b on #fab387")
         return Text(value, style=color)
 
@@ -676,7 +676,7 @@ class MultiverseApp(App):
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
-                      ("live", "TERMINAL"), ("activity", "HARNESS STATUS"), ("reason", "OBSERVATION"),
+                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields

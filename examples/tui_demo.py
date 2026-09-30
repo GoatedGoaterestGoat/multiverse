@@ -33,9 +33,9 @@ class DemoBackend:
             (cad, "harness-builder", "alive", "working", "working", "Validate the new constraint solver adapter"),
             (verify, "verifier", "stopped", "—", "done", "Reproduced the gearbox trial across three seeds"),
         ]
-        for index, (path, name, live, activity, phase, summary) in enumerate(samples):
+        for index, (path, name, live, status, phase, summary) in enumerate(samples):
             self.agents.append({"id": f"00000000-0000-4000-8000-{index + 1:012d}", "name": name,
-                                "universe": str(path), "harness": "codex" if index % 2 == 0 else "claude", "live": live, "activity": activity,
+                                "universe": str(path), "harness": "codex" if index % 2 == 0 else "claude", "live": live, "status": status,
                                 "phase": phase, "summary": summary, "task": summary, "runtime": {}})
 
     def snapshot(self, root):
@@ -55,7 +55,7 @@ class DemoBackend:
     def spawn(self, root, values):
         with self.lock:
             row = {"id": uid(), "name": values["name"], "universe": str(root), "harness": values.get("harness", "codex"),
-                   "live": "alive", "activity": "idle", "phase": "starting", "summary": values.get("task", ""),
+                   "live": "alive", "status": "idle", "phase": "starting", "summary": values.get("task", ""),
                    "task": values.get("task", ""), "model": values.get("model") or None, "runtime": {}}
             self.agents.append(row)
             return deepcopy(row)
@@ -67,11 +67,11 @@ class DemoBackend:
 
     def stop(self, root, reference):
         with self.lock:
-            self.find(root, reference).update(live="stopped", activity="—")
+            self.find(root, reference).update(live="stopped", status="—")
 
     def resume(self, root, reference):
         with self.lock:
-            self.find(root, reference).update(live="alive", activity="idle")
+            self.find(root, reference).update(live="alive", status="idle")
 
     def inspect(self, root, reference):
         with self.lock:

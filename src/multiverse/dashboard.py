@@ -12,10 +12,12 @@ from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "tokens": ("Tokens", 8), "activity": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "tokens": ("Tokens", 8), "status": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
-DEFAULT_COLUMNS = ["name", "harness", "live", "activity", "tokens", "phase", "summary"]
+DEFAULT_COLUMNS = ["name", "harness", "live", "status", "tokens", "phase", "summary"]
+# Former column keys that views written for older versions still use.
+COLUMN_ALIASES = {"activity": "status"}
 
 
 def clean(value):
@@ -40,6 +42,7 @@ def view(root):
     requested = config.get("columns", DEFAULT_COLUMNS)
     if not isinstance(requested, list):
         requested = DEFAULT_COLUMNS
+    requested = [COLUMN_ALIASES.get(key, key) if isinstance(key, str) else key for key in requested]
     selected = list(dict.fromkeys(key for key in requested if isinstance(key, str) and key in COLUMNS))
     return {"columns": selected or DEFAULT_COLUMNS, "accent": accent,
             "title": str(config.get("title", "")), "widgets": normalize_widgets(config.get("widgets", []))}
@@ -56,7 +59,7 @@ def within(item, root):
 def counts(items):
     return {"total": len(items), "alive": sum(a.get("live") == "alive" for a in items),
             "blocked": sum(a.get("phase") == "blocked" for a in items),
-            "waiting": sum(a.get("activity") == "waiting" for a in items),
+            "waiting": sum(a.get("status") == "waiting" for a in items),
             "unknown": sum(a.get("live") == "unknown" for a in items)}
 
 
@@ -179,7 +182,7 @@ def hierarchy(data, collapsed=(), search=""):
         descendants = []
         for agent in members[path]:
             if matched or query in " ".join(clean(agent.get(k, "")) for k in
-                    ("name", "id", "task", "summary", "phase", "live", "activity", "harness")).casefold():
+                    ("name", "id", "task", "summary", "phase", "live", "status", "harness")).casefold():
                 descendants.append({**agent, "kind": "agent", "key": agent_key(agent),
                                     "parent_key": group_key(path), "depth": depth + 1, "accent": group["accent"]})
         for child in children[path]:

@@ -372,12 +372,12 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_waiting_agents_stand_out_and_groups_count_them(self):
         reviewer = next(a for a in self.backend.agents if a["name"] == "reviewer")
-        reviewer["activity"] = "waiting"
+        reviewer["status"] = "waiting"
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             self.assertIn("1 waiting", str(self.app.query_one("#totals", Static).render()))
             row = self.app.visible_rows[agent_key(reviewer)]
-            name, status = MultiverseApp.cell(row, "name"), MultiverseApp.cell(row, "activity")
+            name, status = MultiverseApp.cell(row, "name"), MultiverseApp.cell(row, "status")
             self.assertIn("●", name.plain)
             self.assertEqual(status.plain, "waiting")
             self.assertIn("#fab387", str(status.style))
@@ -389,7 +389,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
     async def test_user_facing_text_says_status(self):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
-            self.assertEqual(COLUMNS["activity"][0], "Status")
+            self.assertEqual(COLUMNS["status"][0], "Status")
             self.assertNotIn("ctivity", KEYS)
             self.assertIn("Inspector", [b.description for b in self.app.BINDINGS if b.show])
             await pilot.press("p")
@@ -428,7 +428,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.app.refresh_snapshot()
                 await self.settle(pilot)
                 self.assertEqual(len(calls), before + 1)
-                reviewer["live"], reviewer["activity"] = "stopped", "—"
+                reviewer["live"], reviewer["status"] = "stopped", "—"
                 self.app.refresh_snapshot()
                 await self.settle(pilot)
                 self.assertEqual(len(calls), before + 1)

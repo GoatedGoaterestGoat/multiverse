@@ -17,7 +17,7 @@ and the execution boundary. A handle contains the stable Multiverse agent ID,
 provider name, exact native ID/session file, saved workspace, and current launch
 ID. Core derives it from authoritative properties/runtime records; it does not
 maintain another copy of those records. Spawn/resume return `session` in their
-result. `list` reads current core identity, process state and reported activity after
+result. `list` reads current core identity, process state and reported status after
 asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID; Pi owns an
@@ -141,8 +141,8 @@ in-process acceptance records. Missing evidence remains unknown. Codex checks up
 message ID; absence remains unknown and requires investigation. Accepted submissions are never automatically resubmitted.
 
 The old `native-status` command remains a tool compatibility shim for usage.
-Its activity operation reports unavailable and points callers to `list`; there
-is no native activity query or adapter `observe` operation. Adapters expose
+Its status operation (formerly `activity`) reports unavailable and points callers to
+`list`; there is no native status query or adapter `observe` operation. Adapters expose
 feature methods directly, with no `control`, `native_capabilities`, `probes`, or
 `NativeContext` conversion layer. Resume validation is part of `resume()`, not
 a separate adapter method. Binding and built-in resume use the shared
@@ -258,8 +258,8 @@ shows the model the text alone:
   submits the text as its own prompt instead.
 
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
-reported unavailable until it has) and reports activity through `mv2
-runtime-update`: `working` while a main-loop turn runs; `waiting` while an
+reported unavailable until it has) and reports status through `mv2
+runtime-update --status`: `working` while a main-loop turn runs; `waiting` while an
 `AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched
 to its call through the engine's `ask` verdict and ends when the call finishes, is
@@ -285,7 +285,7 @@ tested against Claude Code 2.1.285; the mod API may change between releases.
 | After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
-| Native status (`activity` field) | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
+| Native status | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
 

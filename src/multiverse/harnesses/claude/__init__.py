@@ -6,7 +6,7 @@ message to that inbox at `next` priority, its text tagged for the mod. The mod
 shows the model the text alone: mid-turn it removes Claude's peer wrapper from
 the queued message; otherwise it types the text in as a prompt. The mod
 registers the `claude-mod-v1` bridge for its launch and reports the session's
-activity: working, waiting (a permission prompt or question) or idle.
+status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 """

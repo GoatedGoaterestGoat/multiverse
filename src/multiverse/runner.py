@@ -43,12 +43,12 @@ def main():
             if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
                 raise ValueError('Native control socket does not belong to this launch')
             service_dir = endpoint.parent
-        update_runtime(agent_dir, launch.name, state="running", activity="unknown")
+        update_runtime(agent_dir, launch.name, state="running", status="unknown")
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
         code = process.wait()
         update_runtime(agent_dir, launch.name, state="stopped" if code == 0 else "failed", exit_code=code,
-                       activity="unknown", stopped_at=now())
+                       status="unknown", stopped_at=now())
         return code
     except Exception as error:
         print(f"Multiverse launch failed: {error}", file=sys.stderr)

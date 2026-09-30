@@ -68,7 +68,7 @@ class Inspector(Vertical):
         if group:
             state = f'{row["alive"]}/{row["total"]} live · {row["waiting"]} waiting · {row["blocked"]} blocked'
             members = [a for a in self.app.snapshot["agents"] if within(a, Path(row["path"]))]
-            members.sort(key=lambda a: (a.get("activity") != "waiting", a.get("phase") != "blocked"))
+            members.sort(key=lambda a: (a.get("status") != "waiting", a.get("phase") != "blocked"))
             work = Text("ACTIVE WORK\n", style="#7f849c")
             for agent in members[:4]:
                 work.append("\n" + clean(agent["name"]) + "\n", style=accent)
@@ -82,7 +82,7 @@ class Inspector(Vertical):
                 state.append(" / " + clean(row["model"]))
             live = row.get("live", "unknown")
             state.append(f" · {live}", style="#a6e3a1" if live == "alive" else "#f9e2af")
-            state.append("\nStatus: " + clean(row.get("activity", "unknown")), style="#a6adc8")
+            state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
             state.append(" · Tokens: " + clean(row.get("tokens", "N/A")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
             if live != "alive":

@@ -102,7 +102,7 @@ class SessionHandle:
     state: str = 'unknown'
     endpoint: NativeEndpoint | None = None
     bridge: str | None = None
-    activity: str = 'unknown'
+    status: str = 'unknown'
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -111,7 +111,7 @@ class SessionHandle:
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
-                   runtime.get('native_bridge'), runtime.get('activity', 'unknown'))
+                   runtime.get('native_bridge'), runtime.get('status', 'unknown'))
 
 @dataclass(frozen=True)
 class Message:

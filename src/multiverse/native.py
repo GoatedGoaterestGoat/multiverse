@@ -207,8 +207,8 @@ def control(root, reference, operation_name):
     """Compatibility for the old native-status tool; new callers use named operations."""
     if operation_name == 'usage':
         return operation(root, reference, 'get_usage')
-    if operation_name == 'activity':
-        return NativeResult('unavailable', 'Native activity is not implemented; use list for core launch state').to_dict()
+    if operation_name in ('status', 'activity'):
+        return NativeResult('unavailable', 'Native status is not implemented; use list for core launch state').to_dict()
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 

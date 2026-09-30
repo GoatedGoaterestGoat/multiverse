@@ -160,13 +160,13 @@ class ClaudeBridgeTest(BaseTest):
         write(directory / 'properties.json', {'id': agent, 'name': 'worker', 'harness': 'claude'})
         write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
         with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
-            runtime_update.run(self.root, agent=agent, activity='idle', bridge='claude-mod-v1')
-            runtime_update.run(self.root, agent=agent, activity='waiting')
+            runtime_update.run(self.root, agent=agent, status='idle', bridge='claude-mod-v1')
+            runtime_update.run(self.root, agent=agent, status='waiting')
         facts = read(directory / 'runtime.json')
-        self.assertEqual((facts['native_bridge'], facts['activity']), ('claude-mod-v1', 'waiting'))
+        self.assertEqual((facts['native_bridge'], facts['status']), ('claude-mod-v1', 'waiting'))
         with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'previous'}), self.assertRaisesRegex(ValueError, 'Outdated launch'):
-            runtime_update.run(self.root, agent=agent, activity='working')
-        self.assertEqual(read(directory / 'runtime.json')['activity'], 'waiting')
+            runtime_update.run(self.root, agent=agent, status='working')
+        self.assertEqual(read(directory / 'runtime.json')['status'], 'waiting')
 
     def response(self, id, input_tokens, output_tokens, cache_read=0, cache_write=0, block='text'):
         usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,

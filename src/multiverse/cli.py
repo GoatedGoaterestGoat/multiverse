@@ -9,11 +9,16 @@ from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "status",
+            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "report",
             "runtime-update", "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
 
 
+# Former names that keep working for agents launched with older prompts.
+ALIASES = {"report": ["status"]}
+
+
 def tool(action):
+    action = {"status": "report"}.get(action, action)
     name = "list_agents" if action == "list" else action.replace("-", "_")
     return import_module(f".tools.{name}", __package__)
 
@@ -24,7 +29,7 @@ def parser():
     commands = result.add_subparsers(dest="action")
     for action in COMMANDS:
         module = tool(action)
-        module.configure(commands.add_parser(action, help=module.__doc__))
+        module.configure(commands.add_parser(action, help=module.__doc__, aliases=ALIASES.get(action, [])))
     return result
 
 

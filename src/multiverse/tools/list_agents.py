@@ -10,7 +10,7 @@ def run(root=None, *, recursive=False, json=False):
     rows = agents.listing(universe.resolve(root), recursive)
     if json:
         return rows
-    return "\n".join(f'{r["id"][:8]}  {r["name"]:16} {r["live"]:8} {r["activity"]:8} {r.get("phase", "?"):9} {r.get("summary", "")} [{r["universe"]}]' for r in rows) or "No agents."
+    return "\n".join(f'{r["id"][:8]}  {r["name"]:16} {r["live"]:8} {r["status"]:8} {r.get("phase", "?"):9} {r.get("summary", "")} [{r["universe"]}]' for r in rows) or "No agents."
 
 
 if __name__ == "__main__":

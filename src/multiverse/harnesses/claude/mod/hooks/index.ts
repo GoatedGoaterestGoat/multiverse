@@ -12,7 +12,7 @@ import type { EngineInterface, Register } from 'claude-code'
 // Enter sent to this tmux pane, and the draft restored once it is submitted.
 // If that fails, the text is submitted as this plugin's prompt instead.
 //
-// It also reports this session's activity to Multiverse: working while a
+// It also reports this session's status to Multiverse: working while a
 // main-loop turn runs, waiting while a permission prompt, a question or an MCP
 // elicitation waits on the person, idle otherwise.
 
@@ -47,11 +47,11 @@ let reported: string | undefined
 let registered = false
 let reporting = false
 
-function activity(): string {
+function status(): string {
   return waiting.size > 0 ? "waiting" : turnRunning ? "working" : "idle"
 }
 
-// Report the current activity once it changes, one report at a time, so a
+// Report the current status once it changes, one report at a time, so a
 // burst of changes ends with the latest state. The first report also tells
 // Multiverse this launch's mod is loaded.
 async function report($: EngineInterface) {
@@ -60,13 +60,13 @@ async function report($: EngineInterface) {
   try {
     const cli = await $.env.get("MV2_CLI")
     if (!cli) return
-    while (!registered || reported !== activity()) {
-      const value = activity()
-      const argv = [cli, "runtime-update", "--activity", value]
+    while (!registered || reported !== status()) {
+      const value = status()
+      const argv = [cli, "runtime-update", "--status", value]
       if (!registered) argv.push("--bridge", "claude-mod-v1")
       const result = await $.process.run(argv, { timeoutMs: 10000 })
       if (result.exitCode !== 0) {
-        $.ui.log(`multiverse: activity report failed: ${result.stderr.trim()}`)
+        $.ui.log(`multiverse: status report failed: ${result.stderr.trim()}`)
         return
       }
       reported = value

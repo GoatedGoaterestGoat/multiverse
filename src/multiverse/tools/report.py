@@ -10,7 +10,7 @@ def configure(parser):
 
 def run(root=None, *, agent=None, phase=None, summary=None):
     root, directory, launch_id = callback(root, agent)
-    return agents.status(root, agent, phase, summary)
+    return agents.report(root, agent, phase, summary)
 
 
 if __name__ == "__main__":
