@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.231; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.286; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -71,9 +71,9 @@ errors raised, while shell entry points format output and exit codes.
 
 `send` saves the durable record and attempts native delivery through the common
 adapter protocol. `ask` and `get-usage` use the same tools from CLI and
-backend. Unsupported operations are explicit. The Claude bridge's mod is the one
-place that presses Enter: in the agent's own tmux pane, to submit a message it has
-typed into an idle session (see [harness adapters](docs/harness-adapters.md)).
+backend. Unsupported operations are explicit. Nothing types into agent terminals:
+the Claude bridge's mod submits messages for an idle session through Claude's own
+plugin API (see [harness adapters](docs/harness-adapters.md)).
 
 ## Files and ownership
 
@@ -185,11 +185,11 @@ The title and accent style its group row and agents in the parent hierarchy. The
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. Claude supports `"inbox_bridge": true` as well: `mv2 send` writes to the session's peer inbox, and the source-owned `multiverse` mod steers mid-turn at the next tool result or submits follow-ups and idle-session messages as ordinary prompts; the mod also reports status, delivery receipts and context usage. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
 
 ## Harness definitions
 
-Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` reports unavailable for bundled providers; `get-usage` measures Claude sessions from their transcripts and reports unavailable for the others.
+Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` reports unavailable for bundled providers. `get-usage` measures Claude sessions from their transcripts, adding the context fill, cost and rate limits the Claude mod reports when the bridge is on; it reports unavailable for the others.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 
@@ -205,7 +205,7 @@ A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` arg
 | `{model}` | Explicit model override; omitted flags use the native default |
 | `{session_file}`, `{session_id}` | File-based session path or recorded native UUID |
 
-`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Status remains `unknown` unless reported (Claude agents with the bridge report working, waiting or idle); liveness still comes from tagged tmux panes.
+`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Status is detected, never set by agents: bridge launches report it (Claude from its mod, Codex from the app-server's thread status, Pi from its extension), and other launches stay `unknown`. Liveness still comes from tagged tmux panes.
 
 Existing schema-1 definitions and assets remain authoritative and are never rewritten on package update. Opting into schema 2 is explicit: preserve every local model, argument, permission and workspace preference; keep schema 1 for behavior that cannot be represented. No live-universe migration is automatic.
 
@@ -225,11 +225,11 @@ The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse
 
 The renderer exports actual SVG screens to `/tmp/multiverse-previews` for visual review, including the unified hierarchy, live inspector, narrow layouts and inline creation. Additional tests cover concurrent inbox writers, interrupted records, recursive installs, ambiguous commands, real tmux launch/rename/stop/resume and pane ownership, Textual attach/detach/exit, Codex/Claude argv and exact resume with fake executables, session registration guards, and real Pi and Codex native delivery/resume with their bridges and local scripted providers. They use temporary universes and isolated tmux sockets, with no network or model spend. Authenticated Codex/Claude model turns are not exercised. Native timing checks skip when their harness or tmux binaries are absent. A sandbox that denies Unix sockets must allow the terminal integration tests explicitly.
 
-`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are optional native delivery integrations, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy, background ask primitive, or urgent mid-turn delivery in this slice.
+`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are per-agent Git worktrees, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy or background ask primitive in this slice.
 
 ## Development checkout
 
 Run `uv sync --locked`, then `. scripts/dev-env.sh` in the main checkout to use
 the local `.multiverse` and `.run/tmux.sock`. Launch `mv2 tui`. Worktrees share Git
-history; runtime state and evidence are ignored. See `.multiverse/DEVELOPMENT.md`
-for this machine’s active agents and migration conventions.
+history; runtime state and evidence are ignored. Machine-specific notes (active
+agents, migration conventions) can go in `.multiverse/DEVELOPMENT.md`, which Git ignores.
