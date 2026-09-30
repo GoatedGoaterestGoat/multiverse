@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { registerUsage } from './usage'
 
 // Multiverse sends each message over this session's peer inbox at `next`
 // priority, its text between <<MV2>> and <</MV2>>. The model reads the text
@@ -160,6 +161,8 @@ function take($: EngineInterface, text: string) {
 }
 
 export const register: Register = (on) => {
+  registerUsage(on)
+
   on("session.start", async ($, e, next) => {
     const result = await next(e)
     void report($)
