@@ -480,7 +480,7 @@ class MultiverseApp(App):
         if field == "context" and row.get("context_level"):
             return Text(value, style={"warn": "#f9e2af", "high": "bold #f38ba8"}[row["context_level"]])
         if field == "status" and value == "waiting":
-            return Text(value, style="bold #11111b on #fab387")
+            return Text(value, style="bold reverse #fab387")
         return Text(value, style=color)
 
     def show_selection(self, key):
