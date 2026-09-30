@@ -81,6 +81,15 @@ class CodexAdapter(ConfiguredAdapter):
     def spawn(self, context):
         return super().spawn(context)
 
+    def status_watch(self, session):
+        """Optional passive stream: core runs the plan and owns its lifetime."""
+        if (not self.settings.get('inbox_bridge') or not session.native_id
+                or not session.endpoint or session.endpoint.transport != 'unix-websocket'):
+            return None
+        from .status import snapshot, notification
+        return (RpcSpec(session.endpoint.address, partial(snapshot, session), max_requests=2),
+                partial(notification, session))
+
     def stop(self, session, executor):
         if not session.endpoint:
             return super().stop(session, executor)

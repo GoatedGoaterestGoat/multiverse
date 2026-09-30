@@ -215,6 +215,22 @@ reachable server. Closing a terminal by other means only disconnects its client
 and can leave native work running. Closing a dashboard or detaching tmux never
 calls native stop.
 
+The per-launch runner owns a passive status watcher for bridge launches. Once
+an exact native session ID is bound, the Codex adapter describes an initialize
+and metadata-only `thread/read` exchange and interprets the snapshot and
+`thread/status/changed` notifications. Core owns the connection and writes status
+through the launch-checked runtime update path. Status notifications are broadcast
+by app-server, so the watcher filters by the exact bound thread ID; it never calls
+`thread/resume` to subscribe to turn/item events or reload a thread. The initial
+read checks both thread ID and saved workspace before accepting observations.
+`active` with no flags maps to `working`; `waitingOnApproval` or
+`waitingOnUserInput` maps to `waiting`; `idle` maps to `idle`. Other states,
+unbound sessions, transport/protocol failures and plain launches remain `unknown`.
+The watcher never answers approvals or questions. It closes when the terminal
+launch ends and clears its observation on disconnection; it never restarts the
+daemon or reconnects automatically. Existing running launches need an explicit
+stop/resume to acquire the new runner; status is detected, never agent-reported.
+
 A daemon crash can interrupt every thread it hosts. Multiverse does not restart
 it from status reads or sends and never automatically resumes conversations.
 Explicit resume reloads saved history, not old live processes/PTYs. One shared
@@ -286,7 +302,7 @@ tested against Claude Code 2.1.286; the mod API may change between releases.
 | After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
-| Native status | Unknown | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
+| Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
 
