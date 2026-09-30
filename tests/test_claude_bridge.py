@@ -293,6 +293,11 @@ class ClaudeBridgeTest(BaseTest):
         result = subprocess.run(['claude', 'plugin', 'validate', str(MOD)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    @unittest.skipUnless(shutil.which('claude'), 'Claude Code is not installed')
+    def test_packaged_mod_passes_its_plugin_tests(self):
+        result = subprocess.run(['claude', 'plugin', 'test', str(MOD)], capture_output=True, text=True, timeout=180)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()
