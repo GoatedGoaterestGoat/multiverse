@@ -274,7 +274,7 @@ adapter reads each transcript once, then only what was appended.
 
 Claude sends no receipt, so an accepted `send` means written to the inbox.
 Follow-up delivery and receipt reconciliation are not implemented. The mod was
-tested against Claude Code 2.1.285; the mod API may change between releases.
+tested against Claude Code 2.1.286; the mod API may change between releases.
 
 ## Implemented capabilities and verification limits
 
