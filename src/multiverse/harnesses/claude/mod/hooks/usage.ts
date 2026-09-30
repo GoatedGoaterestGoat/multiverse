@@ -1,10 +1,14 @@
-import type { EngineInterface, On } from 'claude-code'
+import type { EngineInterface } from 'claude-code'
 
 // Reports the session's context fill, cost and rate-limit windows
 // ($.session.usage(), free without arguments) to Multiverse, which stores them
-// in this launch's runtime.json. Read when a session starts and when a
-// main-loop turn completes; a subagent's turn.complete carries its agentId.
+// in this launch's runtime.json. Read when a session starts, when a main-loop
+// turn completes, and after main-loop tool calls at most every 30 seconds, so a
+// long turn stays current; a subagent's events carry its agentId.
 // Reported only when a figure changed, one report at a time.
+
+const TOOL_INTERVAL_MS = 30000
+let lastRead = -Infinity
 
 let reported: string | undefined
 let reporting = false
@@ -22,6 +26,7 @@ async function snapshot($: EngineInterface): Promise<string> {
 }
 
 async function report($: EngineInterface) {
+  lastRead = await $.clock.now()
   if (reporting) {
     again = true
     return
@@ -49,16 +54,14 @@ async function report($: EngineInterface) {
   }
 }
 
-export function registerUsage(on: On) {
-  on("session.start", async ($, e, next) => {
-    const result = await next(e)
-    void report($)
-    return result
-  })
+// Called by index.ts when a session starts and when a main-loop turn completes:
+// a plugin registers each event once, so this module adds no hooks of its own.
+export function reportUsage($: EngineInterface) {
+  void report($)
+}
 
-  on("turn.complete", async ($, e, next) => {
-    const result = await next(e)
-    if (e.agentId === undefined) void report($)
-    return result
-  })
+// Called by index.ts after each main-loop tool call; reports at most every
+// 30 seconds, so a long turn stays current.
+export async function reportUsageAfterTool($: EngineInterface) {
+  if ((await $.clock.now()) - lastRead >= TOOL_INTERVAL_MS) void report($)
 }
