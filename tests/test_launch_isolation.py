@@ -13,6 +13,7 @@ from multiverse import agents, runner, universe, harnesses
 import json
 from multiverse.cli import parser, run
 from multiverse.store import ack, append_message, inbox, read, write, lock
+from multiverse.tools import runtime_update
 
 
 class LaunchIsolationTest(unittest.TestCase):
@@ -167,13 +168,18 @@ class LaunchIsolationTest(unittest.TestCase):
         message = append_message(agent, "for current launch", {})
         cursor = inbox(agent)["cursor"]
         actions = (["inbox"], ["ack", "--cursor", str(cursor)],
-                   ["report", "--phase", "done"], ["runtime-update", "--status", "idle"],
-                   ["session-bind", "--session-id", str(uuid4())])
+                   ["report", "--phase", "done"], ["session-bind", "--session-id", str(uuid4())])
         for action in actions:
             with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):
                 args = parser().parse_args(["-u", str(self.root), *action, "--agent", agent.name])
                 with self.assertRaisesRegex(ValueError, "Outdated launch"):
                     run(args)
+        # Status comes from harness integrations, not an mv2 command, and also
+        # refuses an outdated launch.
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["-u", str(self.root), "runtime-update", "--status", "idle", "--agent", agent.name])
+        with patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}), self.assertRaisesRegex(ValueError, "Outdated launch"):
+            runtime_update.run(self.root, agent=agent.name, status="idle")
         self.assertEqual(read(agent / "properties.json"), properties)
         self.assertEqual(read(agent / "runtime.json"), runtime)
         self.assertEqual(inbox(agent)["messages"], [message])

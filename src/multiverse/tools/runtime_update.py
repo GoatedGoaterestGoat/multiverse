@@ -1,4 +1,8 @@
-"""Report native harness status for the current launch."""
+"""Report native harness status for the current launch.
+
+For harness integrations (the Claude mod, the Pi extension), run as
+`python -m multiverse.tools.runtime_update`; it is not an `mv2` command.
+"""
 from .. import agents
 from ._common import add_agent, callback
 

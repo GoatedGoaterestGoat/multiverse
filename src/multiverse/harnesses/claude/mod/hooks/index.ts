@@ -58,11 +58,12 @@ async function report($: EngineInterface) {
   if (reporting) return
   reporting = true
   try {
-    const cli = await $.env.get("MV2_CLI")
-    if (!cli) return
+    // Not an mv2 command: agents report their phase, never their status.
+    const python = await $.env.get("MV2_PYTHON")
+    if (!python) return
     while (!registered || reported !== status()) {
       const value = status()
-      const argv = [cli, "runtime-update", "--status", value]
+      const argv = [python, "-m", "multiverse.tools.runtime_update", "--status", value]
       if (!registered) argv.push("--bridge", "claude-mod-v1")
       const result = await $.process.run(argv, { timeoutMs: 10000 })
       if (result.exitCode !== 0) {

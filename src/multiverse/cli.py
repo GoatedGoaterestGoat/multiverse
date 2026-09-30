@@ -8,9 +8,11 @@ from . import universe
 from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
+# Harness integrations report status with `python -m multiverse.tools.runtime_update`;
+# it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
             "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "report",
-            "runtime-update", "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
+            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
 
 
 # Former names that keep working for agents launched with older prompts.

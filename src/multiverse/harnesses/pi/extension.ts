@@ -23,9 +23,14 @@ export default function multiverse(pi: any, run = exec) {
       { env, timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
     return result.stdout;
   }
+  // Not an mv2 command: agents report their phase, never their status.
+  async function runtimeUpdate(...args: string[]) {
+    await run(env.MV2_PYTHON!, ["-m", "multiverse.tools.runtime_update", "-u", env.MV2_UNIVERSE!, ...args],
+      { env, timeout: 10000, maxBuffer: 2 * 1024 * 1024 });
+  }
   function report(error: unknown) { context?.ui?.notify(`Multiverse: ${error}`, "warning"); }
   async function reportStatus(value: string) {
-    if (!closed) try { await cli("runtime-update", "--status", value); } catch (error) { report(error); }
+    if (!closed) try { await runtimeUpdate("--status", value); } catch (error) { report(error); }
   }
   function close() {
     closed = true;
@@ -81,7 +86,7 @@ export default function multiverse(pi: any, run = exec) {
     transcript = new TranscriptReceipts();
     if (!ctx.sessionManager.getSessionFile() ||
         resolve(ctx.sessionManager.getSessionFile()) !== resolve(env.MV2_AGENT_DIR!, "session.jsonl")) {
-      try { await cli("runtime-update", "--status", "unknown", "--bridge", "none"); } catch (error) { report(error); }
+      try { await runtimeUpdate("--status", "unknown", "--bridge", "none"); } catch (error) { report(error); }
       return;
     }
     try {
@@ -111,14 +116,14 @@ export default function multiverse(pi: any, run = exec) {
       server.on("error", report);
       server.unref();
       closed = false;
-      await cli("runtime-update", "--status", "idle", "--bridge", "pi-socket-v1");
+      await runtimeUpdate("--status", "idle", "--bridge", "pi-socket-v1");
     } catch (error) { close(); report(error); }
   });
   pi.on("agent_start", async () => { await reportStatus("working"); });
   pi.on("agent_settled", async () => { await reportStatus("idle"); });
   pi.on("session_shutdown", async () => {
     close();
-    try { await cli("runtime-update", "--status", "unknown", "--bridge", "none"); } catch (error) { report(error); }
+    try { await runtimeUpdate("--status", "unknown", "--bridge", "none"); } catch (error) { report(error); }
   });
   pi.registerCommand("multiverse", {
     description: "List capabilities or load a universe command",

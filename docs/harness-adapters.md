@@ -258,8 +258,9 @@ shows the model the text alone:
   submits the text as its own prompt instead.
 
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
-reported unavailable until it has) and reports status through `mv2
-runtime-update --status`: `working` while a main-loop turn runs; `waiting` while an
+reported unavailable until it has) and reports status through `python -m
+multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
+report their phase with `mv2 report` but never set their status: `working` while a main-loop turn runs; `waiting` while an
 `AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
 elicitation waits on the person; `idle` otherwise. A permission prompt is matched
 to its call through the engine's `ask` verdict and ends when the call finishes, is
