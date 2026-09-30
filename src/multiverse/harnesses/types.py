@@ -21,7 +21,8 @@ class Capability:
 
 @dataclass(frozen=True)
 class NativeEndpoint:
-    transport: Literal['unix-websocket', 'unix-json']
+    """`unix-lines` is a local inbox that reads JSON lines and sends no reply."""
+    transport: Literal['unix-websocket', 'unix-json', 'unix-lines']
     address: str
 
 
@@ -39,10 +40,12 @@ class SharedServiceSpec:
 
 @dataclass(frozen=True)
 class CommandSpec:
+    """`environment` is set for the launched process; core identity variables win."""
     argv: tuple[str, ...]
     unset_env: tuple[str, ...] = ('CODEX_THREAD_ID', 'CLAUDECODE')
     control_endpoint: NativeEndpoint | None = None
     shared_service: SharedServiceSpec | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -112,12 +115,18 @@ class SessionHandle:
 
 @dataclass(frozen=True)
 class Message:
+    """`framed` is core's text for the recipient: the sender line, then `text`.
+
+    Providers that deliver text verbatim send `framed`; `prompt()` is the older
+    collaborator envelope with the message ID for acknowledgement.
+    """
     id: str
     text: str
     sender: Mapping[str, Any] = field(default_factory=dict)
     reply_to: str | None = None
 
     delivery: DeliveryMode = 'steer'
+    framed: str = ''
 
     def prompt(self):
         import json
@@ -132,6 +141,7 @@ class Executor(Protocol):
     def check_session(self) -> None: ...
     def command(self, specification: CommandSpec, timeout: float = 10): ...
     def rpc(self, specification: RpcSpec, timeout: float = 10) -> NativeResult: ...
+    def write_lines(self, session: SessionHandle, lines: list[str], timeout: float = 10) -> NativeResult: ...
 
 
 class HarnessAdapter(Protocol):

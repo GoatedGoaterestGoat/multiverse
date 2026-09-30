@@ -202,7 +202,7 @@ class AdapterContractTest(BaseTest):
                  {'schema': 2, 'adapter': 'codex', 'settings': {'typo': True}},
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': '--bad'}},
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': ['{unknown}']}},
-                 {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': True}},
+                 {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': 'yes'}},
                  {'schema': 1, 'spawn': []}, {'schema': 1, 'spawn': [22]},
                  {'schema': 1, 'spawn': ['binary'], 'bootstrap': []}]
         for data in cases:

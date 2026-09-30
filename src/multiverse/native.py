@@ -104,6 +104,46 @@ class NativeExecutor:
                 raise ValueError('Invalid extension receipt state')
             return NativeResult(value['state'], value.get('reason', ''), value.get('value'))
 
+    def write_lines(self, session, lines, timeout=10):
+        """Submit JSON lines to a local inbox that sends no reply."""
+        self.check_session()
+        if not session.endpoint or session.endpoint.transport != 'unix-lines':
+            return NativeResult('unavailable', 'No local inbox socket')
+        wire = ''.join(line + '\n' for line in lines).encode()
+        if len(wire) > 1024 * 1024:
+            return NativeResult('error', 'Native request exceeds 1 MiB')
+        with socket.socket(socket.AF_UNIX) as connection:
+            connection.settimeout(timeout)
+            try:
+                connection.connect(session.endpoint.address)
+            except OSError as error:
+                return NativeResult('error', f'Inbox connection failed before submission: {error}')
+            connection.sendall(wire)
+            connection.shutdown(socket.SHUT_WR)
+            # The inbox closes its side once it has read every line.
+            while connection.recv(65536):
+                pass
+        return NativeResult('ok', 'Written to the inbox')
+
+
+def framed_text(root, message):
+    """The recipient's text: who sent the message, then the message as written."""
+    sender = message.get('from') or {}
+    name = sender.get('name') or 'user'
+    scope = sender.get('universe')
+    if sender.get('agent_id') and scope:
+        try:
+            name = read(Path(scope) / 'state' / 'agents' / sender['agent_id'] / 'properties.json')['name']
+        except (OSError, ValueError, KeyError):
+            pass
+    origin = ''
+    if scope and Path(scope).resolve() != Path(root).resolve():
+        try:
+            origin = f' (in universe {read(Path(scope) / "universe.json")["name"]})'
+        except (OSError, ValueError, KeyError):
+            origin = f' (in universe {scope})'
+    return f'Message from {name}{origin}:\n{message["text"]}'
+
 
 def context(root, reference):
     directory = agents.directory(root, reference)
@@ -238,7 +278,7 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
             else:
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      message.get('reply_to'), selected_mode), executor)
+                                      message.get('reply_to'), selected_mode, framed_text(root, message)), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}

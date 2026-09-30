@@ -180,6 +180,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint)
+            # Adapter variables never override this launch's identity.
+            env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
                                            "shared_service": bool(command.shared_service)})

@@ -1,0 +1,6 @@
+{
+  "name": "multiverse",
+  "version": "0.1.0",
+  "description": "Delivers Multiverse messages to this Claude session as the text Multiverse wrote",
+  "author": {"name": "Multiverse"}
+}

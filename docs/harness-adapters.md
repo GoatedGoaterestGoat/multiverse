@@ -41,7 +41,7 @@ Each built-in has its own folder under `src/multiverse/harnesses/`:
 
 - `codex/`: launch/resume preferences and native app-server queue/steer protocol.
 - `pi/`: launch/resume preferences, interactive TypeScript extension, transcript receipts.
-- `claude/`: native lifecycle; required native delivery is currently unavailable.
+- `claude/`: launch/resume preferences, opt-in peer-inbox steering and its Claude mod (`mod/`).
 - `legacy/`: lossless compatibility for existing schema-1 local definitions.
 
 `base.py` shares argument rendering and default unsupported operations. Built-ins
@@ -159,13 +159,14 @@ New universes retain references and preferences, not copied implementations:
 ```
 
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-and `unset_env`. Codex and Pi additionally support `inbox_bridge`. Native flags,
+and `unset_env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
-No adapter reads credentials or changes installed native configuration.
+No adapter changes installed native configuration. The Claude bridge reads only the
+inbox key Claude publishes for its own launch's socket; no other credentials are read.
 
 Existing schema-1 manifests, custom bootstrap and assets remain authoritative;
 there is no automatic rewrite or migration. Compare source defaults and transfer
@@ -232,14 +233,42 @@ recognizes persisted IDs across launches. Socket loss leaves acceptance unknown.
 Core owns the private socket directory lifecycle. Pi's separate headless RPC mode
 is not substituted for its interactive terminal.
 
+Core frames each message for its recipient: `Message from <sender>:`, with
+` (in universe <name>)` when the sender is in another universe, then the text.
+Providers that deliver text verbatim receive it as `Message.framed`; Codex and
+Pi still send the collaborator envelope with the message ID.
+
+Claude bridge mode steers through the session's own peer inbox. Each launch
+passes `--messaging-socket-path` (the core-assigned private socket),
+`--plugin-dir` for the source-owned `multiverse` mod, `--settings` with
+`crossSessionInbound: accept` (Claude otherwise holds peer messages for approval
+when the session skips permission prompts) and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
+(mods are early access). `send` reads the key Claude publishes for that socket and
+writes one message at `next` priority, addressed to the exact session UUID, its
+framed text between `<<MV2>>` and `<</MV2>>`. The mod acts only on tagged text and
+shows the model the text alone:
+
+- Mid-turn it merges at the next tool result as a queued command; the mod removes
+  Claude's peer wrapper and the tags from what the model reads. Claude's transcript
+  and terminal keep the original record, tags included.
+- Arriving while idle, or queued with no tool result after it, it is taken before it
+  becomes a wrapped peer prompt and typed in: the draft is saved, the prompt box
+  filled and checked, Enter sent to the agent's own tmux pane, and the draft
+  restored. It reaches the model as an ordinary prompt. If that fails, the mod
+  submits the text as its own prompt instead.
+
+Claude sends no receipt, so an accepted `send` means written to the inbox.
+Follow-up delivery and receipt reconciliation are not implemented. The mod was
+tested against Claude Code 2.1.280; the mod API may change between releases.
+
 ## Implemented capabilities and verification limits
 
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |
 | --- | --- | --- | --- | --- |
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
 | Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
-| Safe-boundary steer | Yes | Unavailable | Yes | Unavailable |
-| After-turn send / idle wake | Yes | Unavailable | Yes | Unavailable |
+| Safe-boundary steer | Yes | Bridge: peer inbox + mod | Yes | Unavailable |
+| After-turn send / idle wake | Yes | Idle wake (steer); follow-up unavailable | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
 | Native activity | Unknown | Unknown | Lifecycle events | Unknown |
@@ -250,8 +279,7 @@ Unsupported usage displays N/A, not zero. The usage representation includes
 cache-inclusive input, output, total, optional cache subsets, source, timestamp
 and completeness. No token estimation or native-history guessing is performed.
 An unsupported ask never becomes ordinary input or launches a separate agent.
-Claude delivery remains a required integration gap: installed native feature gates
-can prevent channels/Mods from loading. Basic lifecycle does not depend on them.
+Claude steering needs the mod to load; basic lifecycle does not depend on it.
 
 Contract tests cover a provider implementing only the public protocol, shared
 CLI/backend dispatch, exact handles across resume, optional prompts, side-question

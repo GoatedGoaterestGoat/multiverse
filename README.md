@@ -71,7 +71,9 @@ errors raised, while shell entry points format output and exit codes.
 
 `send` saves the durable record and attempts native delivery through the common
 adapter protocol. `ask` and `get-usage` use the same tools from CLI and
-backend. Unsupported operations are explicit; no terminal keystroke delivery is introduced.
+backend. Unsupported operations are explicit. The Claude bridge's mod is the one
+place that presses Enter: in the agent's own tmux pane, to submit a message it has
+typed into an idle session (see [harness adapters](docs/harness-adapters.md)).
 
 ## Files and ownership
 
