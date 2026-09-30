@@ -16,6 +16,27 @@ from multiverse.agents import update_runtime, bind_session
 from multiverse.store import now, read
 
 
+class UsagePublisher:
+    """Publish adapter observations only into their exact running launch."""
+    def __init__(self, agent_dir, launch_id):
+        self.agent_dir, self.launch_id = agent_dir, launch_id
+
+    def __call__(self, usage):
+        try:
+            facts = read(self.agent_dir / 'runtime.json')
+            properties = read(self.agent_dir / 'properties.json')
+            if (facts.get('launch_id') != self.launch_id or facts.get('state') != 'running'
+                    or not usage.get('native_session_id')
+                    or properties.get('native_session_id') != usage['native_session_id']):
+                return
+            previous = facts.get('usage')
+            previous = previous if isinstance(previous, dict) else {}
+            if usage != {key: value for key, value in previous.items() if key != 'reported_at'}:
+                update_runtime(self.agent_dir, self.launch_id, usage={**usage, 'reported_at': now()})
+        except (OSError, ValueError, TypeError):
+            pass  # A stale launch or unavailable runtime cannot affect native work.
+
+
 class StatusWatcher:
     """Core-owned observer, bounded by one terminal launch and exact binding."""
     def __init__(self, agent_dir, launch_id, root):
@@ -120,7 +141,8 @@ def main():
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 lambda native_id: bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name),
-                lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error))
+                lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
+                UsagePublisher(agent_dir, launch.name))
             proxy.start()
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)

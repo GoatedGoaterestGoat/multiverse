@@ -10,7 +10,7 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
 | `ask` | Answer an isolated side question without adding it to the main conversation. |
-| `get_usage` | Return measured cumulative session usage, or an explicit unavailable/error result. |
+| `get_usage` | Return measured context and/or cumulative session usage, or an explicit unavailable/error result. |
 
 `harnesses/types.py` defines `HarnessAdapter`, `SessionHandle`, `Message`, results
 and the execution boundary. A handle contains the stable Multiverse agent ID,
@@ -231,6 +231,27 @@ Multiverse launch. The relay closes with the launch and never restarts the share
 daemon or reconnects automatically. Plain launches have no relay. The development
 template enables the bridge by default; existing universes must opt in explicitly.
 
+Codex bridge context usage comes from the TUI connection's native
+`thread/tokenUsage/updated` notifications. The adapter interprets only the exact
+thread after its launch reply has validated the ID and workspace; the core relay
+passes every frame to the TUI and publishes observations through the runner's
+existing runtime update path. No extra subscription or thread resume is performed.
+`runtime.json` stores `usage.context` (`tokens`, optional `window` and `percent`),
+the native session ID, source and `reported_at`. The adapter's `get_usage` exposes
+the reading only for that exact launch and session. The last reading remains
+available with its timestamp after disconnection or launch end; a new launch
+waits for its own native notification, including Codex's resume usage replay.
+
+Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
+cached input and reasoning output are already included and are not added again.
+The window is native `modelContextWindow`; a missing window stays unknown.
+The percentage matches Codex 0.159.2's native TUI: subtract its 12,000-token
+baseline from the used count and window, clamp and round the remaining percentage,
+then report 100 minus that value as used. Thus the percentage can differ from
+raw tokens divided by window. Compaction may reduce the count. Until a measurement
+arrives, usage displays N/A; a measured zero is zero. Plain Codex, cumulative usage, cost and
+rate-limit reporting remain unavailable in this adapter.
+
 Explicit `stop` holds the recipient's launch lock, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background
 terminals before closing its terminal. Confirmed queue cancellations are recorded
@@ -350,6 +371,7 @@ plugin validate` when Claude Code is installed.
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
+| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; otherwise unavailable |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
 

@@ -125,7 +125,15 @@ class CodexAdapter(ConfiguredAdapter):
         result['get_delivery'] = replace(support, required=False)
         if session.endpoint:
             result['stop'] = replace(support, required=False)
+        if self.settings.get('inbox_bridge') and session.native_id and session.session_file:
+            result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
         return result
+
+    def get_usage(self, session, executor=None):
+        if not self.settings.get('inbox_bridge'):
+            return NativeResult('unavailable', 'Codex context reporting requires inbox_bridge')
+        from .usage import measured
+        return measured(session)
 
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':

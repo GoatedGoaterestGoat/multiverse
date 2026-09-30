@@ -77,6 +77,7 @@ class LaunchProtocol:
         self.settings = settings
         self.native_id = settings.get('native_id')
         self.pending = None
+        self.bound = False
 
     def outgoing(self, value):
         method = value.get('method')
@@ -120,4 +121,10 @@ class LaunchProtocol:
         if not isinstance(thread.get('cwd'), str) or Path(thread['cwd']).resolve() != Path(self.settings['workspace']).resolve():
             raise ValueError('Native thread workspace differs from the saved workspace')
         self.native_id = native_id
+        self.bound = True
         return native_id
+
+    def usage(self, value):
+        from .usage import notification
+        # Even a saved resume ID must be checked against the native reply first.
+        return notification(value, self.native_id) if self.bound else None

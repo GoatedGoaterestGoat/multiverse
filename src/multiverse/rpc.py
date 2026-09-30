@@ -136,10 +136,12 @@ class LaunchProxy:
     MAX_MESSAGE_SIZE = 64 * 1024 * 1024
     MAX_QUEUE = 2
 
-    def __init__(self, spec, protocol, bind, record_error=lambda error: None):
+    def __init__(self, spec, protocol, bind, record_error=lambda error: None,
+                 publish_usage=lambda usage: None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
+        self.publish_usage = publish_usage
         self.stopped, self.ready = threading.Event(), threading.Event()
         self.error = None
         self.thread = threading.Thread(target=self._run, name='native-launch-proxy', daemon=True)
@@ -208,6 +210,14 @@ class LaunchProxy:
                                 native_id = self.protocol.incoming(value)
                                 if native_id is not None:
                                     self.bind(native_id)
+                                observe = getattr(self.protocol, 'usage', None)
+                                if observe is not None:
+                                    try:
+                                        usage = observe(value)
+                                        if usage is not None:
+                                            self.publish_usage(usage)
+                                    except (OSError, ValueError, TypeError, KeyError):
+                                        pass  # Optional telemetry must not disrupt the TUI.
                             if value is not original:
                                 encoded = json.dumps(value, ensure_ascii=False)
                                 if len(encoded.encode()) > self.MAX_MESSAGE_SIZE:
