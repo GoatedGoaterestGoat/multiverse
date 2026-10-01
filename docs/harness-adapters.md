@@ -298,7 +298,7 @@ mv2 inbox                         # show unread inbox-only messages and mark the
 mv2 inbox --all                    # browse full raw history and delivery evidence
 mv2 send worker --text 'Later' --delivery inbox-only
 mv2 deliver worker --retry        # retry this recipient's definite failures
-mv2 deliver worker --check        # reconcile pending/uncertain native receipts
+mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```
 
 Ordinary inbox reads return sender, text, time and delivery mode, without message
@@ -327,7 +327,10 @@ Existing `native-delivery.json` receipts remain readable for compatibility;
 accepted or uncertain old attempts are not replayed. New attempts use inbox state.
 
 `deliver AGENT --retry` selects definite failures; `--check` selects pending,
-interrupted or unknown submissions and queries receipts without submitting.
+interrupted or unknown submissions, plus messages the current launch accepted
+without a recorded receipt, and queries receipts without submitting. Missing
+evidence for an accepted message is reported but is not a failure; a resume
+prompt has no receipt to correlate and is skipped.
 Both preserve exact native session identity, allow a new launch of that same
 session, and refuse a different session. Core persists each attempt before the
 native call and merges delivery evidence separately from inbox read position.

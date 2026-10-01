@@ -214,6 +214,30 @@ class InboxDeliveryTest(BaseTest):
         self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
         self.assertEqual(len(inbox(self.directory)['messages']), 1)
 
+    def test_check_records_receipts_for_accepted_messages_of_the_current_launch(self):
+        self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
+        older = self.send()
+        update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+        current = self.send()
+        missing = self.send()
+        checked = []
+        def check(session, message_id, executor):
+            checked.append(message_id)
+            if message_id == missing['id']:
+                return NativeResult('unknown', 'No receipt yet')
+            return NativeResult('native_queued', value={'transcript_confirmed': True})
+        adapter = harnesses.load(self.root, 'claude')
+        with patch.object(adapter, 'get_delivery', side_effect=check):
+            first = deliver.run(self.root, agent=self.agent, check=True)
+            second = deliver.run(self.root, agent=self.agent, check=True)
+        # Missing evidence for an accepted message is not a failure, and is asked again.
+        self.assertTrue(first['ok'] and second['ok'])
+        self.assertEqual(checked, [current['id'], missing['id'], missing['id']])
+        tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
+        confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
+        self.assertTrue(confirmed[current['id']])
+        self.assertIsNone(confirmed[older['id']])
+
     def test_recipient_retry_covers_history_beyond_the_default_inbox_page(self):
         for index in range(55):
             message = append_message(self.directory, str(index), {}, delivery='steer')
