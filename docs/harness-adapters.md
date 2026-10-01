@@ -4,9 +4,9 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 
 | Operation | Contract |
 | --- | --- |
-| `spawn` | Start a native terminal in the saved workspace; the initial prompt is optional. |
+| `spawn` | Start a native terminal in the saved workspace with bootstrap, optional initial prompt and model override; apply the mv2 agent name where supported. |
 | `stop` | Cancel native work where the terminal is only a client, then close the owned terminal; never stop a shared daemon. |
-| `resume` | Reopen the exact saved conversation, never the latest or a replacement session. |
+| `resume` | Reopen the exact saved conversation, never the latest or a replacement session; reapply the mv2 agent name where supported. |
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
 | `ask` | Answer an isolated side question without adding it to the main conversation. |
@@ -21,9 +21,9 @@ result. `list` reads current core identity, process state and reported status af
 asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID; Pi owns an
-exact session file and its bridge reports its UUID. Codex currently still uses
-`session-bind` with the native `CODEX_THREAD_ID`; automatic startup identity
-capture is not claimed.
+exact session file and its bridge reports its UUID. Codex bridge binds the exact
+thread ID and workspace from the native launch reply. Plain Codex uses
+prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
 
 ## Ownership and implementation
 
@@ -68,6 +68,83 @@ workspace preservation, processes and tmux. `attach`, `inspect` and process
 from observed liveness. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
+## Lifecycle paths
+
+`tools/spawn.py` and `tools/resume.py` call `agents.start()`. Spawn creates a new
+agent UUID and saves its name, prompt, harness, model and workspace. Resume loads
+that record, keeps its workspace and exact native identity, and accepts an
+optional model override. Under the agent's `.launch.lock`, core refuses another
+launch unless tmux observation says the previous one is stopped. Unknown
+liveness also blocks a duplicate launch.
+
+The adapter first validates and describes its command. Core then records a fresh
+launch ID, bootstrap, prompt and request; starts/reuses a shared native service
+when required; creates a detached tmux session running `runner.py`; and tags the
+pane with universe, agent and launch IDs. The runner waits up to 15 seconds for
+core's `ready` file, scrubs inherited identities, opens any relay, launches the
+native child, and owns the relay/status watcher until that child exits. A clean
+child exit records `stopped`; a nonzero exit records `failed`. Setup failures
+retain the failed record and clean up a created terminal/socket directory.
+Returning from `spawn` means the launch was registered; it does not mean native
+authentication, session binding or the first model turn has finished.
+
+`tools/stop.py` calls `agents.terminal_action(..., "stop")`. Core verifies the
+owned live pane, takes `.launch.lock`, rechecks ownership, then calls
+`native.stop()` and the adapter's `stop()`. Codex bridge cancels up to 128 queued
+submissions, requests interruption of the active turn, and cleans background
+terminals for the exact thread. Confirmed cancellations are recorded in the
+inbox. Errors leave the terminal attached, although earlier successful
+cancellations remain applied. Claude, Pi and plain/legacy adapters rely on
+terminal shutdown. Core then issues `tmux kill-pane` and records `stopped`;
+native cancellation is requested, not polled to completion. No shared daemon is
+stopped. The current stop command requires a live owned pane, so it cannot
+recover orphaned server work after that pane is already gone.
+
+There is no separate public `kill` command. A direct tmux pane/session kill or
+native exit bypasses adapter stop, so shared-server work may remain active. On
+SIGHUP/SIGTERM the runner closes its relay/watcher and terminates its native
+child, escalating to child kill after two seconds; it does not call adapter
+stop or kill a shared daemon. A forced runner kill cannot guarantee cleanup.
+Tmux observation determines liveness even if saved runtime state is stale.
+Closing the dashboard or detaching tmux leaves agents running.
+
+The dashboard's `s` key is enabled for a live agent, asks for confirmation, then
+calls `LocalBackend.stop()` and the same stop tool. Its `r` key is enabled for a
+stopped agent and calls `LocalBackend.resume()` and the same resume tool without
+a confirmation. Resume creates a new terminal/launch generation for the saved
+conversation; it does not restore old shell processes or resubmit the built-in
+adapters' original initial prompt. Claude uses its assigned
+UUID, Pi validates its exact session-file header, and Codex requires its bound
+UUID. Built-in adapters never search for the latest conversation.
+
+### Codex resume grants: current gap
+
+The guard in `CodexAdapter.resume()` originated in `81eca5c`. In bridge mode it
+rejects permission/profile flags in shared `args` and in `resume_args` before
+native RPC. Putting the bypass flag in `spawn_args` allows spawn but deliberately
+omits it on resume. `LaunchProtocol.outgoing()` currently adds bootstrap on
+`thread/resume` and leaves its grant unchanged. A session started plain with
+`--dangerously-bypass-approvals-and-sandbox` can therefore return through the
+bridge with saved `workspace-write` restrictions, including blocked Unix sockets
+and read-only `.git`, as observed in the development universe.
+
+The current app-server accepts `sandbox` and `approvalPolicy` on `thread/resume`
+([protocol documentation](https://learn.chatgpt.com/docs/app-server)). Translating
+an explicit bypass to `sandbox: "danger-full-access"` and
+`approvalPolicy: "never"` in the relay is technically possible. A disposable,
+model-free probe on 2026-10-01 with installed Codex 0.159.3 verified a critical
+distinction: after restarting that isolated app-server, resume applied the new
+grant; rejoining the same already-loaded thread accepted the request but returned
+its existing `workspaceWrite` policy. Both cases kept the exact thread ID. The
+same probe confirmed naming an empty thread and persisting its name across the
+isolated restart.
+
+A follow-up permission change needs to translate explicit configured grants,
+preserve saved grants when none are requested, and validate the effective grant
+in the native reply. It also needs an explicit policy for already-loaded threads;
+merely removing the old guard and injecting fields can still silently retain the
+wrong permissions. The naming change does not alter these permission semantics.
+
 ## Shared tools and delivery results
 
 ```sh
@@ -86,8 +163,13 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `stop`, `send_steer`, `send_follow_up`,
-`ask`, `get_usage`, and `get_delivery`. Support may depend on configuration and a registered,
-running native session. Discovery returns supported/unavailable/error plus a reason.
+`ask`, `get_usage`, and `get_delivery`. The `session_name` capability describes
+naming during spawn/resume, not a separate rename operation. Claude and Pi pass
+`--name` in both modes. Codex bridge calls `thread/name/set` after validating and
+binding the launch reply; plain Codex has no CLI naming flag. Legacy manifests
+remain unchanged and report naming unverified. Capabilities describe adapter
+support, not confirmation of an individual launch's display name. Support may
+depend on configuration and a registered, running native session. Discovery returns supported/unavailable/error plus a reason.
 
 `send` first persists the message with a stable UUID, sender and optional
 `reply_to`, then calls the adapter. Its result includes `saved`, `state`, and
@@ -201,8 +283,10 @@ Exact thread ID/workspace are checked before queueing or steering. Urgent busy
 input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. Races return errors without fresh-turn or resume fallback.
 Approvals remain unanswered by the delivery client. Core bounds transport
-requests, frames and deadlines. Remote resume inherits native permissions: put
-initial permission/profile flags in `spawn_args`. Unsupported resume overrides
+requests, frames and deadlines. Multiverse currently preserves saved permissions
+on bridge resume and rejects explicit permission/profile flags in `args` or
+`resume_args`; put initial grants in `spawn_args`. This is an adapter restriction,
+not a claim that current app-server cannot accept resume overrides. Overrides
 are diagnosed, never silently removed. Whole-table `shell_environment_policy`
 CLI overrides are rejected in bridge mode; individual keys remain supported.
 Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
@@ -226,7 +310,13 @@ passes through to the native TUI. A malformed launch request gets an explicit
 RPC error and a runtime diagnostic; it is never forwarded without its bootstrap.
 The relay records the exact thread ID/workspace from the matching native reply
 before passing it to the TUI, so bridge launches do not rely on prompt-driven
-`session-bind`. Switching or forking into a different thread requires a separate
+`session-bind`. It then names the exact thread after the mv2 agent using a separate
+initialized control connection to the upstream server (`thread/name/set`, at most
+two requests and three seconds). This also reapplies the name on resume. Naming
+errors or timeouts are recorded in `runtime.json` without failing the terminal
+launch; unrelated TUI requests, native notifications and approvals retain their
+own connection. Existing saved launch requests without a name remain usable.
+Switching or forking into a different thread requires a separate
 Multiverse launch. The relay closes with the launch and never restarts the shared
 daemon or reconnects automatically. Plain launches have no relay. The development
 template enables the bridge by default; existing universes must opt in explicitly.
@@ -365,6 +455,7 @@ plugin validate` when Claude Code is installed.
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |
 | --- | --- | --- | --- | --- |
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
+| Native session name on spawn / resume | `thread/name/set` | `--name`, with or without bridge | `--name`, with or without bridge | Plain Codex unavailable; legacy unverified |
 | Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
 | Safe-boundary steer | Yes | Bridge: peer inbox + mod | Yes | Unavailable |
 | After-turn send / idle wake | Yes | Bridge: follow-up after the turn; idle wake | Yes | Unavailable |

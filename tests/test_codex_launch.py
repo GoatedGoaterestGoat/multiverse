@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from websockets.asyncio.client import unix_connect
@@ -21,7 +21,7 @@ from multiverse.store import read, write
 class CodexLaunchTest(unittest.TestCase):
     def setUp(self):
         self.native_id = str(uuid4())
-        self.values = {'workspace': '/workspace', 'agent_dir': '/outside/state/agent',
+        self.values = {'name': 'worker', 'workspace': '/workspace', 'agent_dir': '/outside/state/agent',
                        'bootstrap_json': json.dumps('bootstrap'), 'task': '--literal prompt',
                        'session_id': self.native_id, 'control_socket': '/tmp/owned/rpc.sock'}
         self.context = LaunchContext('spawn', self.values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'))
@@ -34,6 +34,7 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertIn('--dangerously-bypass-approvals-and-sandbox', command.argv)
         self.assertEqual(command.argv[-1], self.values['task'])
         self.assertEqual(command.rpc_proxy.settings['bootstrap'], 'bootstrap')
+        self.assertEqual(command.rpc_proxy.settings['name'], 'worker')
         self.assertEqual(command.rpc_proxy.settings['roots'], ['/outside/state/agent', '/custom'])
         self.assertEqual(command.control_endpoint.address, self.values['control_socket'])
         self.assertEqual(command.rpc_proxy.upstream_path, '/tmp/native.sock')
@@ -42,6 +43,7 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertNotIn('--add-dir', resumed.argv)
         self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', resumed.argv)
         self.assertEqual(resumed.rpc_proxy.settings['native_id'], self.native_id)
+        self.assertEqual(resumed.rpc_proxy.settings['name'], 'worker')
         self.assertEqual(resumed.rpc_proxy.settings['roots'], [])
 
     def test_native_environment_exclusions_and_roots_remain(self):
@@ -82,15 +84,27 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         write(self.directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
         self.native_id = str(uuid4())
         self.spec = {'socket_path': str(self.root / 'relay.sock'), 'upstream_path': str(self.root / 'native.sock')}
-        self.settings = {'bootstrap': 'MV2 bootstrap', 'roots': ['/mv2-state'], 'workspace': str(self.root), 'native_id': None}
+        self.settings = {'name': 'relay-agent', 'bootstrap': 'MV2 bootstrap', 'roots': ['/mv2-state'],
+                         'workspace': str(self.root), 'native_id': None}
         self.received = asyncio.Queue()
+        self.naming = []
+        self.name_reply = {'result': {}}
         self.errors = []
         self.connected = asyncio.Event()
         async def server(connection):
-            self.upstream = connection
-            self.connected.set()
+            if not self.connected.is_set():
+                self.upstream = connection
+                self.connected.set()
             try:
                 async for payload in connection:
+                    value = json.loads(payload) if isinstance(payload, str) else {}
+                    if value.get('method') in ('initialize', 'initialized', 'thread/name/set'):
+                        self.naming.append(value)
+                        if value['method'] == 'initialize':
+                            await connection.send(json.dumps({'id': value['id'], 'result': {}}))
+                        elif value['method'] == 'thread/name/set' and self.name_reply is not None:
+                            await connection.send(json.dumps({'id': value['id'], **self.name_reply}))
+                        continue
                     await self.received.put(payload)
             except Exception:
                 pass
@@ -132,6 +146,9 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await self.upstream.send(response)
         self.assertEqual(await self.client.recv(), response)
         self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
+        self.assertEqual([v['method'] for v in self.naming], ['initialize', 'initialized', 'thread/name/set'])
+        self.assertEqual(self.naming[-1]['params'], {'threadId': self.native_id, 'name': 'relay-agent'})
+        self.assertEqual(self.errors, [])
 
     async def test_resume_injects_bootstrap_but_preserves_saved_grants(self):
         self.settings['native_id'] = self.native_id
@@ -141,6 +158,53 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         request = json.loads(await self.receive())
         self.assertEqual(request['params']['developerInstructions'], 'MV2 bootstrap')
         self.assertEqual(request['params']['config'], {'model_reasoning_effort': 'high'})
+        response = json.dumps({'id': 3, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertEqual(self.naming[-1]['params'], {'threadId': self.native_id, 'name': 'relay-agent'})
+
+    async def test_naming_errors_leave_terminal_usable_with_diagnostic(self):
+        self.name_reply = {'error': {'code': -32601, 'message': 'Naming unavailable'}}
+        await self.connect()
+        await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+        await self.receive()
+        response = json.dumps({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertIn('Naming unavailable', self.errors[-1])
+        self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
+        await self.client.send('{"id":4,"method":"future/method"}')
+        self.assertEqual(await self.receive(), '{"id":4,"method":"future/method"}')
+
+    async def test_naming_timeout_is_bounded_and_does_not_fail_launch(self):
+        self.name_reply = None
+        with patch.object(rpc.LaunchProxy, 'POST_BIND_TIMEOUT', .1):
+            await self.connect()
+            await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+            await self.receive()
+            response = json.dumps({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+            await self.upstream.send(response)
+            self.assertEqual(await asyncio.wait_for(self.client.recv(), 2), response)
+        self.assertIn('timed out', self.errors[-1])
+
+    async def test_old_saved_launch_without_name_still_binds(self):
+        del self.settings['name']
+        await self.connect()
+        await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+        await self.receive()
+        response = json.dumps({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertEqual(self.naming, [])
+
+    async def test_failed_launch_reply_does_not_name_a_thread(self):
+        await self.connect()
+        await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+        await self.receive()
+        response = '{"id":2,"error":{"code":-32000,"message":"Launch failed"}}'
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertEqual(self.naming, [])
 
     async def test_unknown_frames_binary_and_approvals_pass_through_unchanged(self):
         await self.connect()
@@ -209,6 +273,7 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(self.client.wait_closed(), 2)
         self.assertNotIn('native_session_id', read(self.directory / 'properties.json'))
         self.assertTrue(self.errors)
+        self.assertEqual(self.naming, [])
 
     async def test_daemon_disconnect_closes_client_with_same_code(self):
         await self.connect()

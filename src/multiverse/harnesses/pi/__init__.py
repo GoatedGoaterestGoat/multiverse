@@ -38,6 +38,7 @@ class PiAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        result['session_name'] = Capability('supported', mechanism='--name')
         connected = (session.state == 'running' and session.bridge == 'pi-socket-v1'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-json')
         support = Capability('supported', mechanism='pi-socket-v1', required=True) if connected else Capability(

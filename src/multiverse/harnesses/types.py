@@ -92,7 +92,8 @@ class NativeResult:
 
 
 DeliveryMode = Literal['steer', 'follow-up']
-CAPABILITIES = ('spawn', 'resume', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
+# session_name describes naming during spawn/resume, not a live rename operation.
+CAPABILITIES = ('spawn', 'resume', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
 
 
 @dataclass(frozen=True)

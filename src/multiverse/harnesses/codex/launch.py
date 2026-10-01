@@ -1,9 +1,10 @@
 """Pure remote-TUI launch protocol transforms; core owns transport and binding."""
 import json
+from functools import partial
 from pathlib import Path
 import tomllib
 
-from ..types import NativeResult, RpcRequest, normalize_session_id
+from ..types import NativeResult, RpcRequest, RpcSpec, normalize_session_id
 from .protocol import result, object_field
 
 
@@ -72,6 +73,16 @@ def launch_settings(workspace):
                                     'workspace_policy': config.get('sandbox_workspace_write') or {}})
 
 
+def name_session(native_id, name):
+    initialized = result((yield RpcRequest('initialize', {
+        'clientInfo': {'name': 'multiverse', 'version': '1'},
+    })))
+    if isinstance(initialized, NativeResult):
+        return initialized
+    named = result((yield RpcRequest('thread/name/set', {'threadId': native_id, 'name': name})))
+    return named if isinstance(named, NativeResult) else NativeResult('ok')
+
+
 class LaunchProtocol:
     def __init__(self, settings):
         self.settings = settings
@@ -123,6 +134,13 @@ class LaunchProtocol:
         self.native_id = native_id
         self.bound = True
         return native_id
+
+    def after_bind(self, upstream_path):
+        """Name only the validated thread, after core accepts its launch binding."""
+        # Saved launch requests from before naming was supported have no name.
+        if self.bound and self.settings.get('name'):
+            return RpcSpec(upstream_path, partial(name_session, self.native_id, self.settings['name']), max_requests=2)
+        return None
 
     def usage(self, value):
         from .usage import notification

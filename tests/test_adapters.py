@@ -68,6 +68,26 @@ class AdapterContractTest(BaseTest):
         self.assertIn('NO_COLOR', default.unset_env)
         self.assertEqual(config.read_bytes(), original)
 
+    def test_native_session_naming_capabilities_and_launch_arguments(self):
+        values = self.values()
+        values['name'] = 'literal-name'
+        for provider in ('claude', 'pi'):
+            for bridge in (False, True):
+                adapter = harnesses.BUILTINS[provider].configured(provider, {'inbox_bridge': bridge})
+                session = self.session(provider, values)
+                self.assertEqual(adapter.capabilities(session)['session_name'].state, 'supported')
+                for mode in ('spawn', 'resume'):
+                    with self.subTest(provider=provider, bridge=bridge, mode=mode):
+                        context = LaunchContext(mode, values)
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                        self.assertEqual(command.argv[command.argv.index('--name') + 1], values['name'])
+        for bridge, state in ((False, 'unavailable'), (True, 'supported')):
+            adapter = harnesses.CodexAdapter.configured('codex', {'inbox_bridge': bridge})
+            capability = adapter.capabilities(self.session('codex', values))['session_name']
+            self.assertEqual(capability.state, state)
+        legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom', '{name}']})
+        self.assertEqual(legacy.capabilities(self.session('custom', values))['session_name'].state, 'unavailable')
+
     def test_builtins_accept_empty_initial_prompt_without_empty_native_turn(self):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):

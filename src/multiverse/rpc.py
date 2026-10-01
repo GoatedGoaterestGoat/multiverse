@@ -135,6 +135,7 @@ class LaunchProxy:
     # tool output and images. The small control-RPC budget is inappropriate here.
     MAX_MESSAGE_SIZE = 64 * 1024 * 1024
     MAX_QUEUE = 2
+    POST_BIND_TIMEOUT = 3
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
                  publish_usage=lambda usage: None):
@@ -210,6 +211,16 @@ class LaunchProxy:
                                 native_id = self.protocol.incoming(value)
                                 if native_id is not None:
                                     self.bind(native_id)
+                                    after_bind = getattr(self.protocol, 'after_bind', None)
+                                    if after_bind is not None:
+                                        try:
+                                            spec = after_bind(self.spec['upstream_path'])
+                                            if spec is not None:
+                                                observed = await _execute(spec, self.POST_BIND_TIMEOUT)
+                                                if observed.state != 'ok':
+                                                    raise ValueError(observed.reason)
+                                        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+                                            self._record_error(f'Native session naming failed: {error}')
                                 observe = getattr(self.protocol, 'usage', None)
                                 if observe is not None:
                                     try:

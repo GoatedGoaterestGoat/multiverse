@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from multiverse import agents, native, rpc, universe
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
+from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
 from multiverse.store import read, write
 from multiverse.tools import send
@@ -95,6 +96,12 @@ class CodexDaemonTest(TerminalBase):
         self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)
         self.assertEqual(len({x['socketPath'] for x in started}), 1)
         endpoint = started[0]['socketPath']
+        def thread_name(root, agent_id):
+            _, _, session, _ = native.context(root, agent_id)
+            def plan():
+                thread = yield from _thread(session)
+                return thread if isinstance(thread, NativeResult) else NativeResult('ok', value=thread.get('name'))
+            return rpc.execute(RpcSpec(endpoint, plan)).value
         roots = [universe.create(work / '.multiverse', 'project', workdir=work) for work in workspaces]
         for root in roots:
             path = root / 'harnesses/codex/harness.json'
@@ -141,6 +148,7 @@ class CodexDaemonTest(TerminalBase):
                 self.assertNotIn('CLAUDECODE', identity['env'])
                 self.assertNotIn('USER_EXCLUDED', identity['env'])
                 self.assertEqual(agents.runtime(directory)['control_endpoint']['address'], endpoint)
+                self.assertEqual(thread_name(root, launched['id']), 'same-name')
             # Two independent shared-tool callers target distinct native threads.
             with ThreadPoolExecutor(max_workers=2) as pool:
                 sent = list(pool.map(lambda pair: send.run(pair[0], agent=pair[1]['id'],
@@ -176,12 +184,17 @@ class CodexDaemonTest(TerminalBase):
             self.assertFalse(any('CANCEL_ON_STOP' in json.dumps(r) for r in seen_requests))
             self.assertEqual(daemon('version')['status'], 'running')
             self.assertEqual(native.capabilities(roots[1], results[1]['id'], run_probe=True)['send_steer']['state'], 'supported')
+            # Resume reapplies the mv2 name even if the native session was renamed.
+            renamed = rpc.execute(RpcSpec(endpoint, lambda: name_session(first_session.native_id, 'renamed-native')))
+            self.assertEqual(renamed.state, 'ok')
+            self.assertEqual(thread_name(roots[0], results[0]['id']), 'renamed-native')
             # Resume from a monitor with a DIFFERENT home must retain saved storage.
             with patch.dict(os.environ, {**env, 'CODEX_HOME': str(self.work / 'wrong-home')}):
                 resumed = agents.start(roots[0], resume=results[0]['id'], socket_path=self.socket)
             self.assertEqual(resumed['native_environment']['CODEX_HOME'], str(home))
             self.assertEqual(resumed['native_session_id'], read(agents.directory(roots[0], resumed['id']) / 'properties.json')['native_session_id'])
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
+            until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
             # Daemon outage must not trigger a hidden restart/resume on send.
             daemon('stop')

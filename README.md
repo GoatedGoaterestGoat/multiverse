@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.286; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.286; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -189,6 +189,8 @@ There are no added model tools. Agents use `$MV2_CLI` through their ordinary she
 
 ## Harness definitions
 
+Spawn/resume apply the mv2 agent name to the native session where supported: Claude and Pi use `--name`, and Codex bridge uses `thread/name/set`. The `session_name` capability reports support; plain Codex and unverified legacy manifests report naming unavailable. Native display names remain labels, separate from exact session identity.
+
 Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` answers a side question from a bridged Claude session's transcript without adding to it, and reports unavailable for the others. `get-usage` reports the latest request's context and any cumulative totals: Claude measures both from its session transcript, and its mod adds the window, cost and rate limits when the bridge is on; Codex bridge launches report the latest request's tokens and window from app-server; Pi reports unavailable.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
@@ -205,7 +207,7 @@ A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` arg
 | `{model}` | Explicit model override; omitted flags use the native default |
 | `{session_file}`, `{session_id}` | File-based session path or recorded native UUID |
 
-`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Status is detected, never set by agents: bridge launches report it (Claude from its mod, Codex from the app-server's thread status, Pi from its extension), and other launches stay `unknown`. Liveness still comes from tagged tmux panes.
+`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` uses a harness-selected native UUID that core must bind (Codex). Claude resumes that assigned UUID. Codex bridge launches bind the exact thread ID and workspace from the native reply; plain Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working. Resume fails clearly without a binding, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Status is detected, never set by agents: bridge launches report it (Claude from its mod, Codex from the app-server's thread status, Pi from its extension), and other launches stay `unknown`. Liveness still comes from tagged tmux panes.
 
 Existing schema-1 definitions and assets remain authoritative and are never rewritten on package update. Opting into schema 2 is explicit: preserve every local model, argument, permission and workspace preference; keep schema 1 for behavior that cannot be represented. No live-universe migration is automatic.
 

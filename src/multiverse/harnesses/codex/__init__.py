@@ -79,6 +79,7 @@ class CodexAdapter(ConfiguredAdapter):
                                context.endpoint.address if context.endpoint else '',
                                {'bootstrap': bootstrap, 'roots': roots, 'workspace_policy': workspace_policy,
                                 'workspace': context.values['workspace'],
+                                'name': context.values['name'],
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None}),
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
@@ -109,6 +110,9 @@ class CodexAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        result['session_name'] = (Capability('supported', mechanism='thread/name/set')
+            if self.settings.get('inbox_bridge') else Capability(
+                'unavailable', 'Codex CLI has no name flag; native naming requires inbox_bridge'))
         available = (session.state == 'running' and session.native_id and session.endpoint
                      and session.endpoint.transport == 'unix-websocket')
         support = Capability('unavailable', 'No running Codex app-server session', required=True)
