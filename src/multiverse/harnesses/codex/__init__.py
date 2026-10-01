@@ -1,6 +1,7 @@
 """Codex interactive CLI lifecycle and exact-thread native queue specifications."""
 from pathlib import Path
 import json
+import shlex
 import tomllib
 from ..base import ConfiguredAdapter
 from functools import partial
@@ -64,7 +65,19 @@ class CodexAdapter(ConfiguredAdapter):
             except (OSError, RuntimeError, ValueError) as error:
                 raise BridgeUnavailable(f'Cannot prepare shared native session environment: {error}') from error
             if observed.state != 'ok':
-                raise BridgeUnavailable(f'Cannot isolate shared native session environment: {observed.reason}')
+                reason = f'Cannot isolate shared native session environment: {observed.reason}'
+                if ('failed to resolve feature override precedence' in observed.reason
+                        and 'No such file or directory' in observed.reason):
+                    home = str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())
+                    executable = self.spec['spawn'][0]
+                    if '/' in executable and not Path(executable).is_absolute():
+                        executable = str((Path(context.values['workspace']) / executable).resolve())
+                    restart = (f'cd {shlex.quote(str(Path.home().resolve()))} && '
+                               f'CODEX_HOME={shlex.quote(home)} {shlex.quote(executable)} app-server daemon restart')
+                    reason += ('; the shared daemon may have a deleted working directory. '
+                               f'Only when other Codex work is idle, explicitly run `{restart}`, then retry resume. '
+                               'mv2 does not restart shared daemons.')
+                raise BridgeUnavailable(reason)
             excludes = list(observed.value['exclude'])
             roots = list(dict.fromkeys([*observed.value['writable_roots'], *roots]))
             workspace_policy = observed.value.get('workspace_policy', {})
@@ -101,7 +114,7 @@ class CodexAdapter(ConfiguredAdapter):
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
                                {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())},
-                               required_cli_flags=('--remote',)))
+                               required_cli_flags=('--remote',), cwd=str(Path.home().resolve())))
 
     def launch_proxy(self, settings):
         from .launch import LaunchProtocol

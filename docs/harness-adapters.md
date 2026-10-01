@@ -387,6 +387,24 @@ identity, workspace and effective permission validation failures stay loud. The
 shared daemon is never stopped or restarted to repair a launch. A later resume
 reevaluates availability, so a plain-started session can return on the bridge.
 
+`SharedServiceSpec.cwd` optionally selects the service startup directory; other
+services retain the launch workspace when it is absent. Codex selects the OS
+user's home directory for daemon startup and CLI checks. The native terminal and
+thread still use the saved agent workspace, and `CODEX_HOME` still selects native
+storage. Workspace-relative executable paths resolve before changing directory.
+This keeps a shared daemon usable after its originating worktree or temporary
+universe is removed.
+
+A daemon already running from a deleted directory cannot be repaired by reusing
+its socket. Codex 0.159.3 returns `config/read` error -32603, `failed to resolve
+feature override precedence: No such file or directory`, even when the requested
+workspace exists. The adapter retains this error and adds a restart command with
+the configured executable and exact `CODEX_HOME`, from the user's home directory.
+Run it explicitly only when other Codex work is idle, then retry resume. Required
+bridge mode still fails; auto still records the reason and selects plain. mv2
+never restarts the daemon on its own. A disposable native-daemon regression test
+removes the original workspace and verifies that configuration reads still work.
+
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
 and `unset_env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,

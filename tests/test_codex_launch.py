@@ -38,6 +38,8 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertEqual(command.rpc_proxy.settings['roots'], ['/outside/state/agent', '/custom'])
         self.assertEqual(command.control_endpoint.address, self.values['control_socket'])
         self.assertEqual(command.rpc_proxy.upstream_path, '/tmp/native.sock')
+        self.assertEqual(command.shared_service.cwd, str(Path.home().resolve()))
+        self.assertEqual(command.rpc_proxy.settings['workspace'], self.values['workspace'])
         session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
         resumed = adapter.resume(session, self.context)
         self.assertNotIn('--add-dir', resumed.argv)
@@ -55,6 +57,25 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertIn('NATIVE_SECRET', ' '.join(command.argv))
         self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="agent"', command.argv)
         self.assertEqual(executor.rpc.call_count, 1)
+
+    def test_deleted_daemon_cwd_diagnostic_keeps_strict_and_auto_contracts(self):
+        executor = Mock()
+        executor.rpc.return_value = NativeResult('error',
+            'Native RPC -32603: failed to resolve feature override precedence: No such file or directory (os error 2)')
+        context = replace(self.context, executor=executor, environment={'CODEX_HOME': '/native storage'})
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+        strict = CodexAdapter.configured('codex', {'inbox_bridge': True})
+        with self.assertRaisesRegex(ValueError, 'deleted working directory') as raised:
+            strict.resume(session, context)
+        self.assertIn('daemon restart', str(raised.exception))
+        self.assertIn("CODEX_HOME='/native storage'", str(raised.exception))
+        self.assertIn('when other Codex work is idle', str(raised.exception))
+        auto = CodexAdapter.configured('codex', {})
+        command = auto.resume(session, context)
+        self.assertEqual(command.native_mode['mode'], 'plain')
+        self.assertIn('deleted working directory', command.native_mode['fallback_reason'])
+        self.assertIn(self.native_id, command.argv)
+        self.assertEqual(executor.rpc.call_count, 2, 'Diagnosis must not mutate or restart the daemon')
 
     def test_resume_translates_only_explicit_permission_flags(self):
         cases = [

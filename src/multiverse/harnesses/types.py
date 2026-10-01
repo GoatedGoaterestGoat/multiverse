@@ -41,6 +41,7 @@ class SharedServiceSpec:
     version_fields: tuple[str, str]
     environment: Mapping[str, str] = field(default_factory=dict)
     required_cli_flags: tuple[str, ...] = ()
+    cwd: str | None = None
 
 
 @dataclass(frozen=True)

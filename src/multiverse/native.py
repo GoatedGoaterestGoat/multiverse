@@ -39,7 +39,13 @@ def start_shared_service(specification, workspace, log_path, unset_env):
 def _start_shared_service(specification, workspace, log_path, unset_env):
     command = CommandSpec(specification.argv, unset_env)
     env = {**environment(command), **specification.environment}
-    result = subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
+    # Shared services outlive worktrees and temporary universes. Their adapter
+    # can select a persistent cwd without moving the agent's native terminal.
+    service_cwd = specification.cwd or workspace
+    argv = command.argv
+    if specification.cwd and '/' in argv[0] and not Path(argv[0]).is_absolute():
+        argv = (str((Path(workspace) / argv[0]).resolve()), *argv[1:])
+    result = subprocess.run(argv, cwd=service_cwd, env=env, stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     log_path.write_text(result.stdout + result.stderr)
     if result.returncode:
@@ -54,7 +60,7 @@ def _start_shared_service(specification, workspace, log_path, unset_env):
     if specification.required_cli_flags:
         # Read-only CLI help detects old/partial installations without starting
         # another daemon or constructing a speculative native conversation.
-        help_result = subprocess.run([specification.argv[0], '--help'], cwd=workspace, env=env,
+        help_result = subprocess.run([argv[0], '--help'], cwd=service_cwd, env=env,
                                      capture_output=True, text=True, timeout=5)
         help_text = help_result.stdout + help_result.stderr
         missing = [flag for flag in specification.required_cli_flags
