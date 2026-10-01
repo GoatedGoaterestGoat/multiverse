@@ -752,7 +752,8 @@ class MultiverseApp(App):
                 if 'cancelled_submissions' in native:
                     detail += (f" ({native['cancelled_submissions']} queued cancelled, "
                                f"{native['interrupted_turns']} turn interrupts)")
-                self.set_status('Kill complete: ' + detail)
+                incomplete = native.get('state') != 'ok'
+                self.set_status(('Terminal closed: ' if incomplete else 'Kill complete: ') + detail, error=incomplete)
             else:
                 self.set_status(label + " complete.")
             succeeded = True

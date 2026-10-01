@@ -200,7 +200,7 @@ def stop(root, reference):
         update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
                        last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
     if result.state != 'ok':
-        raise RuntimeError(f'Native stop incomplete; remaining terminal retained: {result.reason}')
+        raise RuntimeError(f'Native stop incomplete: {result.reason}')
     cancelled = end_startup_messages(directory, session.launch_id, 'Cancelled by explicit agent stop', cancelled=True)
     return replace(result, value={**(result.value or {}), 'cancelled_startup_messages': cancelled})
 

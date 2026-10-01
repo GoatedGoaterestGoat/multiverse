@@ -317,10 +317,16 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.app.screen_stack), 1)
 
             self.backend.kill = lambda *_: {'native_cancellation': {
-                'reason': 'Native cleanup requested', 'cancelled_submissions': 1, 'interrupted_turns': 2}}
+                'state': 'ok', 'reason': 'Native cleanup requested', 'cancelled_submissions': 1, 'interrupted_turns': 2}}
             await pilot.press('s', 'ctrl+enter')
             await self.settle(pilot)
             self.assertIn('1 queued cancelled, 2 turn interrupts', str(self.app.query_one('#status', Static).render()))
+            self.backend.kill = lambda *_: {'native_cancellation': {
+                'state': 'unknown', 'reason': 'Native cancellation unconfirmed: Connection refused'}}
+            await pilot.press('s', 'ctrl+enter')
+            await self.settle(pilot)
+            self.assertIn('Terminal closed: Native cancellation unconfirmed',
+                          str(self.app.query_one('#status', Static).render()))
 
     async def test_kill_operation_refreshes_ending_and_stopped_before_dormant(self):
         ending, stopped, finish_native, finish_wrapper = Event(), Event(), Event(), Event()

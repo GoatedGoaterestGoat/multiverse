@@ -113,10 +113,29 @@ class KillTest(TerminalBase):
         agents.bind_session(self.root, launched['id'], identifier)
         self.backend.run('kill-pane', '-t', launched['runtime']['tmux']['pane'])
         with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')):
-            with self.assertRaisesRegex(RuntimeError, 'native daemon unreachable'):
-                agents.kill(self.root, launched['id'])
+            result = agents.kill(self.root, launched['id'])
+        self.assertEqual(result['native_cancellation']['state'], 'unknown')
+        self.assertIn('native daemon unreachable', result['native_cancellation']['reason'])
         self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
+
+    def test_dead_wrapper_removal_does_not_require_native_daemon(self):
+        launched, directory = self.spawn()
+        identifier = str(uuid4())
+        agents.bind_session(self.root, launched['id'], identifier)
+        pane = launched['runtime']['tmux']['pane']
+        self.backend.run('send-keys', '-t', pane, 'C-c')
+        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
+        with patch.object(native, 'stop', side_effect=ConnectionRefusedError(61, 'Connection refused')), \
+                patch.object(Tmux, 'signal_child') as signal_child:
+            result = agents.kill(self.root, launched['id'])
+        signal_child.assert_not_called()
+        self.assertEqual(result['state'], 'dormant')
+        self.assertEqual(result['native_cancellation']['state'], 'unknown')
+        self.assertIn('unconfirmed', agents.runtime(directory)['error'])
+        self.assertNotIn(pane, self.backend.snapshot()[0])
+        resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket)
+        self.assertEqual(resumed['native_session_id'], identifier)
 
     def test_move_and_remove_clear_retained_wrappers_and_preserve_identity(self):
         launched, directory = self.spawn()

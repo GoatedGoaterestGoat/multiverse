@@ -115,7 +115,11 @@ The adapter's `stop()` cancels work hosted outside the terminal first. Codex
 bridge cancels up to 128 queued submissions on the exact thread, interrupts its
 active turn and cleans background terminals. A validated already-unloaded
 thread needs no cancellation and is never resumed by kill. A failure retains
-the terminal and reports an error. The shared daemon and sibling agents remain
+a still-running terminal and reports an error. If the child has already exited,
+core removes its owned wrapper even when native cancellation fails, recording
+`native_cancellation.state=unknown` and a retry diagnostic in runtime and the result.
+This does not claim that shared-server work stopped; retry stop once the server
+is reachable. Unsubmitted startup messages are cancelled locally. The shared daemon and sibling agents remain
 running. Stop also works when the pane is gone: under the same launch lock,
 core authorizes native cancellation through the saved endpoint and exact bound
 thread, without authorizing any pane operation. Results report cancelled
@@ -525,8 +529,9 @@ Explicit `kill` (or `stop`) holds the recipient's launch lock during native canc
 queue entries, interrupts its exact active turn and cleans its native background
 terminals before closing its terminal. Confirmed queue cancellations are recorded
 by message ID in the core inbox and cannot be replayed with `deliver --retry`.
-Native cancellation is bounded to 128 queued submissions; errors leave the terminal
-attached with a diagnostic. This requires a bound native session ID and a
+Native cancellation is bounded to 128 queued submissions; errors leave a running
+terminal attached with a diagnostic. An already-stopped wrapper can still be
+removed, with native cancellation reported as unconfirmed. Cancellation requires a bound native session ID and a
 reachable server. Closing a terminal by other means only disconnects its client
 and can leave native work running. Closing a dashboard or detaching tmux never
 calls native stop.

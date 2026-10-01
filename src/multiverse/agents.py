@@ -10,7 +10,7 @@ import sys
 import time
 
 from . import universe, harnesses
-from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id, BridgeUnavailable
+from .harnesses.types import LaunchContext, SessionHandle, NativeResult, normalize_session_id, BridgeUnavailable
 from .store import lock, now, read, uid, write, message_record, update_message
 from .tmux import Tmux, observe, owned
 
@@ -357,10 +357,18 @@ def kill(root, reference):
             from .native import stop
             cancellation = stop(root, reference)
         except Exception as error:
-            update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
-                           ending_at=facts.get('ending_at'),
-                           error=f'Native cancellation failed; remaining terminal retained: {error}')
-            raise
+            if live not in ('stopped', 'dormant'):
+                update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
+                               ending_at=facts.get('ending_at'),
+                               error=f'Native cancellation failed; remaining terminal retained: {error}')
+                raise
+            # A dead child has no terminal connection to preserve. Removing its
+            # owned wrapper must not depend on an unreachable shared service.
+            from .native import end_startup_messages
+            cancelled = end_startup_messages(agent_dir, launch_id, 'Cancelled by explicit agent stop', cancelled=True)
+            cancellation = NativeResult('unknown',
+                f'Native cancellation unconfirmed: {error}. Retry stop when the native service is reachable.',
+                {'cancelled_startup_messages': cancelled})
 
     # The runner's relay can be binding under .launch.lock during startup or
     # shutdown. Never hold that lock while waiting for the child/runner to exit.
@@ -400,7 +408,9 @@ def kill(root, reference):
                 backend.run('kill-pane', '-t', pane)
             elif live != 'dormant':
                 raise RuntimeError(f'Native exit not confirmed ({live}); terminal retained')
-            update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now())
+            update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now(),
+                           error=cancellation.reason if cancellation and cancellation.state != 'ok' else None,
+                           native_cancellation=cancellation.to_dict() if cancellation else None)
         # Receipt IDs remain internal; callers need counts and the native result.
         details = (cancellation.value or {}) if cancellation else {}
         return {'id': agent_dir.name, 'state': 'dormant', 'native_cancellation': {
