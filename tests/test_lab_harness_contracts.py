@@ -9,6 +9,9 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+from native_safety import install as install_native_safety
+install_native_safety()
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import agents, cli, universe
 from multiverse.store import append_message, inbox, read, write
@@ -20,6 +23,11 @@ class LabHarnessContracts(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
         self.root = universe.create(self.work / 'universe', 'offline', workdir=self.work)
+        # These are argv/state contracts, not native daemon integration tests.
+        path = self.root / 'harnesses/codex/harness.json'
+        definition = read(path)
+        definition['settings']['inbox_bridge'] = False
+        write(path, definition)
         self.socket = '/offline-test/tmux.sock'
         self.patches = ExitStack()
         self.addCleanup(self.patches.close)
@@ -28,6 +36,8 @@ class LabHarnessContracts(unittest.TestCase):
             'socket': self.socket, 'session': '$offline', 'pane': '%offline'}
         self.patches.enter_context(patch('multiverse.agents.shutil.which', return_value=sys.executable))
         self.patches.enter_context(patch.dict(os.environ, MV2_TMUX_SOCKET=self.socket))
+        self.patches.enter_context(patch('multiverse.native.start_shared_service',
+            side_effect=AssertionError('Offline lab must never prepare a native daemon')))
 
     def start(self, **kwargs):
         return agents.start(self.root, name='offline', task='literal $(false) `false`\nquoted',

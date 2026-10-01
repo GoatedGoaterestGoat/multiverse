@@ -13,6 +13,9 @@ import time
 import unittest
 from unittest.mock import patch
 
+from native_safety import install as install_native_safety
+install_native_safety()
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe

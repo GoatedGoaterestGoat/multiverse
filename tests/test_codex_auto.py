@@ -45,6 +45,7 @@ else:
         self.executable.chmod(0o755)
         self.info = {'socketPath': str(self.address), 'cliVersion': '1', 'appServerVersion': '1'}
         self.config = self.root / 'harnesses/codex/harness.json'
+        self.enterContext(patch.dict(os.environ, {'CODEX_HOME': str(self.work / 'native-home')}))
         self.set_case()
 
     def set_case(self, **changes):
