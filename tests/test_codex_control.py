@@ -11,7 +11,7 @@ from multiverse.harnesses.types import SessionHandle, Message
 class CodexControlTest(unittest.TestCase):
     def setUp(self):
         self.ctx = SessionHandle('agent', 'codex', '/tmp', native_id=str(uuid4()))
-        self.message = Message(str(uuid4()), 'literal `false` $(false)')
+        self.message = Message(str(uuid4()), 'literal `false` $(false)', framed='Message from reviewer:\nliteral `false` $(false)')
         self.requests = []
 
     def run_plan(self, operation, *, state='active', overrides=None):
@@ -45,7 +45,8 @@ class CodexControlTest(unittest.TestCase):
         self.assertEqual(last.params['expectedTurnId'], 'exact-turn')
         self.assertEqual(last.params['threadId'], self.ctx.native_id)
         self.assertEqual(last.params['clientUserMessageId'], self.message.id)
-        self.assertIn('literal `false` $(false)', last.params['input'][0]['text'])
+        self.assertEqual(last.params['input'][0]['text'], self.message.framed)
+        self.assertNotIn(self.message.id, last.params['input'][0]['text'])
 
     def test_normal_and_idle_urgent_use_native_queue_without_steering(self):
         for operation, state in [('follow-up', 'active'), ('follow-up', 'idle'), ('steer', 'idle')]:
@@ -53,6 +54,7 @@ class CodexControlTest(unittest.TestCase):
                 self.requests.clear()
                 self.assertEqual(self.run_plan(operation, state=state).state, 'native_queued')
                 self.assertEqual(self.requests[-1].method, 'thread/queue/add')
+                self.assertEqual(self.requests[-1].params['input'][0]['text'], self.message.framed)
                 self.assertNotIn('turn/steer', [r.method for r in self.requests])
 
     def test_unloaded_wrong_identity_and_workspace_never_receive(self):

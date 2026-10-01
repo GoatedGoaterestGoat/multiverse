@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe
 from multiverse.tools import send
-from multiverse.store import ack, append_message, inbox, read, write
+from multiverse.store import append_message, inbox, read, write
 from multiverse.tmux import Tmux, observe
 from multiverse.dashboard import LocalBackend, columns, hierarchy
 
@@ -83,7 +83,7 @@ class FilesTest(BaseTest):
         self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
         self.assertLess(len(prompt.split()), 260)
 
-    def test_concurrent_inbox_and_explicit_ack(self):
+    def test_concurrent_inbox_writers_and_automatic_read_position(self):
         agent = self.root / "state" / "agents" / "test"
         agent.mkdir()
         with concurrent.futures.ProcessPoolExecutor(max_workers=4) as pool:
@@ -91,17 +91,16 @@ class FilesTest(BaseTest):
         first = inbox(agent)
         self.assertEqual(len(first["messages"]), 48)
         self.assertEqual(len({m["id"] for m in first["messages"]}), 48)
-        self.assertEqual(inbox(agent), first)  # Peek/crash does not discard anything.
-        ack(agent, first["cursor"])
+        self.assertEqual(inbox(agent, all_messages=True)["messages"],
+                         [{**m, "tracking": {"submission_state": "manual"}} for m in first["messages"]])
         self.assertEqual(inbox(agent)["messages"], [])
         append_message(agent, "next", {"name": "user"})
         self.assertEqual(inbox(agent)["messages"][0]["text"], "next")
         with self.assertRaises(ValueError):
-            ack(agent, first["cursor"] + 1)
-        with self.assertRaises(ValueError):
-            ack(agent, 0)
+            inbox(agent, after=first["cursor"] + 1)
+        self.assertEqual(inbox(agent, after=0)["messages"], [])
 
-    def test_incomplete_record_never_acknowledged_or_overwritten(self):
+    def test_incomplete_record_never_consumed_or_overwritten(self):
         agent = self.work / "agent"
         agent.mkdir()
         append_message(agent, "complete", {})
@@ -109,7 +108,7 @@ class FilesTest(BaseTest):
             out.write(b'{"incomplete":')
         batch = inbox(agent)
         self.assertEqual(len(batch["messages"]), 1)
-        ack(agent, batch["cursor"])
+        self.assertEqual(read(agent / "inbox.cursor"), batch["cursor"])
         self.assertEqual(inbox(agent)["messages"], [])
         with self.assertRaises(ValueError):
             append_message(agent, "must not hide corruption", {})

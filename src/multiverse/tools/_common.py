@@ -27,6 +27,15 @@ def callback(root, agent):
     return root, directory, launch_id
 
 
+def delivery_summary(receipt):
+    """Expose delivery evidence without provider or core message identifiers."""
+    result = {key: receipt[key] for key in ('state', 'reason', 'ok', 'reused') if key in receipt}
+    value = receipt.get('value')
+    if isinstance(value, dict) and 'transcript_confirmed' in value:
+        result['transcript_confirmed'] = value['transcript_confirmed']
+    return result
+
+
 def output(call, **values):
     try:
         result = call(**values)

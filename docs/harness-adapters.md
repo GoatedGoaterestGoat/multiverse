@@ -207,15 +207,17 @@ remain unchanged and report naming unverified. Capabilities describe adapter
 support, not confirmation of an individual launch's display name. Support may
 depend on configuration and a registered, running native session. Discovery returns supported/unavailable/error plus a reason.
 
-`send` first persists the message with a stable UUID, sender and optional
-`reply_to`, then calls the adapter. Its result includes `saved`, `state`, and
-`native_delivery`. Unavailable or failed native delivery produces `ok: false`
-and a nonzero CLI exit while retaining the saved message and its ID. Do not
-repeat `send` to retry that same message: that creates a new UUID.
+`send` first persists the text, sender, timing and an internal receipt identifier,
+then calls the adapter. Its result includes `saved`, `state`, and a delivery
+summary without message identifiers. Unavailable or failed native delivery
+produces `ok: false` and a nonzero CLI exit while retaining the saved message.
+Use recipient-scoped recovery instead of repeating `send`, which creates a new
+message.
 
-One logical inbox lives in `inbox.jsonl` (immutable messages) and
-`inbox-state.json` (delivery attempts, receipts and per-ID acknowledgements).
-The state sidecar is core-owned; providers have no mailbox or retry database.
+One logical inbox lives in `inbox.jsonl` (immutable messages),
+`inbox-state.json` (delivery attempts and receipts), and `inbox.cursor` (the
+ordinary read position). These files are core-owned; providers have no mailbox
+or retry database.
 
 | Submission state | Meaning |
 | --- | --- |
@@ -226,37 +228,52 @@ The state sidecar is core-owned; providers have no mailbox or retry database.
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
 The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
-map to failed. Transcript confirmation, explicit acknowledgement, and a correlated
-reply are independent evidence, never inferred from acceptance.
+map to failed. Transcript confirmation and an answer are independent evidence,
+never inferred from acceptance.
 
 ```sh
-mv2 inbox                         # unread manual messages only
-mv2 inbox --all                    # full history, delivery attempts and acknowledgements
-mv2 ack --message-id UUID          # acknowledge exactly this message (repeatable)
+mv2 inbox                         # show unread inbox-only messages and mark them read
+mv2 inbox --all                    # browse full raw history and delivery evidence
 mv2 send worker --text 'Later' --delivery inbox-only
-mv2 deliver worker --message-id UUID --retry  # definite failure only
-mv2 deliver worker --message-id UUID --check  # reconcile without submitting
+mv2 deliver worker --retry        # retry this recipient's definite failures
+mv2 deliver worker --check        # reconcile pending/uncertain native receipts
 ```
+
+Ordinary inbox reads return sender, text, time and delivery mode, without message
+identifiers. They advance the read position under the inbox lock, including
+across skipped native records, stopping at the last complete record in the page.
+Concurrent readers cannot consume the same manual message twice. Stale launch
+callbacks cannot read or advance the current launch's inbox. An interrupted
+caller can recover already-consumed text from history.
+
+`inbox --all` is a non-consuming raw view, including internal identifiers and
+native delivery evidence. Page through it with `--after CURSOR`; ordinary reads
+page forward automatically. Diagnostics and recovery use the non-consuming view.
+Reading history does not cancel pending native delivery, so viewing a message
+there and later receiving it natively can produce a duplicate.
 
 `--queue-only` is a compatibility alias for `inbox-only`. Native-assigned messages
 never also appear in ordinary mailbox reads, including failed/pending submissions.
-They remain inspectable through `inbox --all`. No automatic switch to manual
-handling occurs. Each native message contains its ID, sender, text, delivery mode,
-and reply correlation; the agent acknowledges the ID after handling it.
+They remain inspectable through `inbox --all`; no automatic switch to manual
+handling occurs. Native delivery presents only the core sender line and text.
 
 Per-recipient sends serialize persistence and submission. Urgent messages may
-overtake native follow-ups; acknowledgements therefore use individual IDs.
-Legacy cursor ack still works for manual messages only and cannot clear native
-messages it skipped. Existing schema-less logs retain manual semantics without
-rewriting their contents. Existing `native-delivery.json` receipts remain readable for compatibility;
+overtake native follow-ups. Existing schema-less logs retain manual semantics
+without rewriting their contents. Retired per-message read markers and reply
+references are ignored; an existing byte cursor remains the read position.
+Existing `native-delivery.json` receipts remain readable for compatibility;
 accepted or uncertain old attempts are not replayed. New attempts use inbox state.
 
-Retries preserve exact native session identity, allow a new launch of that same
-session, and refuse a different session. Core persists the attempt before the
-native call and merges receipts without overwriting concurrent acknowledgements.
-Pi supports receipt reconciliation against its exact transcript and current
-in-process acceptance records. Missing evidence remains unknown. Codex checks up to 100 queued submissions and 20 recent turns by exact client
-message ID; absence remains unknown and requires investigation. Accepted submissions are never automatically resubmitted.
+`deliver AGENT --retry` selects definite failures; `--check` selects pending,
+interrupted or unknown submissions and queries receipts without submitting.
+Both preserve exact native session identity, allow a new launch of that same
+session, and refuse a different session. Core persists each attempt before the
+native call and merges delivery evidence separately from inbox read position.
+Pi supports receipt reconciliation against metadata in its exact transcript and
+current in-process acceptance records. Missing evidence remains unknown. Codex
+checks up to 100 queued submissions and 20 recent turns using internal client
+correlation; absence remains unknown and requires investigation. Accepted
+submissions are never automatically resubmitted.
 
 The old `native-status` command remains a tool compatibility shim for usage.
 Its status operation (formerly `activity`) reports unavailable and points callers to
@@ -417,16 +434,19 @@ not be independently adopted by two universes.
 Pi's opt-in extension retains the native interactive terminal. It listens on a
 core-assigned private Unix socket and receives actual messages with exact native
 session and launch IDs. `sendMessage` uses the saved `steer`/`followUp` mode.
-There are no polling timers, inbox reads, or acknowledgements in the extension.
+There are no polling timers or inbox reads in the extension.
 Native acceptance is deduplicated in process; a bounded exact-transcript reader
-recognizes persisted IDs across launches. Socket loss leaves acceptance unknown.
+recognizes receipt metadata in `custom_message.details.ids` across launches.
+Pi converts only custom-message content into model input; details stay out of
+that input ([native conversion](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/messages.ts)). Socket loss leaves acceptance unknown.
 Core owns the private socket directory lifecycle. Pi's separate headless RPC mode
 is not substituted for its interactive terminal.
 
 Core frames each message for its recipient: `Message from <sender>:`, with
 ` (in universe <name>)` when the sender is in another universe, then the text.
-Providers that deliver text verbatim receive it as `Message.framed`; Codex and
-Pi still send the collaborator envelope with the message ID.
+Every provider sends `Message.framed` as the message content. Receipt identifiers
+remain separate: Codex uses `clientUserMessageId`, Pi persists custom-message
+details, and the Claude mod removes its transport tag before presenting text.
 
 Claude bridge mode steers through the session's own peer inbox. Each launch
 passes `--messaging-socket-path` (the core-assigned private socket),

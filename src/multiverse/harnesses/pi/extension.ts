@@ -7,7 +7,7 @@ import { TranscriptReceipts } from "./transcript.ts";
 const exec = promisify(execFile);
 
 // Runs inside the native interactive Pi process. No polling, inbox access,
-// model tools, or message acknowledgements: core owns all delivery records.
+// or model tools: core owns all delivery records.
 export default function multiverse(pi: any, run = exec) {
   const env = { ...process.env };
   if (!env.MV2_AGENT_ID || !env.MV2_LAUNCH_ID || !env.MV2_CONTROL_SOCKET) return;
@@ -65,11 +65,11 @@ export default function multiverse(pi: any, run = exec) {
       return reply("native_queued", "Message already accepted", { message_id: input.message_id,
         transcript_confirmed: persisted.ids.has(input.message_id) });
     }
-    // Pi queues this at the requested native boundary; this is not an answer or ack.
+    // Pi queues this at the requested native boundary; this is not an answer.
     accepted.set(input.message_id, "unknown");
     try {
       pi.sendMessage({ customType: "multiverse-inbox", content: input.text, display: true,
-        details: { ids: [input.message_id] } },
+        details: { ids: [input.message_id] } }, // Persisted metadata, excluded from Pi's model input.
         { triggerTurn: true, deliverAs: input.mode === "follow-up" ? "followUp" : "steer" });
     } catch (error) {
       // Retain uncertain IDs: retrying after a partially successful throw can duplicate.

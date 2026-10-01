@@ -15,7 +15,7 @@ may survive elsewhere. Copying agent state does not stop the original process.
 Session binding validates a native UUID, rejects stale launch callbacks and
 refuses to replace an agent's already-bound UUID. Codex resume fails if no native
 session is recorded; it never falls back to the latest session. CLI callbacks
-from an old launch cannot read or acknowledge the current inbox, bind its
+from an old launch cannot read or advance the current inbox, bind its
 session, or change its status/runtime. Offline regression coverage exercises
 those callback guards without launching any workers.
 

@@ -283,6 +283,21 @@ class AdapterContractTest(BaseTest):
         executor.rpc.assert_not_called()
         executor.command.assert_not_called()
 
+    def test_pi_sends_framed_text_with_separate_receipt_metadata(self):
+        from multiverse.harnesses.types import Message
+        from unittest.mock import Mock
+        adapter = harnesses.load(self.root, 'pi')
+        session = SessionHandle('agent', 'pi', str(self.work), native_id=str(uuid4()), state='running',
+                                bridge='pi-socket-v1', endpoint=NativeEndpoint('unix-json', '/tmp/test.sock'))
+        executor = Mock()
+        for mode in ('steer', 'follow-up'):
+            message = Message(str(uuid4()), 'literal body', delivery=mode, framed='Message from reviewer:\nliteral body')
+            adapter.send(session, message, executor)
+            payload = executor.request.call_args.args[1]
+            self.assertEqual(payload, {'operation': 'send', 'message_id': message.id,
+                                      'text': message.framed, 'mode': mode})
+            self.assertNotIn(message.id, payload['text'])
+
 
 class NativeDeliveryTest(BaseTest):
     def setUp(self):

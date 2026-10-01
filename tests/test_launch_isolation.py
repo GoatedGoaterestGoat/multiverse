@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import agents, runner, universe, harnesses
 import json
 from multiverse.cli import parser, run
-from multiverse.store import ack, append_message, inbox, read, write, lock
+from multiverse.store import append_message, inbox, read, write, lock
 from multiverse.tools import runtime_update
 
 
@@ -23,7 +23,7 @@ class LaunchIsolationTest(unittest.TestCase):
         self.work = Path(temporary.name).resolve()
         self.root = universe.create(self.work / "universe", "test", workdir=self.work)
 
-    def test_empty_inbox_ack_preserves_future_messages(self):
+    def test_empty_inbox_read_preserves_future_messages(self):
         agent = self.work / "empty-agent"
         for existing in (False, True):
             with self.subTest(existing=existing):
@@ -31,38 +31,37 @@ class LaunchIsolationTest(unittest.TestCase):
                     (agent / "inbox.jsonl").touch()
                 batch = inbox(agent)
                 self.assertEqual(batch, {"messages": [], "cursor": 0})
-                self.assertEqual(ack(agent, batch["cursor"]), {"cursor": 0})
-                self.assertEqual(ack(agent, 0), {"cursor": 0})
+                self.assertEqual(inbox(agent), batch)
                 for invalid in (-1, 1):
                     with self.assertRaises(ValueError):
-                        ack(agent, invalid)
+                        inbox(agent, after=invalid)
         message = append_message(agent, "after empty checkpoint", {})
         self.assertEqual(inbox(agent)["messages"], [message])
-        ack(agent, inbox(agent)["cursor"])
         self.assertEqual(inbox(agent)["messages"], [])
 
-    def test_ack_unknown_agent_does_not_create_state(self):
+    def test_inbox_unknown_agent_does_not_create_state(self):
         before = list((self.root / "state" / "agents").iterdir())
-        args = parser().parse_args(["-u", str(self.root), "ack", "--agent", "missing", "--cursor", "0"])
+        args = parser().parse_args(["-u", str(self.root), "inbox", "--agent", "missing"])
         with self.assertRaisesRegex(ValueError, "Expected one agent"):
             run(args)
         self.assertEqual(list((self.root / "state" / "agents").iterdir()), before)
 
-    def test_inbox_pages_do_not_ack_skipped_messages(self):
+    def test_inbox_pages_advance_without_skipping_or_repeating_unread_messages(self):
         agent = self.work / 'paged-agent'
         agent.mkdir()
         messages = [append_message(agent, f'内容 {index}', {}) for index in range(53)]
+        history = inbox(agent, all_messages=True)
+        self.assertFalse((agent / 'inbox.cursor').exists())
+        with self.assertRaisesRegex(ValueError, 'browse ahead'):
+            inbox(agent, after=history['cursor'])
         first = inbox(agent, after=0)
         second = inbox(agent, after=first['cursor'])
         self.assertEqual(first['messages'], messages[:50])
         self.assertTrue(first['has_more'])
         self.assertEqual(second['messages'], messages[50:])
         self.assertFalse(second['has_more'])
-        self.assertEqual(second['ack_cursor'], 0)
-        self.assertEqual(inbox(agent)['messages'], messages[:50])
-        ack(agent, first['message_cursors'][0])
-        # A read cursor from an older sweep cannot resurrect acknowledged input.
-        self.assertEqual(inbox(agent, after=0)['messages'], messages[1:51])
+        self.assertEqual(second['read_cursor'], first['cursor'])
+        self.assertEqual(inbox(agent, after=0)['messages'], [])
         with self.assertRaisesRegex(ValueError, 'Invalid inbox cursor'):
             inbox(agent, after=first['cursor'] - 1)
         with (agent / 'inbox.jsonl').open('ab') as out:
@@ -159,15 +158,14 @@ class LaunchIsolationTest(unittest.TestCase):
         self.assertIn(successful["id"], str(ambiguous.exception))
         self.assertIn("full UUID", str(ambiguous.exception))
 
-    def test_stale_cli_callbacks_cannot_read_ack_bind_or_change_current_launch(self):
+    def test_stale_cli_callbacks_cannot_read_bind_or_change_current_launch(self):
         agent = self.root / "state/agents" / str(uuid4())
         properties = {"id": agent.name, "name": "callback", "phase": "working"}
         runtime = {"launch_id": "current", "status": "working"}
         write(agent / "properties.json", properties)
         write(agent / "runtime.json", runtime)
         message = append_message(agent, "for current launch", {})
-        cursor = inbox(agent)["cursor"]
-        actions = (["inbox"], ["ack", "--cursor", str(cursor)],
+        actions = (["inbox"],
                    ["report", "--phase", "done"], ["session-bind", "--session-id", str(uuid4())])
         for action in actions:
             with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):
@@ -182,30 +180,29 @@ class LaunchIsolationTest(unittest.TestCase):
             runtime_update.run(self.root, agent=agent.name, status="idle")
         self.assertEqual(read(agent / "properties.json"), properties)
         self.assertEqual(read(agent / "runtime.json"), runtime)
-        self.assertEqual(inbox(agent)["messages"], [message])
         self.assertFalse((agent / "inbox.cursor").exists())
+        self.assertEqual(inbox(agent)["messages"], [message])
 
-    def test_ack_rechecks_generation_after_waiting_for_launch_lock(self):
-        from multiverse.tools import ack as ack_tool
+    def test_inbox_rechecks_generation_after_waiting_for_launch_lock(self):
+        from multiverse.tools import inbox as inbox_tool
         agent = self.root / 'state/agents' / str(uuid4())
         write(agent / 'properties.json', {'id': agent.name, 'name': 'race'})
         write(agent / 'runtime.json', {'launch_id': 'old'})
         message = append_message(agent, 'must remain unread', {})
-        cursor = inbox(agent)['cursor']
         validated, errors = threading.Event(), []
-        original = ack_tool.callback
+        original = inbox_tool.callback
         def callback(*args):
             value = original(*args)
             validated.set()
             return value
-        def acknowledge():
+        def consume():
             try:
-                ack_tool.run(self.root, agent=agent.name, cursor=cursor)
+                inbox_tool.run(self.root, agent=agent.name)
             except Exception as error:
                 errors.append(error)
-        with patch.object(ack_tool, 'callback', callback), patch.dict(os.environ, {'MV2_LAUNCH_ID': 'old'}):
+        with patch.object(inbox_tool, 'callback', callback), patch.dict(os.environ, {'MV2_LAUNCH_ID': 'old'}):
             with lock(agent / '.launch.lock'):
-                worker = threading.Thread(target=acknowledge)
+                worker = threading.Thread(target=consume)
                 worker.start()
                 self.assertTrue(validated.wait(2))
                 # Resume publishes its replacement while the old callback waits.

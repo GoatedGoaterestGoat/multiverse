@@ -11,7 +11,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import agents, cli, universe
-from multiverse.store import ack, append_message, inbox, read, write
+from multiverse.store import append_message, inbox, read, write
 
 
 class LabHarnessContracts(unittest.TestCase):
@@ -88,31 +88,38 @@ class LabHarnessContracts(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
             agents.start(self.root, resume=row['id'], socket_path=self.socket)
 
-    def test_h002_empty_ack_and_existing_message_boundaries(self):
+    def test_h002_empty_read_and_existing_message_boundaries(self):
         row = self.start()
         directory = self.root / 'state/agents' / row['id']
         self.assertEqual(inbox(directory), {'messages': [], 'cursor': 0})
-        self.assertEqual(ack(directory, 0), {'cursor': 0})
         first = append_message(directory, 'nonce one', {})
-        second = append_message(directory, 'nonce two', {}, first['id'])
+        second = append_message(directory, 'nonce two', {})
         batch = inbox(directory, limit=1)
         self.assertEqual(batch['messages'][0]['id'], first['id'])
-        ack(directory, batch['cursor'])
-        self.assertEqual(inbox(directory)['messages'][0]['reply_to'], first['id'])
+        self.assertEqual(inbox(directory)['messages'][0]['id'], second['id'])
         with self.assertRaises(ValueError):
-            ack(directory, batch['cursor'] + 1)
-        with self.assertRaises(ValueError):
-            ack(directory, 0)
-        ack(directory, inbox(directory)['cursor'])
+            inbox(directory, after=batch['cursor'] + 1)
         self.assertEqual(inbox(directory)['messages'], [])
         self.assertNotEqual(first['id'], second['id'])
 
-    def test_unknown_agent_ack_does_not_create_state(self):
+    def test_unknown_agent_inbox_does_not_create_state(self):
         before = set((self.root / 'state/agents').iterdir())
-        args = cli.parser().parse_args(['-u', str(self.root), 'ack', '--agent', 'absent', '--cursor', '0'])
+        args = cli.parser().parse_args(['-u', str(self.root), 'inbox', '--agent', 'absent'])
         with self.assertRaisesRegex(ValueError, 'found 0'):
             cli.run(args)
         self.assertEqual(set((self.root / 'state/agents').iterdir()), before)
+
+    def test_agent_facing_templates_describe_current_messaging(self):
+        for template in ('base', 'development', 'testing'):
+            root = universe.TEMPLATES / template
+            for path in root.rglob('*.md'):
+                with self.subTest(path=path):
+                    text = path.read_text()
+                    self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
+            self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
+            skill = (root / 'skills/coordination/SKILL.md').read_text()
+            self.assertIn('deliver AGENT --retry', skill)
+            self.assertIn('deliver AGENT --check', skill)
 
 
 if __name__ == '__main__':

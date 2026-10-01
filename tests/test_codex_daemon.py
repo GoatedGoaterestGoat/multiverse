@@ -19,7 +19,7 @@ from multiverse import agents, native, rpc, universe
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
 from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
-from multiverse.store import read, write
+from multiverse.store import inbox, read, write
 from multiverse.tools import send
 from test_multiverse import TerminalBase, until
 
@@ -178,7 +178,9 @@ class CodexDaemonTest(TerminalBase):
                 return observed.state == 'unavailable' or (observed.state == 'ok' and observed.value['thread']['status']['type'] != 'active' and not observed.value['terminals'].get('data'))
             until(check_stopped, seconds=5)
             self.assertFalse((workspaces[0] / 'active-end').exists())
-            retried = native.deliver(roots[0], results[0]['id'], queued['id'], retry=True)
+            saved = inbox(agents.directory(roots[0], results[0]['id']), all_messages=True)['messages']
+            queued_id = next(m['id'] for m in saved if m['text'] == 'CANCEL_ON_STOP')
+            retried = native.deliver(roots[0], results[0]['id'], queued_id, retry=True)
             self.assertFalse(retried['ok'])
             self.assertIn('Cancelled', retried['reason'])
             self.assertFalse(any('CANCEL_ON_STOP' in json.dumps(r) for r in seen_requests))

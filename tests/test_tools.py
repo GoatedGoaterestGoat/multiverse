@@ -70,15 +70,46 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(first["state"], "queued")
         batch = json.loads(self.invoke("inbox", "--agent", self.agent, standalone=False).stdout)
         self.assertEqual(batch["messages"][0]["text"], message)
-        self.invoke("ack", "--agent", self.agent, "--cursor", str(batch["cursor"]))
+        self.assertNotIn("id", first)
+        self.assertNotIn("id", batch["messages"][0])
+        self.assertEqual(json.loads(self.invoke("inbox", "--agent", self.agent).stdout)["messages"], [])
         LocalBackend().send(self.root, self.agent, "from dashboard")
         batch = json.loads(self.invoke("inbox", "--agent", self.agent, "--all").stdout)
         self.assertEqual([m["text"] for m in batch["messages"]], [message, "from dashboard"])
         self.assertEqual(batch["messages"][-1]["from"], {"name": "user", "agent_id": None})
 
+    def test_retired_message_commands_and_arguments_are_not_available(self):
+        import contextlib
+        import io
+        self.assertNotIn('ack', cli.COMMANDS)
+        self.assertFalse((PROJECT / 'src/multiverse/tools/ack.py').exists())
+        for args in (['ack'], ['send', self.agent, '--text', 'hello', '--reply-to', 'old'],
+                     ['deliver', self.agent, '--message-id', 'old', '--retry'],
+                     ['deliver', self.agent], ['deliver', self.agent, '--check', '--retry']):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                cli.parser().parse_args(args)
+
+    def test_doctor_checks_inbox_without_consuming_unread_messages(self):
+        self.invoke('send', self.agent, '--text', 'keep unread', '--queue-only')
+        self.invoke('doctor')
+        self.assertFalse((self.directory / 'inbox.cursor').exists())
+        batch = json.loads(self.invoke('inbox', '--agent', self.agent).stdout)
+        self.assertEqual([m['text'] for m in batch['messages']], ['keep unread'])
+
+    def test_old_reply_references_and_read_markers_stay_out_of_normal_inbox(self):
+        old = {'id': 'old-message', 'reply_to': 'old-parent', 'text': 'still readable', 'from': {'name': 'reviewer'}}
+        (self.directory / 'inbox.jsonl').write_text(json.dumps(old) + '\n')
+        write(self.directory / 'inbox-state.json', {'old-message': {'acknowledged_at': 'old-time'}})
+        history = json.loads(self.invoke('inbox', '--agent', self.agent, '--all').stdout)
+        self.assertEqual(history['messages'][0]['id'], old['id'])
+        batch = json.loads(self.invoke('inbox', '--agent', self.agent).stdout)
+        self.assertEqual(batch['messages'], [{'from': {'name': 'reviewer'}, 'text': 'still readable'}])
+        self.assertNotIn('old-message', json.dumps(batch))
+        self.assertNotIn('old-parent', json.dumps(batch))
+
     def test_standalone_callbacks_reject_stale_launch_without_mutating_state(self):
         before = {p.name: p.read_bytes() for p in self.directory.iterdir() if p.is_file()}
-        callbacks = (("inbox", ()), ("ack", ("--cursor", "0")),
+        callbacks = (("inbox", ()),
                      ("report", ("--phase", "done")), ("runtime-update", ("--status", "idle")),
                      ("session-bind", ("--session-id", str(uuid4()))))
         for action, args in callbacks:
@@ -98,7 +129,10 @@ class ToolsTest(unittest.TestCase):
         self.assertIn('Pre-submission', result['native_delivery']['reason'])
         self.assertTrue(result['saved'])
         batch = json.loads(self.invoke('inbox', '--agent', self.agent, '--all').stdout)
-        self.assertEqual(batch['messages'][0]['id'], result['id'])
+        self.assertIn('id', batch['messages'][0])
+        self.assertNotIn('id', result)
+        self.assertNotIn('message_id', result['native_delivery'])
+        self.assertEqual(batch['messages'][0]['text'], result['text'])
 
     def test_init_and_tui_subverse_install_fresh_scoped_definitions(self):
         installed = json.loads(self.invoke("init", str(self.work / "fresh"), "--name", "fresh").stdout)

@@ -1,6 +1,6 @@
 """Shared native controls. Core executes adapter specifications and owns receipts.
 
-Durable send/inbox/ack never depend on these best-effort operations.
+Durable message storage never depends on these best-effort operations.
 """
 from dataclasses import asdict
 import json
@@ -215,7 +215,7 @@ def control(root, reference, operation_name):
 def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
-    # take their own shorter lock, so ack cannot overwrite delivery evidence.
+    # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
         try:
@@ -251,8 +251,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
             raise ValueError('Message targets a different native session; refusing delivery')
         previous = tracking.get('attempts', [])
         state = tracking.get('submission_state', 'pending')
-        if tracking.get('acknowledged_at') or state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
-            receipt = previous[-1] if previous else {'state': 'unavailable', 'reason': 'Message already acknowledged'}
+        if state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
+            receipt = previous[-1] if previous else {'state': 'unknown', 'reason': 'No submission receipt recorded; no resend'}
             if state == 'accepted':
                 receipt = {**receipt, 'state': 'native_queued', 'reason': 'Native acceptance recorded; no resend',
                            'value': tracking.get('native_receipt')}
@@ -278,7 +278,7 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
             else:
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      message.get('reply_to'), selected_mode, framed_text(root, message)), executor)
+                                      delivery=selected_mode, framed=framed_text(root, message)), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}

@@ -57,4 +57,4 @@ class PiAdapter(ConfiguredAdapter):
         if self.capabilities(session)['send_steer'].state != 'supported':
             return NativeResult('unavailable', 'Pi extension socket is not registered')
         return executor.request(session, {'operation': 'send', 'message_id': message.id,
-                                         'text': message.prompt(), 'mode': mode})
+                                         'text': message.framed or message.text, 'mode': mode})

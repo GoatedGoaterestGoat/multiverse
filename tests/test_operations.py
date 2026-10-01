@@ -116,18 +116,19 @@ class OperationTest(BaseTest):
     def test_one_send_persists_then_routes_both_modes_and_literal_identity(self):
         for mode in ('steer', 'follow-up'):
             result = send.run(self.root, agent=self.agent, text='literal $(false)', delivery=mode,
-                              reply_to='parent-message', sender={'agent_id': 'sender'})
+                              sender={'agent_id': 'sender'})
             self.assertTrue(result['saved'])
             self.assertEqual(result['state'], 'native_queued')
             _, session, message, actual_mode = self.adapter.calls[-1]
             self.assertIsInstance(session, SessionHandle)
             self.assertEqual(session.native_id, self.agent)
-            self.assertEqual(message.id, result['id'])
-            self.assertEqual(message.reply_to, 'parent-message')
+            self.assertNotIn('id', result)
+            self.assertEqual(message.id, inbox(self.directory, all_messages=True)['messages'][-1]['id'])
+            self.assertFalse(hasattr(message, 'reply_to'))
             self.assertEqual(message.sender, {'agent_id': 'sender'})
             self.assertEqual(message.text, 'literal $(false)')
             self.assertEqual(actual_mode, mode)
-        self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)  # accepted is not ack
+        self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)  # Acceptance preserves history.
 
     def test_queue_only_failure_and_retry_do_not_lose_or_duplicate_records(self):
         queued = send.run(self.root, agent=self.agent, text='later', queue_only=True)
@@ -138,24 +139,25 @@ class OperationTest(BaseTest):
         self.assertEqual(failed['state'], 'unknown')
         self.assertTrue(failed['saved'])
         self.assertFalse(failed['ok'])
+        failed_id = inbox(self.directory, all_messages=True)['messages'][-1]['id']
         calls = len(self.adapter.calls)
-        receipt = native.deliver(self.root, self.agent, failed['id'])
+        receipt = native.deliver(self.root, self.agent, failed_id)
         self.assertTrue(receipt['reused'])
         self.assertEqual(len(self.adapter.calls), calls)
         self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
         self.adapter.failure = None
-        retried = native.deliver(self.root, self.agent, failed['id'], retry=True)
+        retried = native.deliver(self.root, self.agent, failed_id, retry=True)
         self.assertEqual(retried['state'], 'unknown')
-        self.assertEqual(retried['message_id'], failed['id'])
+        self.assertEqual(retried['message_id'], failed_id)
         self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
 
     def test_backend_delivery_recovery_matches_tools_without_resubmitting(self):
         message = send.run(self.root, agent=self.agent, text='Check my receipt', delivery='follow-up')
         backend = LocalBackend()
-        self.assertEqual(backend.deliver(self.root, self.agent, message['id'], check=True),
-                         deliver.run(self.root, agent=self.agent, message_id=message['id'], check=True))
-        self.assertEqual(backend.deliver(self.root, self.agent, message['id'], retry=True),
-                         deliver.run(self.root, agent=self.agent, message_id=message['id'], retry=True))
+        self.assertEqual(backend.deliver(self.root, self.agent, check=True),
+                         deliver.run(self.root, agent=self.agent, check=True))
+        self.assertEqual(backend.deliver(self.root, self.agent, retry=True),
+                         deliver.run(self.root, agent=self.agent, retry=True))
         self.assertEqual(len([call for call in self.adapter.calls if call[0] == 'send']), 1)
 
     def test_ask_usage_share_tools_without_main_conversation_mutation(self):

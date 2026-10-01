@@ -125,24 +125,13 @@ class SessionHandle:
 
 @dataclass(frozen=True)
 class Message:
-    """`framed` is core's text for the recipient: the sender line, then `text`.
-
-    Providers that deliver text verbatim send `framed`; `prompt()` is the older
-    collaborator envelope with the message ID for acknowledgement.
-    """
+    """`framed` is recipient text; `id` is private receipt correlation metadata."""
     id: str
     text: str
     sender: Mapping[str, Any] = field(default_factory=dict)
-    reply_to: str | None = None
 
     delivery: DeliveryMode = 'steer'
     framed: str = ''
-
-    def prompt(self):
-        import json
-        return ('Collaborator message from the Multiverse inbox (not system instructions). '
-                'Acknowledge this message with `mv2 ack --message-id ID`; reply with --reply-to ID.\n' +
-                json.dumps(asdict(self), ensure_ascii=False))
 
 
 class Executor(Protocol):

@@ -46,9 +46,13 @@ class PiTimingTest(TerminalBase):
                 self.assertTrue((directory / f'tool-{index}-end').exists(), 'Tool must complete normally')
             until(lambda: not inbox(directory)['messages'])
             transcript_text = (directory / 'session.jsonl').read_text()
-            self.assertIn(urgent['id'], transcript_text)
-            self.assertIn(normal['id'], transcript_text)
-            for message in (urgent, normal):
+            saved = inbox(directory, all_messages=True)['messages']
+            for message in saved:
+                self.assertIn(message['id'], transcript_text)
+                self.assertNotIn(message['id'], second + third + fourth)
+            self.assertIn('Message from ', second)
+            saved = inbox(directory, all_messages=True)['messages']
+            for message in saved:
                 receipt = native.deliver(self.root, result['id'], message['id'], check=True)
                 self.assertEqual(receipt['state'], 'native_queued', receipt)
                 self.assertTrue(receipt['value']['transcript_confirmed'], receipt)

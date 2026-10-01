@@ -25,7 +25,7 @@ async function fixture({ failSend = false, wrongSession = false, stale = false }
     // Status goes through the tool module, never an mv2 command.
     assert(args[3] !== 'runtime-update');
     calls.push(args[0] === '-m' ? [args[1].split('.').pop().replace('_', '-'), ...args.slice(4)] : args.slice(3));
-    assert(!['inbox', 'ack', 'claim-inbox'].includes(args[3]));
+    assert(!['inbox', 'claim-inbox'].includes(args[3]));
     if (stale && args[3] === 'session-bind') throw Error('Outdated launch');
     return { stdout: '{}' };
   };
@@ -50,11 +50,17 @@ try {
   assert.equal(urgent.state, 'native_queued'); assert.equal(normal.state, 'native_queued');
   assert.deepEqual(f.sent.map(x => x.options.deliverAs), ['steer', 'followUp']);
   assert.equal(f.sent[0].message.content, 'literal $(false) 日本語');
+  assert.deepEqual(f.sent[0].message.details, { ids: ['one'] });
   assert.equal((await f.request()).state, 'native_queued'); assert.equal(f.sent.length, 2);
   assert.equal((await f.request({ launch_id: 'stale', message_id: 'bad' })).state, 'error');
   assert.equal((await f.request({ native_id: 'other', message_id: 'bad' })).state, 'error');
   assert.equal((await f.request({ mode: 'unknown', message_id: 'bad' })).state, 'error');
   assert.equal(f.sent.length, 2);
+  // Persist the actual native payload: correlation comes from details, not text.
+  appendFileSync(f.file, JSON.stringify({ type: 'custom_message', ...f.sent[0].message }) + '\n');
+  const receipt = await f.request({ operation: 'get_delivery' });
+  assert.equal(receipt.value.transcript_confirmed, true);
+  assert(!f.sent[0].message.content.includes('one'));
   appendFileSync(f.file, JSON.stringify({ type: 'custom_message', customType: 'multiverse-inbox', details: { ids: ['persisted'] } }) + '\n');
   const persisted = await f.request({ message_id: 'persisted' });
   assert.equal(persisted.value.transcript_confirmed, true); assert.equal(f.sent.length, 2);
@@ -77,7 +83,7 @@ try {
   assert((await reader.scan(file, 'native')).ids.has('late'));
   const wrong = new TranscriptReceipts();
   await assert.rejects(wrong.scan(file, 'different'), /identity mismatch/);
-  console.log('Pi socket: concurrent modes, dedup, transcript evidence, exact identity, failures, no inbox polling/ack passed');
+  console.log('Pi socket: concurrent modes, dedup, receipt metadata, exact identity, failures, no inbox polling passed');
 } finally {
   for (const f of fixtures) await f.events.session_shutdown();
   for (const d of directories) rmSync(d, { recursive: true, force: true });

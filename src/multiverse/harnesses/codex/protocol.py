@@ -83,7 +83,7 @@ def send_message(session, message, mode):
     if not message.id:
         return NativeResult('error', 'A durable message ID is required for native input')
     params = {'threadId': session.native_id, 'clientUserMessageId': message.id,
-              'input': [{'type': 'text', 'text': message.prompt(), 'text_elements': []}]}
+              'input': [{'type': 'text', 'text': message.framed or message.text, 'text_elements': []}]}
     if mode == 'follow-up' or thread['status']['type'] == 'idle':
         accepted = result((yield RpcRequest('thread/queue/add', params)))
         if isinstance(accepted, NativeResult):

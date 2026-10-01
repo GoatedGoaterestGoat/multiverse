@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from multiverse.tools import send
 from multiverse import agents, native
-from multiverse.store import append_message, read, write
+from multiverse.store import inbox, append_message, read, write
 from test_multiverse import TerminalBase, until
 
 
@@ -120,7 +120,9 @@ class CodexTimingTest(TerminalBase):
             for index in (1, 2):
                 self.assertTrue((work / f'tool-{index}-end').exists())
             self.assertTrue(str(self.root) in json.dumps(records[0]['body']), 'Bootstrap must reach the native conversation')
-            for message in (urgent, normal):
+            saved = inbox(directory, all_messages=True)['messages']
+            for message in saved:
+                self.assertNotIn(message['id'], json.dumps(records))
                 receipt = native.deliver(self.root, result['id'], message['id'], check=True)
                 self.assertEqual(receipt['state'], 'native_queued', receipt)
                 self.assertTrue(receipt['value']['transcript_confirmed'], receipt)

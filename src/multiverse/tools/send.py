@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 from .. import agents, native, universe
 from ..store import append_message, read, lock
+from ._common import delivery_summary
 
 def configure(parser):
     parser.add_argument("agent")
@@ -11,13 +12,12 @@ def configure(parser):
     message.add_argument("--text")
     message.add_argument("--file", type=Path)
     message.add_argument("--stdin", action="store_true")
-    parser.add_argument("--reply-to")
     parser.add_argument("--queue-only", action="store_true", help="Save for manual inbox reading; do not submit natively")
     parser.add_argument("--delivery", choices=("steer", "follow-up", "inbox-only"), default="steer",
                         help="Native timing: next safe boundary or the next turn")
 
 
-def run(root=None, *, agent, text=None, file=None, stdin=False, reply_to=None, sender=None, delivery="steer", queue_only=False):
+def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False):
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
     root = universe.resolve(root)
@@ -31,15 +31,16 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, reply_to=None, s
             delivery = 'inbox-only'
         with lock(directory / '.launch.lock'):
             target = read(directory / 'properties.json').get('native_session_id')
-            result = append_message(directory, text, sender, reply_to, delivery, target_session=target)
+            message = append_message(directory, text, sender, delivery, target_session=target)
+        result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
         if delivery == 'inbox-only':
             return {**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}
         try:
-            receipt = native.deliver(root, directory.name, result['id'])
+            receipt = native.deliver(root, directory.name, message['id'])
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
-        return {**result, "state": receipt['state'], "saved": True, "native_delivery": receipt,
+        return {**result, "state": receipt['state'], "saved": True, "native_delivery": delivery_summary(receipt),
                 "ok": receipt['state'] not in ('error', 'unavailable', 'unknown')}
 
 

@@ -14,4 +14,4 @@ Copy the forms in artifacts/ for each case. Update rows in views/default.json to
 show the queue; the table is declarative and does not schedule work or infer state.
 Keep raw logs beside each report. Send results to the assigned coordinator using
 its universe and exact agent ID; include the report path and reply reference.
-Check/ack your inbox at work checkpoints, including before declaring the queue clear.
+Check your inbox at work checkpoints, including before declaring the queue clear.
