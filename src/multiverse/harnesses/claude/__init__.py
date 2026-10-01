@@ -9,6 +9,13 @@ registers the `claude-mod-v1` bridge for its launch and reports the session's
 status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
+
+With the bridge, a universe can opt this harness into tree compaction
+(`compaction.json`; see multiverse.compaction). The launch then tells the mod
+to answer the session's `/compact` with mv2's compacted conversation, and adds
+a PreCompact hook that refuses Claude's own compaction should the mod ever fail
+to answer. `compaction(session)` returns the protocol implementation in
+`compaction/`.
 """
 from dataclasses import asdict, replace
 import hashlib
@@ -32,6 +39,10 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
+USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+# Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
+# it). Runs with the agent's Python, like the mod's reports; a missing one blocks too.
+COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
 def claude_home():
@@ -56,7 +67,9 @@ class Transcript:
     """Usage recorded in one transcript file, read once and then as it grows.
 
     Claude writes one record per content block of a response, each with the
-    response's usage, so usage is counted once per response ID.
+    response's usage, so usage is counted once per response ID. A compaction
+    that keeps a row stores it again with zero usage; that copy never replaces
+    the response's real usage.
     """
 
     def __init__(self, path):
@@ -77,6 +90,8 @@ class Transcript:
                 continue
             message = record.get('message') if isinstance(record, dict) and record.get('type') == 'assistant' else None
             if isinstance(message, dict) and isinstance(message.get('usage'), dict) and message.get('id'):
+                if message['id'] in self.responses and not any(counted(message['usage'], key) for key in USAGE_KEYS):
+                    continue
                 self.responses[message['id']] = message['usage']
                 self.last = record.get('timestamp') or self.last
         self.offset += end
@@ -142,12 +157,33 @@ class ClaudeAdapter(ConfiguredAdapter):
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
-        settings = json.dumps({'crossSessionInbound': 'accept'})
+        settings = {'crossSessionInbound': 'accept'}
+        environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
+        compaction = self.compaction_settings(context.values.get('agent_dir'))
+        if compaction is not None and compaction.enabled:
+            settings['hooks'] = {'PreCompact': [{'hooks': [{'type': 'command', 'command': COMPACTION_GUARD}]}]}
+            environment['MV2_COMPACTION'] = '1'
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', settings, *command.argv[1:]),
+                  '--settings', json.dumps(settings), *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
-            environment={**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'})
+            environment=environment)
+
+    def compaction_settings(self, agent_dir):
+        """This harness's compaction settings in the agent's universe, or None outside one."""
+        if not agent_dir:
+            return None
+        directory = Path(agent_dir)
+        root = directory.parent.parent.parent
+        if directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
+            return None
+        from ...compaction import config
+        return config.load(root).for_harness(self.name)
+
+    def compaction(self, session):
+        """The compaction protocol for this exact session (multiverse.compaction.protocol)."""
+        from .compaction import ClaudeCompaction
+        return ClaudeCompaction(self, session)
 
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)

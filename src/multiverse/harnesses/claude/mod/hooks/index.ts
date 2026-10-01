@@ -1,4 +1,5 @@
 import type { EngineInterface, Register } from 'claude-code'
+import { registerCompaction } from './compaction'
 import { registerUsage } from './usage'
 
 // Multiverse sends each message over this session's peer inbox at `next`
@@ -141,6 +142,7 @@ function text(content: readonly { type: string; text?: unknown }[]): string {
 
 export const register: Register = (on) => {
   registerUsage(on)
+  registerCompaction(on)
 
   on("session.start", async ($, e, next) => {
     const result = await next(e)

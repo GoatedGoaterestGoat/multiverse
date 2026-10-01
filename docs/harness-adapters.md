@@ -348,10 +348,22 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
+With the bridge, a universe's `compaction.json` can enable tree compaction for
+the Claude harness ([compaction](compaction.md)). The launch then sets
+`MV2_COMPACTION=1` and adds a `PreCompact` command hook. The mod answers the
+session's `/compact` with mv2's compacted turns from `python -m
+multiverse.compaction install`, showing progress and every error in the status
+line, as notices and as toasts, and skips with the reason when it cannot. The
+`PreCompact` hook refuses Claude's own compaction should the mod not answer, so a
+session never falls back to it. The mod's `Stop` hook starts the background tree
+builder with the time the turn ended. The adapter's `compaction(session)` returns
+the Claude implementation of the compaction protocol (`claude/compaction/`).
+
 Claude usage is measured from the session's own transcript under Claude's
 `projects` directory, plus any subagent transcripts: each response's recorded
 usage, counted once per response ID. It works with or without the bridge. The
-adapter reads each transcript once, then only what was appended.
+adapter reads each transcript once, then only what was appended. A row that a
+compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
 confirms delivery. The mod was tested against Claude Code 2.1.286; the mod API

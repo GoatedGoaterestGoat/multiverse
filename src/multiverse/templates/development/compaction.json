@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "enabled": false,
+  "default": {
+    "scheduler": "last_k_raw",
+    "k": 2,
+    "budget": 0
+  },
+  "builder": {
+    "background": true,
+    "model": "sonnet",
+    "effort": "medium",
+    "concurrency": 1,
+    "turn_retries": 3,
+    "rate_limit": {
+      "claude_max_retries": 3,
+      "retries": 10,
+      "wait_seconds": {
+        "first": 20,
+        "multiplier": 2,
+        "max": 300
+      }
+    }
+  },
+  "harnesses": {
+    "claude": {
+      "enabled": true
+    }
+  }
+}
