@@ -241,18 +241,23 @@ def kill(root, reference):
     with lock(agent_dir / '.launch.lock'):
         facts = runtime(agent_dir)
         properties = read(agent_dir / 'properties.json')
-        backend, pane = owned(properties, facts, states=('alive', 'ending', 'stopped'))
+        live = observe(properties, facts)['live']
+        if live == 'dormant':
+            backend = pane = None
+        else:
+            backend, pane = owned(properties, facts, states=('alive', 'ending', 'stopped'))
         launch_id = facts['launch_id']
         # Older launches may have inherited remain-on-exit=off.
-        backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
+        if backend is not None:
+            backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
         update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
         try:
             from .native import stop
-            stop(root, reference)
+            cancellation = stop(root, reference)
         except Exception as error:
             update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
                            ending_at=facts.get('ending_at'),
-                           error=f'Native cancellation failed; terminal retained: {error}')
+                           error=f'Native cancellation failed; remaining terminal retained: {error}')
             raise
 
     # The runner's relay can be binding under .launch.lock during startup or
@@ -294,7 +299,12 @@ def kill(root, reference):
             elif live != 'dormant':
                 raise RuntimeError(f'Native exit not confirmed ({live}); terminal retained')
             update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now())
-        return {'id': agent_dir.name, 'state': 'dormant'}
+        # Receipt IDs remain internal; callers need counts and the native result.
+        details = (cancellation.value or {}) if cancellation else {}
+        return {'id': agent_dir.name, 'state': 'dormant', 'native_cancellation': {
+            'state': cancellation.state if cancellation else 'ok',
+            'reason': cancellation.reason if cancellation else '',
+            **{key: value for key, value in details.items() if key != 'cancelled_message_ids'}}}
     except Exception as error:
         if runtime(agent_dir).get('launch_id') == launch_id:
             update_runtime(agent_dir, launch_id, error=f'Kill incomplete: {error}')

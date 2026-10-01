@@ -167,12 +167,12 @@ class CodexDaemonTest(TerminalBase):
             self.assertEqual(queued['state'], 'native_queued')
             _, _, first_session, _ = native.context(roots[0], results[0]['id'])
             agents.terminal_action(roots[0], results[0]['id'], 'stop')
-            def check_stopped():
+            def check_stopped(session=first_session):
                 def plan():
-                    result = yield from _thread(first_session)
+                    result = yield from _thread(session)
                     if isinstance(result, NativeResult):
                         return result
-                    terminals = rpc_result((yield RpcRequest('thread/backgroundTerminals/list', {'threadId': first_session.native_id})))
+                    terminals = rpc_result((yield RpcRequest('thread/backgroundTerminals/list', {'threadId': session.native_id})))
                     return NativeResult('ok', value={'thread': result, 'terminals': terminals})
                 observed = rpc.execute(RpcSpec(endpoint, plan))
                 return observed.state == 'unavailable' or (observed.state == 'ok' and observed.value['thread']['status']['type'] != 'active' and not observed.value['terminals'].get('data'))
@@ -198,9 +198,30 @@ class CodexDaemonTest(TerminalBase):
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
             until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
+            # Work on the shared daemon survives losing its TUI. Stop still
+            # cancels only this exact thread after its pane has disappeared.
+            message = send.run(roots[1], agent=results[1]['id'], text='STOP_ACTIVE_WORK_ORPHAN', delivery='follow-up')
+            self.assertEqual(message['state'], 'native_queued', message)
+            until(lambda: (workspaces[1] / 'active-start').exists())
+            message = send.run(roots[1], agent=results[1]['id'], text='ORPHAN_CANCEL_ON_STOP', delivery='follow-up')
+            self.assertEqual(message['state'], 'native_queued', message)
+            _, _, second_session, _ = native.context(roots[1], results[1]['id'])
+            self.backend.run('kill-pane', '-t', results[1]['runtime']['tmux']['pane'])
+            until(lambda: agents.listing(roots[1])[0]['live'] == 'dormant')
+            cancelled = agents.terminal_action(roots[1], results[1]['id'], 'stop')['native_cancellation']
+            self.assertEqual(cancelled['cancelled_submissions'], 1)
+            self.assertEqual(cancelled['interrupted_turns'], 1)
+            self.assertTrue(cancelled['background_terminal_cleanup_requested'])
+            self.assertNotIn('cancelled_message_ids', cancelled)
+            until(lambda: check_stopped(second_session), seconds=5)
+            self.assertFalse((workspaces[1] / 'active-end').exists())
+            saved = inbox(agents.directory(roots[1], results[1]['id']), all_messages=True)['messages']
+            self.assertEqual(next(m for m in saved if m['text'] == 'ORPHAN_CANCEL_ON_STOP')['tracking']['submission_state'], 'cancelled')
+            self.assertEqual(daemon('version')['status'], 'running')
+            self.assertEqual(native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'], 'supported')
             # Daemon outage must not trigger a hidden restart/resume on send.
             daemon('stop')
-            failed = send.run(roots[1], agent=results[1]['id'], text='OUTAGE_MESSAGE', delivery='steer')
+            failed = send.run(roots[0], agent=resumed['id'], text='OUTAGE_MESSAGE', delivery='steer')
             self.assertTrue(failed['saved'])
             self.assertNotEqual(failed['state'], 'native_queued')
             self.assertFalse(Path(endpoint).exists(), 'Failed send must not restart the daemon')

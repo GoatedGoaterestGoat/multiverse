@@ -117,6 +117,8 @@ class ConfiguredAdapter:
         return self._launch_command(replace(context, mode='resume', values=values))
 
     def stop(self, session: SessionHandle, executor: Executor) -> NativeResult:
+        if session.state in ('stopped', 'dormant'):
+            return NativeResult('ok', 'No native process was running')
         return NativeResult('ok', 'Core stops the owned terminal process')
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:

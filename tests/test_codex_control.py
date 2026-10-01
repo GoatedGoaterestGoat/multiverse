@@ -117,6 +117,9 @@ class CodexControlTest(unittest.TestCase):
             {'id': 'queued-item', 'clientUserMessageId': self.message.id}]}}})
         self.assertEqual(result.state, 'ok')
         self.assertEqual(result.value['cancelled_message_ids'], [self.message.id])
+        self.assertEqual(result.value['cancelled_submissions'], 1)
+        self.assertEqual(result.value['interrupted_turns'], 1)
+        self.assertTrue(result.value['background_terminal_cleanup_requested'])
         for request in self.requests[1:]:
             self.assertEqual(request.params['threadId'], self.ctx.native_id)
         interrupt = next(r for r in self.requests if r.method == 'turn/interrupt')

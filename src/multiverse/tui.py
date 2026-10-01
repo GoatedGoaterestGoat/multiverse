@@ -282,7 +282,7 @@ class MultiverseApp(App):
 
     def check_action(self, action, parameters):
         if action in ('kill', 'stop', 'resume'):
-            eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped')
+            eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
             return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
         if action == "filter":
             # Handle the opening slash before buffered keys are forwarded to
@@ -746,6 +746,13 @@ class MultiverseApp(App):
                 state = receipt.get('state', 'queued')
                 detail = receipt.get('reason', 'delivery and an answer may follow')
                 self.set_status(f"Message saved; {state}: {detail}", error=state in ('error', 'unavailable'))
+            elif label == 'Kill agent' and (result or {}).get('native_cancellation'):
+                native = result['native_cancellation']
+                detail = native.get('reason', 'Native cancellation complete')
+                if 'cancelled_submissions' in native:
+                    detail += (f" ({native['cancelled_submissions']} queued cancelled, "
+                               f"{native['interrupted_turns']} turn interrupts)")
+                self.set_status('Kill complete: ' + detail)
             else:
                 self.set_status(label + " complete.")
             succeeded = True
@@ -930,10 +937,13 @@ class MultiverseApp(App):
         self.action_kill()
 
     def action_kill(self):
-        if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped'):
+        if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant'):
             agent = dict(self.selected)
-            self.push_screen(Form(f'Kill {agent["name"]}?', description=
-                                  "Ctrl+Enter ends running work and removes its tmux wrapper. Files and conversation remain for resume. Esc cancels."),
+            description = ("Ctrl+Enter cancels native work only; no terminal remains to close."
+                           if agent['live'] == 'dormant' else
+                           "Ctrl+Enter ends running work and removes its tmux wrapper.")
+            self.push_screen(Form(f'Kill {agent["name"]}?', description=description +
+                                  " Files and conversation remain for resume. Esc cancels."),
                              lambda values: self.submit_operation("Kill agent", self.backend.kill, Path(agent["universe"]),
                                                                   agent["id"]) if values is not None else None)
 

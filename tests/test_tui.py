@@ -271,10 +271,19 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertEqual(self.backend.calls, [('kill', Path(agent['universe']), agent['id'])])
             self.assertEqual((self.app.selected['live'], self.app.selected['status']), ('dormant', '-'))
-            self.assertFalse(self.app.check_action('kill', ()))
+            self.assertTrue(self.app.check_action('kill', ()))
             self.assertTrue(self.app.check_action('resume', ()))
             await pilot.press('K')
+            self.assertIn('cancels native work only; no terminal remains',
+                          str(self.app.screen.query_one('#dialog-description', Static).render()))
+            await pilot.press('escape')
             self.assertEqual(len(self.app.screen_stack), 1)
+
+            self.backend.kill = lambda *_: {'native_cancellation': {
+                'reason': 'Native cleanup requested', 'cancelled_submissions': 1, 'interrupted_turns': 2}}
+            await pilot.press('s', 'ctrl+enter')
+            await self.settle(pilot)
+            self.assertIn('1 queued cancelled, 2 turn interrupts', str(self.app.query_one('#status', Static).render()))
 
     async def test_kill_operation_refreshes_ending_and_stopped_before_dormant(self):
         ending, stopped, finish_native, finish_wrapper = Event(), Event(), Event(), Event()

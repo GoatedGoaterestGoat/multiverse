@@ -19,8 +19,9 @@ detaches the entire tmux client.
 `K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
 `k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer
 shows `K Kill`; `d` still deletes to trash and appears in the `?` help screen.
-Kill is enabled for alive, ending or stopped agent rows. It is unavailable for
-groups, dormant agents and unknown terminal state. `r` resumes a stopped or
+Kill is enabled for alive, ending, stopped and dormant agent rows. A dormant
+agent's confirmation says that only native work is cancelled; no terminal remains
+to close. It is unavailable for groups and unknown terminal state. `r` resumes a stopped or
 dormant agent.
 
 During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while

@@ -2,7 +2,7 @@
 
 Durable message storage never depends on these best-effort operations.
 """
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import stat
@@ -14,7 +14,7 @@ import time
 from . import agents, harnesses
 from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint
 from .store import lock, now, read, message_record, update_message
-from .tmux import owned
+from .tmux import owned, observe
 
 
 def environment(command):
@@ -59,6 +59,8 @@ class NativeExecutor:
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
+        if self.stopping and observe(self.properties, self.facts)['live'] == 'dormant':
+            return  # Adapter validates exact native identity; no pane control.
         owned(self.properties, self.facts, states=('alive', 'ending', 'stopped') if self.stopping else ('alive',))
 
     def command(self, specification, timeout=10):
@@ -158,6 +160,9 @@ def context(root, reference):
 def stop(root, reference):
     directory, adapter, session, executor = context(root, reference)
     executor.stopping = True
+    live = observe(executor.properties, executor.facts)['live']
+    if live in ('stopped', 'dormant'):
+        session = replace(session, state=live)
     result = adapter.stop(session, executor)
     for message_id in (result.value or {}).get('cancelled_message_ids', []):
         try:
@@ -167,7 +172,7 @@ def stop(root, reference):
         update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
                        last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
     if result.state != 'ok':
-        raise RuntimeError(f'Native stop incomplete; terminal left attached: {result.reason}')
+        raise RuntimeError(f'Native stop incomplete; remaining terminal retained: {result.reason}')
     return result
 
 

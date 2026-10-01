@@ -93,6 +93,31 @@ class KillTest(TerminalBase):
             self.assertEqual(agents.kill(self.root, launched['id'])['state'], 'dormant')
         signal_child.assert_not_called()
 
+    def test_stop_with_absent_or_foreign_pane_never_controls_the_pane(self):
+        launched, directory = self.spawn()
+        pane = launched['runtime']['tmux']['pane']
+        self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'foreign')
+        with patch.object(Tmux, 'signal_child') as signal_child:
+            result = agents.terminal_action(self.root, launched['id'], 'stop')
+            self.assertEqual(result['native_cancellation']['reason'], 'No native process was running')
+            self.assertIn(pane, self.backend.snapshot()[0])
+            self.backend.run('kill-pane', '-t', pane)
+            result = agents.terminal_action(self.root, launched['id'], 'stop')
+        signal_child.assert_not_called()
+        self.assertEqual(result['state'], 'dormant')
+        self.assertEqual(result['native_cancellation']['reason'], 'No native process was running')
+
+    def test_dormant_native_cancellation_failure_preserves_identity(self):
+        launched, directory = self.spawn()
+        identifier = str(uuid4())
+        agents.bind_session(self.root, launched['id'], identifier)
+        self.backend.run('kill-pane', '-t', launched['runtime']['tmux']['pane'])
+        with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')):
+            with self.assertRaisesRegex(RuntimeError, 'native daemon unreachable'):
+                agents.kill(self.root, launched['id'])
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
+        self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
+
     def test_move_and_remove_clear_retained_wrappers_and_preserve_identity(self):
         launched, directory = self.spawn()
         identifier = str(uuid4())

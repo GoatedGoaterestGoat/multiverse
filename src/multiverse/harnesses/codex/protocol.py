@@ -160,13 +160,16 @@ def environment_exclusions(workspace):
 def stop_session(session):
     """Explicit stop cancels only the exact thread; never shuts down its server."""
     cancelled = []
+    counts = {'cancelled_submissions': 0, 'interrupted_turns': 0,
+              'background_terminal_cleanup_requested': False}
     def failure(observed):
-        return NativeResult(observed.state, observed.reason, {'cancelled_message_ids': cancelled})
+        return NativeResult(observed.state, observed.reason, {'cancelled_message_ids': cancelled, **counts})
     thread = yield from _thread(session, allow_unloaded=True)
     if isinstance(thread, NativeResult):
         return failure(thread)
     if thread['status']['type'] == 'notLoaded':
-        return NativeResult('ok', 'Exact native thread is already unloaded', {'cancelled_message_ids': []})
+        return NativeResult('ok', 'Exact native thread is already unloaded; nothing was running',
+                            {'cancelled_message_ids': [], **counts})
     # Bound work before any mutation. Core holds the recipient's launch lock,
     # so concurrent Multiverse sends cannot replenish this queue during stop.
     queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 128})))
@@ -182,8 +185,10 @@ def stop_session(session):
             'threadId': session.native_id, 'queuedSubmissionId': item['id']})))
         if isinstance(deleted, NativeResult):
             return failure(deleted)
-        if deleted.get('deleted') is True and isinstance(item.get('clientUserMessageId'), str):
-            cancelled.append(item['clientUserMessageId'])
+        if deleted.get('deleted') is True:
+            counts['cancelled_submissions'] += 1
+            if isinstance(item.get('clientUserMessageId'), str):
+                cancelled.append(item['clientUserMessageId'])
     turns = result((yield RpcRequest('thread/turns/list', {
         'threadId': session.native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})))
     if isinstance(turns, NativeResult):
@@ -196,8 +201,10 @@ def stop_session(session):
                 'threadId': session.native_id, 'turnId': turn['id']})))
             if isinstance(interrupted, NativeResult):
                 return failure(interrupted)
+            counts['interrupted_turns'] += 1
     cleaned = result((yield RpcRequest('thread/backgroundTerminals/clean', {'threadId': session.native_id})))
     if isinstance(cleaned, NativeResult):
         return failure(cleaned)
+    counts['background_terminal_cleanup_requested'] = True
     return NativeResult('ok', 'Native turn cancellation and background-terminal cleanup requested',
-                        {'cancelled_message_ids': cancelled})
+                        {'cancelled_message_ids': cancelled, **counts})

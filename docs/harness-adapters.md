@@ -102,7 +102,12 @@ bridge cancels up to 128 queued submissions on the exact thread, interrupts its
 active turn and cleans background terminals. A validated already-unloaded
 thread needs no cancellation and is never resumed by kill. A failure retains
 the terminal and reports an error. The shared daemon and sibling agents remain
-running. Local adapters rely on termination of their native process.
+running. Stop also works when the pane is gone: under the same launch lock,
+core authorizes native cancellation through the saved endpoint and exact bound
+thread, without authorizing any pane operation. Results report cancelled
+submissions, interrupt requests and background-terminal cleanup; receipt IDs
+remain internal. Local adapters rely on termination of their native process and
+report that nothing was running for stopped or dormant sessions.
 
 Core then sends SIGTERM only to the recorded native child after checking its
 parent against the owned tmux runner. If it has not exited after two seconds,

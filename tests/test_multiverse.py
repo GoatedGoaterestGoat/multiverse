@@ -193,7 +193,8 @@ class TerminalTest(TerminalBase):
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
         self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result["id"], "stop")
+            agents.terminal_action(self.root, result["id"], "inspect")
+        self.assertEqual(agents.terminal_action(self.root, result["id"], "stop")['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_hostname_change_preserves_owned_pane_and_duplicate_launch_guard(self):
@@ -207,7 +208,8 @@ class TerminalTest(TerminalBase):
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
         self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result['id'], 'stop')
+            agents.terminal_action(self.root, result['id'], 'inspect')
+        self.assertEqual(agents.terminal_action(self.root, result['id'], 'stop')['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_missing_pane_after_hostname_change_can_resume_same_session(self):
