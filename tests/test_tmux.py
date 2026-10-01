@@ -12,7 +12,7 @@ class HostOwnershipTest(unittest.TestCase):
                         'tmux': {'socket': '/recorded/socket', 'pane': '%1'}}
         self.pane = {'pane_dead': '0', '@mv2_agent_id': 'agent',
                      '@mv2_universe_id': 'universe', '@mv2_launch_id': 'launch'}
-        self.enterContext(patch('multiverse.tmux.socket.gethostname', return_value='after'))
+        self.enterContext(patch('socket.gethostname', return_value='after'))
 
     def test_exact_local_tags_allow_hostname_change_and_cached_snapshots(self):
         with patch.object(Tmux, 'snapshot', return_value=({'%1': self.pane}, None)) as snapshot:
@@ -28,14 +28,23 @@ class HostOwnershipTest(unittest.TestCase):
                 pane = {**self.pane, field: value}
                 with self.subTest(field=field, value=value), \
                         patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)):
-                    self.assertEqual(observe(self.properties, self.runtime)['live'], 'unknown')
+                    self.assertEqual(observe(self.properties, self.runtime)['live'], 'stopped')
                     with self.assertRaises(ValueError):
                         owned(self.properties, self.runtime)
 
-    def test_missing_socket_missing_pane_and_permission_error_remain_unknown(self):
-        for snapshot in (({}, None), ({'%2': self.pane}, None), ({}, 'Operation not permitted')):
+    def test_missing_local_pane_is_stopped_after_hostname_change(self):
+        for snapshot in (({}, None), ({'%2': self.pane}, None)):
             with self.subTest(snapshot=snapshot), patch.object(Tmux, 'snapshot', return_value=snapshot):
-                self.assertEqual(observe(self.properties, self.runtime)['live'], 'unknown')
+                result = observe(self.properties, self.runtime)
+                self.assertEqual(result, {'live': 'stopped', 'reason': 'Recorded pane is absent'})
+                with self.assertRaises(ValueError):
+                    owned(self.properties, self.runtime)
+
+    def test_observation_errors_remain_unknown_with_the_actual_reason(self):
+        for reason in ('Operation not permitted', 'tmux observation timed out'):
+            snapshot = ({}, reason)
+            with self.subTest(snapshot=snapshot), patch.object(Tmux, 'snapshot', return_value=snapshot):
+                self.assertEqual(observe(self.properties, self.runtime), {'live': 'unknown', 'reason': reason})
                 with self.assertRaises(ValueError):
                     owned(self.properties, self.runtime)
 
