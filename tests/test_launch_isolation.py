@@ -8,6 +8,9 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
+from native_safety import install as install_native_safety
+install_native_safety()
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import agents, runner, universe, harnesses
 import json
@@ -22,6 +25,12 @@ class LaunchIsolationTest(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name).resolve()
         self.root = universe.create(self.work / "universe", "test", workdir=self.work)
+        path = self.root / 'harnesses/codex/harness.json'
+        definition = read(path)
+        definition['settings']['inbox_bridge'] = False
+        write(path, definition)
+        self.enterContext(patch('multiverse.native.start_shared_service',
+            side_effect=AssertionError('Offline launch contracts must never prepare a native daemon')))
 
     def test_empty_inbox_read_preserves_future_messages(self):
         agent = self.work / "empty-agent"
