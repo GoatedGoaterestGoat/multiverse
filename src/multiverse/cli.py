@@ -8,12 +8,19 @@ from . import universe
 from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
+# Harness integrations report status with `python -m multiverse.tools.runtime_update`;
+# it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "status",
-            "runtime-update", "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
+            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "report",
+            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
+
+
+# Former names that keep working for agents launched with older prompts.
+ALIASES = {"report": ["status"]}
 
 
 def tool(action):
+    action = {"status": "report"}.get(action, action)
     name = "list_agents" if action == "list" else action.replace("-", "_")
     return import_module(f".tools.{name}", __package__)
 
@@ -24,7 +31,7 @@ def parser():
     commands = result.add_subparsers(dest="action")
     for action in COMMANDS:
         module = tool(action)
-        module.configure(commands.add_parser(action, help=module.__doc__))
+        module.configure(commands.add_parser(action, help=module.__doc__, aliases=ALIASES.get(action, [])))
     return result
 
 

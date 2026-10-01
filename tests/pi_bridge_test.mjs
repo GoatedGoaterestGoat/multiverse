@@ -22,7 +22,9 @@ async function fixture({ failSend = false, wrongSession = false, stale = false }
       sent.push({ message, options });
     } };
   const run = async (_, args) => {
-    calls.push(args.slice(3));
+    // Status goes through the tool module, never an mv2 command.
+    assert(args[3] !== 'runtime-update');
+    calls.push(args[0] === '-m' ? [args[1].split('.').pop().replace('_', '-'), ...args.slice(4)] : args.slice(3));
     assert(!['inbox', 'ack', 'claim-inbox'].includes(args[3]));
     if (stale && args[3] === 'session-bind') throw Error('Outdated launch');
     return { stdout: '{}' };

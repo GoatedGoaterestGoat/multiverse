@@ -52,11 +52,11 @@ def listing(root, recursive=False):
                 measured = native.usage_snapshot(scope, properties, facts)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
-                             "activity": facts.get("activity", "unknown") if observation["live"] == "alive" else "—",
+                             "status": facts.get("status", "unknown") if observation["live"] == "alive" else "—",
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
-                             "live": "unknown", "activity": "unknown", "phase": "unknown", "summary": str(error)})
+                             "live": "unknown", "status": "unknown", "phase": "unknown", "summary": str(error)})
     return rows
 
 
@@ -180,9 +180,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint)
+            # Adapter variables never override this launch's identity.
+            env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
-                                           "shared_service": bool(command.shared_service)})
+                                           "shared_service": bool(command.shared_service),
+                                           "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None})
             (launch / "ready").touch()
         except Exception as error:
             if service_directory_created:
@@ -202,7 +205,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             "session": asdict(SessionHandle.from_records(properties, runtime(agent_dir), agent_dir))}
 
 
-def status(root, reference, phase=None, summary=None):
+def report(root, reference, phase=None, summary=None):
     agent_dir = directory(root, reference)
     with lock(agent_dir / ".properties.lock"):
         data = read(agent_dir / "properties.json")
@@ -229,6 +232,6 @@ def terminal_action(root, reference, action):
             from .native import stop
             stop(root, reference)
             backend.run("kill-pane", "-t", pane)
-            update_runtime(agent_dir, facts["launch_id"], state="stopped", activity="unknown", stopped_at=now())
+            update_runtime(agent_dir, facts["launch_id"], state="stopped", status="unknown", stopped_at=now())
             return {"id": agent_dir.name, "state": "stopped"}
     return backend, pane

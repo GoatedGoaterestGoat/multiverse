@@ -34,7 +34,7 @@ detaches the entire tmux client.
 ```
 
 `title`, `accent` and `columns` retain their existing meanings. Supported agent
-columns are `name`, `harness`, `live`, `activity`, `phase`, `summary`, `id`,
+columns are `name`, `harness`, `live`, `status` (`activity` in older views still works), `context` (`tokens` in older views still works; the latest request's tokens against the model's window), `cost` (off by default), `phase`, `summary`, `id`,
 `universe`, `task`, and `updated_at`. The name column is always shown. Narrow
 terminals omit optional agent columns and stack the local view below the fleet.
 

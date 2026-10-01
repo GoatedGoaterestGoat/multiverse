@@ -80,7 +80,7 @@ class LabHarnessContracts(unittest.TestCase):
                 self.assertIn(native if harness != 'pi' else str(directory / 'session.jsonl'), argv)
                 self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6-astra')
                 with self.assertRaisesRegex(ValueError, 'Outdated'):
-                    agents.update_runtime(directory, row['runtime']['launch_id'], activity='idle')
+                    agents.update_runtime(directory, row['runtime']['launch_id'], status='idle')
 
     def test_unbound_codex_cannot_resume(self):
         row = self.start()

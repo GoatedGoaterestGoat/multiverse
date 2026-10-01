@@ -10,14 +10,14 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
 | `ask` | Answer an isolated side question without adding it to the main conversation. |
-| `get_usage` | Return measured cumulative session usage, or an explicit unavailable/error result. |
+| `get_usage` | Return measured context and/or cumulative session usage, or an explicit unavailable/error result. |
 
 `harnesses/types.py` defines `HarnessAdapter`, `SessionHandle`, `Message`, results
 and the execution boundary. A handle contains the stable Multiverse agent ID,
 provider name, exact native ID/session file, saved workspace, and current launch
 ID. Core derives it from authoritative properties/runtime records; it does not
 maintain another copy of those records. Spawn/resume return `session` in their
-result. `list` reads current core identity, process state and reported activity after
+result. `list` reads current core identity, process state and reported status after
 asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
 must not guess a recent session. Claude receives an assigned UUID; Pi owns an
@@ -41,7 +41,7 @@ Each built-in has its own folder under `src/multiverse/harnesses/`:
 
 - `codex/`: launch/resume preferences and native app-server queue/steer protocol.
 - `pi/`: launch/resume preferences, interactive TypeScript extension, transcript receipts.
-- `claude/`: native lifecycle; required native delivery is currently unavailable.
+- `claude/`: launch/resume preferences, opt-in peer-inbox steering and its Claude mod (`mod/`).
 - `legacy/`: lossless compatibility for existing schema-1 local definitions.
 
 `base.py` shares argument rendering and default unsupported operations. Built-ins
@@ -141,8 +141,8 @@ in-process acceptance records. Missing evidence remains unknown. Codex checks up
 message ID; absence remains unknown and requires investigation. Accepted submissions are never automatically resubmitted.
 
 The old `native-status` command remains a tool compatibility shim for usage.
-Its activity operation reports unavailable and points callers to `list`; there
-is no native activity query or adapter `observe` operation. Adapters expose
+Its status operation (formerly `activity`) reports unavailable and points callers to
+`list`; there is no native status query or adapter `observe` operation. Adapters expose
 feature methods directly, with no `control`, `native_capabilities`, `probes`, or
 `NativeContext` conversion layer. Resume validation is part of `resume()`, not
 a separate adapter method. Binding and built-in resume use the shared
@@ -159,13 +159,14 @@ New universes retain references and preferences, not copied implementations:
 ```
 
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-and `unset_env`. Codex and Pi additionally support `inbox_bridge`. Native flags,
+and `unset_env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
-No adapter reads credentials or changes installed native configuration.
+No adapter changes installed native configuration. The Claude bridge reads only the
+inbox key Claude publishes for its own launch's socket; no other credentials are read.
 
 Existing schema-1 manifests, custom bootstrap and assets remain authoritative;
 there is no automatic rewrite or migration. Compare source defaults and transfer
@@ -174,13 +175,15 @@ behavior schema 2 cannot express. Existing universes are never overwritten.
 
 Codex bridge mode uses the shared native daemon for the current OS user and
 `CODEX_HOME`. Spawn/resume invokes `codex app-server daemon start`, reads its JSON
-socket address, and connects the native TUI with `--remote unix://<returned socket>`. Concurrent
-monitors use Codex's native startup lock; there is no server per agent, project,
+socket address, and connects the native TUI through a private launch relay to that
+socket using `--remote unix://...`. Concurrent
+monitors use Codex's native startup lock; there is no native app-server process per agent, project,
 or dashboard. Opening/closing a dashboard does not start/stop the daemon. Core
 never invokes daemon stop, restart, bootstrap, install or update. Codex's own
-configured daemon update policy remains authoritative. A missing
-managed standalone installation or a CLI/daemon version mismatch fails with a
-diagnostic; it is never repaired by disrupting other clients. Codex owns daemon
+configured daemon update policy remains authoritative. Codex 0.159.2 can install
+its daemon package from the installed CLI during native startup, including a
+Homebrew CLI. A CLI/daemon version mismatch fails with a diagnostic; it is never
+repaired by disrupting other clients. Codex owns daemon
 persistence and native history. No Multiverse-specific Codex home is created.
 
 The selected Codex home is saved for exact resume even if another monitor has a
@@ -202,7 +205,52 @@ requests, frames and deadlines. Remote resume inherits native permissions: put
 initial permission/profile flags in `spawn_args`. Unsupported resume overrides
 are diagnosed, never silently removed. Whole-table `shell_environment_policy`
 CLI overrides are rejected in bridge mode; individual keys remain supported.
-Plain compatibility launches do not acquire bridge controls.
+Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
+`developer_instructions` CLI override from remote thread requests. The adapter
+therefore returns an optional `RpcProxySpec` in its `CommandSpec`. Core serializes
+it in the launch request, creates a private 0700 socket directory, and starts the
+relay in the runner before starting the TUI. The provider supplies pure request
+and reply interpretation; core owns WebSocket connections, backpressure, size
+limits, error recording, exact session binding and cleanup.
+Interactive relay messages have a separate 64 MiB limit and a two-frame receive
+queue: native resume replies include conversation history and can exceed the
+1 MiB budget used for small control RPCs. Oversized messages still close the
+connection with a runtime diagnostic.
+
+The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
+requests, preserving existing developer instructions. Initial writable roots from
+mv2, user arguments and native configuration are combined in the thread request,
+so external state directories remain supported without the rejected CLI flag.
+Resume keeps the saved permission grant. Other traffic, including approvals,
+passes through to the native TUI. A malformed launch request gets an explicit
+RPC error and a runtime diagnostic; it is never forwarded without its bootstrap.
+The relay records the exact thread ID/workspace from the matching native reply
+before passing it to the TUI, so bridge launches do not rely on prompt-driven
+`session-bind`. Switching or forking into a different thread requires a separate
+Multiverse launch. The relay closes with the launch and never restarts the shared
+daemon or reconnects automatically. Plain launches have no relay. The development
+template enables the bridge by default; existing universes must opt in explicitly.
+
+Codex bridge context usage comes from the TUI connection's native
+`thread/tokenUsage/updated` notifications. The adapter interprets only the exact
+thread after its launch reply has validated the ID and workspace; the core relay
+passes every frame to the TUI and publishes observations through the runner's
+existing runtime update path. No extra subscription or thread resume is performed.
+`runtime.json` stores `usage.context` (`tokens`, optional `window` and `percent`),
+the native session ID, source and `reported_at`. The adapter's `get_usage` exposes
+the reading only for that exact launch and session. The last reading remains
+available with its timestamp after disconnection or launch end; a new launch
+waits for its own native notification, including Codex's resume usage replay.
+
+Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
+cached input and reasoning output are already included and are not added again.
+The window is native `modelContextWindow`; a missing window stays unknown.
+The percentage matches Codex 0.159.2's native TUI: subtract its 12,000-token
+baseline from the used count and window, clamp and round the remaining percentage,
+then report 100 minus that value as used. Thus the percentage can differ from
+raw tokens divided by window. Compaction may reduce the count. Until a measurement
+arrives, usage displays N/A; a measured zero is zero. Plain Codex, cumulative usage, cost and
+rate-limit reporting remain unavailable in this adapter.
 
 Explicit `stop` holds the recipient's launch lock, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background
@@ -213,6 +261,22 @@ attached with a diagnostic. This requires a bound native session ID and a
 reachable server. Closing a terminal by other means only disconnects its client
 and can leave native work running. Closing a dashboard or detaching tmux never
 calls native stop.
+
+The per-launch runner owns a passive status watcher for bridge launches. Once
+an exact native session ID is bound, the Codex adapter describes an initialize
+and metadata-only `thread/read` exchange and interprets the snapshot and
+`thread/status/changed` notifications. Core owns the connection and writes status
+through the launch-checked runtime update path. Status notifications are broadcast
+by app-server, so the watcher filters by the exact bound thread ID; it never calls
+`thread/resume` to subscribe to turn/item events or reload a thread. The initial
+read checks both thread ID and saved workspace before accepting observations.
+`active` with no flags maps to `working`; `waitingOnApproval` or
+`waitingOnUserInput` maps to `waiting`; `idle` maps to `idle`. Other states,
+unbound sessions, transport/protocol failures and plain launches remain `unknown`.
+The watcher never answers approvals or questions. It closes when the terminal
+launch ends and clears its observation on disconnection; it never restarts the
+daemon or reconnects automatically. Existing running launches need an explicit
+stop/resume to acquire the new runner; status is detected, never agent-reported.
 
 A daemon crash can interrupt every thread it hosts. Multiverse does not restart
 it from status reads or sends and never automatically resumes conversations.
@@ -232,26 +296,90 @@ recognizes persisted IDs across launches. Socket loss leaves acceptance unknown.
 Core owns the private socket directory lifecycle. Pi's separate headless RPC mode
 is not substituted for its interactive terminal.
 
+Core frames each message for its recipient: `Message from <sender>:`, with
+` (in universe <name>)` when the sender is in another universe, then the text.
+Providers that deliver text verbatim receive it as `Message.framed`; Codex and
+Pi still send the collaborator envelope with the message ID.
+
+Claude bridge mode steers through the session's own peer inbox. Each launch
+passes `--messaging-socket-path` (the core-assigned private socket),
+`--plugin-dir` for the source-owned `multiverse` mod, `--settings` with
+`crossSessionInbound: accept` (Claude otherwise holds peer messages for approval
+when the session skips permission prompts) and `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS=1`
+(mods are early access). `send` reads the key Claude publishes for that socket and
+writes one message at `next` priority, addressed to the exact session UUID. Its
+framed text sits between `<<MV2 steer id=UUID>>` (or `follow-up`) and `<</MV2>>`:
+the mode, which the mod honors, and the message ID for its receipt. The mod acts
+only on tagged text and shows the model the text alone:
+
+- A steer arriving mid-turn loses its tags in `session.receive`, so the queued
+  message shows clean in the terminal. It merges at the next tool result as a
+  queued command, and `session.append` stores that row without Claude's peer
+  wrapper, so the model, the transcript and later resumes read the text alone.
+- A steer arriving while idle, and every follow-up, is taken in `session.receive`
+  and submitted with `$.prompt.submit({ text, asUser: true })`: the model reads it
+  bare, as the person's own words, in a turn of its own once the current turn has
+  ended. A steer queued mid-turn that no tool result took would start its own turn
+  as a wrapped peer prompt, so `prompt.submit` drops it and submits it this way.
+  The terminal shows these as ordinary prompts; the transcript names the plugin.
+
+When a message's row enters the conversation, the mod writes
+`claude-receipts/<message id>.json` in the agent's directory. `get_delivery`
+reads it: `mv2 deliver --check` then records the message as accepted and
+transcript-confirmed. A message without a receipt stays `unknown`.
+
+`mv2 ask` sends the question tagged `<<MV2 ask id=UUID>>` over the same inbox.
+The mod consumes it in `session.receive`, so nothing enters the conversation,
+and answers with `$.model.fork`: one tool-less completion over the session's own
+transcript as the main thread last sent it, reusing its prompt cache. It writes
+`claude-asks/<id>.json` in the agent's directory, which the adapter waits for (up
+to 120 s) and removes. Before the session's first response, or right after
+`/clear`, there is nothing to answer from and `ask` reports unavailable. Core
+resolves the session under the launch lock but waits for the answer outside it,
+so sends and stop are not held.
+
+The mod also registers the `claude-mod-v1` bridge for its launch (steering is
+reported unavailable until it has) and reports status through `python -m
+multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
+report their phase with `mv2 report` but never set their status: `working` while a main-loop turn runs; `waiting` while an
+`AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
+elicitation waits on the person; `idle` otherwise. A permission prompt is matched
+to its call through the engine's `ask` verdict and ends when the call finishes, is
+denied, or (Bash) draws its progress row; an approved call that runs briefly
+without a progress row can read `waiting` until it finishes.
+
+Claude usage is measured from the session's own transcript under Claude's
+`projects` directory, plus any subagent transcripts: each response's recorded
+usage, counted once per response ID. It works with or without the bridge. The
+adapter reads each transcript once, then only what was appended.
+
+An accepted `send` means written to the Claude session inbox; the receipt
+confirms delivery. The mod was tested against Claude Code 2.1.286; the mod API
+may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
+`claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
+delivery path, `ask` and older tags; the Python suite runs them and `claude
+plugin validate` when Claude Code is installed.
+
 ## Implemented capabilities and verification limits
 
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |
 | --- | --- | --- | --- | --- |
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
 | Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
-| Safe-boundary steer | Yes | Unavailable | Yes | Unavailable |
-| After-turn send / idle wake | Yes | Unavailable | Yes | Unavailable |
+| Safe-boundary steer | Yes | Bridge: peer inbox + mod | Yes | Unavailable |
+| After-turn send / idle wake | Yes | Bridge: follow-up after the turn; idle wake | Yes | Unavailable |
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
-| Receipt reconciliation | Bounded queue/history lookup | Unavailable | Exact transcript/current acceptance | Unavailable |
-| Native activity | Unknown | Unknown | Lifecycle events | Unknown |
-| Measured cumulative usage | Unavailable | Unavailable | Unavailable | Unavailable |
-| Isolated ask | Unavailable | Unavailable | Unavailable | Unavailable |
+| Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
+| Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
+| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; otherwise unavailable |
+| Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
+| Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
 
 Unsupported usage displays N/A, not zero. The usage representation includes
 cache-inclusive input, output, total, optional cache subsets, source, timestamp
 and completeness. No token estimation or native-history guessing is performed.
 An unsupported ask never becomes ordinary input or launches a separate agent.
-Claude delivery remains a required integration gap: installed native feature gates
-can prevent channels/Mods from loading. Basic lifecycle does not depend on them.
+Claude steering needs the mod to load; basic lifecycle does not depend on it.
 
 Contract tests cover a provider implementing only the public protocol, shared
 CLI/backend dispatch, exact handles across resume, optional prompts, side-question

@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.231; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.154.0 and Claude Code 2.1.286; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -71,7 +71,9 @@ errors raised, while shell entry points format output and exit codes.
 
 `send` saves the durable record and attempts native delivery through the common
 adapter protocol. `ask` and `get-usage` use the same tools from CLI and
-backend. Unsupported operations are explicit; no terminal keystroke delivery is introduced.
+backend. Unsupported operations are explicit. Nothing types into agent terminals:
+the Claude bridge's mod submits messages for an idle session through Claude's own
+plugin API (see [harness adapters](docs/harness-adapters.md)).
 
 ## Files and ownership
 
@@ -89,7 +91,7 @@ project/.multiverse/
   state/                        # local, ignored by Git
     agents/<uuid>/
       properties.json           # identity, task, reported phase and summary
-      runtime.json              # launch generation, host, pane, observed activity
+      runtime.json              # launch generation, host, pane, reported status
       inbox.jsonl               # append-only messages with IDs and reply references
       inbox.cursor              # acknowledged byte offset
       session.jsonl             # native Pi conversation
@@ -128,7 +130,7 @@ The [r/unixporn Catppuccin setups](https://www.reddit.com/r/unixporn/comments/1f
 
 One-line headers and footer hints leave the terminal for agents. There are no action buttons. Search opens with `/`, includes folded descendants, and keeps matching ancestors visible. Escape clears it and restores the existing folds. `v` opens full details. At smaller widths, secondary columns disappear; the demo's entire hierarchy fits at 60×20 with the inspector closed. `NO_COLOR` is respected.
 
-Pause over a row for 300 ms to inspect it: current work, harness/model, observed activity, reported phase, and a live pane capture. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Keyboard selection opens the same view; `p` toggles it and Escape dismisses it. Moving into the inspector keeps it open for reading and scrolling. Hovering never changes the selected agent or the target of actions. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
+Press `p` to open the inspector: current work, harness/model, status, reported phase, and a live pane capture. It opens and closes only with `p` (Escape also closes it); hovering or selecting a row never opens it. While open it follows the selected row. The inspector sits to the right at 120 columns and wider, or becomes a short drawer below the list. Groups show counts and recent work instead of a terminal. Captures refresh with the dashboard (normally every 1.5 seconds), retain your scroll position when reading older output, and discard results from a previous agent or launch.
 
 `n` inserts a draft row in the selected group, following the original Multiverse monitor's inline creation pattern. Type over the suggested name; Tab cycles through name, harness, and optional model. New agents start idle with no initial prompt; message them with `m` once they are running. Harness opens an inline selector populated from that group's `harnesses/*/harness.json`: arrows choose, Enter confirms, or click an option. Codex is preferred, then Claude, then the first configured adapter. It is not a free-text field. Enter in a text field creates the agent; Ctrl+Enter submits from any field, and Escape discards. Creation failures retain the draft for correction. No agent starts before submission.
 
@@ -142,7 +144,7 @@ Filesystem and tmux work run outside the UI event loop. Stable agent keys preser
 
 The TUI reads `properties.json` to discover agents and their reported work. It reconciles `runtime.json` with `tmux list-panes` to observe whether each launch is alive. Each pane carries three tags: universe ID, agent ID and launch ID. A readable window/session name is only a label. Renaming it does not change identity; a reused pane ID cannot impersonate an old launch. Unknown or inaccessible state is shown as unknown.
 
-`LIVE` comes from tmux, `ACTIVITY` comes from the harness, and `PHASE`/`SUMMARY` come from the model. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
+`LIVE` comes from tmux, `STATUS` (`working`, `waiting` or `idle`) comes from the harness, `CONTEXT` is the size of the agent's latest request against its model's window (`82k/200k`, yellow from 70%, red from 90%; `82k` before the window is known, `N/A` when the harness reports none), never a cumulative total, and `COST` (optional) is the session's cost so far. When a Claude agent reports rate limits, the header shows the account's `5h 34% · 7d 12%` windows. `PHASE`/`SUMMARY` come from the model. A `waiting` agent needs you: a permission prompt, a question or a plan approval is open. Waiting agents are marked with an orange `●` and status badge, and groups and the header count them (`2 waiting`) alongside blocked agents. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
 
 The dashboard is a reader and command client. Quit it and agents continue. The default tmux server is named `multiverse-v2`, separate from existing sessions; `MV2_TMUX_SOCKET` can select an explicit socket. Attach/inspect/stop verify pane ownership first. `stop` terminates the pane and its running work.
 
@@ -163,7 +165,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | Enter / Escape in a draft | Confirm harness or create / discard the new agent |
 | Escape / Ctrl-Enter | Cancel / submit a form |
 
-Mouse: pause over a row to inspect; click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
+Mouse: click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
 
 Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to return to the dashboard that opened it. This also works when the dashboard runs inside tmux: the host terminal opens the agent client and reattaches to the exact dashboard pane when that client exits. The dashboard's selection/state and agent process remain alive. On the dashboard itself, detach works normally. Custom prefixes and bindings are preserved; uppercase L remains tmux's stock last-session action. Each universe can customize `views/default.json`:
 
@@ -183,11 +185,11 @@ The title and accent style its group row and agents in the parent hierarchy. The
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. `/multiverse list` and `/multiverse review ...` are prompt conventions. Native CLIs may intercept slash commands before the model sees them; send ordinary text such as `Please run /multiverse list`, or use `mv2 catalog` in a shell. Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Stable message IDs must appear in the native transcript before automatic acknowledgment. Codex also supports `"inbox_bridge": true`: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. Claude supports `"inbox_bridge": true` as well: `mv2 send` writes to the session's peer inbox, and the source-owned `multiverse` mod steers mid-turn at the next tool result or submits follow-ups and idle-session messages as ordinary prompts; the mod also reports status, delivery receipts and context usage. See the adapter guide for native resume permission constraints. These bridges are opt-in; compatibility launches report the missing required delivery capabilities explicitly.
 
 ## Harness definitions
 
-Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations and currently report unavailable for bundled providers.
+Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` answers a side question from a bridged Claude session's transcript without adding to it, and reports unavailable for the others. `get-usage` reports the latest request's context and any cumulative totals: Claude measures both from its session transcript, and its mod adds the window, cost and rate limits when the bridge is on; Codex bridge launches report the latest request's tokens and window from app-server; Pi reports unavailable.
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 
@@ -203,7 +205,7 @@ A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` arg
 | `{model}` | Explicit model override; omitted flags use the native default |
 | `{session_file}`, `{session_id}` | File-based session path or recorded native UUID |
 
-`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Activity remains `unknown` unless reported; liveness still comes from tagged tmux panes.
+`session` defaults to `file` (Pi). `assigned` gives the harness the agent UUID at launch (Claude). `reported` requires the native UUID to be recorded through `mv2 session-bind` (Codex). Claude resumes that assigned UUID. Codex's startup prompt asks it to register `$CODEX_THREAD_ID` before working; resume fails clearly if this has not happened, rather than choosing another agent's session. See the [Codex adapter](src/multiverse/templates/base/harnesses/codex/README.md) and [Claude adapter](src/multiverse/templates/base/harnesses/claude/README.md) for native permission prompts, session recovery and integration limits. Status is detected, never set by agents: bridge launches report it (Claude from its mod, Codex from the app-server's thread status, Pi from its extension), and other launches stay `unknown`. Liveness still comes from tagged tmux panes.
 
 Existing schema-1 definitions and assets remain authoritative and are never rewritten on package update. Opting into schema 2 is explicit: preserve every local model, argument, permission and workspace preference; keep schema 1 for behavior that cannot be represented. No live-universe migration is automatic.
 
@@ -214,7 +216,7 @@ Existing schema-1 definitions and assets remain authoritative and are never rewr
 ./bin/mv2 -u /path/to/project doctor
 ```
 
-The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, hover delays, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
+The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -p test_tui.py -v
@@ -223,11 +225,11 @@ The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse
 
 The renderer exports actual SVG screens to `/tmp/multiverse-previews` for visual review, including the unified hierarchy, live inspector, narrow layouts and inline creation. Additional tests cover concurrent inbox writers, interrupted records, recursive installs, ambiguous commands, real tmux launch/rename/stop/resume and pane ownership, Textual attach/detach/exit, Codex/Claude argv and exact resume with fake executables, session registration guards, and real Pi and Codex native delivery/resume with their bridges and local scripted providers. They use temporary universes and isolated tmux sockets, with no network or model spend. Authenticated Codex/Claude model turns are not exercised. Native timing checks skip when their harness or tmux binaries are absent. A sandbox that denies Unix sockets must allow the terminal integration tests explicitly.
 
-`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are optional native delivery integrations, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy, background ask primitive, or urgent mid-turn delivery in this slice.
+`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are per-agent Git worktrees, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy or background ask primitive in this slice.
 
 ## Development checkout
 
 Run `uv sync --locked`, then `. scripts/dev-env.sh` in the main checkout to use
 the local `.multiverse` and `.run/tmux.sock`. Launch `mv2 tui`. Worktrees share Git
-history; runtime state and evidence are ignored. See `.multiverse/DEVELOPMENT.md`
-for this machine’s active agents and migration conventions.
+history; runtime state and evidence are ignored. Machine-specific notes (active
+agents, migration conventions) can go in `.multiverse/DEVELOPMENT.md`, which Git ignores.

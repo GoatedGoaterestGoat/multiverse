@@ -15,7 +15,6 @@ class Inspector(Vertical):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self.row = None
-        self.mode = None
         self.identity = None
         self.generation = 0
         self.capturing = False
@@ -33,20 +32,13 @@ class Inspector(Vertical):
             yield Static("", id="preview", markup=False)
         yield Static("", id="inspect-hint", markup=False)
 
-    def on_enter(self):
-        self.app.keep_inspector()
-
-    def on_leave(self):
-        self.app.leave_inspector()
-
-    def show(self, row, mode):
-        self.mode = mode
+    def show(self, row):
         self.app.add_class("inspecting")
         self.update_row(row)
 
     def close(self):
         self.generation += 1
-        self.row = self.mode = self.identity = None
+        self.row = self.identity = None
         self.app.remove_class("inspecting")
 
     def update_row(self, row):
@@ -67,16 +59,16 @@ class Inspector(Vertical):
         self.query_one("#inspect-name", Static).update(Text(clean(row["name"]), style=f"bold {accent}"))
         self.query_one("#inspect-meta", Static).update(self.app.scope_trail(row))
         self.query_one("#inspect-hint", Static).update(
-            "Hover · click row to select" if self.mode == "hover" else "v full details · p / Esc close")
+            "v full details · p / Esc close")
         self.query_one("#inspect-label", Static).update("PURPOSE" if group else "CURRENT WORK")
         self.query_one("#inspect-work", Static).update(clean(
             row.get("description", "No description yet.") if group else row.get("summary") or row.get("task") or "No work reported yet."))
         self.query_one("#inspect-group").display = group
         self.query_one("#pane-scroll").display = not group
         if group:
-            state = f'{row["alive"]}/{row["total"]} live · {row["blocked"]} blocked'
+            state = f'{row["alive"]}/{row["total"]} live · {row["waiting"]} waiting · {row["blocked"]} blocked'
             members = [a for a in self.app.snapshot["agents"] if within(a, Path(row["path"]))]
-            members.sort(key=lambda a: a.get("phase") != "blocked")
+            members.sort(key=lambda a: (a.get("status") != "waiting", a.get("phase") != "blocked"))
             work = Text("ACTIVE WORK\n", style="#7f849c")
             for agent in members[:4]:
                 work.append("\n" + clean(agent["name"]) + "\n", style=accent)
@@ -90,9 +82,9 @@ class Inspector(Vertical):
                 state.append(" / " + clean(row["model"]))
             live = row.get("live", "unknown")
             state.append(f" · {live}", style="#a6e3a1" if live == "alive" else "#f9e2af")
-            state.append("\nActivity: " + clean(row.get("activity", "unknown")), style="#a6adc8")
-            state.append(" · Tokens: " + clean(row.get("tokens", "N/A")), style="#a6adc8")
+            state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
+            state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 self.query_one("#preview", Static).update(clean(row.get("reason") or "No live pane. Resume a stopped agent with r."))

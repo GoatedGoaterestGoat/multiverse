@@ -75,23 +75,28 @@ class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.selected_key, group_key(cad))
             self.assertIn(str(review), app.collapsed)
 
-    async def test_hover_keeps_selection_and_draft_cancel_survives_resize(self):
+    async def test_inspector_opens_only_with_p_and_draft_cancel_survives_resize(self):
         backend = DemoBackend()
-        app = MultiverseApp(backend.root, backend, refresh_interval=0, hover_delay=0.02)
+        app = MultiverseApp(backend.root, backend, refresh_interval=0)
         review = backend.root / "subverses/pr-review"
         async with app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot, app)
             original = app.selected_key
             reviewer = next(a for a in backend.agents if a["name"] == "reviewer")
             index = list(app.visible_rows).index(agent_key(reviewer))
+            # Hovering a row neither selects it nor opens the inspector.
             await pilot.hover("#agents", offset=(6, index + 1))
-            await pilot.pause(0.08)
+            await pilot.pause(0.4)
             await self.settle(pilot, app)
             self.assertEqual(app.selected_key, original)
+            self.assertIsNone(app.inspector.row)
+            app.select_key(agent_key(reviewer))
+            await pilot.press("p")
+            await self.settle(pilot, app)
             self.assertEqual(app.inspector.row["id"], reviewer["id"])
             self.assertIn("Context loaded", str(app.query_one("#preview", Static).render()))
-            await pilot.hover("#masthead")
-            await pilot.pause(0.25)
+            await pilot.press("p")
+            self.assertIsNone(app.inspector.row)
             app.select_key(group_key(review))
             await pilot.press("n", "ctrl+u", *"independent-draft", "tab", "tab", *"check scope")
             before = dict(app.draft.values)

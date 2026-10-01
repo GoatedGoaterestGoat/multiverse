@@ -186,7 +186,7 @@ class TerminalTest(TerminalBase):
         self.assertEqual(resumed["id"], result["id"])
         self.assertNotEqual(resumed["runtime"]["launch_id"], row["runtime"]["launch_id"])
         with self.assertRaises(ValueError):
-            agents.update_runtime(agent_dir, row["runtime"]["launch_id"], activity="idle")
+            agents.update_runtime(agent_dir, row["runtime"]["launch_id"], status="idle")
 
     def test_wrong_launch_tag_refuses_control(self):
         result, _ = self.spawn()
@@ -292,7 +292,7 @@ class PiTest(TerminalBase):
             request = json.loads(log.read_text().splitlines()[0])
             self.assertIn("You work in a Multiverse universe", request["systemPrompt"])
             self.assertEqual(sorted(t["name"] for t in request["tools"]), ["bash", "edit", "read", "write"])
-            until(lambda: agents.runtime(agent_dir).get("activity") == "idle")
+            until(lambda: agents.runtime(agent_dir).get("status") == "idle")
             agents.terminal_action(self.root, result["id"], "stop")
             until(lambda: not self.backend.snapshot()[0])
             time.sleep(0.1)

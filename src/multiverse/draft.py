@@ -145,7 +145,7 @@ class AgentDraft(Draft):
         self.harnesses = tuple(next((g.get("harnesses", []) for g in snapshot["groups"]
                                      if g["path"] == str(self.scope)), []))
         row = {"id": "__draft__", "universe": str(self.scope), "name": self.values["name"],
-               "harness": self.values["harness"], "live": "new", "phase": "draft", "activity": "—"}
+               "harness": self.values["harness"], "live": "new", "phase": "draft", "status": "—"}
         return {**snapshot, "agents": [*snapshot["agents"], row]}
 
     def problem(self, values, snapshot):
@@ -183,7 +183,7 @@ class SubverseDraft(Draft):
         parent = next((g for g in snapshot["groups"] if g["path"] == str(self.scope)), {})
         group = {"path": str(self.scope / "subverses" / PENDING), "parent": str(self.scope),
                  "name": self.values["name"], "description": "", "accent": parent.get("accent", "#a6adc8"),
-                 "harnesses": [], "alive": 0, "blocked": 0, "total": 0}
+                 "harnesses": [], "alive": 0, "blocked": 0, "waiting": 0, "total": 0}
         return {**snapshot, "groups": [*snapshot["groups"], group]}
 
     @staticmethod

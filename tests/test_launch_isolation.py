@@ -13,6 +13,7 @@ from multiverse import agents, runner, universe, harnesses
 import json
 from multiverse.cli import parser, run
 from multiverse.store import ack, append_message, inbox, read, write, lock
+from multiverse.tools import runtime_update
 
 
 class LaunchIsolationTest(unittest.TestCase):
@@ -161,19 +162,24 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_stale_cli_callbacks_cannot_read_ack_bind_or_change_current_launch(self):
         agent = self.root / "state/agents" / str(uuid4())
         properties = {"id": agent.name, "name": "callback", "phase": "working"}
-        runtime = {"launch_id": "current", "activity": "working"}
+        runtime = {"launch_id": "current", "status": "working"}
         write(agent / "properties.json", properties)
         write(agent / "runtime.json", runtime)
         message = append_message(agent, "for current launch", {})
         cursor = inbox(agent)["cursor"]
         actions = (["inbox"], ["ack", "--cursor", str(cursor)],
-                   ["status", "--phase", "done"], ["runtime-update", "--activity", "idle"],
-                   ["session-bind", "--session-id", str(uuid4())])
+                   ["report", "--phase", "done"], ["session-bind", "--session-id", str(uuid4())])
         for action in actions:
             with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):
                 args = parser().parse_args(["-u", str(self.root), *action, "--agent", agent.name])
                 with self.assertRaisesRegex(ValueError, "Outdated launch"):
                     run(args)
+        # Status comes from harness integrations, not an mv2 command, and also
+        # refuses an outdated launch.
+        with self.assertRaises(SystemExit):
+            parser().parse_args(["-u", str(self.root), "runtime-update", "--status", "idle", "--agent", agent.name])
+        with patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}), self.assertRaisesRegex(ValueError, "Outdated launch"):
+            runtime_update.run(self.root, agent=agent.name, status="idle")
         self.assertEqual(read(agent / "properties.json"), properties)
         self.assertEqual(read(agent / "runtime.json"), runtime)
         self.assertEqual(inbox(agent)["messages"], [message])

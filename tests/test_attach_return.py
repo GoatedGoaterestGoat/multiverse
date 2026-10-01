@@ -211,7 +211,7 @@ class AttachReturnTest(TerminalBase):
 
     def test_dashboard_selection_survives_attach_and_return(self):
         other = agents.start(self.root, 'z-selected', 'second agent', 'fake', socket_path=self.socket)
-        agents.status(self.root, other['id'], summary='second agent')
+        agents.report(self.root, other['id'], summary='second agent')
         dashboard = self.backend.create('dashboard', self.work, self.tui_command())
         master, _ = self.client([*self.backend.prefix, 'attach-session', '-t', dashboard['pane']])
         self.read_until(master, b'z-selected')

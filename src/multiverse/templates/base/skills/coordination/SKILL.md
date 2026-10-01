@@ -12,7 +12,7 @@ Use `"$MV2_CLI" --help` for the CLI. Your current universe and identity are alre
 - `resume AGENT` resumes its native session after it stops. `stop AGENT` terminates its terminal and running work; use only when appropriate.
 - `inbox` reads unread manual messages. `inbox --all` shows full history and native delivery states. A native-delivered message already contains its text and ID; acknowledge it with `ack --message-id UUID` after handling it. Manual batches may still use `ack --cursor N`. Acceptance, acknowledgement and an answer are distinct. `deliver AGENT --message-id UUID --retry` retries definite failures only; `--check` reconciles receipts where supported. Never blindly resend an uncertain submission.
 
-- Set your own status with `status --phase working|blocked|done --summary '...'`. Properties are self-reported. The TUI shows process observations separately.
+- Report your own phase with `report --phase working|blocked|done --summary '...'`. Properties are self-reported. The TUI shows process observations separately.
 
 Harness instructions live in `harnesses/<name>/`. If an adapter fails, inspect its manifest, docs and pane. Do not type into a pane based only on its window name. Match the recorded universe, agent and launch tags first. Avoid sending keys into an active model turn or an unknown shell.
 

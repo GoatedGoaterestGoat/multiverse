@@ -76,7 +76,7 @@ class CodexDaemonTest(TerminalBase):
         workspaces = [self.work / 'project-a', self.work / 'project-b']
         for work in workspaces:
             work.mkdir()
-        (home / 'config.toml').write_text('model="gpt-5.6-terra"\nmodel_provider="offline"\n'
+        (home / 'config.toml').write_text('model="gpt-6-sol"\nmodel_provider="offline"\n'
             '[shell_environment_policy]\nexclude=["USER_EXCLUDED"]\n'
             '[model_providers.offline]\nname="Offline"\nwire_api="responses"\nrequires_openai_auth=false\n'
             f'base_url="http://127.0.0.1:{provider.server_port}/v1"\n' +

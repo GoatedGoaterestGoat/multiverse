@@ -4,7 +4,7 @@ from .. import native, universe
 
 def configure(parser):
     parser.add_argument('agent')
-    parser.add_argument('--operation', choices=('activity', 'usage', 'interrupt', 'ask'), default='usage')
+    parser.add_argument('--operation', choices=('status', 'activity', 'usage', 'interrupt', 'ask'), default='usage')
 
 
 def run(root=None, *, agent, operation='usage'):
