@@ -1,5 +1,6 @@
 """Fail before a test can start, stop or connect to a developer's Codex daemon."""
 import os
+import json
 from pathlib import Path
 import socket
 import sys
@@ -10,6 +11,19 @@ PROTECTED_HOMES = {(Path.home() / '.codex').resolve()}
 if os.environ.get('CODEX_HOME'):
     PROTECTED_HOMES.add(Path(os.environ['CODEX_HOME']).expanduser().resolve())
 _installed = False
+
+
+def isolated_home(path):
+    """Keep disposable daemons from spawning updater processes that outlive tests."""
+    path = Path(path).resolve()
+    if any(path == protected or protected in path.parents for protected in PROTECTED_HOMES):
+        raise AssertionError('Cannot configure the default Codex daemon from a test')
+    settings = path / 'app-server-daemon/settings.json'
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    value = json.loads(settings.read_text()) if settings.exists() else {}
+    value['updater'] = {**value.get('updater', {}), 'autoUpdateEnabled': False}
+    settings.write_text(json.dumps(value) + '\n')
+    return path
 
 
 def check_spawn(argv, environment):
@@ -28,6 +42,12 @@ def check_spawn(argv, environment):
     home = Path(env.get('CODEX_HOME', Path.home() / '.codex')).expanduser().resolve()
     if any(home == protected or protected in home.parents for protected in PROTECTED_HOMES):
         raise AssertionError('Test attempted to access the default Codex daemon; use an isolated CODEX_HOME')
+    try:
+        settings = json.loads((home / 'app-server-daemon/settings.json').read_text())
+    except (OSError, ValueError):
+        settings = {}
+    if settings.get('updater', {}).get('autoUpdateEnabled') is not False:
+        raise AssertionError('Native tests must disable daemon automatic updates in their isolated CODEX_HOME')
 
 
 def check_connect(address):

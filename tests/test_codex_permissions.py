@@ -15,6 +15,7 @@ from multiverse import agents, harnesses
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.store import read, write, inbox
 from multiverse.tools import send
+from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -71,7 +72,7 @@ class CodexPermissionTest(TerminalBase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        home = self.work / 'native-home'
+        home = isolated_home(self.work / 'native-home')
         managed = home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())

@@ -78,6 +78,37 @@ def check_connection(session):
     return NativeResult('ok', 'Exact loaded thread and native queue observed')
 
 
+def _start_idle_submission(session, item, receipt):
+    """Interrupt can pause native auto-draining. Start only our sole queued item."""
+    try:
+        queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 2})))
+        if isinstance(queued, NativeResult):
+            raise ValueError(queued.reason)
+        items = records(queued)
+        if not items:
+            return receipt  # Native auto-draining already took it.
+        if (len(items) != 1 or queued.get('nextCursor') or items[0].get('id') != item['id']
+                or items[0].get('clientUserMessageId') != item['clientUserMessageId']):
+            return NativeResult('native_queued',
+                'Accepted by native queue; other queued work exists, so no explicit start attempted. '
+                'Consumption unconfirmed; an interrupted queue may need native continuation.', receipt.value)
+        started = result((yield RpcRequest('thread/queue/start', {
+            'threadId': session.native_id, 'queuedSubmissionId': item['id']})))
+        if isinstance(started, NativeResult):
+            raise ValueError(started.reason)
+        turn = object_field(started, 'turn')
+        if not isinstance(turn.get('id'), str) or not turn['id']:
+            raise ValueError('Native queue start returned no turn ID')
+        return NativeResult('native_queued', 'Accepted and started from the native idle queue; consumption unconfirmed',
+                            {**receipt.value, 'turn_id': turn['id']})
+    except ValueError as error:
+        # Acceptance is already established. A racing automatic start, an active
+        # turn, or an unsupported method must never make this message retryable.
+        return NativeResult('native_queued',
+            f'Accepted by native queue; explicit idle start was not confirmed: {error}. '
+            'Use deliver AGENT --check; do not resend.', {**receipt.value, 'idle_start_error': str(error)})
+
+
 def send_message(session, message, mode):
     thread = yield from _thread(session)
     if isinstance(thread, NativeResult):
@@ -93,8 +124,11 @@ def send_message(session, message, mode):
         item = object_field(accepted, 'queuedSubmission')
         if not isinstance(item.get('id'), str) or not item['id'] or item.get('clientUserMessageId') != message.id:
             return NativeResult('unknown', 'Native queue receipt does not correlate with this message')
-        return NativeResult('native_queued', 'Accepted by native after-turn queue; consumption unconfirmed',
-                            {'queued_submission_id': item['id'], 'client_user_message_id': message.id})
+        receipt = NativeResult('native_queued', 'Accepted by native after-turn queue; consumption unconfirmed',
+                               {'queued_submission_id': item['id'], 'client_user_message_id': message.id})
+        if thread['status']['type'] == 'idle':
+            return (yield from _start_idle_submission(session, item, receipt))
+        return receipt
     turns = result((yield RpcRequest('thread/turns/list', {
         'threadId': session.native_id, 'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'})))
     if isinstance(turns, NativeResult):

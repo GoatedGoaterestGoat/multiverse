@@ -2,9 +2,10 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import tempfile
 import unittest
 
-from native_safety import PROTECTED_HOMES, check_connect, check_spawn, install
+from native_safety import PROTECTED_HOMES, check_connect, check_spawn, install, isolated_home
 
 install()
 
@@ -27,7 +28,16 @@ class NativeSafetyTest(unittest.TestCase):
                     client.connect(address)
 
     def test_isolated_native_home_and_read_only_cli_help_are_allowed(self):
-        check_spawn(['codex', 'app-server', 'daemon', 'start'], {'CODEX_HOME': '/tmp/disposable-native-home'})
+        with tempfile.TemporaryDirectory() as path:
+            with self.assertRaisesRegex(AssertionError, 'disable daemon automatic updates'):
+                check_spawn(['codex', 'app-server', 'daemon', 'start'], {'CODEX_HOME': path})
+            isolated_home(path)
+            check_spawn(['codex', 'app-server', 'daemon', 'start'], {'CODEX_HOME': path})
         check_spawn(['codex', '--version'], {})
         check_spawn(['codex', '--help'], {})
         check_connect('/tmp/isolated-test/rpc.sock')
+
+    def test_fixture_setup_cannot_change_default_home_settings(self):
+        for home in PROTECTED_HOMES:
+            with self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
+                isolated_home(home)

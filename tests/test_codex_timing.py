@@ -11,8 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from multiverse.tools import send
-from multiverse import agents, native
+from multiverse import agents, native, rpc
+from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.store import inbox, append_message, read, write
+from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -46,8 +48,9 @@ class CodexTimingTest(TerminalBase):
                         'content': [{'type': 'output_text', 'text': 'Offline sequence complete.'}]}
                 if is_title:
                     item['content'][0]['text'] = '{"title":"Run offline test"}'
-                elif index <= 2:
-                    command = f'touch tool-{index}-start; sleep 4; touch tool-{index}-end'
+                elif index <= 2 or index in (6, 8, 10):
+                    duration = 30 if index > 2 else 4
+                    command = f'touch tool-{index}-start; sleep {duration}; touch tool-{index}-end'
                     if index == 1:
                         command = '"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; ' + command
                     item = {'type': 'function_call', 'call_id': f'call-{index}', 'name': 'exec_command',
@@ -70,8 +73,7 @@ class CodexTimingTest(TerminalBase):
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        native_home = self.work / 'native-home'
-        native_home.mkdir()
+        native_home = isolated_home(self.work / 'native-home')
         managed = native_home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())
@@ -142,6 +144,7 @@ class CodexTimingTest(TerminalBase):
             self.assertEqual(resumed['workspace'], str(work))
             until(lambda: native.capabilities(self.root, result['id'], run_probe=True)['send_follow_up']['state'] == 'supported', seconds=20)
             idle = append_message(directory, 'IDLE_AFTER_EXACT_RESUME', {}, delivery='follow-up')
+            resumed_sent = time.time() * 1000
             receipt = native.deliver(self.root, result['id'], idle['id'])
             self.assertEqual(receipt['state'], 'native_queued', receipt)
             self.assertEqual(receipt['native_session_id'], original_native)
@@ -149,6 +152,67 @@ class CodexTimingTest(TerminalBase):
             self.assertTrue('IDLE_AFTER_EXACT_RESUME' in json.dumps(records[4]['body']))
             metadata = json.loads(records[4]['body']['client_metadata']['x-codex-turn-metadata'])
             self.assertEqual(metadata['sandbox_mode'], 'workspace-write', 'Saved native permissions must survive resume')
+            print('Codex resumed idle queue evidence:', json.dumps({'delay_ms': records[4]['at'] - resumed_sent}))
+            def raw(method, params):
+                def plan():
+                    yield RpcRequest('initialize', {'clientInfo': {'name': 'timing-investigation', 'version': '1'},
+                        'capabilities': {'experimentalApi': True}})
+                    response = yield RpcRequest(method, {'threadId': original_native, **params})
+                    return NativeResult('ok', value=response)
+                return rpc.execute(RpcSpec(str(endpoint), plan)).value
+            until(lambda: agents.runtime(directory).get('status') == 'idle', seconds=10)
+            trigger = send.run(self.root, agent=result['id'], text='RUN_TOOL_TO_INTERRUPT', delivery='follow-up')
+            self.assertEqual(trigger['state'], 'native_queued', trigger)
+            until(lambda: (work / 'tool-6-start').exists(), seconds=15)
+            waiting = raw('thread/queue/add', {'clientUserMessageId': 'during-active-turn',
+                'input': [{'type': 'text', 'text': 'MUST_WAIT_FOR_ACTIVE_TURN'}]})['result']['queuedSubmission']
+            active_start = raw('thread/queue/start', {'queuedSubmissionId': waiting['id']})
+            print('Start while active:', json.dumps(active_start))
+            self.assertIn('error', active_start, 'Queue start must refuse an active thread')
+            self.assertEqual(len(records), 6)
+            cancelled = native.stop(self.root, result['id'])
+            self.assertEqual(cancelled.value['interrupted_turns'], 1, cancelled)
+            self.assertEqual(cancelled.value['cancelled_submissions'], 1, cancelled)
+            # Reproduce native behavior independently: interrupt pauses automatic
+            # draining, even when the next queue/add happens after it is idle.
+            until(lambda: raw('thread/read', {'includeTurns': False})['result']['thread']['status']['type'] == 'idle')
+            raw_receipt = raw('thread/queue/add', {'clientUserMessageId': 'direct-after-interrupt',
+                'input': [{'type': 'text', 'text': 'RAW_FOLLOW_UP_AFTER_INTERRUPT'}]})
+            raw_item = raw_receipt['result']['queuedSubmission']
+            time.sleep(.3)
+            if len(records) == 6:
+                self.assertEqual(raw('thread/queue/list', {'limit': 2})['result']['data'][0]['id'], raw_item['id'])
+                self.assertIn('result', raw('thread/queue/start', {'queuedSubmissionId': raw_item['id']}))
+            until(lambda: len(records) >= 7, seconds=5)
+            self.assertIn('RAW_FOLLOW_UP_AFTER_INTERRUPT', json.dumps(records[6]['body']))
+
+            # mv2 recovers the sole newly accepted item, including after killing
+            # and resuming the exact saved conversation. It never resends it.
+            for index, shutdown in ((8, False), (10, True)):
+                until(lambda: agents.runtime(directory).get('status') == 'idle', seconds=10)
+                trigger = send.run(self.root, agent=result['id'], text=f'INTERRUPT_CYCLE_{index}', delivery='follow-up')
+                self.assertEqual(trigger['state'], 'native_queued', trigger)
+                until(lambda: (work / f'tool-{index}-start').exists(), seconds=10)
+                if shutdown:
+                    stop_owned()
+                    with patch.dict(os.environ, test_env):
+                        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket,
+                                               wait=True, wait_timeout=30)
+                    self.assertTrue(resumed['ready'], resumed)
+                    self.assertEqual(resumed['native_session_id'], original_native)
+                else:
+                    self.assertEqual(native.stop(self.root, result['id']).value['interrupted_turns'], 1)
+                sent_after_interrupt = time.time() * 1000
+                text = f'FOLLOW_UP_AFTER_INTERRUPT_{index}'
+                followup = send.run(self.root, agent=result['id'], text=text, delivery='follow-up')
+                self.assertEqual(followup['state'], 'native_queued', followup)
+                until(lambda: len(records) >= index + 1, seconds=5)
+                self.assertIn(text, json.dumps(records[index]['body']))
+                saved = inbox(directory, all_messages=True)['messages'][-1]
+                receipt = native.deliver(self.root, result['id'], saved['id'], check=True)
+                self.assertTrue(receipt['value']['transcript_confirmed'], receipt)
+                print('Codex interrupted queue recovery:', json.dumps({'stop_resume': shutdown,
+                    'delay_ms': records[index]['at'] - sent_after_interrupt}))
         except Exception:
             print('REQUESTS', [{'at': r['at'], 'urgent': 'URGENT_SAFE_BOUNDARY' in json.dumps(r['body']),
                                  'normal': 'NORMAL_AFTER_TURN' in json.dumps(r['body'])} for r in records])

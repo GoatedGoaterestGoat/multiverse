@@ -413,6 +413,26 @@ storage. Workspace-relative executable paths resolve before changing directory.
 This keeps a shared daemon usable after its originating worktree or temporary
 universe is removed.
 
+Codex also owns a separate `pid-update-loop` process. Restarting only the daemon
+does not necessarily replace an existing updater. When diagnosing repeated
+shutdowns, inspect both PID records under `CODEX_HOME/app-server-daemon`, each
+process's executable and working directory, and the managed package's `current`
+link. A stranded 0.159.3 updater was observed forcing hourly restarts of an
+already-0.160.0 daemon after its original temporary working directory was deleted.
+The native updater selects a forced restart when the managed executable differs
+from its own running executable
+([native update decision](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server-daemon/src/update_loop.rs#L412)).
+Explicit recovery can replace just the verified stale updater, then use native
+`daemon start` from a persistent directory to reuse the server and start the
+current updater; verify that the daemon PID remains unchanged. mv2 does not
+signal or replace native updater processes automatically.
+
+Native tests use isolated Codex homes with
+`app-server-daemon/settings.json` setting `updater.autoUpdateEnabled=false`.
+The subprocess guard rejects native execution without that setting, as well as
+access to the default native home/socket. This prevents disposable tests from
+leaving scheduled updaters behind; daemon stop alone does not stop the updater.
+
 A daemon already running from a deleted directory cannot be repaired by reusing
 its socket. Codex 0.159.3 returns `config/read` error -32603, `failed to resolve
 feature override precedence: No such file or directory`, even when the requested
@@ -464,7 +484,18 @@ Different process-level environments require separately configured native homes.
 
 Exact thread ID/workspace are checked before queueing or steering. Urgent busy
 input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
-`thread/queue/add`. Races return errors without fresh-turn or resume fallback.
+`thread/queue/add`. A racing busy steer is never converted to a fresh turn.
+Codex 0.159.3 and 0.160.0 can leave automatic queue draining paused after an
+interrupt: a later `queue/add` accepts a message while the thread remains idle.
+This reproduces through direct native RPC, independently of mv2. For a thread
+observed idle before submission, mv2 checks the queue after acceptance. If the
+new message is its only entry, mv2 asks `thread/queue/start` to start that exact
+entry. It never resubmits the text, skips older work or restarts a thread. Native
+queue start rejects active/pending turns. If auto-draining already took the
+entry, no start is needed. A rejected explicit start preserves acceptance and
+reports a diagnostic for `deliver AGENT --check`, rather than making it retryable.
+If other queued work exists, mv2 preserves it and reports that an interrupted
+queue may need native continuation. Receipt checks never start or replay work.
 Approvals remain unanswered by the delivery client. Core bounds transport
 requests, frames and deadlines. Explicit sandbox/approval flags in `args` or
 `resume_args` are applied and verified on bridge resume as described above;

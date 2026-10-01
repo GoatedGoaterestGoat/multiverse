@@ -11,13 +11,14 @@ from multiverse import native, rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import launch_settings
 from multiverse.harnesses.types import LaunchContext, RpcSpec
+from native_safety import isolated_home
 from test_multiverse import BaseTest
 
 
 @unittest.skipUnless(shutil.which('codex'), 'Codex required')
 class CodexDaemonCwdTest(BaseTest):
     def test_config_read_survives_removal_of_original_workspace(self):
-        home = self.work / 'native-home'
+        home = isolated_home(self.work / 'native-home')
         managed = home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())
@@ -40,6 +41,8 @@ class CodexDaemonCwdTest(BaseTest):
         with patch.dict(os.environ, env):
             endpoint = native.start_shared_service(command.shared_service, workspace,
                                                    self.work / 'startup.log', command.unset_env)
+        self.assertFalse((home / 'app-server-daemon/daemon-updater.pid').exists(),
+                         'Disposable test daemons must not start a background updater')
         before = rpc.execute(RpcSpec(endpoint.address, lambda: launch_settings(str(self.work))))
         self.assertEqual(before.state, 'ok', before.reason)
         workspace.rmdir()

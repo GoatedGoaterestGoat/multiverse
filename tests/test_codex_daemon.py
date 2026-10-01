@@ -21,6 +21,7 @@ from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
 from multiverse.store import inbox, read, write
 from multiverse.tools import send
+from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -70,7 +71,7 @@ class CodexDaemonTest(TerminalBase):
         threading.Thread(target=provider.serve_forever, daemon=True).start()
         self.addCleanup(provider.server_close)
         self.addCleanup(provider.shutdown)
-        home = self.work / 'codex-home'
+        home = isolated_home(self.work / 'codex-home')
         managed = home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())

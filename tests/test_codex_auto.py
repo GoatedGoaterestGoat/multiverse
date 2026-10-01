@@ -11,6 +11,7 @@ from multiverse import agents, harnesses, native, runner
 from multiverse.harnesses.types import CommandSpec, NativeResult
 from multiverse.store import append_message, message_record, read, update_message, write
 from multiverse.tools.capabilities import run as capabilities
+from native_safety import isolated_home
 from test_multiverse import TerminalBase, BaseTest, until
 
 
@@ -45,7 +46,7 @@ else:
         self.executable.chmod(0o755)
         self.info = {'socketPath': str(self.address), 'cliVersion': '1', 'appServerVersion': '1'}
         self.config = self.root / 'harnesses/codex/harness.json'
-        self.enterContext(patch.dict(os.environ, {'CODEX_HOME': str(self.work / 'native-home')}))
+        self.enterContext(patch.dict(os.environ, {'CODEX_HOME': str(isolated_home(self.work / 'native-home'))}))
         self.set_case()
 
     def set_case(self, **changes):
