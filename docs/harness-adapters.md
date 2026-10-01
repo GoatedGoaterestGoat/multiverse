@@ -595,7 +595,7 @@ usage, counted once per response ID. It works with or without the bridge. The
 adapter reads each transcript once, then only what was appended.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.286; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.287; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude
