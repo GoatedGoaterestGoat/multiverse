@@ -9,9 +9,12 @@ from .protocol import result, object_field
 
 
 def remote_arguments(argv, context):
-    """Move writable roots and bootstrap from rejected/dropped CLI flags to RPC."""
+    """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)
-    output, roots = [], []
+    output, roots, permissions = [], [], {}
+    permission_flags = {'--sandbox': 'sandbox', '-s': 'sandbox',
+                        '--ask-for-approval': 'approvalPolicy', '-a': 'approvalPolicy',
+                        '--dangerously-bypass-approvals-and-sandbox': 'bypass'}
     bootstrap = json.loads(context.values['bootstrap_json'])
     index = 0
     while index < end:
@@ -19,7 +22,27 @@ def remote_arguments(argv, context):
         flag, equal, value = arg.partition('=')
         if arg.startswith('-c') and not arg.startswith('--') and arg != '-c':
             flag, equal, value = '-c', '=', arg[2:].removeprefix('=')
-        if flag in ('--add-dir', '-c', '--config'):
+        if context.mode == 'resume' and arg[:2] in ('-s', '-a') and len(arg) > 2:
+            flag, equal, value = arg[:2], '=', arg[2:].removeprefix('=')
+        if context.mode == 'resume' and flag in permission_flags:
+            key = permission_flags[flag]
+            if key in permissions:
+                raise ValueError(f'{flag} cannot be used multiple times')
+            if key == 'bypass':
+                if equal:
+                    raise ValueError(f'{flag} does not take a value')
+                permissions[key] = True
+            else:
+                if not equal:
+                    index += 1
+                    if index >= end:
+                        raise ValueError(f'Missing value for {flag}')
+                    value = argv[index]
+                allowed = ('read-only', 'workspace-write', 'danger-full-access') if key == 'sandbox' else ('on-request', 'never')
+                if value not in allowed:
+                    raise ValueError(f'Invalid {flag}: {value!r}; expected one of {", ".join(allowed)}')
+                permissions[key] = value
+        elif flag in ('--add-dir', '-c', '--config'):
             if not equal:
                 index += 1
                 if index >= end:
@@ -51,7 +74,10 @@ def remote_arguments(argv, context):
         else:
             output.append(arg)
         index += 1
-    return [*output, *argv[end:]], bootstrap, list(dict.fromkeys(roots))
+    # Match native CLI precedence when bypass is combined with explicit policies.
+    if permissions.pop('bypass', False):
+        permissions.update(sandbox='danger-full-access', approvalPolicy='never')
+    return [*output, *argv[end:]], bootstrap, list(dict.fromkeys(roots)), permissions
 
 
 def launch_settings(workspace):
@@ -113,6 +139,8 @@ class LaunchProtocol:
             params['config'] = config
         elif not self.native_id or params.get('threadId') != self.native_id:
             raise ValueError('Native resume does not match this launch')
+        else:
+            params.update(self.settings.get('resume_permissions') or {})
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         self.pending = value['id']
@@ -131,6 +159,20 @@ class LaunchProtocol:
             raise ValueError('Native reply returned a different thread ID')
         if not isinstance(thread.get('cwd'), str) or Path(thread['cwd']).resolve() != Path(self.settings['workspace']).resolve():
             raise ValueError('Native thread workspace differs from the saved workspace')
+        permissions = self.settings.get('resume_permissions') or {}
+        for key, expected in permissions.items():
+            actual = observed.get(key)
+            if key == 'sandbox':
+                actual = actual.get('type') if isinstance(actual, dict) else None
+                expected = {'read-only': 'readOnly', 'workspace-write': 'workspaceWrite',
+                            'danger-full-access': 'dangerFullAccess'}[expected]
+            if actual != expected:
+                raise ValueError(f'Native resume did not apply requested {key}: expected {expected}, got {actual}. '
+                                 'An already-loaded thread may retain its existing permissions. Stop this mv2 agent, '
+                                 'close other clients for this thread, let it become idle and wait for native unload '
+                                 '(thread_unload_delay_secs, 60 seconds by default), then resume again. '
+                                 'This launch cannot accept input until its requested grant is verified; '
+                                 'Multiverse will not restart the shared daemon.')
         self.native_id = native_id
         self.bound = True
         return native_id

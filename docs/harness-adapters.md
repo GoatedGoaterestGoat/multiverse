@@ -83,7 +83,9 @@ when required; creates a detached tmux session running `runner.py`; and tags the
 pane with universe, agent and launch IDs. The runner waits up to 15 seconds for
 core's `ready` file, scrubs inherited identities, opens any relay, launches the
 native child, and owns the relay/status watcher until that child exits. A clean
-child exit records `stopped`; a nonzero exit records `failed`. Setup failures
+child exit records `stopped`; a nonzero exit records `failed`. Bridged launches
+remain `starting` until the native reply validates and binds; plain launches
+become `running` when the runner starts the child. Setup failures
 retain the failed record and clean up a created terminal/socket directory.
 Returning from `spawn` means the launch was registered; it does not mean native
 authentication, session binding or the first model turn has finished.
@@ -117,33 +119,67 @@ adapters' original initial prompt. Claude uses its assigned
 UUID, Pi validates its exact session-file header, and Codex requires its bound
 UUID. Built-in adapters never search for the latest conversation.
 
-### Codex resume grants: current gap
+### Codex bridge resume permissions
 
-The guard in `CodexAdapter.resume()` originated in `81eca5c`. In bridge mode it
-rejects permission/profile flags in shared `args` and in `resume_args` before
-native RPC. Putting the bypass flag in `spawn_args` allows spawn but deliberately
-omits it on resume. `LaunchProtocol.outgoing()` currently adds bootstrap on
-`thread/resume` and leaves its grant unchanged. A session started plain with
-`--dangerously-bypass-approvals-and-sandbox` can therefore return through the
-bridge with saved `workspace-write` restrictions, including blocked Unix sockets
-and read-only `.git`, as observed in the development universe.
+Bridge resume accepts `--dangerously-bypass-approvals-and-sandbox`,
+`--sandbox` / `-s` (`read-only`, `workspace-write`, `danger-full-access`) and
+`--ask-for-approval` / `-a` (`on-request`, `never`) in shared `args` or
+`resume_args`. Long `--flag=value` and attached short values are supported.
+The adapter removes these flags from the remote resume CLI arguments and the
+relay applies their explicit values as `sandbox` and `approvalPolicy` on the
+exact `thread/resume` request. Bypass sets `danger-full-access` plus `never`,
+with the same precedence as the native CLI. Malformed/duplicate values fail
+before launching. Spawn arguments and plain launches retain native CLI behavior.
 
-The current app-server accepts `sandbox` and `approvalPolicy` on `thread/resume`
-([protocol documentation](https://learn.chatgpt.com/docs/app-server)). Translating
-an explicit bypass to `sandbox: "danger-full-access"` and
-`approvalPolicy: "never"` in the relay is technically possible. A disposable,
-model-free probe on 2026-10-01 with installed Codex 0.159.3 verified a critical
-distinction: after restarting that isolated app-server, resume applied the new
-grant; rejoining the same already-loaded thread accepted the request but returned
-its existing `workspaceWrite` policy. Both cases kept the exact thread ID. The
-same probe confirmed naming an empty thread and persisting its name across the
-isolated restart.
+The old blanket refusal from `81eca5c` forced bypass into `spawn_args`, which
+omits it on resume. That allowed a plain full-access session to return through
+the bridge with `workspace-write` restrictions, including blocked Unix sockets
+and read-only `.git`. Put grants needed on both spawn and resume in `args`.
+For a trusted environment where full access is intended, for example:
 
-A follow-up permission change needs to translate explicit configured grants,
-preserve saved grants when none are requested, and validate the effective grant
-in the native reply. It also needs an explicit policy for already-loaded threads;
-merely removing the old guard and injecting fields can still silently retain the
-wrong permissions. The naming change does not alter these permission semantics.
+```json
+{"schema": 2, "adapter": "codex", "settings": {
+  "inbox_bridge": true,
+  "args": ["--dangerously-bypass-approvals-and-sandbox"]
+}}
+```
+
+No-flag resume is unchanged: the relay leaves native TUI permission fields as
+received and does not infer a grant from `spawn_args` or local defaults. This
+is not a guarantee that a prior full-access launch stays full-access: native
+TUI settings may restore a different policy. Installed Codex 0.159.3 returned
+to `workspace-write` when the bypass was removed in an isolated test. Explicit
+shared `args` avoids relying on that behavior. Profiles, `--approve-for-me`,
+`--add-dir` and writable-root config overrides remain unsupported on bridge
+resume; use `spawn_args` for those initial settings.
+
+Before accepting the native reply, the relay verifies that each requested
+permission matches the effective `sandbox` and `approvalPolicy` returned by
+app-server. Bridged launches remain in `starting` until validated binding;
+`send` refuses steer/follow-up input while the launch is still binding. A
+mismatch records an actionable runtime error, closes that client connection,
+and prevents new mv2 input for the unvalidated launch. No automatic downgrade,
+empty model turn, turn-time grant fallback, or shared-daemon restart is used.
+
+Codex 0.159.3 applies overrides when loading a thread but can retain the existing
+grant when rejoining an already-loaded thread. If validation fails, stop the
+mv2 agent, close any other clients subscribed to that exact thread, let it
+become inactive and wait for native unload before resuming. The default delay
+is 60 seconds, configurable by native `thread_unload_delay_secs`; both no
+subscribers and inactivity must hold, and a new subscription cancels the timer.
+The native daemon and other threads stay running. See the
+[app-server protocol](https://learn.chatgpt.com/docs/app-server) and the
+[0.159.3 unload implementation](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server/src/request_processors/thread_lifecycle.rs).
+
+Verification uses an installed Codex 0.159.3 TUI, a disposable native home and
+a local scripted provider: a plain full-access launch and two successive
+explicit bridge resumes kept the same native UUID, wrote inside `.git` and
+bound a Unix socket. Existing no-flag native timing tests retain their
+workspace-write behavior. Separate protocol tests cover an ignored loaded
+thread grant, missing effective permissions, malformed flags, plain argv,
+no-flag pass-through, and input refusal before binding. A model-free native
+probe also verified idle unsubscribe/unload followed by a changed resume grant
+without restarting the daemon.
 
 ## Shared tools and delivery results
 
@@ -230,7 +266,8 @@ feature methods directly, with no `control`, `native_capabilities`, `probes`, or
 a separate adapter method. Binding and built-in resume use the shared
 `normalize_session_id()` UUID helper; it validates an ID without discovering a
 session. Pi additionally checks its exact session-file header, while Codex
-checks unsupported resume permission overrides before any native RPC.
+checks unsupported profile/directory resume overrides before any native RPC
+and verifies supported explicit grants against the native launch reply.
 
 ## Configuration and compatibility
 
@@ -283,11 +320,10 @@ Exact thread ID/workspace are checked before queueing or steering. Urgent busy
 input uses `turn/steer` with `expectedTurnId`; normal/idle input uses
 `thread/queue/add`. Races return errors without fresh-turn or resume fallback.
 Approvals remain unanswered by the delivery client. Core bounds transport
-requests, frames and deadlines. Multiverse currently preserves saved permissions
-on bridge resume and rejects explicit permission/profile flags in `args` or
-`resume_args`; put initial grants in `spawn_args`. This is an adapter restriction,
-not a claim that current app-server cannot accept resume overrides. Overrides
-are diagnosed, never silently removed. Whole-table `shell_environment_policy`
+requests, frames and deadlines. Explicit sandbox/approval flags in `args` or
+`resume_args` are applied and verified on bridge resume as described above;
+without them, native TUI permission fields pass through unchanged. Unsupported
+profile/directory resume overrides are diagnosed, never silently removed. Whole-table `shell_environment_policy`
 CLI overrides are rejected in bridge mode; individual keys remain supported.
 Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
 `developer_instructions` CLI override from remote thread requests. The adapter
@@ -305,7 +341,8 @@ The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resum
 requests, preserving existing developer instructions. Initial writable roots from
 mv2, user arguments and native configuration are combined in the thread request,
 so external state directories remain supported without the rejected CLI flag.
-Resume keeps the saved permission grant. Other traffic, including approvals,
+Resume applies and verifies explicit sandbox/approval grants when configured.
+Other traffic, including approvals,
 passes through to the native TUI. A malformed launch request gets an explicit
 RPC error and a runtime diagnostic; it is never forwarded without its bootstrap.
 The relay records the exact thread ID/workspace from the matching native reply

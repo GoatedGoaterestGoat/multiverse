@@ -25,12 +25,11 @@ class CodexAdapter(ConfiguredAdapter):
     def resume(self, session, context):
         settings = getattr(self, 'settings', {})
         if settings.get('inbox_bridge'):
-            permission_flags = {'--sandbox', '-s', '--ask-for-approval', '-a', '--add-dir', '--approve-for-me',
-                                '--dangerously-bypass-approvals-and-sandbox', '--profile', '-p'}
+            permission_flags = {'--add-dir', '--approve-for-me', '--profile', '-p'}
             args = [*settings.get('args', []), *settings.get('resume_args', [])]
-            if any(arg.split('=', 1)[0] in permission_flags for arg in args):
-                raise ValueError('Codex native remote resume rejects explicit permission/profile overrides. '
-                                 'Use spawn_args for initial grants; native resume retains saved permissions. '
+            if any(arg.split('=', 1)[0] in permission_flags or arg.startswith('-p') and not arg.startswith('--') for arg in args):
+                raise ValueError('Codex bridge resume does not support writable-directory, profile or automatic-review overrides. '
+                                 'Use spawn_args for these initial grants; resume uses native saved permissions and TUI settings. '
                                  'Your configuration has not been changed.')
         return super().resume(session, context)
 
@@ -40,7 +39,7 @@ class CodexAdapter(ConfiguredAdapter):
             return command
         argv = list(command.argv)
         from .launch import remote_arguments
-        argv, bootstrap, roots = remote_arguments(argv, context)
+        argv, bootstrap, roots, permissions = remote_arguments(argv, context)
         position = argv.index('--') if '--' in argv else len(argv)
         workspace_policy = {}
         options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
@@ -80,6 +79,7 @@ class CodexAdapter(ConfiguredAdapter):
                                {'bootstrap': bootstrap, 'roots': roots, 'workspace_policy': workspace_policy,
                                 'workspace': context.values['workspace'],
                                 'name': context.values['name'],
+                                'resume_permissions': permissions,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None}),
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
@@ -150,4 +150,6 @@ class CodexAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
             return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID')
+        if session.state != 'running':
+            return NativeResult('unavailable', 'Native launch is still binding; retry after validation completes, or inspect runtime.json for a launch error')
         return executor.rpc(RpcSpec(session.endpoint.address, partial(send_message, session, message, mode)))

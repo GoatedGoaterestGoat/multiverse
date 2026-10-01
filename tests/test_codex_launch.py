@@ -56,6 +56,69 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="agent"', command.argv)
         self.assertEqual(executor.rpc.call_count, 1)
 
+    def test_resume_translates_only_explicit_permission_flags(self):
+        cases = [
+            (['--dangerously-bypass-approvals-and-sandbox'], {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
+            (['--sandbox', 'read-only', '--ask-for-approval', 'on-request'], {'sandbox': 'read-only', 'approvalPolicy': 'on-request'}),
+            (['--sandbox=workspace-write', '--ask-for-approval=never'], {'sandbox': 'workspace-write', 'approvalPolicy': 'never'}),
+            (['-s', 'danger-full-access', '-a', 'never'], {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
+            (['-sread-only', '-a=on-request'], {'sandbox': 'read-only', 'approvalPolicy': 'on-request'}),
+            (['-sworkspace-write'], {'sandbox': 'workspace-write'}),
+            (['-anever'], {'approvalPolicy': 'never'}),
+            (['--dangerously-bypass-approvals-and-sandbox', '-sread-only', '-aon-request'],
+             {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}),
+            ([], {}),
+        ]
+        for preference in ('args', 'resume_args'):
+            for flags, expected in cases:
+                with self.subTest(preference=preference, flags=flags):
+                    settings = {'inbox_bridge': True, preference: flags}
+                    adapter = CodexAdapter.configured('codex', settings)
+                    session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+                    command = adapter.resume(session, self.context)
+                    self.assertEqual(command.rpc_proxy.settings['resume_permissions'], expected)
+                    self.assertEqual(command.argv[-1], self.native_id)
+                    for flag in flags:
+                        self.assertNotIn(flag, command.argv)
+                    self.assertEqual(settings[preference], flags)
+        # No resume grant is inferred from a spawn-only preference.
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': True,
+                                          'spawn_args': ['--dangerously-bypass-approvals-and-sandbox']})
+        self.assertEqual(adapter.resume(session, self.context).rpc_proxy.settings['resume_permissions'], {})
+
+    def test_plain_permission_arguments_are_unchanged(self):
+        flags = ['--dangerously-bypass-approvals-and-sandbox']
+        adapter = CodexAdapter.configured('codex', {'args': flags})
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+        for command in (adapter.spawn(self.context), adapter.resume(session, self.context)):
+            self.assertIn(flags[0], command.argv)
+            self.assertIsNone(command.rpc_proxy)
+
+    def test_malformed_resume_permission_flags_fail_before_native_calls(self):
+        for flags in (['--sandbox'], ['--sandbox=wrong'], ['-s'], ['-sread-only', '--sandbox=workspace-write'],
+                      ['-a'], ['--ask-for-approval=wrong'], ['-anever', '-aon-request'],
+                      ['--dangerously-bypass-approvals-and-sandbox=true']):
+            with self.subTest(flags=flags):
+                adapter = CodexAdapter.configured('codex', {'inbox_bridge': True, 'resume_args': flags})
+                executor = Mock()
+                session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+                with self.assertRaises(ValueError):
+                    adapter.resume(session, replace(self.context, executor=executor))
+                executor.rpc.assert_not_called()
+
+    def test_send_waits_for_verified_launch_including_queued_followups(self):
+        from multiverse.harnesses.types import Message
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id, state='starting',
+                                endpoint=self.context.endpoint)
+        for mode in ('steer', 'follow-up'):
+            executor = Mock()
+            result = adapter.send(session, Message('id', 'work', delivery=mode), executor)
+            self.assertEqual(result.state, 'unavailable')
+            self.assertIn('still binding', result.reason)
+            executor.rpc.assert_not_called()
+        self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'unavailable')
+
     def test_plain_launch_unchanged(self):
         command = CodexAdapter.configured('codex', {}).spawn(self.context)
         self.assertIn('--add-dir', command.argv)
@@ -71,6 +134,18 @@ class CodexLaunchTest(unittest.TestCase):
         protocol.outgoing({'id': 2, 'method': 'thread/resume', 'params': {'threadId': self.native_id}})
         with self.assertRaisesRegex(ValueError, 'workspace'):
             protocol.incoming({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': '/other'}}})
+
+    def test_resume_rejects_missing_or_mismatched_effective_grant_fields(self):
+        for policy in ({}, {'sandbox': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'on-request'},
+                       {'sandbox': None, 'approvalPolicy': 'never'}):
+            with self.subTest(policy=policy):
+                protocol = LaunchProtocol({'bootstrap': 'b', 'roots': [], 'workspace': '/workspace',
+                                           'native_id': self.native_id,
+                                           'resume_permissions': {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'}})
+                protocol.outgoing({'id': 1, 'method': 'thread/resume', 'params': {'threadId': self.native_id}})
+                with self.assertRaisesRegex(ValueError, 'did not apply requested'):
+                    protocol.incoming({'id': 1, 'result': {'thread': {'id': self.native_id, 'cwd': '/workspace'}, **policy}})
+                self.assertFalse(protocol.bound)
 
 
 class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
@@ -150,14 +225,17 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.naming[-1]['params'], {'threadId': self.native_id, 'name': 'relay-agent'})
         self.assertEqual(self.errors, [])
 
-    async def test_resume_injects_bootstrap_but_preserves_saved_grants(self):
+    async def test_resume_without_flags_preserves_native_tui_policy_fields(self):
         self.settings['native_id'] = self.native_id
         await self.connect()
         await self.client.send(json.dumps({'id': 3, 'method': 'thread/resume', 'params': {
-            'threadId': self.native_id, 'config': {'model_reasoning_effort': 'high'}}}))
+            'threadId': self.native_id, 'config': {'model_reasoning_effort': 'high'},
+            'sandbox': 'workspace-write', 'approvalPolicy': 'on-request'}}))
         request = json.loads(await self.receive())
         self.assertEqual(request['params']['developerInstructions'], 'MV2 bootstrap')
         self.assertEqual(request['params']['config'], {'model_reasoning_effort': 'high'})
+        self.assertEqual(request['params']['sandbox'], 'workspace-write')
+        self.assertEqual(request['params']['approvalPolicy'], 'on-request')
         response = json.dumps({'id': 3, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
         await self.upstream.send(response)
         self.assertEqual(await self.client.recv(), response)
@@ -175,6 +253,36 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
         await self.client.send('{"id":4,"method":"future/method"}')
         self.assertEqual(await self.receive(), '{"id":4,"method":"future/method"}')
+
+    async def test_resume_applies_grants_and_validates_native_effective_reply(self):
+        self.settings.update(native_id=self.native_id,
+                             resume_permissions={'sandbox': 'danger-full-access', 'approvalPolicy': 'never'})
+        await self.connect()
+        await self.client.send(json.dumps({'id': 3, 'method': 'thread/resume', 'params': {
+            'threadId': self.native_id, 'sandbox': None, 'approvalPolicy': None}}))
+        request = json.loads(await self.receive())
+        self.assertEqual(request['params']['sandbox'], 'danger-full-access')
+        self.assertEqual(request['params']['approvalPolicy'], 'never')
+        response = json.dumps({'id': 3, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)},
+                                                 'sandbox': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never'}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertTrue(self.protocol.bound)
+        self.assertEqual(self.errors, [])
+
+    async def test_ignored_loaded_thread_grant_does_not_bind_or_name(self):
+        self.settings.update(native_id=self.native_id,
+                             resume_permissions={'sandbox': 'danger-full-access', 'approvalPolicy': 'never'})
+        await self.connect()
+        await self.client.send(json.dumps({'id': 3, 'method': 'thread/resume', 'params': {'threadId': self.native_id}}))
+        await self.receive()
+        await self.upstream.send(json.dumps({'id': 3, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)},
+                                              'sandbox': {'type': 'workspaceWrite'}, 'approvalPolicy': 'never'}}))
+        await asyncio.wait_for(self.client.wait_closed(), 2)
+        self.assertIn('did not apply requested sandbox', self.errors[-1])
+        self.assertNotIn('native_session_id', read(self.directory / 'properties.json'))
+        self.assertFalse(self.protocol.bound)
+        self.assertEqual(self.naming, [])
 
     async def test_naming_timeout_is_bounded_and_does_not_fail_launch(self):
         self.name_reply = None

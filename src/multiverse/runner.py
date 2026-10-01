@@ -83,8 +83,11 @@ class StatusWatcher:
             while not self.stopped.is_set():
                 facts = read(self.agent_dir / 'runtime.json')
                 properties = read(self.agent_dir / 'properties.json')
-                if facts.get('launch_id') != self.launch_id or facts.get('state') != 'running':
+                if facts.get('launch_id') != self.launch_id or facts.get('state') not in ('starting', 'running'):
                     return
+                if facts.get('state') == 'starting':
+                    await asyncio.sleep(.1)
+                    continue
                 if task is not None:
                     if properties.get('native_session_id') != native_id or task.done():
                         return
@@ -134,13 +137,18 @@ def main():
             if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
                 raise ValueError('Native control socket does not belong to this launch')
             service_dir = endpoint.parent
-        update_runtime(agent_dir, launch.name, state="running", status="unknown")
+        # A bridge resume already has a saved ID, but it must validate the new
+        # native reply (including requested grants) before accepting more input.
+        update_runtime(agent_dir, launch.name, state="starting" if request.get('rpc_proxy') else "running", status="unknown")
         if request.get('rpc_proxy'):
             from multiverse import harnesses, rpc
             properties = read(agent_dir / 'properties.json')
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
+            def bound(native_id):
+                bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
+                update_runtime(agent_dir, launch.name, state='running')
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
-                lambda native_id: bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name),
+                bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
                 UsagePublisher(agent_dir, launch.name))
             proxy.start()

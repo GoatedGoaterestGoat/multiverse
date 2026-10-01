@@ -177,7 +177,7 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
         await self.connection.wait_closed()
         self.assertEqual(self.observed, ['idle', 'unknown'])
 
-    def setup_runtime(self, bound=True):
+    def setup_runtime(self, bound=True, state='running'):
         self.agent_dir = self.root / 'state/agents/agent'
         self.agent_dir.mkdir(parents=True)
         config = self.root / 'harnesses/codex/harness.json'
@@ -187,7 +187,7 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
         if bound:
             self.properties['native_session_id'] = self.session.native_id
         write(self.agent_dir / 'properties.json', self.properties)
-        write(self.agent_dir / 'runtime.json', {'launch_id': 'launch', 'state': 'running', 'status': 'unknown',
+        write(self.agent_dir / 'runtime.json', {'launch_id': 'launch', 'state': state, 'status': 'unknown',
               'control_endpoint': {'transport': 'unix-websocket', 'address': self.socket}})
         self.watcher = StatusWatcher(self.agent_dir, 'launch', self.root)
         self.watcher.start()
@@ -216,6 +216,14 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.runtime_status(), 'unknown')
         self.assertEqual(len(self.requests), 3)
 
+    async def test_resume_watcher_waits_for_launch_validation_with_saved_id(self):
+        self.setup_runtime(state='starting')
+        await asyncio.sleep(.15)
+        self.assertEqual(self.requests, [])
+        facts = read(self.agent_dir / 'runtime.json')
+        write(self.agent_dir / 'runtime.json', {**facts, 'state': 'running'})
+        await self.eventually(lambda: self.runtime_status() == 'idle')
+
     async def test_old_launch_cannot_overwrite_new_runtime(self):
         self.setup_runtime()
         await self.eventually(lambda: self.runtime_status() == 'idle')
@@ -225,6 +233,33 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
 
 
 class RunnerLifetimeTest(unittest.TestCase):
+    def test_bridge_is_starting_until_relay_accepts_binding(self):
+        from multiverse import runner
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            agent_id, launch_id, native_id = str(uuid4()), str(uuid4()), str(uuid4())
+            directory = root / 'state/agents' / agent_id
+            launch = directory / 'launches' / launch_id
+            launch.mkdir(parents=True)
+            write(directory / 'properties.json', {'id': agent_id, 'name': 'worker', 'harness': 'codex', 'native_session_id': native_id})
+            write(directory / 'runtime.json', {'launch_id': launch_id, 'state': 'starting'})
+            write(launch / 'request.json', {'argv': ['fake-codex'],
+                  'rpc_proxy': {'socket_path': '/tmp/mv2-native-' + launch_id + '/rpc.sock', 'settings': {}},
+                  'env': {'MV2_CLI': str(root / 'bin/mv2'), 'MV2_UNIVERSE': str(root)}})
+            (launch / 'ready').touch()
+            process = Mock(pid=123)
+            process.poll.return_value = 0
+            def waited():
+                self.assertEqual(read(directory / 'runtime.json')['state'], 'starting')
+                proxy_factory.call_args.args[2](native_id)
+                self.assertEqual(read(directory / 'runtime.json')['state'], 'running')
+                return 0
+            process.wait.side_effect = waited
+            with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                 patch.object(runner.subprocess, 'Popen', return_value=process), \
+                 patch('multiverse.harnesses.load'), patch('multiverse.rpc.LaunchProxy') as proxy_factory:
+                self.assertEqual(runner.main(), 0)
+
     def test_watcher_follows_terminal_exit_and_signal_but_plain_has_none(self):
         from multiverse import runner
         for bridge, outcome in [(False, 0), (True, 0), (True, 1), (True, SystemExit(143))]:
