@@ -504,6 +504,22 @@ Multiverse launch. The relay closes with the launch and never restarts the share
 daemon or reconnects automatically. Plain launches have no relay. The development
 template, like base and testing, uses auto; existing unset profiles also try the bridge on their next launch.
 
+The runner records `native_relay.state=ready` after binding. Loss of the bound
+TUI's relay connection (or an upstream connection failure before binding) records
+`native_relay.state=lost`, with a reason, transport detail and timestamp. A live
+agent then shows `STATUS disconnected` in list and the dashboard; the inspector
+shows recovery guidance. Secondary-client failures and optional naming errors do
+not mark a healthy primary connection lost. An ordinary terminal exit still
+produces `LIVE stopped` and `STATUS -`.
+
+Relay loss is sticky for that launch. New sends fail before submission and stay
+saved for explicit retry; `--wait` returns failure immediately. Already accepted
+messages are never replayed automatically. Exact-thread receipt checks and native
+cancellation remain available independently of the relay. Kill the launch, then
+resume its saved conversation; if the launch never bound a thread, kill it and
+spawn again. Native work may survive a disconnected TUI. The relay never restarts
+the daemon or reconnects to conceal a broken terminal session.
+
 Codex bridge context usage comes from the TUI connection's native
 `thread/tokenUsage/updated` notifications. The adapter interprets only the exact
 thread after its launch reply has validated the ID and workspace; the core relay
@@ -546,7 +562,9 @@ by app-server, so the watcher filters by the exact bound thread ID; it never cal
 read checks both thread ID and saved workspace before accepting observations.
 `active` with no flags maps to `working`; `waitingOnApproval` or
 `waitingOnUserInput` maps to `waiting`; `idle` maps to `idle`. Other states,
-unbound sessions, transport/protocol failures and plain launches remain `unknown`.
+unbound sessions, watcher transport/protocol failures and plain launches remain `unknown`.
+The separate primary-relay loss described above overrides that observation with
+`disconnected` while the native process is alive.
 The watcher never answers approvals or questions. It closes when the terminal
 launch ends and clears its observation on disconnection; it never restarts the
 daemon or reconnects automatically. Existing running launches need an explicit

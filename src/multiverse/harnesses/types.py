@@ -125,6 +125,7 @@ class SessionHandle:
     status: str = 'unknown'
     native_mode: Mapping[str, Any] | None = None
     native_versions: Mapping[str, str] | None = None
+    native_relay: Mapping[str, Any] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -134,7 +135,7 @@ class SessionHandle:
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
                    runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
-                   runtime.get('native_versions'))
+                   runtime.get('native_versions'), runtime.get('native_relay'))
 
 @dataclass(frozen=True)
 class Message:

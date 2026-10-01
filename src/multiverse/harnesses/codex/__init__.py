@@ -177,6 +177,9 @@ class CodexAdapter(ConfiguredAdapter):
         result['get_delivery'] = replace(support, required=False)
         if session.endpoint:
             result['stop'] = replace(support, required=False)
+        if session.native_relay and session.native_relay.get('state') == 'lost':
+            result['send_steer'] = result['send_follow_up'] = Capability(
+                'unavailable', session.native_relay['reason'], required=True)
         if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
         return result
@@ -201,6 +204,8 @@ class CodexAdapter(ConfiguredAdapter):
         return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
+        if session.native_relay and session.native_relay.get('state') == 'lost':
+            return NativeResult('unavailable', session.native_relay['reason'])
         mode = message.delivery
         if mode not in ('steer', 'follow-up'):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')

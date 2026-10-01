@@ -138,11 +138,14 @@ class LaunchProxy:
     POST_BIND_TIMEOUT = 3
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
-                 publish_usage=lambda usage: None):
+                 publish_usage=lambda usage: None, record_lost=lambda reason: None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
         self.publish_usage = publish_usage
+        self.record_lost = record_lost
+        self.owner = None
+        self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
         self.error = None
         self.thread = threading.Thread(target=self._run, name='native-launch-proxy', daemon=True)
@@ -165,11 +168,21 @@ class LaunchProxy:
         except (OSError, ValueError):
             pass  # Outdated launches cannot write diagnostics into a new runtime.
 
+    def _lost(self, reason):
+        if self.stopped.is_set() or self.lost is not None:
+            return
+        self.lost = reason
+        try:
+            self.record_lost(reason)
+        except (OSError, ValueError):
+            pass
+
     def _run(self):
         try:
             asyncio.run(self._serve())
         except Exception as error:
             self.error = error
+            self._lost(str(error))
         finally:
             self.ready.set()
 
@@ -182,11 +195,17 @@ class LaunchProxy:
                 await asyncio.sleep(.1)
 
     async def _connection(self, client):
+        if self.lost is not None:
+            await client.close(code=1011, reason='Native relay lost; end this launch and resume the agent')
+            return
+        ended = None
+        failure = None
         try:
             async with unix_connect(self.spec['upstream_path'], compression=None, open_timeout=5,
                                     close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE,
                                     max_queue=self.MAX_QUEUE) as upstream:
                 async def forward(source, target, outgoing):
+                    nonlocal ended
                     try:
                         async for payload in source:
                             try:
@@ -211,6 +230,7 @@ class LaunchProxy:
                                 native_id = self.protocol.incoming(value)
                                 if native_id is not None:
                                     self.bind(native_id)
+                                    self.owner = client
                                     after_bind = getattr(self.protocol, 'after_bind', None)
                                     if after_bind is not None:
                                         try:
@@ -237,6 +257,8 @@ class LaunchProxy:
                             await target.send(payload)
                     finally:
                         code = source.close_code
+                        if ended is None:
+                            ended = ('terminal' if outgoing else 'daemon', code, source.close_reason)
                         if code is not None:
                             await target.close(code=code if code != 1006 else 1011,
                                                reason=source.close_reason or '')
@@ -251,6 +273,15 @@ class LaunchProxy:
                         task.cancel()
                     await asyncio.gather(*tasks, return_exceptions=True)
         except (OSError, ValueError, TypeError, WebSocketException) as error:
+            failure = str(error)
             self._record_error(str(error))
             # A relay never fabricates answers to native approval requests.
             await client.close(code=1011, reason='Native launch relay failed; see runtime.json')
+        finally:
+            # Only the bound TUI connection owns launch health. A secondary
+            # client's failure must not strand a healthy primary connection.
+            normal_exit = ended and ended[0] == 'terminal' and ended[1] in (1000, 1001)
+            if (self.owner is client or self.owner is None) and not normal_exit:
+                if failure or ended:
+                    reason = failure or f'{ended[0]} connection closed (code {ended[1]}): {ended[2] or "no reason supplied"}'
+                    self._lost(reason)

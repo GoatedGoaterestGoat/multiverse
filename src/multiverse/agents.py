@@ -53,9 +53,12 @@ def listing(root, recursive=False):
                 observation = observe(properties, facts, snapshots)
                 from . import native, usage
                 measured = native.usage_snapshot(scope, properties, facts)
+                relay = facts.get('native_relay') or {}
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
-                             "status": facts.get("status", "unknown") if observation["live"] == "alive" else "-",
+                             "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
+                                       if observation["live"] == "alive" else "-",
+                             "connection_error": relay.get('reason') if relay.get('state') == 'lost' else None,
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
@@ -288,6 +291,8 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+        if (facts.get('native_relay') or {}).get('state') == 'lost':
+            return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
         running = facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
         session = SessionHandle.from_records(result, facts, agent_dir)

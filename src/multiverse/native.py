@@ -400,7 +400,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 receipt = {**receipt, 'state': 'unknown', 'reason': 'Previous submission was interrupted; acceptance unknown'}
                 update_message(directory, message_id, submission_state='unknown')
             return {**receipt, 'reused': True, 'ok': receipt['state'] not in ('error', 'unavailable', 'unknown')}
-        if executor.facts.get('startup_delivery') == 'waiting' and observe(executor.properties, executor.facts)['live'] == 'alive':
+        relay_lost = (session.native_relay or {}).get('state') == 'lost'
+        if not relay_lost and executor.facts.get('startup_delivery') == 'waiting' and observe(executor.properties, executor.facts)['live'] == 'alive':
             update_message(directory, message_id, submission_state='pending', deferred_launch_id=session.launch_id,
                            delivery_method='native', target_session=target or session.native_id)
             return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}

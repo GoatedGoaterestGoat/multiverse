@@ -37,6 +37,23 @@ class UsagePublisher:
             pass  # A stale launch or unavailable runtime cannot affect native work.
 
 
+class RelayPublisher:
+    """Keep fatal transport loss separate from optional launch diagnostics."""
+    def __init__(self, agent_dir, launch_id):
+        self.agent_dir, self.launch_id = agent_dir, launch_id
+
+    def __call__(self, detail):
+        facts = runtime(self.agent_dir)
+        if facts.get('launch_id') != self.launch_id or facts.get('state') not in ('starting', 'running'):
+            return
+        bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+        recovery = ('Kill then resume the agent; native work may still be running.' if bound else
+                    'Kill this unbound launch and spawn again.')
+        reason = 'Native relay lost. ' + recovery
+        update_runtime(self.agent_dir, self.launch_id, status='unknown', native_relay={
+            'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()})
+
+
 class StatusWatcher:
     """Core-owned observer, bounded by one terminal launch and exact binding."""
     def __init__(self, agent_dir, launch_id, root):
@@ -200,11 +217,11 @@ def main():
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             def bound(native_id):
                 bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
-                update_runtime(agent_dir, launch.name, state='running')
+                update_runtime(agent_dir, launch.name, state='running', native_relay={'state': 'ready'})
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
-                UsagePublisher(agent_dir, launch.name))
+                UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name))
             try:
                 proxy.start()
             except Exception as error:
@@ -225,7 +242,7 @@ def main():
                 # atomically with disabling the startup queue for future senders.
                 with lock(agent_dir / '.launch.lock'):
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
-                                   startup_delivery=None, native_mode=selection, error=None)
+                                   startup_delivery=None, native_mode=selection, native_relay=None, error=None)
                     from multiverse.native import end_startup_messages
                     end_startup_messages(agent_dir, launch.name,
                         'Launch selected plain mode before delivery; message saved. '

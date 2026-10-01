@@ -14,7 +14,7 @@ from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 12), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]

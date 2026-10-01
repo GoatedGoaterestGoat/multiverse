@@ -221,6 +221,18 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Mode: bridge (required)', state)
             self.assertIn('Versions: CLI 0.159.3 / daemon 0.160.0 (different)', state)
 
+    async def test_relay_loss_is_visible_in_status_and_inspector(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.selected['status'] = 'disconnected'
+            self.app.selected['runtime'] = {'native_relay': {'state': 'lost',
+                'reason': 'Native relay lost. Kill then resume the agent.', 'detail': 'daemon connection closed'}}
+            self.assertEqual(self.app.cell(self.app.selected, 'status').plain, 'disconnected')
+            self.app.action_preview()
+            state = str(self.app.query_one('#inspect-state', Static).render())
+            self.assertIn('Native relay lost. Kill then resume', state)
+            self.assertIn('daemon connection closed', state)
+
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]
         async with self.app.run_test(size=(110, 28)) as pilot:

@@ -481,7 +481,7 @@ class MultiverseApp(App):
         value = clean(row.get(field, "—"))
         color = {"alive": "#a6e3a1", "ending": "#fab387", "stopped": "#7f849c", "dormant": "#7f849c", "unknown": "#f9e2af",
                  "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
-                 "waiting": "#fab387"}.get(value, "#a6adc8")
+                 "waiting": "#fab387", "disconnected": "bold #f38ba8"}.get(value, "#a6adc8")
         if field == "context" and row.get("context_level"):
             return Text(value, style={"warn": "#f9e2af", "high": "bold #f38ba8"}[row["context_level"]])
         if field == "status" and value == "waiting":

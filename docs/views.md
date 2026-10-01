@@ -22,6 +22,12 @@ reason. It also shows the CLI and daemon versions recorded at launch preparation
 highlighting differences without blocking the bridge. Opening the inspector does
 not retry bridge startup, poll versions or change the mode.
 
+A lost Codex terminal relay shows `STATUS disconnected` in red while `LIVE`
+still describes the process. The inspector shows the connection failure and
+recovery guidance: kill the launch, then resume its saved conversation. New
+messages are refused and remain saved for explicit retry. Native receipt checks
+and cancellation can still reach the exact thread if the daemon is available.
+
 `K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
 `k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer
 shows `K Kill`; `d` still deletes to trash and appears in the `?` help screen.

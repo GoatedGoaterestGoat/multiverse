@@ -202,6 +202,7 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         self.naming = []
         self.name_reply = {'result': {}}
         self.errors = []
+        self.losses = []
         self.connected = asyncio.Event()
         async def server(connection):
             if not self.connected.is_set():
@@ -233,13 +234,61 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await self.server.wait_closed()
         self.temp.cleanup()
 
-    async def connect(self):
+    async def connect(self, expect_upstream=True):
         self.protocol = LaunchProtocol(self.settings)
         self.proxy = rpc.LaunchProxy(self.spec, self.protocol,
-            lambda native_id: agents.bind_session(self.root, 'agent', native_id, 'launch'), self.errors.append)
+            lambda native_id: agents.bind_session(self.root, 'agent', native_id, 'launch'), self.errors.append,
+            record_lost=self.losses.append)
         await asyncio.to_thread(self.proxy.start)
         self.client = await unix_connect(self.spec['socket_path'], max_size=64 * 1024 * 1024)
-        await asyncio.wait_for(self.connected.wait(), 2)
+        if expect_upstream:
+            await asyncio.wait_for(self.connected.wait(), 2)
+
+    async def bind_primary(self):
+        await self.connect()
+        await self.client.send('{"id":2,"method":"thread/start","params":{}}')
+        await self.receive()
+        response = json.dumps({'id': 2, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+
+    async def test_primary_daemon_loss_is_sticky_and_does_not_reconnect(self):
+        await self.bind_primary()
+        await self.upstream.close(code=1001, reason='daemon shutdown')
+        await asyncio.wait_for(self.client.wait_closed(), 2)
+        await asyncio.sleep(.05)
+        self.assertEqual(len(self.losses), 1)
+        self.assertIn('daemon shutdown', self.losses[0])
+        async with unix_connect(self.spec['socket_path']) as retry:
+            await asyncio.wait_for(retry.wait_closed(), 2)
+            self.assertEqual(retry.close_code, 1011)
+            self.assertIn('resume', retry.close_reason)
+        self.assertEqual(len(self.losses), 1)
+
+    async def test_rejected_secondary_launch_and_disconnect_do_not_lose_primary(self):
+        await self.bind_primary()
+        async with unix_connect(self.spec['socket_path']) as secondary:
+            await secondary.send('{"id":4,"method":"thread/start","params":{}}')
+            self.assertIn('error', json.loads(await secondary.recv()))
+        await asyncio.sleep(.05)
+        self.assertEqual(self.losses, [])
+        await self.client.send('{"id":8,"method":"future/method"}')
+        self.assertEqual(await self.receive(), '{"id":8,"method":"future/method"}')
+
+    async def test_missing_daemon_before_binding_reports_lost(self):
+        Path(self.spec['upstream_path']).unlink()
+        await self.connect(expect_upstream=False)
+        await asyncio.wait_for(self.client.wait_closed(), 2)
+        await asyncio.sleep(.05)
+        self.assertEqual(len(self.losses), 1)
+        self.assertIn('No such file', self.losses[0])
+
+    async def test_normal_bound_terminal_exit_is_not_a_relay_failure(self):
+        await self.bind_primary()
+        await self.client.close(code=1000, reason='terminal exit')
+        await asyncio.wait_for(self.upstream.wait_closed(), 2)
+        await asyncio.sleep(.05)
+        self.assertEqual(self.losses, [])
 
     async def receive(self):
         return await asyncio.wait_for(self.received.get(), 2)

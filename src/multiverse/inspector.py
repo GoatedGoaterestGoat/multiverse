@@ -91,6 +91,10 @@ class Inspector(Vertical):
                 if selection.get('fallback_reason'):
                     state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
             versions = row.get('runtime', {}).get('native_versions')
+            relay = row.get('runtime', {}).get('native_relay') or {}
+            if relay.get('state') == 'lost':
+                state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style='bold #f38ba8')
+                state.append('\n' + clean(relay.get('detail', '')), style='#f9e2af')
             if versions:
                 mismatch = versions['cli'] != versions['daemon']
                 state.append(f'\nVersions: CLI {clean(versions["cli"])} / daemon {clean(versions["daemon"])}'
