@@ -115,9 +115,15 @@ class LaunchProtocol:
         self.native_id = settings.get('native_id')
         self.pending = None
         self.bound = False
+        self.prompt_request = None
+        self.prompt_submitted = False
+        self.prompt_error = None
 
     def outgoing(self, value):
         method = value.get('method')
+        if (method == 'turn/start' and 'id' in value and self.bound and not self.prompt_submitted
+                and self.prompt_request is None and (value.get('params') or {}).get('threadId') == self.native_id):
+            self.prompt_request = value['id']
         if method == 'thread/fork':
             raise ValueError('Fork into a separate Multiverse launch to preserve session identity')
         if method not in ('thread/start', 'thread/resume') or 'id' not in value:
@@ -147,6 +153,13 @@ class LaunchProtocol:
         return {**value, 'params': params}
 
     def incoming(self, value):
+        if 'method' not in value and self.prompt_request is not None and value.get('id') == self.prompt_request:
+            self.prompt_request = None
+            observed = result(value)
+            if isinstance(observed, NativeResult):
+                self.prompt_error = observed.reason
+            else:
+                self.prompt_submitted = True
         if 'method' in value or self.pending is None or value.get('id') != self.pending:
             return None
         self.pending = None

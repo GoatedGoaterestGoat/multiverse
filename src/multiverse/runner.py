@@ -106,6 +106,52 @@ class StatusWatcher:
             self._publish('unknown')
 
 
+class StartupDelivery:
+    """Deliver this launch's durable startup queue once its bridge is ready."""
+    def __init__(self, agent_dir, launch_id, root, prompt_protocol=None):
+        self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
+        self.prompt_protocol = prompt_protocol
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='startup-delivery', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join()
+
+    def _run(self):
+        from multiverse import agents, harnesses, native
+        error = 'Launch ended before startup delivery; use deliver AGENT --retry'
+        try:
+            adapter = harnesses.load(self.root, read(self.agent_dir / 'properties.json')['harness'])
+            while not self.stopped.is_set():
+                result = agents.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5, include_delivery=False)
+                if result['ready']:
+                    if self.prompt_protocol is not None:
+                        if self.prompt_protocol.prompt_error:
+                            error = 'Interactive starting prompt failed: ' + self.prompt_protocol.prompt_error
+                            break
+                        if not self.prompt_protocol.prompt_submitted:
+                            self.stopped.wait(.05)
+                            continue
+                    error = None
+                    break
+                if not result.get('timed_out'):
+                    error = result['error'] + '; startup messages remain saved for deliver AGENT --retry'
+                    break
+        except Exception as failure:
+            error = f'Startup delivery failed: {failure}; messages remain saved for deliver AGENT --check'
+        try:
+            native.flush_startup(self.root, self.agent_dir, self.launch_id, error)
+        except Exception as failure:
+            try:
+                update_runtime(self.agent_dir, self.launch_id, startup_delivery='failed', delivery_error=str(failure))
+            except (OSError, ValueError):
+                pass
+
+
 def main():
     launch = Path(sys.argv[1])
     agent_dir = launch.parent.parent
@@ -113,6 +159,8 @@ def main():
     service_dir = None
     watcher = None
     proxy = None
+    startup = None
+    request = {}
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -155,6 +203,12 @@ def main():
             proxy.start()
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
+        from multiverse.native import finish_wake
+        finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
+        if request.get('control_endpoint'):
+            startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
+                                      proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
+            startup.start()
         if request.get('shared_service'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             watcher.start()
@@ -171,6 +225,16 @@ def main():
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error))
         return 1
     finally:
+        if request.get('resume_message_id') and process is None:
+            from multiverse.native import finish_wake
+            finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
+                        'Runner exited before starting the native process; use deliver AGENT --retry')
+        if startup is not None:
+            startup.close()
+        elif request.get('control_endpoint'):
+            from multiverse.native import flush_startup
+            flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
+                          'Runner ended before bridge readiness; use deliver AGENT --retry')
         if proxy is not None:
             proxy.close()
         if watcher is not None:

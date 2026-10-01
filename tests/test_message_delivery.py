@@ -24,6 +24,7 @@ class InboxDeliveryTest(BaseTest):
             'workspace': str(self.work), 'native_session_id': self.native_id})
         write(self.directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
         self.enterContext(patch.object(native, 'owned'))
+        self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
         self.behavior = NativeResult('native_queued', value={'receipt': 'native'})
         owner = self

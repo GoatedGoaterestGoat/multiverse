@@ -7,6 +7,7 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | `spawn` | Start a native terminal in the saved workspace with bootstrap, optional initial prompt and model override; apply the mv2 agent name where supported. |
 | `kill` / `stop` | Cancel native work, terminate the owned native process, wait for exit, then remove its tmux wrapper; never stop a shared daemon. |
 | `resume` | Reopen the exact saved conversation, never the latest or a replacement session; reapply the mv2 agent name where supported. |
+| `wake` | Resume a stopped/dormant agent with a message as its interactive starting prompt; no native message API is needed for that prompt. |
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
 | `ask` | Answer an isolated side question without adding it to the main conversation. |
@@ -184,7 +185,7 @@ resume; use `spawn_args` for those initial settings.
 Before accepting the native reply, the relay verifies that each requested
 permission matches the effective `sandbox` and `approvalPolicy` returned by
 app-server. Bridged launches remain in `starting` until validated binding;
-`send` refuses steer/follow-up input while the launch is still binding. A
+new launches save incoming steer/follow-up messages until that validation completes. A
 mismatch records an actionable runtime error, closes that client connection,
 and prevents new mv2 input for the unvalidated launch. No automatic downgrade,
 empty model turn, turn-time grant fallback, or shared-daemon restart is used.
@@ -226,7 +227,7 @@ mv2 capabilities --agent worker --probe
 The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
-Public capabilities are `spawn`, `resume`, `stop`, `send_steer`, `send_follow_up`,
+Public capabilities are `spawn`, `resume`, `wake`, `stop`, `send_steer`, `send_follow_up`,
 `ask`, `get_usage`, and `get_delivery`. The `session_name` capability describes
 naming during spawn/resume, not a separate rename operation. Claude and Pi pass
 `--name` in both modes. Codex bridge calls `thread/name/set` after validating and
@@ -236,11 +237,41 @@ support, not confirmation of an individual launch's display name. Support may
 depend on configuration and a registered, running native session. Discovery returns supported/unavailable/error plus a reason.
 
 `send` first persists the text, sender, timing and an internal receipt identifier,
-then calls the adapter. Its result includes `saved`, `state`, and a delivery
+then resumes an ended session or calls the running adapter. Its result includes `saved`, `state`, and a delivery
 summary without message identifiers. Unavailable or failed native delivery
 produces `ok: false` and a nonzero CLI exit while retaining the saved message.
 Use recipient-scoped recovery instead of repeating `send`, which creates a new
 message.
+
+Steer/follow-up to `stopped` or `dormant` resumes the exact agent, preserving its
+workspace, task, native identity and launch preferences. The framed sender line
+and text become `LaunchContext.resume_prompt`. Claude appends a positional prompt
+to `claude --resume UUID` (never `--print`); Codex appends it after the UUID in
+`codex resume`; Pi appends literal text after `--` while reopening its exact
+session file. All remain interactive. The `wake` capability is supported by
+these adapters in both plain and bridge modes; legacy manifests have no verified
+resume-prompt recipe. Dashboard `m` uses the same send path. Inbox-only never
+wakes, and a live plain session still reports native delivery unavailable.
+
+Core records the wake attempt before releasing the runner. Successful process
+startup becomes `accepted` with `delivery_method: resume_prompt` and consumption
+unconfirmed. There is no bridge/mod delivery for this first prompt and no
+correlatable native receipt for it. Failure before process startup is retryable;
+an interrupted/uncertain attempt is never replayed, including by receipt checks.
+The saved task is unchanged; each launch retains its own prompt in `task.md`.
+
+New bridge launches hold subsequent messages durably as `pending`, tied to that
+launch. A runner thread waits for exact binding, validated Codex permissions or
+Claude/Pi extension registration. For a Codex wake it also observes acceptance
+of the TUI's first `turn/start`, so queued input cannot race ahead of its CLI
+prompt. It then delivers the batch in saved order. Timing modes still apply
+inside the native harness. Send and queue draining take `.send.lock` before
+`.launch.lock`; wake releases the latter before calling `start`. Readiness waits
+hold neither. Failed startup leaves never-submitted input as definite failures;
+`deliver AGENT --check` also detects an abandoned launch queue after a runner
+crash. Explicit kill cancels pending startup messages. Recovery never replays
+accepted or uncertain submissions. Existing runners predating this queue retain
+their binding-time refusal until relaunched.
 
 One logical inbox lives in `inbox.jsonl` (immutable messages),
 `inbox-state.json` (delivery attempts and receipts), and `inbox.cursor` (the
@@ -250,8 +281,8 @@ or retry database.
 | Submission state | Meaning |
 | --- | --- |
 | pending | Saved; no completed submission attempt. |
-| submitting | Attempt persisted before calling native API; a crash makes acceptance unknown. |
-| accepted | Native API accepted; may still be queued inside the harness. |
+| submitting | Attempt persisted before native API submission or prompt-bearing process startup; a crash makes acceptance unknown. |
+| accepted | Native API accepted, or the resumed interactive process started with its prompt; consumption may remain unconfirmed. |
 | failed | Definite rejection or pre-submission failure; explicit retry permitted. |
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
@@ -450,9 +481,10 @@ launch ends and clears its observation on disconnection; it never restarts the
 daemon or reconnects automatically. Existing running launches need an explicit
 stop/resume to acquire the new runner; status is detected, never agent-reported.
 
-A daemon crash can interrupt every thread it hosts. Multiverse does not restart
-it from status reads or sends and never automatically resumes conversations.
-Explicit resume reloads saved history, not old live processes/PTYs. One shared
+A daemon crash can interrupt every thread it hosts. Status reads and sends to a
+live agent never restart it. Explicit resume, including message-triggered wake
+of a stopped/dormant agent, may start the daemon and reloads saved history, not
+old live processes/PTYs. One shared
 daemon also shares resource pressure and a version upgrade's impact. SSH use is
 local to the remote host: run Multiverse and Codex there. Cross-host routing and
 shared-filesystem distributed ownership are not implemented. Existing standalone
@@ -540,6 +572,7 @@ plugin validate` when Claude Code is installed.
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |
 | --- | --- | --- | --- | --- |
 | Spawn / exact resume | Yes | Yes | Yes | Manifest-dependent |
+| Wake stopped/dormant with an interactive resume prompt | Yes | Yes, with or without bridge | Yes | Built-in plain adapters: yes; legacy: unverified |
 | Native session name on spawn / resume | `thread/name/set` | `--name`, with or without bridge | `--name`, with or without bridge | Plain Codex unavailable; legacy unverified |
 | Explicit stop | Native queue cancellation/interrupt/terminal cleanup | Owned terminal | Owned terminal | Owned terminal |
 | Safe-boundary steer | Yes | Bridge: peer inbox + mod | Yes | Unavailable |

@@ -14,6 +14,7 @@ from .protocol import check_connection, send_message, get_delivery, stop_session
 class CodexAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
+    resume_prompt_args = ('{task}',)
 
     def _configure_launch(self):
         if self.settings.get('inbox_bridge'):

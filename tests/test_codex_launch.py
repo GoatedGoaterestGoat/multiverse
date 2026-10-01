@@ -124,6 +124,22 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertIn('--add-dir', command.argv)
         self.assertIsNone(command.rpc_proxy)
 
+    def test_wake_waits_for_exact_tui_starting_turn_reply(self):
+        protocol = LaunchProtocol({'bootstrap': 'b', 'roots': [], 'workspace': '/workspace', 'native_id': self.native_id})
+        protocol.outgoing({'id': 1, 'method': 'thread/resume', 'params': {'threadId': self.native_id}})
+        protocol.incoming({'id': 1, 'result': {'thread': {'id': self.native_id, 'cwd': '/workspace'}}})
+        self.assertFalse(protocol.prompt_submitted)
+        protocol.outgoing({'id': 2, 'method': 'turn/start', 'params': {'threadId': str(uuid4())}})
+        protocol.incoming({'id': 2, 'result': {'turn': {}}})
+        self.assertFalse(protocol.prompt_submitted)
+        protocol.outgoing({'id': 3, 'method': 'turn/start', 'params': {'threadId': self.native_id}})
+        protocol.incoming({'id': 3, 'error': {'code': -1, 'message': 'Prompt failed'}})
+        self.assertFalse(protocol.prompt_submitted)
+        self.assertIn('Prompt failed', protocol.prompt_error)
+        protocol.outgoing({'id': 4, 'method': 'turn/start', 'params': {'threadId': self.native_id}})
+        protocol.incoming({'id': 4, 'result': {'turn': {'id': 'native-turn'}}})
+        self.assertTrue(protocol.prompt_submitted)
+
     def test_wrong_thread_and_workspace_are_not_bound(self):
         protocol = LaunchProtocol({'bootstrap': 'b', 'roots': [], 'workspace': '/workspace', 'native_id': self.native_id})
         with self.assertRaisesRegex(ValueError, 'does not match'):

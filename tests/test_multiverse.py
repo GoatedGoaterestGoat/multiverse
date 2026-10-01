@@ -151,10 +151,21 @@ class TerminalBase(BaseTest):
         write(harness / "harness.json", {"schema": 1, "spawn": argv, "resume": argv})
 
     def kill_server(self):
+        # Runners finish receipt/queue cleanup after tmux tears down a pane.
+        # Await them before TemporaryDirectory removes their state underneath it.
+        panes, _ = self.backend.snapshot()
+        pids = [int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')]
         try:
             self.backend.run("kill-server")
         except (OSError, RuntimeError):
             pass
+        def exited(pid):
+            try:
+                os.kill(pid, 0)
+                return False
+            except ProcessLookupError:
+                return True
+        until(lambda: all(exited(pid) for pid in pids), seconds=15)
 
     def spawn(self):
         result = agents.start(self.root, "tester", "a task", "fake", socket_path=self.socket)
@@ -280,7 +291,8 @@ class PiTest(TerminalBase):
         spec["settings"].update(args=extra, inbox_bridge=True)
         write(harness_dir / "harness.json", spec)
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-            result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket)
+            result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket,
+                                  wait=True, wait_timeout=25)
         agent_dir = agents.directory(self.root, result["id"])
         log = agent_dir / "mock-requests.jsonl"
         try:
@@ -289,7 +301,8 @@ class PiTest(TerminalBase):
             self.assertEqual(first["state"], "native_queued", first)
             until(lambda: "INBOX_SENTINEL" in log.read_text(), seconds=20)
             until(lambda: not inbox(agent_dir)["messages"])
-            self.assertIn(first["id"], (agent_dir / "session.jsonl").read_text())
+            internal_id = inbox(agent_dir, all_messages=True)['messages'][-1]['id']
+            self.assertIn(internal_id, (agent_dir / "session.jsonl").read_text())
             request = json.loads(log.read_text().splitlines()[0])
             self.assertIn("You work in a Multiverse universe", request["systemPrompt"])
             self.assertEqual(sorted(t["name"] for t in request["tools"]), ["bash", "edit", "read", "write"])
@@ -299,7 +312,8 @@ class PiTest(TerminalBase):
             time.sleep(0.1)
             before = len(log.read_text().splitlines())
             with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-                agents.start(self.root, resume=result["id"], socket_path=self.socket)
+                resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket, wait=True, wait_timeout=25)
+                self.assertTrue(resumed['ready'], resumed)
             until(lambda: agents.runtime(agent_dir).get("native_bridge") == "pi-socket-v1", seconds=20)
             sent = send.run(self.root, agent=result["id"], text="AFTER_RESUME", sender={"name": "test"})
             self.assertEqual(sent["state"], "native_queued", sent)

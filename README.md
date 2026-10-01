@@ -69,7 +69,8 @@ Python callers use, for example,
 `list_agents.run(root, recursive=True, json=True)`; results are returned and
 errors raised, while shell entry points format output and exit codes.
 
-`send` saves the durable record and attempts native delivery through the common
+`send` saves the durable record, resumes a dormant/stopped recipient with an
+interactive starting prompt, or delivers to its running bridge through the common
 adapter protocol. `ask` and `get-usage` use the same tools from CLI and
 backend. Unsupported operations are explicit. Nothing types into agent terminals:
 the Claude bridge's mod submits messages for an idle session through Claude's own
@@ -186,6 +187,8 @@ The title and accent style its group row and agents in the parent hierarchy. The
 ## Messages, commands and prompts
 
 `send` durably saves each message, then submits its sender line and text with `--delivery steer` or `--delivery follow-up`. Core retains delivery attempts and native receipts. `inbox` shows unread inbox-only messages and advances its read position automatically; `inbox --all` browses full raw history and delivery evidence without changing that position. Use `--delivery inbox-only` (or `--queue-only`) for manual delivery. `deliver AGENT --retry` retries the recipient's definite failures, never uncertain or accepted submissions. `deliver AGENT --check` reconciles pending or uncertain native receipts without submitting. Native acceptance is not proof of reading or an answer. See [the adapter contract](docs/harness-adapters.md).
+
+Sending steer/follow-up to a stopped or dormant Claude, Codex or Pi agent resumes its exact conversation with the framed message as an interactive command-line prompt. Dashboard `m` does the same. This works in plain mode too; a live plain session still cannot receive native delivery. Inbox-only messages never wake an agent. The `wake` capability reports support; unverified legacy manifests report unavailable. The runner records that the resumed process started with the prompt, with consumption unconfirmed. Further messages during bridge startup return `pending` and remain saved until binding and permission validation finish; Codex also waits for the TUI's starting turn to be accepted. The runner then delivers the batch in order. Startup failures leave definite failures for `deliver AGENT --retry`; kill cancels unsubmitted startup messages. Accepted or uncertain prompts are never automatically replayed.
 
 `report --phase working --summary 'Checking launch permissions'` prints `Reported working: Checking launch permissions`. The CLI omits the full task and properties record; Python `report.run()` still returns that record.
 

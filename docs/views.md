@@ -24,6 +24,12 @@ agent's confirmation says that only native work is cancelled; no terminal remain
 to close. It is unavailable for groups and unknown terminal state. `r` resumes a stopped or
 dormant agent.
 
+`m` sends to the selected agent, including stopped and dormant rows. For Claude,
+Codex and Pi it wakes an ended agent in its saved conversation with the message
+as the interactive starting prompt. The status line reports startup or pending
+bridge delivery; saved/accepted does not mean read or answered. Further messages
+to a starting bridge wait for readiness. Live plain sessions report unavailable.
+
 During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while
 native work and the agent process are terminated. Once the native process exits,
 `LIVE` is `stopped` while its tmux wrapper remains; after wrapper removal it is

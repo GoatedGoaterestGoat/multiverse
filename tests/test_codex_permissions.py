@@ -11,8 +11,9 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents
-from multiverse.store import read, write
+from multiverse import agents, harnesses
+from multiverse.harnesses.codex import CodexAdapter
+from multiverse.store import read, write, inbox
 from multiverse.tools import send
 from test_multiverse import TerminalBase, until
 
@@ -37,7 +38,7 @@ class CodexPermissionTest(TerminalBase):
                 index = len(requests)
                 inputs = value.get('input', [])
                 last_user = next((item for item in reversed(inputs) if item.get('role') == 'user'), {})
-                stage = next((name for name in ('spawn', 'bridge', 'repeat')
+                stage = next((name for name in ('plain-wake', 'bridge-wake', 'extra', 'spawn', 'bridge', 'repeat')
                               if 'permission-probe-' + name in json.dumps(last_user)), 'spawn')
                 title = 'title' in value.get('text', {}).get('format', {}).get('schema', {}).get('properties', {})
                 item = {'type': 'message', 'role': 'assistant', 'id': f'msg-{index}',
@@ -105,22 +106,54 @@ class CodexPermissionTest(TerminalBase):
             until(lambda: (self.work / 'permission-spawn.json').exists() and 'spawn' in completed, seconds=30)
             native_id = read(directory / 'properties.json')['native_session_id']
             self.assertEqual(read(self.work / 'permission-spawn.json')['native_id'], native_id)
-            for stage in ('bridge', 'repeat'):
+            for stage in ('plain-wake', 'bridge-wake', 'bridge', 'repeat'):
                 agents.terminal_action(self.root, launched['id'], 'stop')
-                spec['settings'] = {'inbox_bridge': True, 'args': ['--dangerously-bypass-approvals-and-sandbox']}
+                spec['settings'] = {'inbox_bridge': stage != 'plain-wake',
+                                    'args': ['--dangerously-bypass-approvals-and-sandbox']}
+                if stage == 'plain-wake':
+                    spec['settings']['args'].append('--no-daemon')
                 write(config, spec)
                 with patch.dict(os.environ, env):
-                    resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket,
-                                           wait=True, wait_timeout=30)
+                    if stage.endswith('-wake'):
+                        with patch.object(CodexAdapter, 'send', side_effect=AssertionError('Wake must use the CLI prompt')):
+                            delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage,
+                                                 sender={'name': 'reviewer'}, delivery='follow-up')
+                        self.assertTrue(delivered['ok'], delivered)
+                        # Arrives before the TUI has bound/submitted its CLI prompt.
+                        additional = send.run(self.root, agent=launched['id'],
+                            text='permission-probe-extra ADDITIONAL_WAKE_INPUT',
+                            sender={'name': 'reviewer'}, delivery='follow-up') if stage == 'bridge-wake' else None
+                        if additional:
+                            self.assertEqual(additional['state'], 'pending', additional)
+                        resumed = agents.wait_ready(self.root, directory, agents.runtime(directory)['launch_id'],
+                                                    harnesses.load(self.root, 'codex'), 30)
+                        request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
+                        self.assertEqual(request['argv'][-1], 'Message from reviewer:\npermission-probe-' + stage)
+                    else:
+                        resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket,
+                                               wait=True, wait_timeout=30)
                 self.assertTrue(resumed['ready'], resumed)
                 self.assertEqual(resumed['runtime']['state'], 'running')
                 self.assertEqual(resumed['native_session_id'], native_id)
-                delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage, delivery='follow-up')
-                self.assertEqual(delivered['state'], 'native_queued', delivered)
+                if not stage.endswith('-wake'):
+                    delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage, delivery='follow-up')
+                    self.assertEqual(delivered['state'], 'native_queued', delivered)
                 until(lambda: (self.work / f'permission-{stage}.json').exists() and stage in completed, seconds=30)
                 self.assertEqual(read(self.work / f'permission-{stage}.json')['native_id'], native_id)
                 self.assertEqual((self.work / f'.git/mv2-{stage}').read_text(), 'writable')
-            print('Codex permission evidence: plain -> bridge explicit bypass -> bridge explicit bypass; '
+                self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+                self.assertEqual(read(directory / 'properties.json')['task'], 'permission-probe-spawn')
+                if stage.endswith('-wake'):
+                    receipt = next(m['tracking'] for m in inbox(directory, all_messages=True)['messages']
+                                   if m['text'] == 'permission-probe-' + stage)
+                    self.assertEqual(receipt['submission_state'], 'accepted')
+                    self.assertEqual(receipt['delivery_method'], 'resume_prompt')
+                    self.assertIsNone(receipt['native_receipt']['transcript_confirmed'])
+                if stage == 'bridge-wake':
+                    until(lambda: 'extra' in completed and (self.work / 'permission-extra.json').exists(), seconds=20)
+                    original_requests = [r for r in requests if 'permission-probe-bridge-wake' in json.dumps(r)]
+                    self.assertNotIn('ADDITIONAL_WAKE_INPUT', json.dumps(original_requests[0]))
+            print('Codex permission evidence: plain -> plain wake -> bridge wake -> bridge resume twice; '
                   '.git writes and Unix sockets succeed in the same native thread')
         except Exception:
             print('PERMISSION RUNTIME', agents.runtime(directory))

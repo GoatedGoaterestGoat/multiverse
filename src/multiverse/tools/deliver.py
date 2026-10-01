@@ -22,7 +22,11 @@ def run(root=None, *, agent, retry=False, check=False):
                 message['tracking']['submission_state'] not in states):
             continue
         try:
-            receipt = native.deliver(root, directory.name, message['id'], retry=retry, check=check)
+            if retry:
+                with store.lock(directory / '.send.lock'):
+                    receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
+            else:
+                receipt = native.deliver(root, directory.name, message['id'], check=True)
         except (OSError, ValueError, RuntimeError) as error:
             receipt = {'state': 'error', 'reason': str(error), 'ok': False}
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message},

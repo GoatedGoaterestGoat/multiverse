@@ -11,7 +11,7 @@ import time
 
 from . import universe, harnesses
 from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id
-from .store import lock, now, read, uid, write
+from .store import lock, now, read, uid, write, message_record, update_message
 from .tmux import Tmux, observe, owned
 
 
@@ -79,9 +79,11 @@ def bind_session(root, reference, session_id, launch_id=None):
 
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
-          wait=False, wait_timeout=60):
+          wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None):
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
+    if (resume_prompt is not None or resume_message_id is not None) and not resume:
+        raise ValueError('A resume prompt requires an exact saved agent')
     if resume:
         agent_dir = directory(root, resume)
         properties = read(agent_dir / "properties.json")
@@ -114,6 +116,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         previous = runtime(agent_dir)
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
+        if resume_message_id is not None:
+            from .native import framed_text
+            message, tracking = message_record(agent_dir, resume_message_id)
+            target = tracking.get('target_session') or message.get('target_session')
+            if target and target != properties.get('native_session_id'):
+                raise ValueError('Wake message targets a different native session')
+            if message.get('delivery') not in ('steer', 'follow-up') or tracking.get('submission_state', 'pending') not in ('pending', 'failed'):
+                raise ValueError('Wake message is ineligible or may already have been submitted; refusing replay')
+            resume_prompt = framed_text(root, message)
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
         launch = agent_dir / "launches" / launch_id
@@ -131,7 +142,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values['control_socket'] = str(service_dir / 'rpc.sock')
-        context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})})
+        context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
+                                resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
@@ -142,7 +154,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             old_backend.run('kill-pane', '-t', old_pane)
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
-        (launch / "task.md").write_text(properties["task"])
+        (launch / "task.md").write_text(resume_prompt if resume_prompt is not None else properties["task"])
         cli = Path(__file__).resolve().parents[2] / "bin" / "mv2"
         invoked = Path(sys.argv[0]).resolve()
         cli_path = str(cli) if cli.exists() else str(invoked) if invoked.name == "mv2" and invoked.is_file() else shutil.which("mv2")
@@ -184,20 +196,35 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.shared_service:
                 from .native import NativeExecutor
                 executor = NativeExecutor(workdir, properties, runtime(agent_dir))
-            context = LaunchContext(mode, values, model, env, shared_endpoint, executor)
+            context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt)
             if command.shared_service:
                 command = adapter.resume(session, context) if resume else adapter.spawn(context)
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
-            update_runtime(agent_dir, launch_id, control_endpoint=endpoint)
+            update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
+                           startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
                                            "shared_service": bool(command.shared_service),
+                                           "resume_message_id": resume_message_id,
                                            "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None})
+            if resume_message_id is not None:
+                # The runner cannot start until ready exists. Persist uncertainty
+                # first so a crash can never silently replay this command-line input.
+                update_message(agent_dir, resume_message_id, submission_state='submitting',
+                               delivery_method='resume_prompt', wake_launch_id=launch_id,
+                               target_session=properties.get('native_session_id'),
+                               attempts=[*tracking.get('attempts', []), {'state': 'unknown',
+                                   'reason': 'Resume registered; awaiting native process startup',
+                                   'launch_id': launch_id, 'at': now()}])
             (launch / "ready").touch()
         except Exception as error:
+            if resume_message_id is not None and not (launch / 'ready').exists():
+                from .native import finish_wake
+                finish_wake(agent_dir, launch_id, resume_message_id, False,
+                            f'Resume failed before native process startup: {error}')
             if service_directory_created:
                 shutil.rmtree(service_dir)
             if terminal:
@@ -222,7 +249,7 @@ def launch_result(root, agent_dir):
             'session': asdict(SessionHandle.from_records(properties, facts, agent_dir))}
 
 
-def wait_ready(root, agent_dir, launch_id, adapter, timeout):
+def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
     native = bool(request.get('control_endpoint') or request.get('shared_service'))
@@ -237,6 +264,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout):
         session = SessionHandle.from_records(result, facts, agent_dir)
         ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
             adapter.capabilities(session)['send_steer'].state == 'supported')))
+        ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
         if ready:
             return {**result, 'ok': True, 'ready': True}
         error = None
@@ -244,6 +272,8 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout):
             error = facts.get('error') or f'Launch ended before becoming ready ({live})'
         elif facts.get('state') == 'starting' and facts.get('error'):
             error = facts['error']
+        elif include_delivery and facts.get('startup_delivery') == 'failed':
+            error = facts.get('delivery_error') or 'Startup delivery failed; inspect the launch and saved messages'
         if error:
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()

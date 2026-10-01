@@ -47,6 +47,27 @@ class AdapterContractTest(BaseTest):
                 for required in ('spawn', 'resume', 'send_steer', 'send_follow_up'):
                     self.assertTrue(adapter.capabilities(SessionHandle("agent", name, str(self.work)))[required].required)
 
+    def test_wake_appends_a_literal_interactive_resume_prompt(self):
+        prompt = 'Message from reviewer:\n--literal $(false) `false` {text}'
+        for name in ('codex', 'claude', 'pi'):
+            for bridge in (False, True):
+                with self.subTest(name=name, bridge=bridge):
+                    path = self.root / 'harnesses' / name / 'harness.json'
+                    spec = read(path)
+                    spec['settings']['inbox_bridge'] = bridge
+                    write(path, spec)
+                    adapter = harnesses.load(self.root, name)
+                    values = self.values()
+                    session = self.session(name, values)
+                    command = adapter.resume(session, LaunchContext('resume', values, 'chosen', resume_prompt=prompt))
+                    self.assertEqual(command.argv[-1], prompt)
+                    self.assertNotIn('-p', command.argv)
+                    self.assertNotIn('--print', command.argv)
+                    self.assertIn(values['session_file'] if name == 'pi' else session.native_id, command.argv)
+                    self.assertEqual(adapter.capabilities(session)['wake'].state, 'supported')
+        legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom'], 'resume': ['custom', '{session_id}']})
+        self.assertEqual(legacy.capabilities(SessionHandle('agent', 'custom', '/tmp'))['wake'].state, 'unavailable')
+
     def test_configuration_is_declarative_and_never_rewritten(self):
         config = self.root / 'harnesses/codex/harness.json'
         data = read(config)

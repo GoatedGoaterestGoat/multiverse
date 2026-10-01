@@ -79,6 +79,7 @@ class LaunchContext:
     environment: Mapping[str, str] = field(default_factory=dict)
     endpoint: NativeEndpoint | None = None
     executor: 'Executor | None' = None
+    resume_prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
 
 
 @dataclass(frozen=True)

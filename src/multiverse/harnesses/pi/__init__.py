@@ -11,6 +11,7 @@ from ..types import normalize_session_id
 class PiAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
+    resume_prompt_args = ('--', '{task}')
 
     def spawn(self, context):
         return self._with_extension(super().spawn(context), context)

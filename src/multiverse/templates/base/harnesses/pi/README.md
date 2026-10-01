@@ -14,3 +14,5 @@ delivery and `--retry` to retry definite failures.
 
 Native acceptance is not proof of reading or answering. Isolated ask and usage
 remain explicitly unavailable until implemented and tested.
+
+Steer/follow-up to a stopped or dormant agent resumes its exact conversation with the framed sender and text as an interactive command-line prompt, using Pi's literal positional prompt after `--`, alongside the saved session file. The `wake` capability is supported in plain and bridge modes. No mod/extension delivery is needed for this initial prompt. Process startup is recorded as accepted, with consumption unconfirmed. Additional messages during bridge startup remain pending until registration, then drain in order. A failed startup leaves saved input for explicit retry; accepted or uncertain prompts are never replayed. Live plain sessions still cannot receive native delivery. Inbox-only never wakes. Dashboard `m` uses this same send path.

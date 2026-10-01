@@ -184,6 +184,23 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Message saved', status)
             self.assertIn('Native bridge is unavailable', status)
 
+    async def test_message_on_dormant_row_shows_pending_wake(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.selected['live'] = 'dormant'
+            selected = self.app.selected['id']
+            pending = {'saved': True, 'state': 'pending', 'ok': True,
+                       'native_delivery': {'state': 'pending', 'reason': 'Resuming with this message'}}
+            with patch.object(self.backend, 'send', return_value=pending) as sent:
+                await pilot.press('m')
+                self.app.screen.query_one('#field-text', TextArea).load_text('Continue the saved task')
+                await pilot.press('ctrl+enter')
+                await self.settle(pilot)
+            self.assertEqual(sent.call_args.args[1:], (selected, 'Continue the saved task'))
+            status = str(self.app.query_one('#status', Static).render())
+            self.assertIn('pending', status)
+            self.assertIn('Resuming with this message', status)
+
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]
         async with self.app.run_test(size=(110, 28)) as pilot:

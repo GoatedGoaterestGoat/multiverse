@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import sys
 from .. import agents, native, universe
-from ..store import append_message, read, lock
+from ..store import append_message, read, lock, message_record, update_message
 from ._common import delivery_summary
 
 def configure(parser):
@@ -37,9 +37,13 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             return {**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}
         try:
-            receipt = native.deliver(root, directory.name, message['id'])
+            receipt = native.send_or_wake(root, directory.name, message['id'])
         except Exception as error:
             receipt = {"state": "error", "reason": str(error)}
+            _, tracking = message_record(directory, message['id'])
+            if tracking.get('submission_state', 'pending') == 'pending':
+                update_message(directory, message['id'], submission_state='failed',
+                               attempts=[*tracking.get('attempts', []), receipt])
         return {**result, "state": receipt['state'], "saved": True, "native_delivery": delivery_summary(receipt),
                 "ok": receipt['state'] not in ('error', 'unavailable', 'unknown')}
 

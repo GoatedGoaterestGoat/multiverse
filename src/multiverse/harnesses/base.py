@@ -29,6 +29,7 @@ def arguments(value, label, required=False):
 class ConfiguredAdapter:
     package = None
     supports_bridge = False
+    resume_prompt_args = None
 
     @classmethod
     def configured(cls, name, settings):
@@ -92,6 +93,13 @@ class ConfiguredAdapter:
         if context.model:
             position = argv.index('--') if '--' in argv else len(argv)
             argv[position:position] = [arg.format_map(values) for arg in self.spec.get('model_args', [])]
+        if context.mode == 'resume' and context.resume_prompt is not None:
+            if self.resume_prompt_args is None:
+                raise ValueError('This adapter has no verified interactive resume prompt; wake is unavailable')
+            prompt_args = list(self.resume_prompt_args)
+            if '--' in argv and prompt_args and prompt_args[0] == '--':
+                prompt_args = prompt_args[1:]
+            argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
         # Scrubbing parent identity is a core invariant, including legacy definitions.
         unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset)
@@ -129,6 +137,9 @@ class ConfiguredAdapter:
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
             result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
+            result['wake'] = (Capability('supported', mechanism='interactive-resume-prompt')
+                if self.resume_prompt_args is not None else Capability(
+                    'unavailable', 'No verified interactive resume prompt for this adapter'))
         return result
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:

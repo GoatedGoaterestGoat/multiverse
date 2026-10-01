@@ -122,11 +122,12 @@ class ToolsTest(unittest.TestCase):
 
     def test_unavailable_native_delivery_has_nonzero_exit_but_retains_message(self):
         properties = read(self.directory / 'properties.json')
-        properties.update(harness='claude', workspace=str(self.work), native_session_id=str(uuid4()))
+        write(self.root / 'harnesses/legacy/harness.json', {'schema': 1, 'spawn': ['/bin/true'], 'resume': ['/bin/true']})
+        properties.update(harness='legacy', workspace=str(self.work), native_session_id=str(uuid4()))
         write(self.directory / 'properties.json', properties)
         result = json.loads(self.invoke('send', self.agent, '--text', 'saved on failure', code=1).stdout)
-        self.assertEqual(result['state'], 'error')
-        self.assertIn('Pre-submission', result['native_delivery']['reason'])
+        self.assertEqual(result['state'], 'unavailable')
+        self.assertIn('cannot wake', result['native_delivery']['reason'])
         self.assertTrue(result['saved'])
         batch = json.loads(self.invoke('inbox', '--agent', self.agent, '--all').stdout)
         self.assertIn('id', batch['messages'][0])

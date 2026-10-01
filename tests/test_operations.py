@@ -65,6 +65,7 @@ class OperationTest(BaseTest):
         super().setUp()
         self.adapter = FourthAdapter()
         self.enterContext(patch.object(native, 'owned'))
+        self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.loader = self.enterContext(patch.object(harnesses, 'load', return_value=self.adapter))
         self.enterContext(patch.object(agents, 'observe', return_value={'live': 'dormant'}))
         backend = Mock()

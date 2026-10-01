@@ -127,6 +127,7 @@ def measured_usage(native_id):
 
 
 class ClaudeAdapter(ConfiguredAdapter):
+    resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
     supports_bridge = True
 

@@ -132,7 +132,9 @@ class CodexTimingTest(TerminalBase):
             old_endpoint = endpoint
             stop_owned()
             with patch.dict(os.environ, test_env):
-                resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
+                resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket,
+                                       wait=True, wait_timeout=30)
+            self.assertTrue(resumed['ready'], resumed)
             self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
             endpoint = Path(until(lambda: agents.runtime(directory).get('control_endpoint'), seconds=30)['address'])
             self.assertEqual(endpoint, old_endpoint)
