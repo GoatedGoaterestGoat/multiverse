@@ -110,8 +110,10 @@ class CodexPermissionTest(TerminalBase):
                 spec['settings'] = {'inbox_bridge': True, 'args': ['--dangerously-bypass-approvals-and-sandbox']}
                 write(config, spec)
                 with patch.dict(os.environ, env):
-                    resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket)
-                until(lambda: agents.runtime(directory).get('state') == 'running', seconds=30)
+                    resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket,
+                                           wait=True, wait_timeout=30)
+                self.assertTrue(resumed['ready'], resumed)
+                self.assertEqual(resumed['runtime']['state'], 'running')
                 self.assertEqual(resumed['native_session_id'], native_id)
                 delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage, delivery='follow-up')
                 self.assertEqual(delivered['state'], 'native_queued', delivered)

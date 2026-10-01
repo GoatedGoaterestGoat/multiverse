@@ -5,7 +5,7 @@ description: Coordinate agents within a universe or across subverses.
 
 Use `"$MV2_CLI" --help` for the CLI. Your current universe and identity are already in the environment.
 
-- `spawn --name worker --harness codex --task 'initial prompt'` starts an independent agent. Use `claude` for Claude Code or another name from the harness catalog.
+- `spawn --name worker --harness codex --task 'initial prompt'` starts an independent agent. Add `--wait` to spawn or resume when a script must send immediately after launch; `--wait-timeout SECONDS` defaults to 60. Check `ready`/`ok`; timeout leaves the launch running, so inspect it before retrying. Use `claude` for Claude Code or another name from the harness catalog.
 - `list --recursive` finds agents in this universe and its descendants. Use `-u /absolute/universe/path` before a command to target another universe. IDs are authoritative; unique names or ID prefixes also work.
 - `send AGENT --text 'message'` saves and attempts native delivery. Use `--delivery steer` for a safe-boundary steer or `--delivery follow-up` for the next turn. Inspect the returned state: saved/accepted is not read/answered; unavailable/error retains the message. `deliver AGENT --retry` retries that recipient's definite failures. `deliver AGENT --check` reconciles pending or uncertain native deliveries without submitting them. Never blindly resend an uncertain submission.
 - `inspect AGENT` captures its pane. `attach AGENT` opens its terminal. Use tmux detach to return.

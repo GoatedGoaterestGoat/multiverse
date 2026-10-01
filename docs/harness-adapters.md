@@ -91,6 +91,17 @@ retain the failed record and clean up a created terminal/socket directory.
 Returning from `spawn` means the launch was registered; it does not mean native
 authentication, session binding or the first model turn has finished.
 
+`spawn --wait` and `resume AGENT --wait` opt into a readiness wait after
+registration (`--wait-timeout SECONDS`, default 60). Core waits outside the launch
+lock so native binding can finish. Plain/legacy launches require a running child;
+bridge launches also require the exact native ID and delivery readiness. For
+Codex, `running` means the relay validated the native reply and effective grants.
+Claude/Pi wait for their bridge registration capability. A changed generation is
+refused. The usual result carries the latest runtime/session plus `ready` and
+`ok`; failures return `error` and CLI exit 1. Timeout also sets `timed_out`, keeps
+the launch intact and never retries it. This waits for launch readiness, not
+completion of the first model turn. The dashboard remains asynchronous.
+
 `tools/kill.py` and its `stop` alias call the same core shutdown operation.
 Core verifies the pane's universe, agent and launch tags under the launch lock,
 sets `state=ending`, clears observed status, and enables `remain-on-exit` even

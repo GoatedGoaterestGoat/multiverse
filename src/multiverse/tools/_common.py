@@ -16,6 +16,12 @@ def add_agent(parser):
     parser.add_argument("--agent", default=os.environ.get("MV2_AGENT_ID"))
 
 
+def add_wait(parser):
+    parser.add_argument('--wait', action='store_true', help='Wait until the launch is ready or failed')
+    parser.add_argument('--wait-timeout', type=float, default=60,
+                        help='Readiness limit with --wait, in seconds (default: 60)')
+
+
 def callback(root, agent):
     root = universe.resolve(root)
     if not agent:

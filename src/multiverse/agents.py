@@ -1,5 +1,6 @@
 from dataclasses import asdict
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -77,7 +78,10 @@ def bind_session(root, reference, session_id, launch_id=None):
     return data
 
 
-def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None):
+def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
+          wait=False, wait_timeout=60):
+    if not math.isfinite(wait_timeout) or wait_timeout <= 0:
+        raise ValueError('wait timeout must be a finite positive number of seconds')
     if resume:
         agent_dir = directory(root, resume)
         properties = read(agent_dir / "properties.json")
@@ -207,8 +211,47 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error
-    return {**properties, "universe": str(root), "runtime": runtime(agent_dir),
-            "session": asdict(SessionHandle.from_records(properties, runtime(agent_dir), agent_dir))}
+    if wait:
+        return wait_ready(root, agent_dir, launch_id, adapter, wait_timeout)
+    return launch_result(root, agent_dir)
+
+
+def launch_result(root, agent_dir):
+    properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+    return {**properties, 'universe': str(root), 'runtime': facts,
+            'session': asdict(SessionHandle.from_records(properties, facts, agent_dir))}
+
+
+def wait_ready(root, agent_dir, launch_id, adapter, timeout):
+    """Observe one launch without holding the lock needed by native binding."""
+    request = read(agent_dir / 'launches' / launch_id / 'request.json')
+    native = bool(request.get('control_endpoint') or request.get('shared_service'))
+    deadline = time.monotonic() + timeout
+    while True:
+        result = launch_result(root, agent_dir)
+        facts = result['runtime']
+        if facts.get('launch_id') != launch_id:
+            raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+        live = observe(result, facts)['live']
+        running = facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+        session = SessionHandle.from_records(result, facts, agent_dir)
+        ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
+            adapter.capabilities(session)['send_steer'].state == 'supported')))
+        if ready:
+            return {**result, 'ok': True, 'ready': True}
+        error = None
+        if facts.get('state') == 'failed' or live in ('ending', 'stopped', 'dormant'):
+            error = facts.get('error') or f'Launch ended before becoming ready ({live})'
+        elif facts.get('state') == 'starting' and facts.get('error'):
+            error = facts['error']
+        if error:
+            return {**result, 'ok': False, 'ready': False, 'error': error}
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {**result, 'ok': False, 'ready': False, 'timed_out': True,
+                    'error': f'Timed out after {timeout:g}s waiting for launch readiness; '
+                             'the launch was not stopped. Inspect its runtime or terminal before retrying.'}
+        time.sleep(min(.05, remaining))
 
 
 def report(root, reference, phase=None, summary=None):
