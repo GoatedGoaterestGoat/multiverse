@@ -42,6 +42,7 @@ class SharedServiceSpec:
     environment: Mapping[str, str] = field(default_factory=dict)
     required_cli_flags: tuple[str, ...] = ()
     cwd: str | None = None
+    require_matching_versions: bool = True
 
 
 @dataclass(frozen=True)
@@ -123,6 +124,7 @@ class SessionHandle:
     bridge: str | None = None
     status: str = 'unknown'
     native_mode: Mapping[str, Any] | None = None
+    native_versions: Mapping[str, str] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -131,7 +133,8 @@ class SessionHandle:
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
-                   runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'))
+                   runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
+                   runtime.get('native_versions'))
 
 @dataclass(frozen=True)
 class Message:

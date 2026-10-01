@@ -90,6 +90,11 @@ class Inspector(Vertical):
                 state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style='#a6adc8')
                 if selection.get('fallback_reason'):
                     state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
+            versions = row.get('runtime', {}).get('native_versions')
+            if versions:
+                mismatch = versions['cli'] != versions['daemon']
+                state.append(f'\nVersions: CLI {clean(versions["cli"])} / daemon {clean(versions["daemon"])}'
+                             + (' (different)' if mismatch else ''), style='#f9e2af' if mismatch else '#a6adc8')
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 message = ('Native work is ending.' if live == 'ending' else

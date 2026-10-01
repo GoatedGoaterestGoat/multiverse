@@ -367,10 +367,10 @@ Existing explicit settings and live universe files are not rewritten.
 
 At each spawn/resume, auto first describes a bridge launch and a plain fallback
 with the same bootstrap, task/prompt, model, saved native identity and preferences.
-Core reuses the existing idempotent daemon startup and version/socket checks; one
+Core reuses the existing idempotent daemon startup and socket checks; one
 bounded, read-only `codex --help` check verifies `--remote`. There is no speculative
 thread or second service probe. Before a native child starts, unavailable daemon,
-version, CLI flag, configuration RPC or local relay preparation selects plain.
+CLI flag, configuration RPC or local relay preparation selects plain.
 Bridge-incompatible preferences such as `--no-daemon` or resume profile overrides
 also select plain in auto, with a reason. Invalid configuration is still rejected.
 Explicit `true` fails with a diagnostic for unavailable preparation, and `false`
@@ -389,6 +389,17 @@ No fallback occurs after a native child starts or after a relay has bound a thre
 identity, workspace and effective permission validation failures stay loud. The
 shared daemon is never stopped or restarted to repair a launch. A later resume
 reevaluates availability, so a plain-started session can return on the bridge.
+
+Codex allows different CLI and daemon versions, because their native update paths
+are independent. `runtime.json.native_versions` records the `cli` and `daemon`
+versions returned during launch preparation; the session handle carries them too.
+Capabilities and the inspector display these recorded versions, highlighting a
+difference without blocking spawn/resume. Opening either view does not start a
+daemon or poll for version changes. Native CLI support, configuration RPC, exact
+thread/workspace binding and effective permission checks still apply. Invalid
+version metadata is a preparation error. `SharedServiceSpec.require_matching_versions`
+defaults to `true` for other services; the Codex adapter explicitly sets it to
+`false`. mv2 never updates or restarts the daemon to align versions.
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
 services retain the launch workspace when it is absent. Codex selects the OS
@@ -432,8 +443,8 @@ or dashboard. Opening/closing a dashboard does not start/stop the daemon. Core
 never invokes daemon stop, restart, bootstrap, install or update. Codex's own
 configured daemon update policy remains authoritative. Codex 0.159.2 can install
 its daemon package from the installed CLI during native startup, including a
-Homebrew CLI. A CLI/daemon version mismatch fails with a diagnostic; it is never
-repaired by disrupting other clients. Codex owns daemon
+Homebrew CLI. A CLI/daemon version difference is reported, while actual protocol
+checks decide whether the bridge is usable. Codex owns daemon
 persistence and native history. No Multiverse-specific Codex home is created.
 
 The selected Codex home is saved for exact resume even if another monitor has a

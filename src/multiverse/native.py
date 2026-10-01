@@ -28,15 +28,15 @@ def execute(command: CommandSpec, workspace, timeout=10):
     return subprocess.run(command.argv, cwd=workspace, env=env, text=True, capture_output=True, timeout=timeout)
 
 
-def start_shared_service(specification, workspace, log_path, unset_env):
+def start_shared_service(specification, workspace, log_path, unset_env, observe_versions=None):
     """Ask the native owner to start/reuse its daemon. Never stop or restart it."""
     try:
-        return _start_shared_service(specification, workspace, log_path, unset_env)
+        return _start_shared_service(specification, workspace, log_path, unset_env, observe_versions)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
         raise BridgeUnavailable(str(error)) from error
 
 
-def _start_shared_service(specification, workspace, log_path, unset_env):
+def _start_shared_service(specification, workspace, log_path, unset_env, observe_versions):
     command = CommandSpec(specification.argv, unset_env)
     env = {**environment(command), **specification.environment}
     # Shared services outlive worktrees and temporary universes. Their adapter
@@ -55,7 +55,11 @@ def _start_shared_service(specification, workspace, log_path, unset_env):
     if not isinstance(address, str) or not Path(address).is_absolute() or not stat.S_ISSOCK(Path(address).stat().st_mode):
         raise ValueError('Shared native service did not return an absolute Unix socket')
     versions = [info.get(key) for key in specification.version_fields]
-    if any(not isinstance(v, str) or not v for v in versions) or versions[0] != versions[1]:
+    if any(not isinstance(v, str) or not v for v in versions):
+        raise ValueError('Native service returned invalid CLI/daemon version metadata')
+    if observe_versions:
+        observe_versions({'cli': versions[0], 'daemon': versions[1]})
+    if specification.require_matching_versions and versions[0] != versions[1]:
         raise RuntimeError('Native CLI/daemon version mismatch; update or restart explicitly when sessions are safe')
     if specification.required_cli_flags:
         # Read-only CLI help detects old/partial installations without starting

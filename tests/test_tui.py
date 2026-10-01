@@ -205,11 +205,21 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
             self.app.selected['runtime'] = {'native_mode': {
-                'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'CLI/daemon version mismatch'}}
+                'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'Native config API unavailable'}}
             self.app.action_preview()
             state = str(self.app.query_one('#inspect-state', Static).render())
             self.assertIn('Mode: plain (auto)', state)
-            self.assertIn('Fallback: CLI/daemon version mismatch', state)
+            self.assertIn('Fallback: Native config API unavailable', state)
+
+    async def test_inspector_shows_nonblocking_native_version_difference(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.selected['runtime'] = {'native_mode': {'policy': 'required', 'mode': 'bridge'},
+                                            'native_versions': {'cli': '0.159.3', 'daemon': '0.160.0'}}
+            self.app.action_preview()
+            state = str(self.app.query_one('#inspect-state', Static).render())
+            self.assertIn('Mode: bridge (required)', state)
+            self.assertIn('Versions: CLI 0.159.3 / daemon 0.160.0 (different)', state)
 
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]

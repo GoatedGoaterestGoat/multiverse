@@ -114,7 +114,8 @@ class CodexAdapter(ConfiguredAdapter):
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
                                {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())},
-                               required_cli_flags=('--remote',), cwd=str(Path.home().resolve())))
+                               required_cli_flags=('--remote',), cwd=str(Path.home().resolve()),
+                               require_matching_versions=False))
 
     def launch_proxy(self, settings):
         from .launch import LaunchProtocol
@@ -150,6 +151,11 @@ class CodexAdapter(ConfiguredAdapter):
             setting = self.settings.get('inbox_bridge')
             reason = ('Native mode: auto; selected at each spawn/resume' if setting is None else
                       'Native mode: bridge required' if setting else 'Native mode: plain (explicit opt-out)')
+        if session.native_versions:
+            versions = session.native_versions
+            reason += f'; CLI {versions["cli"]}, daemon {versions["daemon"]}'
+            if versions['cli'] != versions['daemon']:
+                reason += ' (versions differ; launch requires native protocol validation)'
         for operation in ('spawn', 'resume'):
             result[operation] = replace(result[operation], reason=reason)
         result['session_name'] = (Capability('supported', mechanism='thread/name/set')

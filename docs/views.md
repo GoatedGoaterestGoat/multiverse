@@ -18,7 +18,9 @@ detaches the entire tmux client.
 
 The agent inspector shows the Codex native mode (`bridge` or `plain`) and its
 selection policy. If auto fell back to plain during launch, it also shows the
-reason. Opening the inspector does not retry bridge startup or change the mode.
+reason. It also shows the CLI and daemon versions recorded at launch preparation,
+highlighting differences without blocking the bridge. Opening the inspector does
+not retry bridge startup, poll versions or change the mode.
 
 `K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
 `k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer

@@ -77,7 +77,6 @@ else:
     def test_auto_falls_back_before_child_for_each_unavailable_bridge(self):
         cases = [({'failure': 'old CLI: no app-server daemon'}, 'no app-server daemon'),
                  ({'failure': 'daemon start failed'}, 'daemon start failed'),
-                 ({'info': {**self.info, 'appServerVersion': '2'}}, 'version mismatch'),
                  ({'help': 'usage: codex [PROMPT]'}, '--remote')]
         for index, (changes, reason) in enumerate(cases):
             with self.subTest(reason=reason):
@@ -102,6 +101,26 @@ else:
                 agents.kill(self.root, launched['id'])
         self.assertTrue(self.address.exists(), 'Fallback must not remove the shared service socket')
 
+    def test_different_versions_allow_auto_and_required_bridge_with_visible_evidence(self):
+        self.set_case(info={**self.info, 'cliVersion': '0.159.3', 'appServerVersion': '0.160.0'})
+        for policy in ({}, {'inbox_bridge': True}):
+            with self.subTest(policy=policy):
+                self.configure(**policy)
+                launched, directory = self.launch(name='required' if policy else 'auto')
+                self.assertEqual(launched['runtime']['native_mode']['mode'], 'bridge')
+                self.assertEqual(launched['runtime']['native_versions'], {'cli': '0.159.3', 'daemon': '0.160.0'})
+                self.assertIn('--remote', read(directory / 'executed.json'))
+                self.assertIn('versions differ', capabilities(self.root, agent=launched['id'])['resume']['reason'])
+                # Different versions must still pass the real configuration API.
+                with patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('unavailable', 'config/read unsupported')):
+                    if policy:
+                        with self.assertRaisesRegex(RuntimeError, 'config/read unsupported'):
+                            agents.start(self.root, 'bad-required', socket_path=self.socket)
+                    else:
+                        fallback = agents.start(self.root, 'bad-auto', socket_path=self.socket, wait=True, wait_timeout=5)
+                        self.assertEqual(fallback['runtime']['native_mode']['mode'], 'plain')
+                        self.assertIn('config/read unsupported', fallback['runtime']['native_mode']['fallback_reason'])
+
     def test_explicit_true_is_strict_and_false_never_prepares_bridge(self):
         self.set_case(failure='daemon unavailable')
         self.configure(inbox_bridge=True)
@@ -125,10 +144,11 @@ else:
         agents.bind_session(self.root, first['id'], native_id)
         agents.kill(self.root, first['id'])
         (directory / 'executed.json').unlink()
-        self.set_case()
+        self.set_case(info={**self.info, 'cliVersion': '0.159.3', 'appServerVersion': '0.160.0'})
         resumed, directory = self.launch(resume=first['id'])
         self.assertEqual(resumed['native_session_id'], native_id)
         self.assertEqual(resumed['runtime']['native_mode']['mode'], 'bridge')
+        self.assertEqual(resumed['runtime']['native_versions'], {'cli': '0.159.3', 'daemon': '0.160.0'})
         request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
         self.assertIn(native_id, request['argv'])
         self.assertEqual(request['rpc_proxy']['settings']['resume_permissions'],

@@ -189,7 +189,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 from .native import start_shared_service
                 try:
                     shared_endpoint = start_shared_service(command.shared_service, workdir,
-                                                           launch / 'native-service.log', command.unset_env)
+                        launch / 'native-service.log', command.unset_env,
+                        observe_versions=lambda versions: update_runtime(agent_dir, launch_id, native_versions=versions))
                 except BridgeUnavailable as error:
                     command = plain_fallback(command, error)
             if command.control_endpoint:
