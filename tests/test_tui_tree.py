@@ -56,7 +56,8 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             footer = {active.binding.action for active in self.app.active_bindings.values() if active.binding.show}
-            self.assertTrue({"cut", "remove"} <= footer)
+            self.assertTrue({"cut", "kill"} <= footer)
+            self.assertNotIn("remove", footer)
             self.app.select_key(self.key(self.review, "busy"))
             await pilot.press("x")
             self.assertIsNone(self.app.moving)

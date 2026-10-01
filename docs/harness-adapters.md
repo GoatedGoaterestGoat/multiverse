@@ -5,7 +5,7 @@ Multiverse exposes the same operations to its CLI, importable tools and TUI back
 | Operation | Contract |
 | --- | --- |
 | `spawn` | Start a native terminal in the saved workspace with bootstrap, optional initial prompt and model override; apply the mv2 agent name where supported. |
-| `stop` | Cancel native work where the terminal is only a client, then close the owned terminal; never stop a shared daemon. |
+| `kill` / `stop` | Cancel native work, terminate the owned native process, wait for exit, then remove its tmux wrapper; never stop a shared daemon. |
 | `resume` | Reopen the exact saved conversation, never the latest or a replacement session; reapply the mv2 agent name where supported. |
 | `send` with `steer` | Deliver at the next safe boundary, without aborting shell tools; wake an idle session where supported. |
 | `send` with `follow-up` | Deliver as the next turn after current work finishes. |
@@ -64,7 +64,7 @@ UI, or fallback that invokes another model to forward a message.
 
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
-`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
+`kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
 from observed liveness. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
@@ -74,7 +74,7 @@ prompt, not a scheduler object. It is no longer copied into the status summary.
 agent UUID and saves its name, prompt, harness, model and workspace. Resume loads
 that record, keeps its workspace and exact native identity, and accepts an
 optional model override. Under the agent's `.launch.lock`, core refuses another
-launch unless tmux observation says the previous one is stopped. Unknown
+launch unless observation says the previous one is stopped or dormant. Unknown
 liveness also blocks a duplicate launch.
 
 The adapter first validates and describes its command. Core then records a fresh
@@ -83,41 +83,51 @@ when required; creates a detached tmux session running `runner.py`; and tags the
 pane with universe, agent and launch IDs. The runner waits up to 15 seconds for
 core's `ready` file, scrubs inherited identities, opens any relay, launches the
 native child, and owns the relay/status watcher until that child exits. A clean
-child exit records `stopped`; a nonzero exit records `failed`. Bridged launches
+child exit or requested shutdown records `stopped`; other nonzero exits record
+`failed`. Bridged launches
 remain `starting` until the native reply validates and binds; plain launches
 become `running` when the runner starts the child. Setup failures
 retain the failed record and clean up a created terminal/socket directory.
 Returning from `spawn` means the launch was registered; it does not mean native
 authentication, session binding or the first model turn has finished.
 
-`tools/stop.py` calls `agents.terminal_action(..., "stop")`. Core verifies the
-owned live pane, takes `.launch.lock`, rechecks ownership, then calls
-`native.stop()` and the adapter's `stop()`. Codex bridge cancels up to 128 queued
-submissions, requests interruption of the active turn, and cleans background
-terminals for the exact thread. Confirmed cancellations are recorded in the
-inbox. Errors leave the terminal attached, although earlier successful
-cancellations remain applied. Claude, Pi and plain/legacy adapters rely on
-terminal shutdown. Core then issues `tmux kill-pane` and records `stopped`;
-native cancellation is requested, not polled to completion. No shared daemon is
-stopped. The current stop command requires a live owned pane, so it cannot
-recover orphaned server work after that pane is already gone.
+`tools/kill.py` and its `stop` alias call the same core shutdown operation.
+Core verifies the pane's universe, agent and launch tags under the launch lock,
+sets `state=ending`, clears observed status, and enables `remain-on-exit` even
+for panes launched by older versions. `LIVE` is then `ending` and `STATUS` is
+`-`. Native status callbacks cannot make an ending row appear active again.
 
-There is no separate public `kill` command. A direct tmux pane/session kill or
-native exit bypasses adapter stop, so shared-server work may remain active. On
-SIGHUP/SIGTERM the runner closes its relay/watcher and terminates its native
-child, escalating to child kill after two seconds; it does not call adapter
-stop or kill a shared daemon. A forced runner kill cannot guarantee cleanup.
-Tmux observation determines liveness even if saved runtime state is stale.
-Closing the dashboard or detaching tmux leaves agents running.
+The adapter's `stop()` cancels work hosted outside the terminal first. Codex
+bridge cancels up to 128 queued submissions on the exact thread, interrupts its
+active turn and cleans background terminals. A validated already-unloaded
+thread needs no cancellation and is never resumed by kill. A failure retains
+the terminal and reports an error. The shared daemon and sibling agents remain
+running. Local adapters rely on termination of their native process.
 
-The dashboard's `s` key is enabled for a live agent, asks for confirmation, then
-calls `LocalBackend.stop()` and the same stop tool. Its `r` key is enabled for a
-stopped agent and calls `LocalBackend.resume()` and the same resume tool without
-a confirmation. Resume creates a new terminal/launch generation for the saved
-conversation; it does not restore old shell processes or resubmit the built-in
-adapters' original initial prompt. Claude uses its assigned
-UUID, Pi validates its exact session-file header, and Codex requires its bound
-UUID. Built-in adapters never search for the latest conversation.
+Core then sends SIGTERM only to the recorded native child after checking its
+parent against the owned tmux runner. If it has not exited after two seconds,
+core rechecks ownership and sends SIGKILL, with another five-second exit bound.
+No text or control keys are injected into the pane. Core releases the launch
+lock while waiting, so the runner's binding and shutdown callbacks can finish.
+Every later mutation checks the original launch again; a concurrent replacement
+can never be torn down by the older request.
+
+Once the child exits, `LIVE` is `stopped` while the tmux wrapper still exists.
+Core removes that owned wrapper with `kill-pane`, then records `dormant`. A
+shutdown error leaves diagnostic evidence and any remaining wrapper for retry.
+The stopped stage may be brief during automatic teardown. New launches always
+set `remain-on-exit`; Ctrl+C or a native exit therefore retains a stopped pane.
+Absent or foreign panes are dormant for the recorded launch and never authorize
+signals or pane control. Observation errors remain unknown.
+
+Resume accepts stopped and dormant agents, preserves their native identity, and
+removes a retained owned wrapper before launching a new one. Move/remove also
+accept both end states and clear any retained wrapper; alive, ending and unknown
+agents remain ineligible. Killing keeps agent records, files and native history.
+The dashboard's `K` (Shift+k) opens a confirmation and calls the same kill tool;
+`s` is an alias. Lowercase `k` keeps its navigation binding. The footer shows
+`K Kill`, while `d` remains available through the help screen. `r` resumes either
+end state. Header and group live counts include agents that are ending.
 
 ### Codex bridge resume permissions
 
@@ -396,11 +406,11 @@ raw tokens divided by window. Compaction may reduce the count. Until a measureme
 arrives, usage displays N/A; a measured zero is zero. Plain Codex, cumulative usage, cost and
 rate-limit reporting remain unavailable in this adapter.
 
-Explicit `stop` holds the recipient's launch lock, deletes its pending native
+Explicit `kill` (or `stop`) holds the recipient's launch lock during native cancellation, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background
 terminals before closing its terminal. Confirmed queue cancellations are recorded
 by message ID in the core inbox and cannot be replayed with `deliver --retry`.
-Stop is bounded to 128 native queued submissions; errors leave the terminal
+Native cancellation is bounded to 128 queued submissions; errors leave the terminal
 attached with a diagnostic. This requires a bound native session ID and a
 reachable server. Closing a terminal by other means only disconnects its client
 and can leave native work running. Closing a dashboard or detaching tmux never

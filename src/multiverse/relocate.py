@@ -13,9 +13,9 @@ from pathlib import Path
 import shutil
 
 from . import universe
-from .agents import directory, runtime
+from .agents import directory, runtime, update_runtime
 from .store import lock, now, read, write
-from .tmux import observe
+from .tmux import observe, owned
 
 TRASH = "trash"
 RECORD = ".removed.json"
@@ -42,14 +42,19 @@ def exact(value, root=None):
 
 
 def _stopped(agent_dir):
-    """Refuse unless the agent was never launched or its terminal is gone."""
+    """Require native exit and remove any retained, owned terminal wrapper."""
     properties, facts = read(agent_dir / "properties.json"), runtime(agent_dir)
     if not facts.get("launch_id"):
         return
     state = observe(properties, facts)
-    if state["live"] != "stopped":
+    if state["live"] not in ('stopped', 'dormant'):
         raise ValueError(f'Agent {properties["name"]} is {state["live"]}; stop it first'
                          + (f' ({state["reason"]})' if state["reason"] else ""))
+    if state['live'] == 'stopped' and facts.get('tmux'):
+        # A moved/trashed record must not leave an unreachable terminal wrapper.
+        backend, pane = owned(properties, facts, states=('stopped',))
+        backend.run('kill-pane', '-t', pane)
+        update_runtime(agent_dir, facts['launch_id'], state='dormant', status='unknown', dormant_at=now())
 
 
 def _agents(scope):

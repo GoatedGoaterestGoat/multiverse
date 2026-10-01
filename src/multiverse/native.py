@@ -54,11 +54,12 @@ def execute_rpc(spec, workspace, timeout=10):
 class NativeExecutor:
     def __init__(self, workspace, properties=None, facts=None):
         self.workspace, self.properties, self.facts = workspace, properties, facts
+        self.stopping = False
 
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
-        owned(self.properties, self.facts)
+        owned(self.properties, self.facts, states=('alive', 'ending', 'stopped') if self.stopping else ('alive',))
 
     def command(self, specification, timeout=10):
         self.check_session()
@@ -156,6 +157,7 @@ def context(root, reference):
 
 def stop(root, reference):
     directory, adapter, session, executor = context(root, reference)
+    executor.stopping = True
     result = adapter.stop(session, executor)
     for message_id in (result.value or {}).get('cancelled_message_ids', []):
         try:

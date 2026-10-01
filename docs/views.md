@@ -16,6 +16,21 @@ Esc returns to the local view. When attaching from a dashboard inside the same
 tmux server, default `Ctrl-b L` returns to its previous session; `Ctrl-b d`
 detaches the entire tmux client.
 
+`K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
+`k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer
+shows `K Kill`; `d` still deletes to trash and appears in the `?` help screen.
+Kill is enabled for alive, ending or stopped agent rows. It is unavailable for
+groups, dormant agents and unknown terminal state. `r` resumes a stopped or
+dormant agent.
+
+During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while
+native work and the agent process are terminated. Once the native process exits,
+`LIVE` is `stopped` while its tmux wrapper remains; after wrapper removal it is
+`dormant`. The stopped stage can be brief during automatic teardown. A native
+exit or Ctrl+C retains the stopped wrapper until kill, resume, move or removal.
+Ending agents still count as live in the header and groups, and cannot be moved
+or removed. The last reported phase and summary are preserved.
+
 ```json
 {
   "title": "Testing · reproduction queue",

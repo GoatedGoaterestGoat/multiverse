@@ -2,7 +2,7 @@
 import os
 import subprocess
 
-FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id")
+FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
 
 
 class Tmux:
@@ -43,6 +43,36 @@ class Tmux:
     def tag(self, pane, properties, launch_id):
         for key, value in (("agent_id", properties["id"]), ("universe_id", properties["universe_id"]), ("launch_id", launch_id)):
             self.run("set-option", "-p", "-t", pane, f"@mv2_{key}", value)
+        # Preserve the terminal after native exit, independent of the user's
+        # tmux defaults. Core removes this wrapper explicitly on kill/resume.
+        self.run("set-option", "-p", "-t", pane, "remain-on-exit", "on")
+
+    def signal_child(self, properties, runtime, signum):
+        """Signal only the recorded child of this launch's currently owned runner."""
+        panes, error = self.snapshot()
+        if error:
+            raise RuntimeError(error)
+        pane = panes.get(runtime['tmux']['pane'])
+        if not matches(pane, properties, runtime):
+            raise ValueError('Pane ownership changed; refusing to signal a process')
+        if pane['pane_dead'] == '1' or 'exit_code' in runtime:
+            return
+        runner_pid = int(pane['pane_pid'])
+        if runtime.get('runner_pid', runner_pid) != runner_pid:
+            raise ValueError('Pane runner changed; refusing to signal a process')
+        child_pid = runtime.get('pid')
+        if not isinstance(child_pid, int) or child_pid <= 0 or runner_pid <= 0:
+            raise ValueError('Native process has not registered yet; retry after startup')
+        parent = subprocess.run(['ps', '-p', str(child_pid), '-o', 'ppid='],
+                                capture_output=True, text=True, timeout=2)
+        if parent.returncode == 1 and not parent.stdout.strip():
+            return  # The native child exited; its runner is finishing cleanup.
+        if parent.returncode or parent.stdout.strip() != str(runner_pid):
+            raise ValueError('Native process no longer belongs to the owned runner; refusing to signal it')
+        try:
+            os.kill(child_pid, signum)
+        except ProcessLookupError:
+            pass  # Exited between identity validation and the signal.
 
 
 def matches(pane, properties, runtime):
@@ -56,7 +86,7 @@ def matches(pane, properties, runtime):
 def observe(properties, runtime, snapshots=None):
     terminal = runtime.get("tmux")
     if not terminal:
-        return {"live": "stopped" if runtime.get("state") in ("stopped", "failed") else "unknown",
+        return {"live": "dormant" if runtime.get("state") in ("stopped", "failed", "dormant") or not runtime else "unknown",
                 "reason": runtime.get("error", "No recorded pane")}
     backend = Tmux(terminal["socket"])
     if snapshots is not None:
@@ -71,14 +101,16 @@ def observe(properties, runtime, snapshots=None):
         return {"live": "unknown", "reason": error}
     pane = panes.get(terminal["pane"])
     if not pane:
-        return {"live": "stopped", "reason": "Recorded pane is absent"}
+        return {"live": "dormant", "reason": "Recorded pane is absent"}
     if not matches(pane, properties, runtime):
-        return {"live": "stopped", "reason": "Pane belongs to a different launch"}
-    return {"live": "stopped" if pane["pane_dead"] == "1" else "alive", "reason": ""}
+        return {"live": "dormant", "reason": "Pane belongs to a different launch"}
+    live = ('stopped' if pane['pane_dead'] == '1' or 'exit_code' in runtime else
+            'ending' if runtime.get('state') == 'ending' or runtime.get('ending_at') else 'alive')
+    return {"live": live, "reason": ""}
 
 
-def owned(properties, runtime):
+def owned(properties, runtime, *, states=('alive',)):
     result = observe(properties, runtime)
-    if result["live"] != "alive":
+    if result["live"] not in states:
         raise ValueError(f'Cannot operate on agent: {result["live"]}: {result["reason"]}')
     return Tmux(runtime["tmux"]["socket"]), runtime["tmux"]["pane"]

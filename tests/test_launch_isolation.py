@@ -74,7 +74,7 @@ class LaunchIsolationTest(unittest.TestCase):
         backend.create.return_value = terminal
         with patch.object(agents, "Tmux", return_value=backend) as tmux, \
                 patch.object(agents.shutil, "which", return_value="/fake/executable"), \
-                patch.object(agents, "observe", return_value={"live": "stopped"}), \
+                patch.object(agents, "observe", return_value={"live": "dormant"}), \
                 patch.dict(os.environ, {"MV2_TMUX_SOCKET": "/inherited/tmux.sock"}):
             first = agents.start(self.root, "test", "test", "pi", socket_path="/explicit/tmux.sock")
             directory = agents.directory(self.root, first["id"])
@@ -94,7 +94,7 @@ class LaunchIsolationTest(unittest.TestCase):
         other.mkdir()
         with patch.object(agents, "Tmux", return_value=backend), \
                 patch.object(agents.shutil, "which", return_value="/fake/executable"), \
-                patch.object(agents, "observe", return_value={"live": "stopped"}):
+                patch.object(agents, "observe", return_value={"live": "dormant"}):
             first = agents.start(self.root, "worker", "task", "pi")
             directory = agents.directory(self.root, first["id"])
             (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")

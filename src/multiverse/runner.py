@@ -12,7 +12,7 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from multiverse.agents import update_runtime, bind_session
+from multiverse.agents import update_runtime, bind_session, runtime
 from multiverse.store import now, read
 
 
@@ -139,7 +139,8 @@ def main():
             service_dir = endpoint.parent
         # A bridge resume already has a saved ID, but it must validate the new
         # native reply (including requested grants) before accepting more input.
-        update_runtime(agent_dir, launch.name, state="starting" if request.get('rpc_proxy') else "running", status="unknown")
+        update_runtime(agent_dir, launch.name, state="starting" if request.get('rpc_proxy') else "running", status="unknown",
+                       runner_pid=os.getpid())
         if request.get('rpc_proxy'):
             from multiverse import harnesses, rpc
             properties = read(agent_dir / 'properties.json')
@@ -158,11 +159,12 @@ def main():
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             watcher.start()
         code = process.wait()
+        update_runtime(agent_dir, launch.name,
+                       state="stopped" if code == 0 or runtime(agent_dir).get('ending_at') else "failed",
+                       exit_code=code, status="unknown", stopped_at=now())
         if watcher is not None:
             watcher.close()
             watcher = None
-        update_runtime(agent_dir, launch.name, state="stopped" if code == 0 else "failed", exit_code=code,
-                       status="unknown", stopped_at=now())
         return code
     except Exception as error:
         print(f"Multiverse launch failed: {error}", file=sys.stderr)

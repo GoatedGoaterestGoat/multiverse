@@ -3,8 +3,10 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import sys
+import time
 
 from . import universe, harnesses
 from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id
@@ -52,7 +54,7 @@ def listing(root, recursive=False):
                 measured = native.usage_snapshot(scope, properties, facts)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
-                             "status": facts.get("status", "unknown") if observation["live"] == "alive" else "—",
+                             "status": facts.get("status", "unknown") if observation["live"] == "alive" else "-",
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
@@ -106,7 +108,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     agent_dir.mkdir(parents=True, exist_ok=True)
     with lock(agent_dir / ".launch.lock"):
         previous = runtime(agent_dir)
-        if previous and observe(properties, previous)["live"] != "stopped":
+        if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
@@ -130,6 +132,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
+        if previous and observe(properties, previous)['live'] == 'stopped':
+            # Resume creates a fresh pane; remove only the old owned wrapper.
+            old_backend, old_pane = owned(properties, previous, states=('stopped',))
+            old_backend.run('kill-pane', '-t', old_pane)
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(properties["task"])
@@ -219,19 +225,77 @@ def report(root, reference, phase=None, summary=None):
 
 
 def terminal_action(root, reference, action):
+    if action in ('stop', 'kill'):
+        return kill(root, reference)
     agent_dir = directory(root, reference)
     facts = runtime(agent_dir)
     backend, pane = owned(read(agent_dir / "properties.json"), facts)
     if action == "inspect":
         return backend.run("capture-pane", "-p", "-S", "-100", "-t", pane)
-    if action == "stop":
-        with lock(agent_dir / '.launch.lock'):
-            # Recheck ownership under the same lock used by send/resume.
-            facts = runtime(agent_dir)
-            backend, pane = owned(read(agent_dir / 'properties.json'), facts)
+    return backend, pane
+
+
+def kill(root, reference):
+    """End native work, await its process exit, then remove the owned wrapper."""
+    agent_dir = directory(root, reference)
+    with lock(agent_dir / '.launch.lock'):
+        facts = runtime(agent_dir)
+        properties = read(agent_dir / 'properties.json')
+        backend, pane = owned(properties, facts, states=('alive', 'ending', 'stopped'))
+        launch_id = facts['launch_id']
+        # Older launches may have inherited remain-on-exit=off.
+        backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
+        update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
+        try:
             from .native import stop
             stop(root, reference)
-            backend.run("kill-pane", "-t", pane)
-            update_runtime(agent_dir, facts["launch_id"], state="stopped", status="unknown", stopped_at=now())
-            return {"id": agent_dir.name, "state": "stopped"}
-    return backend, pane
+        except Exception as error:
+            update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
+                           ending_at=facts.get('ending_at'),
+                           error=f'Native cancellation failed; terminal retained: {error}')
+            raise
+
+    # The runner's relay can be binding under .launch.lock during startup or
+    # shutdown. Never hold that lock while waiting for the child/runner to exit.
+    def current():
+        latest = runtime(agent_dir)
+        if latest.get('launch_id') != launch_id:
+            raise ValueError('Outdated launch; refusing to kill a replacement')
+        return latest
+
+    def wait_for_exit(timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            latest = current()
+            live = observe(properties, latest)['live']
+            if live in ('stopped', 'dormant'):
+                return
+            if live == 'unknown':
+                raise RuntimeError('Cannot verify native exit; terminal retained')
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Native process has not exited; terminal retained')
+            time.sleep(.05)
+
+    try:
+        if observe(properties, current())['live'] in ('alive', 'ending'):
+            backend.signal_child(properties, current(), signal.SIGTERM)
+            try:
+                wait_for_exit(2)
+            except TimeoutError:
+                backend.signal_child(properties, current(), signal.SIGKILL)
+                wait_for_exit(5)
+        with lock(agent_dir / '.launch.lock'):
+            latest = current()
+            live = observe(properties, latest)['live']
+            if live == 'stopped':
+                backend, pane = owned(properties, latest, states=('stopped',))
+                update_runtime(agent_dir, launch_id, state='stopped', status='unknown', stopped_at=now())
+                backend.run('kill-pane', '-t', pane)
+            elif live != 'dormant':
+                raise RuntimeError(f'Native exit not confirmed ({live}); terminal retained')
+            update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now())
+        return {'id': agent_dir.name, 'state': 'dormant'}
+    except Exception as error:
+        if runtime(agent_dir).get('launch_id') == launch_id:
+            update_runtime(agent_dir, launch_id, error=f'Kill incomplete: {error}')
+        raise

@@ -101,7 +101,7 @@ class CodexTimingTest(TerminalBase):
                 if agents.listing(self.root)[0]['live'] == 'alive':
                     agents.terminal_action(self.root, result['id'], 'stop')
             finally:
-                until(lambda: agents.listing(self.root)[0]['live'] == 'stopped', seconds=10)
+                until(lambda: agents.listing(self.root)[0]['live'] == 'dormant', seconds=10)
                 self.assertTrue(endpoint.exists(), 'Terminal exit must leave shared daemon running')
 
         self.addCleanup(stop_owned)

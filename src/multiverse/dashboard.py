@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from . import universe, usage
 from .harnesses import load as load_harness
 from .store import read
-from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, list_agents, move, native_status, remove,
+from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, kill, list_agents, move, native_status, remove,
                     resume, send, spawn, stop, subverse)
 from .views import normalize_widgets
 
@@ -84,7 +84,7 @@ def within(item, root):
 
 
 def counts(items):
-    return {"total": len(items), "alive": sum(a.get("live") == "alive" for a in items),
+    return {"total": len(items), "alive": sum(a.get("live") in ('alive', 'ending') for a in items),
             "blocked": sum(a.get("phase") == "blocked" for a in items),
             "waiting": sum(a.get("status") == "waiting" for a in items),
             "unknown": sum(a.get("live") == "unknown" for a in items)}
@@ -154,6 +154,9 @@ class LocalBackend:
 
     def stop(self, root, reference):
         return stop.run(root, agent=reference)
+
+    def kill(self, root, reference):
+        return kill.run(root, agent=reference)
 
     def inspect(self, root, reference):
         return inspect.run(root, agent=reference)

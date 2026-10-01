@@ -35,7 +35,7 @@ def result(response):
     return value
 
 
-def _thread(session):
+def _thread(session, *, allow_unloaded=False):
     native_id = session.native_id
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
@@ -51,11 +51,13 @@ def _thread(session):
         return NativeResult('error', 'Native server returned a different thread ID')
     if not isinstance(thread.get('cwd'), str) or not thread['cwd'] or Path(thread['cwd']).resolve() != Path(session.workspace).resolve():
         return NativeResult('error', 'Native thread workspace differs from the saved agent workspace')
-    if thread.get('canAcceptDirectInput') is False:
-        return NativeResult('unavailable', 'Native thread does not accept direct input')
     state = object_field(thread, 'status').get('type')
     if not isinstance(state, str):
         raise ValueError('Native RPC thread status type must be text')
+    if allow_unloaded and state == 'notLoaded':
+        return thread
+    if thread.get('canAcceptDirectInput') is False:
+        return NativeResult('unavailable', 'Native thread does not accept direct input')
     if state not in ('idle', 'active'):
         return NativeResult('unavailable', f'Exact native thread is not controllable on this server ({state}); no resume attempted')
     return thread
@@ -160,9 +162,11 @@ def stop_session(session):
     cancelled = []
     def failure(observed):
         return NativeResult(observed.state, observed.reason, {'cancelled_message_ids': cancelled})
-    thread = yield from _thread(session)
+    thread = yield from _thread(session, allow_unloaded=True)
     if isinstance(thread, NativeResult):
         return failure(thread)
+    if thread['status']['type'] == 'notLoaded':
+        return NativeResult('ok', 'Exact native thread is already unloaded', {'cancelled_message_ids': []})
     # Bound work before any mutation. Core holds the recipient's launch lock,
     # so concurrent Multiverse sends cannot replenish this queue during stop.
     queued = result((yield RpcRequest('thread/queue/list', {'threadId': session.native_id, 'limit': 128})))

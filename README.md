@@ -144,9 +144,9 @@ Filesystem and tmux work run outside the UI event loop. Stable agent keys preser
 
 The TUI reads `properties.json` to discover agents and their reported work. It reconciles `runtime.json` with `tmux list-panes` to observe whether each launch is alive. Each pane carries three tags: universe ID, agent ID and launch ID. A readable window/session name is only a label. Renaming it does not change identity; a reused pane ID cannot impersonate an old launch. Unknown or inaccessible state is shown as unknown.
 
-`LIVE` comes from tmux, `STATUS` (`working`, `waiting` or `idle`) comes from the harness, `CONTEXT` is the size of the agent's latest request against its model's window (`82k/200k`, yellow from 70%, red from 90%; `82k` before the window is known, `N/A` when the harness reports none), never a cumulative total, and `COST` (optional) is the session's cost so far. When a Claude agent reports rate limits, the header shows the account's `5h 34% · 7d 12%` windows. `PHASE`/`SUMMARY` come from the model. A `waiting` agent needs you: a permission prompt, a question or a plan approval is open. Waiting agents are marked with an orange `●` and status badge, and groups and the header count them (`2 waiting`) alongside blocked agents. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
+`LIVE` distinguishes `alive` (native process running), `ending` (shutdown in progress), `stopped` (native process exited; tmux wrapper remains), `dormant` (wrapper gone), and `unknown` (observation failed). `STATUS` (`working`, `waiting` or `idle`) comes from the harness, `CONTEXT` is the size of the agent's latest request against its model's window (`82k/200k`, yellow from 70%, red from 90%; `82k` before the window is known, `N/A` when the harness reports none), never a cumulative total, and `COST` (optional) is the session's cost so far. When a Claude agent reports rate limits, the header shows the account's `5h 34% · 7d 12%` windows. `PHASE`/`SUMMARY` come from the model. A `waiting` agent needs you: a permission prompt, a question or a plan approval is open. Waiting agents are marked with an orange `●` and status badge, and groups and the header count them (`2 waiting`) alongside blocked agents. A live agent can report `done`; a stopped agent's last task can still say `working`. The dashboard preserves that distinction. It never fabricates progress by reading terminal text.
 
-The dashboard is a reader and command client. Quit it and agents continue. The default tmux server is named `multiverse-v2`, separate from existing sessions; `MV2_TMUX_SOCKET` can select an explicit socket. Attach/inspect/stop verify pane ownership first. `stop` terminates the pane and its running work.
+The dashboard is a reader and command client. Quit it and agents continue. The default tmux server is named `multiverse-v2`, separate from existing sessions; `MV2_TMUX_SOCKET` can select an explicit socket. Attach, inspect and shutdown verify pane ownership first. `kill` cancels native work, terminates the owned native process, waits for its exit, then removes the tmux wrapper. `stop` is an alias. Status shows `-` from the start of shutdown. Ctrl+C/native exit retains a stopped wrapper; resume works from both stopped and dormant and removes any retained wrapper before starting the replacement. The header and group live counts include ending agents. Records, files and native session identity are preserved.
 
 | Key | Action |
 | --- | --- |
@@ -156,7 +156,8 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | /, Escape | Search all groups; clear search |
 | n / m | Spawn in selected group / message selected agent |
 | g | Create a subverse inside the selected group |
-| s / r | Stop after confirmation / resume |
+| K or s | Kill after confirmation (`s` is an alias) |
+| r | Resume a stopped or dormant agent |
 | v / p | Full details / show or hide inspector |
 | ? / q | Keyboard help / quit dashboard |
 | F5 / Ctrl-p | Refresh / command palette |

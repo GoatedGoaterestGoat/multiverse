@@ -66,7 +66,7 @@ class OperationTest(BaseTest):
         self.adapter = FourthAdapter()
         self.enterContext(patch.object(native, 'owned'))
         self.loader = self.enterContext(patch.object(harnesses, 'load', return_value=self.adapter))
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'stopped'}))
+        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'dormant'}))
         backend = Mock()
         backend.create.return_value = {'socket': '/fake', 'session': '$1', 'pane': '%1'}
         self.enterContext(patch.object(agents, 'Tmux', return_value=backend))

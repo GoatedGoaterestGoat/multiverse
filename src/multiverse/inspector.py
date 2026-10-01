@@ -87,7 +87,10 @@ class Inspector(Vertical):
             state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
-                self.query_one("#preview", Static).update(clean(row.get("reason") or "No live pane. Resume a stopped agent with r."))
+                message = ('Native work is ending.' if live == 'ending' else
+                           'Native process stopped; tmux wrapper remains. Resume with r.' if live == 'stopped' else
+                           'No tmux wrapper. Resume with r.' if live == 'dormant' else 'Terminal state is unknown.')
+                self.query_one("#preview", Static).update(clean(row.get("reason") or message))
         self.query_one("#inspect-state", Static).update(state)
         self.capture_if_needed()
 

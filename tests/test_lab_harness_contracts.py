@@ -70,7 +70,7 @@ class LabHarnessContracts(unittest.TestCase):
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
                 if harness == 'pi':
                     (directory / 'session.jsonl').write_text(__import__('json').dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
-                with patch('multiverse.agents.observe', return_value={'live': 'stopped'}):
+                with patch('multiverse.agents.observe', return_value={'live': 'dormant'}):
                     resumed = agents.start(self.root, resume=row['id'], socket_path=self.socket)
                 argv = self.request(resumed)['argv']
                 self.assertEqual(resumed['id'], row['id'])
@@ -84,7 +84,7 @@ class LabHarnessContracts(unittest.TestCase):
 
     def test_unbound_codex_cannot_resume(self):
         row = self.start()
-        with patch('multiverse.agents.observe', return_value={'live': 'stopped'}), \
+        with patch('multiverse.agents.observe', return_value={'live': 'dormant'}), \
                 self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
             agents.start(self.root, resume=row['id'], socket_path=self.socket)
 

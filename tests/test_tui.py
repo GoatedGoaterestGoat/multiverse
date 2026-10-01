@@ -32,6 +32,10 @@ class RecordingBackend(DemoBackend):
         self.calls.append(("stop", root, reference))
         return super().stop(root, reference)
 
+    def kill(self, root, reference):
+        self.calls.append(('kill', root, reference))
+        return super().kill(root, reference)
+
     def resume(self, root, reference):
         self.calls.append(("resume", root, reference))
         return super().resume(root, reference)
@@ -237,15 +241,84 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.backend.calls, [])
             await pilot.press("s", "ctrl+enter")
             await self.settle(pilot)
-            self.assertEqual(self.app.selected["live"], "stopped")
+            self.assertEqual(self.app.selected["live"], "dormant")
             await pilot.press("enter")
-            self.assertEqual(self.backend.calls, [("stop", self.backend.root, reference)])
+            self.assertEqual(self.backend.calls, [("kill", self.backend.root, reference)])
             await pilot.press("r")
             await self.settle(pilot)
             with patch.object(self.app, "suspend", return_value=nullcontext()):
                 await pilot.press("enter")
                 await self.settle(pilot)
-            self.assertEqual([call[0] for call in self.backend.calls], ["stop", "resume", "attach"])
+            self.assertEqual([call[0] for call in self.backend.calls], ["kill", "resume", "attach"])
+
+    async def test_shift_k_kills_but_lowercase_k_still_moves_up(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            agent = dict(self.app.selected)
+            key = self.app.selected_key
+            await pilot.press('k')
+            self.assertNotEqual(self.app.selected_key, key)
+            self.assertEqual(self.backend.calls, [])
+            self.assertFalse(self.app.check_action('kill', ()))  # Group row.
+            self.app.select_key(key)
+            await pilot.press('K', 'escape')
+            self.assertEqual(self.backend.calls, [])
+            footer = {b.binding.key for b in self.app.active_bindings.values() if b.binding.show}
+            self.assertIn('K', footer)
+            self.assertNotIn('d', footer)
+            self.assertIn('d              Delete', KEYS)
+            await pilot.press('K', 'ctrl+enter')
+            await self.settle(pilot)
+            self.assertEqual(self.backend.calls, [('kill', Path(agent['universe']), agent['id'])])
+            self.assertEqual((self.app.selected['live'], self.app.selected['status']), ('dormant', '-'))
+            self.assertFalse(self.app.check_action('kill', ()))
+            self.assertTrue(self.app.check_action('resume', ()))
+            await pilot.press('K')
+            self.assertEqual(len(self.app.screen_stack), 1)
+
+    async def test_kill_operation_refreshes_ending_and_stopped_before_dormant(self):
+        ending, stopped, finish_native, finish_wrapper = Event(), Event(), Event(), Event()
+        def staged_kill(root, reference):
+            row = self.backend.find(root, reference)
+            row.update(live='ending', status='-')
+            ending.set()
+            if not finish_native.wait(5):
+                raise TimeoutError('test native release')
+            row.update(live='stopped')
+            stopped.set()
+            if not finish_wrapper.wait(5):
+                raise TimeoutError('test wrapper release')
+            row.update(live='dormant')
+        self.backend.kill = staged_kill
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            await pilot.press('K', 'ctrl+enter')
+            try:
+                for event, live in ((ending, 'ending'), (stopped, 'stopped')):
+                    self.assertTrue(await asyncio.to_thread(event.wait, 2))
+                    self.app.refresh_snapshot()
+                    await self.app.workers.wait_for_complete([w for w in self.app.workers if w.group == 'scan'])
+                    await pilot.pause()
+                    self.assertEqual((self.app.selected['live'], self.app.selected['status']), (live, '-'))
+                    self.assertFalse(self.app.check_action('resume', ()))  # Action still in progress.
+                    finish_native.set()
+            finally:
+                finish_native.set()
+                finish_wrapper.set()
+            await self.settle(pilot)
+            self.assertEqual(self.app.selected['live'], 'dormant')
+
+    async def test_retained_stopped_agent_can_resume_and_ending_counts_as_live(self):
+        from multiverse.dashboard import counts
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            stopped = next(a for a in self.backend.agents if a['live'] == 'stopped')
+            self.app.select_key(agent_key(stopped))
+            self.assertTrue(self.app.check_action('resume', ()))
+            await pilot.press('r')
+            await self.settle(pilot)
+            self.assertEqual(self.app.selected['live'], 'alive')
+            self.assertEqual(counts([{'live': 'ending'}, {'live': 'stopped'}, {'live': 'dormant'}])['alive'], 1)
 
     async def test_create_nested_subverse_and_quit_do_not_stop_agents(self):
         async with self.app.run_test(size=(120, 32)) as pilot:
@@ -428,11 +501,11 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.app.refresh_snapshot()
                 await self.settle(pilot)
                 self.assertEqual(len(calls), before + 1)
-                reviewer["live"], reviewer["status"] = "stopped", "—"
+                reviewer["live"], reviewer["status"] = "stopped", "-"
                 self.app.refresh_snapshot()
                 await self.settle(pilot)
                 self.assertEqual(len(calls), before + 1)
-                self.assertIn("No live pane", str(self.app.query_one("#preview", Static).render()))
+            self.assertIn("Native process stopped; tmux wrapper remains", str(self.app.query_one("#preview", Static).render()))
 
     async def test_group_inspector_does_not_capture_and_preview_errors_stay_local(self):
         async with self.app.run_test(size=(140, 32)) as pilot:

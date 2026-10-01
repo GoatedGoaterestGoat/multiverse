@@ -113,10 +113,10 @@ class FilesTest(BaseTest):
         with self.assertRaises(ValueError):
             append_message(agent, "must not hide corruption", {})
 
-    def test_missing_local_server_is_stopped_despite_old_hostname(self):
+    def test_missing_local_server_is_dormant_despite_old_hostname(self):
         with patch.object(Tmux, "snapshot", return_value=({}, None)):
             result = observe({}, {"host": "some-other-host", "tmux": {"pane": "%1", "socket": "/tmp/nope"}})
-        self.assertEqual(result["live"], "stopped")
+        self.assertEqual(result["live"], "dormant")
 
     def test_subverse_view_is_local_and_parent_shows_summary(self):
         child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
@@ -178,7 +178,7 @@ class TerminalTest(TerminalBase):
         with self.assertRaises(ValueError):
             agents.start(self.root, resume=result["id"], socket_path=self.socket)
         agents.terminal_action(self.root, result["id"], "stop")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "stopped")
+        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
         until(lambda: not self.backend.snapshot()[0])
         time.sleep(0.1)
         resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket)
@@ -191,7 +191,7 @@ class TerminalTest(TerminalBase):
         result, _ = self.spawn()
         pane = result["runtime"]["tmux"]["pane"]
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "stopped")
+        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
         with self.assertRaises(ValueError):
             agents.terminal_action(self.root, result["id"], "stop")
         self.assertIn(pane, self.backend.snapshot()[0])
@@ -205,7 +205,7 @@ class TerminalTest(TerminalBase):
             agents.start(self.root, resume=result['id'], socket_path=self.socket)
         pane = result['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         with self.assertRaises(ValueError):
             agents.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
@@ -217,7 +217,7 @@ class TerminalTest(TerminalBase):
         self.backend.run('kill-pane', '-t', result['runtime']['tmux']['pane'])
         until(lambda: not self.backend.snapshot()[0])
         agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname', state='running')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         time.sleep(0.1)
         resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
         self.assertEqual(resumed['native_session_id'], native_id)

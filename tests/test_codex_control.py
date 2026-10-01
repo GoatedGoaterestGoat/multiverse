@@ -123,6 +123,11 @@ class CodexControlTest(unittest.TestCase):
         self.assertEqual(interrupt.params['turnId'], 'exact-turn')
         self.assertEqual(self.requests[-1].method, 'thread/backgroundTerminals/clean')
 
+    def test_stop_of_exact_unloaded_thread_does_not_reload_it(self):
+        result = self.run_plan('stop', state='notLoaded')
+        self.assertEqual(result.state, 'ok')
+        self.assertEqual([r.method for r in self.requests], ['initialize', 'thread/read'])
+
     def test_stop_limits_and_wrong_thread_fail_before_mutation(self):
         for overrides in (
             {'thread/queue/list': {'result': {'data': [], 'nextCursor': 'more'}}},
