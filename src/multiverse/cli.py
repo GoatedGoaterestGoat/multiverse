@@ -52,7 +52,7 @@ def run(args):
 
 def main():
     args = parser().parse_args()
-    output(lambda: run(args))
+    output(lambda: run(args), render=getattr(tool(args.action or 'tui'), 'format_output', None))
 
 
 if __name__ == "__main__":

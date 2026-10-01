@@ -42,11 +42,12 @@ def delivery_summary(receipt):
     return result
 
 
-def output(call, **values):
+def output(call, *, render=None, **values):
     try:
         result = call(**values)
         if result is not None:
-            print(result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False))
+            display = render(result) if render else result
+            print(display if isinstance(display, str) else json.dumps(display, indent=2, ensure_ascii=False))
         if isinstance(result, dict) and result.get("ok") is False:
             sys.exit(1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
@@ -58,4 +59,4 @@ def main(configure, run):
     parser = argparse.ArgumentParser(description=sys.modules[run.__module__].__doc__)
     add_universe(parser)
     configure(parser)
-    output(run, **vars(parser.parse_args()))
+    output(run, render=getattr(sys.modules[run.__module__], 'format_output', None), **vars(parser.parse_args()))

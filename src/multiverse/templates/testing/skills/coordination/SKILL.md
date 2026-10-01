@@ -12,7 +12,7 @@ Use `"$MV2_CLI" --help` for the CLI. Your current universe and identity are alre
 - `resume AGENT` resumes a stopped or dormant agent in its saved native session. `kill AGENT` cancels native work, ends its process and removes its tmux wrapper; `stop AGENT` is an alias. Both work after the pane is gone to cancel surviving shared-server work, and report what was cancelled. Use shutdown only when appropriate. Live states progress through ending, stopped (wrapper retained) and dormant (wrapper gone).
 - `inbox` shows unread inbox-only messages and advances its read position automatically. Native-delivered messages arrive directly with their sender and text. `inbox --all` is the full raw history, including native delivery evidence; it does not change the ordinary read position. A message viewed in history may still arrive through native delivery. Use `--after CURSOR` to page through that history.
 
-- Report your own phase with `report --phase working|blocked|done --summary '...'`. Properties are self-reported. The TUI shows process observations separately.
+- Report your own phase with `report --phase working|blocked|done --summary '...'`. The CLI prints one line such as `Reported working: Checking launch permissions`. Properties are self-reported. The TUI shows process observations separately.
 
 Harness instructions live in `harnesses/<name>/`. If an adapter fails, inspect its manifest, docs and pane. Do not type into a pane based only on its window name. Match the recorded universe, agent and launch tags first. Avoid sending keys into an active model turn or an unknown shell.
 
