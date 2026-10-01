@@ -106,14 +106,15 @@ class CodexDaemonTest(TerminalBase):
         for root in roots:
             path = root / 'harnesses/codex/harness.json'
             spec = read(path)
-            spec['settings'] = {'inbox_bridge': True,
-                                'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
+            spec['settings'] = {'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
             write(path, spec)
         with patch.dict(os.environ, env), ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda root: agents.start(root, 'same-name', 'Record identity then finish.',
                                                             'codex', socket_path=self.socket,
                                                             wait=True, wait_timeout=30), roots))
         self.assertTrue(all(result['ready'] for result in results), results)
+        self.assertTrue(all(result['runtime']['native_mode'] == {
+            'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None} for result in results))
         self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
         pairs = list(zip(roots, results))
         def stop_terminals():

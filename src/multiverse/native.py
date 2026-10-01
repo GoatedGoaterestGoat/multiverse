@@ -10,9 +10,10 @@ import socket
 import os
 import subprocess
 import time
+import re
 
 from . import agents, harnesses
-from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint
+from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint, BridgeUnavailable
 from .store import lock, now, read, message_record, update_message, inbox
 from .tmux import owned, observe
 
@@ -29,6 +30,13 @@ def execute(command: CommandSpec, workspace, timeout=10):
 
 def start_shared_service(specification, workspace, log_path, unset_env):
     """Ask the native owner to start/reuse its daemon. Never stop or restart it."""
+    try:
+        return _start_shared_service(specification, workspace, log_path, unset_env)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        raise BridgeUnavailable(str(error)) from error
+
+
+def _start_shared_service(specification, workspace, log_path, unset_env):
     command = CommandSpec(specification.argv, unset_env)
     env = {**environment(command), **specification.environment}
     result = subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
@@ -43,6 +51,16 @@ def start_shared_service(specification, workspace, log_path, unset_env):
     versions = [info.get(key) for key in specification.version_fields]
     if any(not isinstance(v, str) or not v for v in versions) or versions[0] != versions[1]:
         raise RuntimeError('Native CLI/daemon version mismatch; update or restart explicitly when sessions are safe')
+    if specification.required_cli_flags:
+        # Read-only CLI help detects old/partial installations without starting
+        # another daemon or constructing a speculative native conversation.
+        help_result = subprocess.run([specification.argv[0], '--help'], cwd=workspace, env=env,
+                                     capture_output=True, text=True, timeout=5)
+        help_text = help_result.stdout + help_result.stderr
+        missing = [flag for flag in specification.required_cli_flags
+                   if not re.search(r'(?<!\S)' + re.escape(flag) + r'(?=[\s=<]|$)', help_text)]
+        if help_result.returncode or missing:
+            raise ValueError('Native CLI does not advertise required bridge flags: ' + ', '.join(missing or specification.required_cli_flags))
     return NativeEndpoint('unix-websocket', address)
 
 

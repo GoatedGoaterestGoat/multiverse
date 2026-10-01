@@ -65,7 +65,8 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         self.publish = UsagePublisher(self.root, 'launch')
         self.adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
         self.session = SessionHandle('agent', 'codex', '/workspace', native_id='thread', launch_id='launch',
-                                     session_file=str(self.root / 'session.jsonl'))
+                                     session_file=str(self.root / 'session.jsonl'),
+                                     native_mode={'policy': 'required', 'mode': 'bridge', 'fallback_reason': None})
 
     def test_latest_measurement_replaces_previous_including_after_compaction(self):
         self.assertEqual(self.adapter.get_usage(self.session).state, 'unavailable')
@@ -99,7 +100,8 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         for session in (replace(self.session, launch_id='old'), replace(self.session, native_id='other'),
                         replace(self.session, native_id=None), replace(self.session, session_file=None)):
             self.assertEqual(self.adapter.get_usage(session).state, 'unavailable')
-        self.assertEqual(CodexAdapter.configured('codex', {}).get_usage(self.session).state, 'unavailable')
+        plain = replace(self.session, native_mode={'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
+        self.assertEqual(CodexAdapter.configured('codex', {'inbox_bridge': False}).get_usage(plain).state, 'unavailable')
 
     def test_snapshot_survives_launch_stop_with_its_measurement_timestamp(self):
         self.publish(notification(event(tokens=0), 'thread'))

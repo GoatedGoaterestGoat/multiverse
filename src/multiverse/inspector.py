@@ -85,6 +85,11 @@ class Inspector(Vertical):
             state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
             state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
+            selection = row.get('runtime', {}).get('native_mode')
+            if selection:
+                state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style='#a6adc8')
+                if selection.get('fallback_reason'):
+                    state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 message = ('Native work is ending.' if live == 'ending' else

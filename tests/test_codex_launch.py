@@ -88,7 +88,7 @@ class CodexLaunchTest(unittest.TestCase):
 
     def test_plain_permission_arguments_are_unchanged(self):
         flags = ['--dangerously-bypass-approvals-and-sandbox']
-        adapter = CodexAdapter.configured('codex', {'args': flags})
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False, 'args': flags})
         session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
         for command in (adapter.spawn(self.context), adapter.resume(session, self.context)):
             self.assertIn(flags[0], command.argv)
@@ -120,7 +120,7 @@ class CodexLaunchTest(unittest.TestCase):
         self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'unavailable')
 
     def test_plain_launch_unchanged(self):
-        command = CodexAdapter.configured('codex', {}).spawn(self.context)
+        command = CodexAdapter.configured('codex', {'inbox_bridge': False}).spawn(self.context)
         self.assertIn('--add-dir', command.argv)
         self.assertIsNone(command.rpc_proxy)
 

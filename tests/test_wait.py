@@ -68,7 +68,7 @@ class WaitTest(BaseTest):
 
     def test_plain_readiness_requires_child_pid_but_not_native_binding(self):
         write(self.directory / 'launches' / self.launch / 'request.json', {})
-        agents.update_runtime(self.directory, self.launch, state='running', pid=None)
+        agents.update_runtime(self.directory, self.launch, state='running', pid=None, control_endpoint=None)
         self.assertTrue(self.wait()['timed_out'])
         agents.update_runtime(self.directory, self.launch, pid=123)
         self.assertTrue(self.wait()['ready'])
@@ -84,6 +84,13 @@ class WaitTest(BaseTest):
                               control_endpoint={'transport': 'unix-lines', 'address': '/fake/inbox'})
         self.assertTrue(self.wait()['timed_out'])
         agents.update_runtime(self.directory, self.launch, native_bridge='claude-mod-v1')
+        self.assertTrue(self.wait()['ready'])
+
+    def test_runner_plain_fallback_does_not_wait_for_a_native_binding(self):
+        # A wait may already have read the original bridge launch request when
+        # the runner selects plain after a relay preparation failure.
+        agents.update_runtime(self.directory, self.launch, state='running', control_endpoint=None,
+                              native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'relay unavailable'})
         self.assertTrue(self.wait()['ready'])
 
     def test_wait_never_follows_replacement_generation(self):

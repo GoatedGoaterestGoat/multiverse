@@ -13,7 +13,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from multiverse.agents import update_runtime, bind_session, runtime
-from multiverse.store import now, read
+from multiverse.store import lock, now, read, write
 
 
 class UsagePublisher:
@@ -152,6 +152,17 @@ class StartupDelivery:
                 pass
 
 
+def launch_environment(request):
+    env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+    for key in request.get('unset_env', []):
+        env.pop(key, None)
+    env.update(request['env'])
+    cli_prefix = str(Path(env['MV2_CLI']).parent) + os.pathsep
+    if not env.get('PATH', '').startswith(cli_prefix):
+        env['PATH'] = cli_prefix + env.get('PATH', '')
+    return env
+
+
 def main():
     launch = Path(sys.argv[1])
     agent_dir = launch.parent.parent
@@ -173,13 +184,7 @@ def main():
                 raise RuntimeError("Spawn did not finish registering this pane")
             time.sleep(0.05)
         request = read(launch / "request.json")
-        env = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
-        for key in request.get("unset_env", []):
-            env.pop(key, None)
-        env.update(request["env"])
-        cli_prefix = str(Path(env["MV2_CLI"]).parent) + os.pathsep
-        if not env.get("PATH", "").startswith(cli_prefix):
-            env["PATH"] = cli_prefix + env.get("PATH", "")
+        env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):
             endpoint = Path(request['rpc_proxy']['socket_path'] if request.get('rpc_proxy') else request['control_endpoint']['address'])
             if endpoint != Path('/tmp') / ('mv2-native-' + launch.name) / 'rpc.sock':
@@ -200,7 +205,34 @@ def main():
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
                 UsagePublisher(agent_dir, launch.name))
-            proxy.start()
+            try:
+                proxy.start()
+            except Exception as error:
+                fallback = request.get('fallback')
+                if fallback is None or getattr(proxy.protocol, 'bound', False):
+                    raise
+                proxy.close()
+                proxy = None
+                selection = {**(fallback.get('native_mode') or {}), 'fallback_reason': f'Native launch relay unavailable: {error}'}
+                request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
+                           'env': {**fallback.get('environment', {}), **request['env']},
+                           'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
+                           'native_mode': selection, 'fallback': None}
+                write(launch / 'request.json', request)
+                env = launch_environment(request)
+                # A sender may have queued input while relay startup was still
+                # pending. Plain mode cannot deliver it; retain a retryable failure
+                # atomically with disabling the startup queue for future senders.
+                with lock(agent_dir / '.launch.lock'):
+                    update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
+                                   startup_delivery=None, native_mode=selection, error=None)
+                    from multiverse.native import end_startup_messages
+                    end_startup_messages(agent_dir, launch.name,
+                        'Launch selected plain mode before delivery; message saved. '
+                        'Use deliver AGENT --retry after a bridge resume or when the agent is stopped.')
+                if service_dir:
+                    shutil.rmtree(service_dir, ignore_errors=True)
+                    service_dir = None
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
         from multiverse.native import finish_wake

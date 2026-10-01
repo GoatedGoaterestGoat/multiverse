@@ -38,11 +38,16 @@ class AdapterContractTest(BaseTest):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):
                 adapter = harnesses.load(self.root, name)
+                if name == 'codex':
+                    adapter = harnesses.CodexAdapter.configured('codex', {'inbox_bridge': False})
                 legacy = harnesses.LegacyAdapter(name, read(harnesses.PACKAGES / name / 'defaults.json'))
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     args = (self.session(name, context.values), context) if mode == 'resume' else (context,)
-                    self.assertEqual(getattr(adapter, mode)(*args), getattr(legacy, mode)(*args))
+                    actual, expected = getattr(adapter, mode)(*args), getattr(legacy, mode)(*args)
+                    self.assertEqual(actual.argv, expected.argv)
+                    self.assertEqual(actual.unset_env, expected.unset_env)
+                    self.assertEqual(actual.control_endpoint, expected.control_endpoint)
                 self.assertEqual(set(adapter.capabilities(SessionHandle("agent", name, str(self.work)))), set(CAPABILITIES))
                 for required in ('spawn', 'resume', 'send_steer', 'send_follow_up'):
                     self.assertTrue(adapter.capabilities(SessionHandle("agent", name, str(self.work)))[required].required)

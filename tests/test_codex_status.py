@@ -34,9 +34,9 @@ class StatusMappingTest(unittest.TestCase):
     def test_plain_unbound_and_wrong_transport_have_no_watcher(self):
         session = SessionHandle('a', 'codex', '/tmp', native_id=str(uuid4()),
                                 endpoint=NativeEndpoint('unix-websocket', '/tmp/rpc.sock'))
-        plain = CodexAdapter.configured('codex', {})
+        plain = CodexAdapter.configured('codex', {'inbox_bridge': False})
         bridge = CodexAdapter.configured('codex', {'inbox_bridge': True})
-        self.assertIsNone(plain.status_watch(session))
+        self.assertIsNone(plain.status_watch(replace(session, native_mode={'policy': 'plain', 'mode': 'plain'})))
         self.assertIsNone(bridge.status_watch(replace(session, native_id=None)))
         self.assertIsNone(bridge.status_watch(replace(session, endpoint=None)))
         self.assertIsNone(bridge.status_watch(replace(session, endpoint=NativeEndpoint('unix-json', '/tmp/rpc.sock'))))

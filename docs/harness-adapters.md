@@ -180,7 +180,10 @@ TUI settings may restore a different policy. Installed Codex 0.159.3 returned
 to `workspace-write` when the bypass was removed in an isolated test. Explicit
 shared `args` avoids relying on that behavior. Profiles, `--approve-for-me`,
 `--add-dir` and writable-root config overrides remain unsupported on bridge
-resume; use `spawn_args` for those initial settings.
+resume; use `spawn_args` for those initial settings or explicitly choose plain.
+Auto falls back for incompatible `--profile`, `--add-dir` and `--approve-for-me`
+resume flags; required bridge mode rejects them before launch. Writable-root
+config overrides on resume remain errors.
 
 Before accepting the native reply, the relay verifies that each requested
 permission matches the effective `sandbox` and `approvalPolicy` returned by
@@ -353,6 +356,37 @@ New universes retain references and preferences, not copied implementations:
 {"schema": 2, "adapter": "pi", "settings": {"inbox_bridge": true}}
 ```
 
+Codex defaults to automatic bridge selection when `settings.inbox_bridge` is
+absent. `true` requires the bridge; `false` always uses plain native argv. `null`
+is not an accepted setting. Claude and Pi retain their opt-in boolean behavior.
+All three bundled Codex templates leave the setting absent, including development.
+Existing explicit settings and live universe files are not rewritten.
+
+At each spawn/resume, auto first describes a bridge launch and a plain fallback
+with the same bootstrap, task/prompt, model, saved native identity and preferences.
+Core reuses the existing idempotent daemon startup and version/socket checks; one
+bounded, read-only `codex --help` check verifies `--remote`. There is no speculative
+thread or second service probe. Before a native child starts, unavailable daemon,
+version, CLI flag, configuration RPC or local relay preparation selects plain.
+Bridge-incompatible preferences such as `--no-daemon` or resume profile overrides
+also select plain in auto, with a reason. Invalid configuration is still rejected.
+Explicit `true` fails with a diagnostic for unavailable preparation, and `false`
+does not call daemon startup or bridge checks at all.
+
+`runtime.json.native_mode` records `policy` (`auto`, `required`, `plain`), actual
+`mode` (`bridge`, `plain`), and nullable `fallback_reason`. The session handle
+carries it too. Capabilities report the selection in the spawn/resume reasons;
+naming, native usage and the status watcher follow the actual launch mode. The
+inspector displays mode and fallback reason. A runner fallback rewrites its launch
+request before starting the child, and `--wait` uses the actual selected mode.
+Messages queued during relay preparation stay saved with a retryable delivery
+failure if that launch falls back to plain; the plain launch itself can be ready.
+Selected native storage is retained across resume, including when switching modes.
+No fallback occurs after a native child starts or after a relay has bound a thread:
+identity, workspace and effective permission validation failures stay loud. The
+shared daemon is never stopped or restarted to repair a launch. A later resume
+reevaluates availability, so a plain-started session can return on the bridge.
+
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
 and `unset_env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
@@ -432,7 +466,7 @@ own connection. Existing saved launch requests without a name remain usable.
 Switching or forking into a different thread requires a separate
 Multiverse launch. The relay closes with the launch and never restarts the shared
 daemon or reconnects automatically. Plain launches have no relay. The development
-template enables the bridge by default; existing universes must opt in explicitly.
+template, like base and testing, uses auto; existing unset profiles also try the bridge on their next launch.
 
 Codex bridge context usage comes from the TUI connection's native
 `thread/tokenUsage/updated` notifications. The adapter interprets only the exact

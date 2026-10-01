@@ -201,6 +201,16 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('pending', status)
             self.assertIn('Resuming with this message', status)
 
+    async def test_inspector_shows_selected_native_mode_and_fallback_reason(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            self.app.selected['runtime'] = {'native_mode': {
+                'policy': 'auto', 'mode': 'plain', 'fallback_reason': 'CLI/daemon version mismatch'}}
+            self.app.action_preview()
+            state = str(self.app.query_one('#inspect-state', Static).render())
+            self.assertIn('Mode: plain (auto)', state)
+            self.assertIn('Fallback: CLI/daemon version mismatch', state)
+
     async def test_inline_harness_selector_keyboard_mouse_and_scoping(self):
         self.backend.scopes[self.review]["harnesses"] = ["codex", "claude"]
         async with self.app.run_test(size=(110, 28)) as pilot:

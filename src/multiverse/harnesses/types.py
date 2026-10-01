@@ -4,6 +4,10 @@ from typing import Any, Callable, Generator, Literal, Mapping, Protocol
 from uuid import UUID
 
 
+class BridgeUnavailable(ValueError):
+    """Preparation failed before a native child or conversation was started."""
+
+
 def normalize_session_id(value: str) -> str:
     """Normalize the UUID used by current harnesses; never discover a session."""
     try:
@@ -36,6 +40,7 @@ class SharedServiceSpec:
     socket_field: str
     version_fields: tuple[str, str]
     environment: Mapping[str, str] = field(default_factory=dict)
+    required_cli_flags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,8 @@ class CommandSpec:
     shared_service: SharedServiceSpec | None = None
     environment: Mapping[str, str] = field(default_factory=dict)
     rpc_proxy: 'RpcProxySpec | None' = None
+    native_mode: Mapping[str, Any] | None = None
+    fallback: 'CommandSpec | None' = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,7 @@ class SessionHandle:
     endpoint: NativeEndpoint | None = None
     bridge: str | None = None
     status: str = 'unknown'
+    native_mode: Mapping[str, Any] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -122,7 +130,7 @@ class SessionHandle:
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
-                   runtime.get('native_bridge'), runtime.get('status', 'unknown'))
+                   runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'))
 
 @dataclass(frozen=True)
 class Message:

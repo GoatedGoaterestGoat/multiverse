@@ -16,6 +16,10 @@ Esc returns to the local view. When attaching from a dashboard inside the same
 tmux server, default `Ctrl-b L` returns to its previous session; `Ctrl-b d`
 detaches the entire tmux client.
 
+The agent inspector shows the Codex native mode (`bridge` or `plain`) and its
+selection policy. If auto fell back to plain during launch, it also shows the
+reason. Opening the inspector does not retry bridge startup or change the mode.
+
 `K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
 `k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer
 shows `K Kill`; `d` still deletes to trash and appears in the `?` help screen.

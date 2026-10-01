@@ -1,4 +1,4 @@
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 import math
 import os
@@ -10,7 +10,7 @@ import sys
 import time
 
 from . import universe, harnesses
-from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id
+from .harnesses.types import LaunchContext, SessionHandle, normalize_session_id, BridgeUnavailable
 from .store import lock, now, read, uid, write, message_record, update_message
 from .tmux import Tmux, observe, owned
 
@@ -76,6 +76,13 @@ def bind_session(root, reference, session_id, launch_id=None):
         data.update(native_session_id=session_id, updated_at=now())
         write(agent_dir / "properties.json", data)
     return data
+
+
+def plain_fallback(command, error):
+    if command.fallback is None:
+        raise error
+    return replace(command.fallback,
+                   native_mode={**(command.fallback.native_mode or {}), 'fallback_reason': str(error)})
 
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
@@ -162,6 +169,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             raise ValueError("Cannot locate mv2 CLI")
         env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
                "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
+        if resume:
+            env.update(properties.get('native_environment', {}))
         # Persist adapter-selected storage so resume cannot accidentally switch
         # accounts/history when launched by a different monitor environment.
         if command.shared_service:
@@ -169,7 +178,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
         write(agent_dir / "properties.json", properties)
-        write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(), "started_at": now()})
+        write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
+                                           "started_at": now(), "native_mode": command.native_mode})
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
         terminal = None
         service_directory_created = False
@@ -177,11 +187,18 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             shared_endpoint = None
             if command.shared_service:
                 from .native import start_shared_service
-                shared_endpoint = start_shared_service(command.shared_service, workdir,
-                                                       launch / 'native-service.log', command.unset_env)
+                try:
+                    shared_endpoint = start_shared_service(command.shared_service, workdir,
+                                                           launch / 'native-service.log', command.unset_env)
+                except BridgeUnavailable as error:
+                    command = plain_fallback(command, error)
             if command.control_endpoint:
-                service_dir.mkdir(mode=0o700)
-                service_directory_created = True
+                try:
+                    service_dir.mkdir(mode=0o700)
+                    service_directory_created = True
+                except OSError as error:
+                    command = plain_fallback(command, BridgeUnavailable(f'Native relay directory unavailable: {error}'))
+                    shared_endpoint = None
             runner = Path(__file__).with_name("runner.py")
             terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
                                       [sys.executable, str(runner), str(launch)])
@@ -198,16 +215,27 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 executor = NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt)
             if command.shared_service:
-                command = adapter.resume(session, context) if resume else adapter.spawn(context)
+                try:
+                    command = adapter.resume(session, context) if resume else adapter.spawn(context)
+                except BridgeUnavailable as error:
+                    command = plain_fallback(command, error)
+                if not command.shared_service:
+                    shared_endpoint = None
+                    if service_directory_created:
+                        shutil.rmtree(service_dir)
+                        service_directory_created = False
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
+                           native_mode=command.native_mode,
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
                                            "shared_service": bool(command.shared_service),
+                                           "native_mode": command.native_mode,
+                                           "fallback": asdict(command.fallback) if command.fallback else None,
                                            "resume_message_id": resume_message_id,
                                            "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None})
             if resume_message_id is not None:
@@ -252,11 +280,11 @@ def launch_result(root, agent_dir):
 def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
-    native = bool(request.get('control_endpoint') or request.get('shared_service'))
     deadline = time.monotonic() + timeout
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
+        native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
         live = observe(result, facts)['live']

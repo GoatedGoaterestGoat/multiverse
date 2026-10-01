@@ -9,6 +9,7 @@ from dataclasses import replace
 from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint
 from .launch import launch_settings
 from .protocol import check_connection, send_message, get_delivery, stop_session
+from ..types import BridgeUnavailable
 
 
 class CodexAdapter(ConfiguredAdapter):
@@ -17,27 +18,39 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
 
     def _configure_launch(self):
-        if self.settings.get('inbox_bridge'):
+        if self.settings.get('inbox_bridge') is True:
             for key in ('args', 'spawn_args', 'resume_args'):
                 if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon'
                        for arg in self.settings.get(key, [])):
                     raise ValueError('inbox_bridge conflicts with a custom --remote or --no-daemon argument')
 
-    def resume(self, session, context):
-        settings = getattr(self, 'settings', {})
-        if settings.get('inbox_bridge'):
-            permission_flags = {'--add-dir', '--approve-for-me', '--profile', '-p'}
-            args = [*settings.get('args', []), *settings.get('resume_args', [])]
-            if any(arg.split('=', 1)[0] in permission_flags or arg.startswith('-p') and not arg.startswith('--') for arg in args):
-                raise ValueError('Codex bridge resume does not support writable-directory, profile or automatic-review overrides. '
-                                 'Use spawn_args for these initial grants; resume uses native saved permissions and TUI settings. '
-                                 'Your configuration has not been changed.')
-        return super().resume(session, context)
-
     def _launch_command(self, context):
         command = super()._launch_command(context)
-        if not getattr(self, 'settings', {}).get('inbox_bridge'):
-            return command
+        setting = getattr(self, 'settings', {}).get('inbox_bridge')
+        policy = 'auto' if setting is None else 'required' if setting else 'plain'
+        plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
+        if setting is False:
+            return plain
+        try:
+            bridge = self._bridge_command(command, context)
+        except BridgeUnavailable as error:
+            if setting is True:
+                raise
+            return replace(plain, native_mode={**plain.native_mode, 'fallback_reason': str(error)})
+        return replace(bridge, native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
+                       fallback=plain if setting is None else None)
+
+    def _bridge_command(self, command, context):
+        settings = getattr(self, 'settings', {})
+        args = [*settings.get('args', []), *settings.get(context.mode + '_args', [])]
+        if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon' for arg in args):
+            raise BridgeUnavailable('Codex bridge conflicts with a custom --remote or --no-daemon argument')
+        if context.mode == 'resume':
+            unsupported = {'--add-dir', '--approve-for-me', '--profile', '-p'}
+            if any(arg.split('=', 1)[0] in unsupported or arg.startswith('-p') and not arg.startswith('--') for arg in args):
+                raise BridgeUnavailable('Codex bridge resume does not support writable-directory, profile or automatic-review overrides. '
+                                        'Bridge resume uses native saved permissions and TUI settings. '
+                                        'Use plain mode or put initial-only settings in spawn_args; configuration is unchanged.')
         argv = list(command.argv)
         from .launch import remote_arguments
         argv, bootstrap, roots, permissions = remote_arguments(argv, context)
@@ -45,10 +58,13 @@ class CodexAdapter(ConfiguredAdapter):
         workspace_policy = {}
         options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
         if context.executor:
-            observed = context.executor.rpc(RpcSpec(context.endpoint.address,
-                partial(launch_settings, context.values['workspace'])))
+            try:
+                observed = context.executor.rpc(RpcSpec(context.endpoint.address,
+                    partial(launch_settings, context.values['workspace'])))
+            except (OSError, RuntimeError, ValueError) as error:
+                raise BridgeUnavailable(f'Cannot prepare shared native session environment: {error}') from error
             if observed.state != 'ok':
-                raise ValueError(f'Cannot isolate shared native session environment: {observed.reason}')
+                raise BridgeUnavailable(f'Cannot isolate shared native session environment: {observed.reason}')
             excludes = list(observed.value['exclude'])
             roots = list(dict.fromkeys([*observed.value['writable_roots'], *roots]))
             workspace_policy = observed.value.get('workspace_policy', {})
@@ -84,7 +100,8 @@ class CodexAdapter(ConfiguredAdapter):
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None}),
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
-                               {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}))
+                               {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())},
+                               required_cli_flags=('--remote',)))
 
     def launch_proxy(self, settings):
         from .launch import LaunchProtocol
@@ -95,7 +112,7 @@ class CodexAdapter(ConfiguredAdapter):
 
     def status_watch(self, session):
         """Optional passive stream: core runs the plan and owns its lifetime."""
-        if (not self.settings.get('inbox_bridge') or not session.native_id
+        if (not self._uses_bridge(session) or not session.native_id
                 or not session.endpoint or session.endpoint.transport != 'unix-websocket'):
             return None
         from .status import snapshot, notification
@@ -111,12 +128,23 @@ class CodexAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        selection = session.native_mode
+        if selection:
+            reason = f'Native mode: {selection["mode"]} ({selection["policy"]})'
+            if selection.get('fallback_reason'):
+                reason += '; fallback: ' + selection['fallback_reason']
+        else:
+            setting = self.settings.get('inbox_bridge')
+            reason = ('Native mode: auto; selected at each spawn/resume' if setting is None else
+                      'Native mode: bridge required' if setting else 'Native mode: plain (explicit opt-out)')
+        for operation in ('spawn', 'resume'):
+            result[operation] = replace(result[operation], reason=reason)
         result['session_name'] = (Capability('supported', mechanism='thread/name/set')
-            if self.settings.get('inbox_bridge') else Capability(
-                'unavailable', 'Codex CLI has no name flag; native naming requires inbox_bridge'))
+            if self._uses_bridge(session) else Capability(
+                'unavailable', 'Codex CLI has no name flag. ' + reason))
         available = (session.state == 'running' and session.native_id and session.endpoint
                      and session.endpoint.transport == 'unix-websocket')
-        support = Capability('unavailable', 'No running Codex app-server session', required=True)
+        support = Capability('unavailable', 'No running Codex app-server session. ' + reason, required=True)
         if available:
             support = Capability('unavailable', 'Native API has not been checked', required=True)
             if executor:
@@ -130,15 +158,23 @@ class CodexAdapter(ConfiguredAdapter):
         result['get_delivery'] = replace(support, required=False)
         if session.endpoint:
             result['stop'] = replace(support, required=False)
-        if self.settings.get('inbox_bridge') and session.native_id and session.session_file:
+        if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
         return result
 
     def get_usage(self, session, executor=None):
-        if not self.settings.get('inbox_bridge'):
+        if not self._uses_bridge(session):
             return NativeResult('unavailable', 'Codex context reporting requires inbox_bridge')
         from .usage import measured
         return measured(session)
+
+    def _uses_bridge(self, session):
+        if session.native_mode:
+            return session.native_mode.get('mode') == 'bridge'
+        # Existing launches have no selection metadata. Their endpoint remains
+        # authoritative; a configured-only strict profile still declares support.
+        return bool((session.endpoint and session.endpoint.transport == 'unix-websocket') or
+                    (not session.launch_id and self.settings.get('inbox_bridge') is True))
 
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':

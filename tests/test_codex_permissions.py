@@ -108,10 +108,12 @@ class CodexPermissionTest(TerminalBase):
             self.assertEqual(read(self.work / 'permission-spawn.json')['native_id'], native_id)
             for stage in ('plain-wake', 'bridge-wake', 'bridge', 'repeat'):
                 agents.terminal_action(self.root, launched['id'], 'stop')
-                spec['settings'] = {'inbox_bridge': stage != 'plain-wake',
-                                    'args': ['--dangerously-bypass-approvals-and-sandbox']}
+                spec['settings'] = {'args': ['--dangerously-bypass-approvals-and-sandbox']}
                 if stage == 'plain-wake':
+                    spec['settings']['inbox_bridge'] = False
                     spec['settings']['args'].append('--no-daemon')
+                elif stage != 'bridge-wake':
+                    spec['settings']['inbox_bridge'] = True
                 write(config, spec)
                 with patch.dict(os.environ, env):
                     if stage.endswith('-wake'):
@@ -135,6 +137,9 @@ class CodexPermissionTest(TerminalBase):
                 self.assertTrue(resumed['ready'], resumed)
                 self.assertEqual(resumed['runtime']['state'], 'running')
                 self.assertEqual(resumed['native_session_id'], native_id)
+                if stage == 'bridge-wake':
+                    self.assertEqual(resumed['runtime']['native_mode']['policy'], 'auto')
+                    self.assertEqual(resumed['runtime']['native_mode']['mode'], 'bridge')
                 if not stage.endswith('-wake'):
                     delivered = send.run(self.root, agent=launched['id'], text='permission-probe-' + stage, delivery='follow-up')
                     self.assertEqual(delivered['state'], 'native_queued', delivered)
