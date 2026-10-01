@@ -1,4 +1,4 @@
-"""List removed agents and subverses, or delete them permanently with --empty."""
+"""List removed agents and subverses and replaced refresh files, or delete them permanently with --empty."""
 from .. import relocate, universe
 
 

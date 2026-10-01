@@ -80,6 +80,7 @@ plugin API (see [harness adapters](docs/harness-adapters.md)).
 ```text
 project/.multiverse/
   universe.json                 # ID, name, workspace and template provenance
+  template-files.json           # fingerprints of installed definitions, for refresh
   bootstrap.md                  # short automatic instructions
   harnesses/codex/              # declarative source adapter reference and preferences
   harnesses/claude/             # declarative source adapter reference and preferences
@@ -97,12 +98,14 @@ project/.multiverse/
       session.jsonl             # native Pi conversation
       launches/<uuid>/          # exact bootstrap, task and argv for each launch
   subverses/pr-review/           # the same structure, recursively
-  trash/<stamp>-<name>/          # removed agents and subverses, ignored by Git
+  trash/<stamp>-<name>/          # removed agents and subverses, files replaced by refresh
 ```
 
 Everything belongs to the universe, including its live state. Definitions and runtime have separate directories so a clean template install can exclude old conversations and processes. JSON describes current state, JSONL records messages, and Markdown holds prompts. Lock files and temporary files are implementation details.
 
-`init --template NAME` looks for `~/.multiverse/templates/NAME`, then a bundled template; an explicit directory also works. `subverse NAME --template PATH` uses the same installer. It copies definitions, generates fresh IDs recursively, and starts with empty state. It does not silently update existing universes. Templates are trusted local files and may contain executable adapters; symlinks are rejected.
+`init --template NAME` looks for `~/.multiverse/templates/NAME`, then a bundled template; an explicit directory also works. `subverse NAME --template PATH` uses the same installer. It copies definitions, generates fresh IDs recursively, starts with empty state, and records a fingerprint of each installed definition in `template-files.json`. Templates are trusted local files and may contain executable adapters; symlinks are rejected.
+
+Existing universes change only through `mv2 refresh`, which compares the definition files (bootstrap, skills, commands, workflows, harnesses and views; never `universe.json`, state or trash) with the template the universe was installed from. It is a dry run unless `--apply` is given; `--diff` shows the changes. A file that still matches its fingerprint takes template updates, a locally edited file is kept, and one changed on both sides is a conflict that changes only with `--take PATH`. New template files are added; files the template dropped or you deleted are reported and left alone. Replaced files are saved in `trash/<stamp>-refresh/`. Universes installed before `refresh` existed have no fingerprints, so every file that differs from the template is `unknown` until taken; the first `--apply` records the rest as local edits. `--recursive` includes subverses, each compared with its own template source, and `--template` compares with a different template. Skills, commands and workflows take effect at once; running agents keep their old bootstrap until relaunched.
 
 Subverses inherit the parent's workspace **at creation**, using a relative path. They receive their own clean definitions and IDs, with no implicit ongoing prompt inheritance. `subverse NAME --workspace /path/to/worktree` can target a worktree. The universe remains in the parent tree when that worktree is removed; `doctor` reports the missing workspace. A universe can have a manager agent, but none is mandatory or auto-created.
 
@@ -232,7 +235,7 @@ The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse
 
 The renderer exports actual SVG screens to `/tmp/multiverse-previews` for visual review, including the unified hierarchy, live inspector, narrow layouts and inline creation. Additional tests cover concurrent inbox writers, interrupted records, recursive installs, ambiguous commands, real tmux launch/rename/stop/resume and pane ownership, Textual attach/detach/exit, Codex/Claude argv and exact resume with fake executables, session registration guards, and real Pi and Codex native delivery/resume with their bridges and local scripted providers. They use temporary universes and isolated tmux sockets, with no network or model spend. Authenticated Codex/Claude model turns are not exercised. Native timing checks skip when their harness or tmux binaries are absent. A sandbox that denies Unix sockets must allow the terminal integration tests explicitly.
 
-`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are per-agent Git worktrees, richer views and artifact links, explicit template upgrades/inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy or background ask primitive in this slice.
+`doctor` is a basic local diagnostic, not the proposed TVA evaluator. The next slices are per-agent Git worktrees, richer views and artifact links, template inheritance, discovery across unrelated project roots, and reusable workflow/TVA evaluation templates. There is no scheduler, remote agent transport, automatic manager hierarchy or background ask primitive in this slice.
 
 ## Development checkout
 

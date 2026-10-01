@@ -12,7 +12,8 @@ from .tools._common import add_universe, output
 # it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
             "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "report",
-            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
+            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor",
+            "refresh")
 
 
 # Former names that keep working for agents launched with older prompts.
