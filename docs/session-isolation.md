@@ -7,15 +7,15 @@ This keeps nested work on the server owning the child pane without carrying the
 parent's agent identity into that child.
 
 Pane control checks universe, agent and launch tags on the recorded local tmux
-socket. The saved hostname is provenance, not an ownership gate. An absent or
-dead local pane is stopped even after a hostname change; an inaccessible socket
-is unknown with its actual observation error. A mismatched pane cannot authorize
+socket. The saved hostname is provenance, not an ownership gate. An absent local
+pane is dormant and a retained dead pane is stopped, even after a hostname change;
+an inaccessible socket is unknown with its actual observation error. A mismatched pane cannot authorize
 control. These observations describe the local terminal, not native work that
 may survive elsewhere. Copying agent state does not stop the original process.
 Session binding validates a native UUID, rejects stale launch callbacks and
 refuses to replace an agent's already-bound UUID. Codex resume fails if no native
 session is recorded; it never falls back to the latest session. CLI callbacks
-from an old launch cannot read or acknowledge the current inbox, bind its
+from an old launch cannot read or advance the current inbox, bind its
 session, or change its status/runtime. Offline regression coverage exercises
 those callback guards without launching any workers.
 

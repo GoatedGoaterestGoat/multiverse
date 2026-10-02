@@ -45,6 +45,11 @@ class HarnessFilesTest(BaseTest):
 
 
 class HarnessLaunchTest(TerminalBase):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(patch('multiverse.native.start_shared_service',
+            side_effect=AssertionError('Fake CLI contracts must never prepare a native daemon')))
+
     def fake_cli(self, harness, report=True):
         directory = self.root / "harnesses" / harness
         executable = directory / "fake-cli"
@@ -60,6 +65,8 @@ class HarnessLaunchTest(TerminalBase):
         executable.chmod(0o755)
         spec = read(directory / "harness.json")
         spec["settings"]["executable"] = str(executable)
+        # The fake CLI implements plain argv and binding, not a native service.
+        spec["settings"]["inbox_bridge"] = False
         write(directory / "harness.json", spec)
 
     def stop_agent(self, agent):

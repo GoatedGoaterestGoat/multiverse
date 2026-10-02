@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "description": "Codex CLI; prompt-led coordination and explicit native session resume.",
-  "checked_cli_version": "0.159.2",
+  "checked_cli_version": "0.159.3",
   "session": "reported",
   "spawn": [
     "codex",

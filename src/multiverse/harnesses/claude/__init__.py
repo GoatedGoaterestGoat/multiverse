@@ -127,6 +127,7 @@ def measured_usage(native_id):
 
 
 class ClaudeAdapter(ConfiguredAdapter):
+    resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
     supports_bridge = True
 
@@ -151,6 +152,7 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
+        result['session_name'] = Capability('supported', mechanism='--name')
         connected = (getattr(self, 'settings', {}).get('inbox_bridge') and session.state == 'running'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines'
                      and session.bridge == 'claude-mod-v1')

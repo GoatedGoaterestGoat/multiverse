@@ -13,11 +13,14 @@ import time
 import unittest
 from unittest.mock import patch
 
+from native_safety import install as install_native_safety
+install_native_safety()
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe
 from multiverse.tools import send
-from multiverse.store import ack, append_message, inbox, read, write
+from multiverse.store import append_message, inbox, read, write
 from multiverse.tmux import Tmux, observe
 from multiverse.dashboard import LocalBackend, columns, hierarchy
 
@@ -83,7 +86,7 @@ class FilesTest(BaseTest):
         self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
         self.assertLess(len(prompt.split()), 260)
 
-    def test_concurrent_inbox_and_explicit_ack(self):
+    def test_concurrent_inbox_writers_and_automatic_read_position(self):
         agent = self.root / "state" / "agents" / "test"
         agent.mkdir()
         with concurrent.futures.ProcessPoolExecutor(max_workers=4) as pool:
@@ -91,17 +94,16 @@ class FilesTest(BaseTest):
         first = inbox(agent)
         self.assertEqual(len(first["messages"]), 48)
         self.assertEqual(len({m["id"] for m in first["messages"]}), 48)
-        self.assertEqual(inbox(agent), first)  # Peek/crash does not discard anything.
-        ack(agent, first["cursor"])
+        self.assertEqual(inbox(agent, all_messages=True)["messages"],
+                         [{**m, "tracking": {"submission_state": "manual"}} for m in first["messages"]])
         self.assertEqual(inbox(agent)["messages"], [])
         append_message(agent, "next", {"name": "user"})
         self.assertEqual(inbox(agent)["messages"][0]["text"], "next")
         with self.assertRaises(ValueError):
-            ack(agent, first["cursor"] + 1)
-        with self.assertRaises(ValueError):
-            ack(agent, 0)
+            inbox(agent, after=first["cursor"] + 1)
+        self.assertEqual(inbox(agent, after=0)["messages"], [])
 
-    def test_incomplete_record_never_acknowledged_or_overwritten(self):
+    def test_incomplete_record_never_consumed_or_overwritten(self):
         agent = self.work / "agent"
         agent.mkdir()
         append_message(agent, "complete", {})
@@ -109,15 +111,15 @@ class FilesTest(BaseTest):
             out.write(b'{"incomplete":')
         batch = inbox(agent)
         self.assertEqual(len(batch["messages"]), 1)
-        ack(agent, batch["cursor"])
+        self.assertEqual(read(agent / "inbox.cursor"), batch["cursor"])
         self.assertEqual(inbox(agent)["messages"], [])
         with self.assertRaises(ValueError):
             append_message(agent, "must not hide corruption", {})
 
-    def test_missing_local_server_is_stopped_despite_old_hostname(self):
+    def test_missing_local_server_is_dormant_despite_old_hostname(self):
         with patch.object(Tmux, "snapshot", return_value=({}, None)):
             result = observe({}, {"host": "some-other-host", "tmux": {"pane": "%1", "socket": "/tmp/nope"}})
-        self.assertEqual(result["live"], "stopped")
+        self.assertEqual(result["live"], "dormant")
 
     def test_subverse_view_is_local_and_parent_shows_summary(self):
         child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
@@ -152,10 +154,21 @@ class TerminalBase(BaseTest):
         write(harness / "harness.json", {"schema": 1, "spawn": argv, "resume": argv})
 
     def kill_server(self):
+        # Runners finish receipt/queue cleanup after tmux tears down a pane.
+        # Await them before TemporaryDirectory removes their state underneath it.
+        panes, _ = self.backend.snapshot()
+        pids = [int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')]
         try:
             self.backend.run("kill-server")
         except (OSError, RuntimeError):
             pass
+        def exited(pid):
+            try:
+                os.kill(pid, 0)
+                return False
+            except ProcessLookupError:
+                return True
+        until(lambda: all(exited(pid) for pid in pids), seconds=15)
 
     def spawn(self):
         result = agents.start(self.root, "tester", "a task", "fake", socket_path=self.socket)
@@ -179,7 +192,7 @@ class TerminalTest(TerminalBase):
         with self.assertRaises(ValueError):
             agents.start(self.root, resume=result["id"], socket_path=self.socket)
         agents.terminal_action(self.root, result["id"], "stop")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "stopped")
+        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
         until(lambda: not self.backend.snapshot()[0])
         time.sleep(0.1)
         resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket)
@@ -192,9 +205,10 @@ class TerminalTest(TerminalBase):
         result, _ = self.spawn()
         pane = result["runtime"]["tmux"]["pane"]
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "stopped")
+        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result["id"], "stop")
+            agents.terminal_action(self.root, result["id"], "inspect")
+        self.assertEqual(agents.terminal_action(self.root, result["id"], "stop")['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_hostname_change_preserves_owned_pane_and_duplicate_launch_guard(self):
@@ -206,9 +220,10 @@ class TerminalTest(TerminalBase):
             agents.start(self.root, resume=result['id'], socket_path=self.socket)
         pane = result['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result['id'], 'stop')
+            agents.terminal_action(self.root, result['id'], 'inspect')
+        self.assertEqual(agents.terminal_action(self.root, result['id'], 'stop')['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_missing_pane_after_hostname_change_can_resume_same_session(self):
@@ -218,7 +233,7 @@ class TerminalTest(TerminalBase):
         self.backend.run('kill-pane', '-t', result['runtime']['tmux']['pane'])
         until(lambda: not self.backend.snapshot()[0])
         agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname', state='running')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'stopped')
+        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
         time.sleep(0.1)
         resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
         self.assertEqual(resumed['native_session_id'], native_id)
@@ -279,7 +294,8 @@ class PiTest(TerminalBase):
         spec["settings"].update(args=extra, inbox_bridge=True)
         write(harness_dir / "harness.json", spec)
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-            result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket)
+            result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket,
+                                  wait=True, wait_timeout=25)
         agent_dir = agents.directory(self.root, result["id"])
         log = agent_dir / "mock-requests.jsonl"
         try:
@@ -288,7 +304,8 @@ class PiTest(TerminalBase):
             self.assertEqual(first["state"], "native_queued", first)
             until(lambda: "INBOX_SENTINEL" in log.read_text(), seconds=20)
             until(lambda: not inbox(agent_dir)["messages"])
-            self.assertIn(first["id"], (agent_dir / "session.jsonl").read_text())
+            internal_id = inbox(agent_dir, all_messages=True)['messages'][-1]['id']
+            self.assertIn(internal_id, (agent_dir / "session.jsonl").read_text())
             request = json.loads(log.read_text().splitlines()[0])
             self.assertIn("You work in a Multiverse universe", request["systemPrompt"])
             self.assertEqual(sorted(t["name"] for t in request["tools"]), ["bash", "edit", "read", "write"])
@@ -298,7 +315,8 @@ class PiTest(TerminalBase):
             time.sleep(0.1)
             before = len(log.read_text().splitlines())
             with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-                agents.start(self.root, resume=result["id"], socket_path=self.socket)
+                resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket, wait=True, wait_timeout=25)
+                self.assertTrue(resumed['ready'], resumed)
             until(lambda: agents.runtime(agent_dir).get("native_bridge") == "pi-socket-v1", seconds=20)
             sent = send.run(self.root, agent=result["id"], text="AFTER_RESUME", sender={"name": "test"})
             self.assertEqual(sent["state"], "native_queued", sent)

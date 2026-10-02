@@ -28,15 +28,15 @@ class HostOwnershipTest(unittest.TestCase):
                 pane = {**self.pane, field: value}
                 with self.subTest(field=field, value=value), \
                         patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)):
-                    self.assertEqual(observe(self.properties, self.runtime)['live'], 'stopped')
+                    self.assertEqual(observe(self.properties, self.runtime)['live'], 'dormant')
                     with self.assertRaises(ValueError):
                         owned(self.properties, self.runtime)
 
-    def test_missing_local_pane_is_stopped_after_hostname_change(self):
+    def test_missing_local_pane_is_dormant_after_hostname_change(self):
         for snapshot in (({}, None), ({'%2': self.pane}, None)):
             with self.subTest(snapshot=snapshot), patch.object(Tmux, 'snapshot', return_value=snapshot):
                 result = observe(self.properties, self.runtime)
-                self.assertEqual(result, {'live': 'stopped', 'reason': 'Recorded pane is absent'})
+                self.assertEqual(result, {'live': 'dormant', 'reason': 'Recorded pane is absent'})
                 with self.assertRaises(ValueError):
                     owned(self.properties, self.runtime)
 
@@ -53,3 +53,15 @@ class HostOwnershipTest(unittest.TestCase):
             self.assertEqual(observe(self.properties, self.runtime)['live'], 'stopped')
             with self.assertRaises(ValueError):
                 owned(self.properties, self.runtime)
+
+    def test_ending_and_child_exit_are_distinct_from_wrapper_removal(self):
+        ending = {**self.runtime, 'state': 'ending', 'ending_at': 'now'}
+        with patch.object(Tmux, 'snapshot', return_value=({'%1': self.pane}, None)):
+            self.assertEqual(observe(self.properties, ending)['live'], 'ending')
+            with self.assertRaises(ValueError):
+                owned(self.properties, ending)
+            self.assertEqual(owned(self.properties, ending, states=('ending',))[1], '%1')
+            exited = {**ending, 'state': 'stopped', 'exit_code': -15}
+            self.assertEqual(observe(self.properties, exited)['live'], 'stopped')
+        with patch.object(Tmux, 'snapshot', return_value=({}, None)):
+            self.assertEqual(observe(self.properties, ending)['live'], 'dormant')

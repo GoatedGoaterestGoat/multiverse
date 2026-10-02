@@ -14,7 +14,8 @@ Both include the plain declarative Codex adapter, the existing coordination
 skill, and review workflow. Additional adapters can be copied from the base
 template when needed. No adapter code or extension is required. Installed
 universes own their definitions; later package updates do not silently replace
-custom prompts or harness settings.
+custom prompts or harness settings. `mv2 refresh` previews template updates and
+`mv2 refresh --apply` takes them for files you have not edited.
 
 The automatic bootstrap adds only a pointer to `testing-role` or
 `development-role`. `mv2 catalog` discovers metadata; `mv2 command NAME` loads

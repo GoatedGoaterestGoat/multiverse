@@ -17,7 +17,7 @@ def run(root=None):
             for item in agents.listing(scope):
                 if item["live"] == "unknown" or item.get("runtime", {}).get("state") == "failed":
                     problems.append(f'{item["name"]}: {item.get("reason") or item.get("runtime", {}).get("error", "Launch failed")}')
-                inbox(scope / "state" / "agents" / item["id"])
+                inbox(scope / "state" / "agents" / item["id"], all_messages=True)
         except (OSError, ValueError, KeyError) as error:
             problems.append(f"{scope}: {error}")
     return {"ok": not problems, "problems": problems, "scope": str(root)}

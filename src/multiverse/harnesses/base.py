@@ -29,6 +29,7 @@ def arguments(value, label, required=False):
 class ConfiguredAdapter:
     package = None
     supports_bridge = False
+    resume_prompt_args = None
 
     @classmethod
     def configured(cls, name, settings):
@@ -92,6 +93,13 @@ class ConfiguredAdapter:
         if context.model:
             position = argv.index('--') if '--' in argv else len(argv)
             argv[position:position] = [arg.format_map(values) for arg in self.spec.get('model_args', [])]
+        if context.mode == 'resume' and context.resume_prompt is not None:
+            if self.resume_prompt_args is None:
+                raise ValueError('This adapter has no verified interactive resume prompt; wake is unavailable')
+            prompt_args = list(self.resume_prompt_args)
+            if '--' in argv and prompt_args and prompt_args[0] == '--':
+                prompt_args = prompt_args[1:]
+            argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
         # Scrubbing parent identity is a core invariant, including legacy definitions.
         unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', *self.spec.get('unset_env', [])]))
         return CommandSpec(tuple(argv), unset)
@@ -117,15 +125,21 @@ class ConfiguredAdapter:
         return self._launch_command(replace(context, mode='resume', values=values))
 
     def stop(self, session: SessionHandle, executor: Executor) -> NativeResult:
+        if session.state in ('stopped', 'dormant'):
+            return NativeResult('ok', 'No native process was running')
         return NativeResult('ok', 'Core stops the owned terminal process')
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
+        result['session_name'] = Capability('unavailable', 'Native session naming is not verified for this manifest')
         result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
             result['resume'] = Capability('supported', mechanism=self.session_mode, required=True)
+            result['wake'] = (Capability('supported', mechanism='interactive-resume-prompt')
+                if self.resume_prompt_args is not None else Capability(
+                    'unavailable', 'No verified interactive resume prompt for this adapter'))
         return result
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:

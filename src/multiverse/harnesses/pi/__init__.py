@@ -11,6 +11,7 @@ from ..types import normalize_session_id
 class PiAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
+    resume_prompt_args = ('--', '{task}')
 
     def spawn(self, context):
         return self._with_extension(super().spawn(context), context)
@@ -38,6 +39,7 @@ class PiAdapter(ConfiguredAdapter):
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = super().capabilities(session, executor)
+        result['session_name'] = Capability('supported', mechanism='--name')
         connected = (session.state == 'running' and session.bridge == 'pi-socket-v1'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-json')
         support = Capability('supported', mechanism='pi-socket-v1', required=True) if connected else Capability(
@@ -56,4 +58,4 @@ class PiAdapter(ConfiguredAdapter):
         if self.capabilities(session)['send_steer'].state != 'supported':
             return NativeResult('unavailable', 'Pi extension socket is not registered')
         return executor.request(session, {'operation': 'send', 'message_id': message.id,
-                                         'text': message.prompt(), 'mode': mode})
+                                         'text': message.framed or message.text, 'mode': mode})

@@ -38,14 +38,40 @@ class AdapterContractTest(BaseTest):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):
                 adapter = harnesses.load(self.root, name)
+                if name == 'codex':
+                    adapter = harnesses.CodexAdapter.configured('codex', {'inbox_bridge': False})
                 legacy = harnesses.LegacyAdapter(name, read(harnesses.PACKAGES / name / 'defaults.json'))
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     args = (self.session(name, context.values), context) if mode == 'resume' else (context,)
-                    self.assertEqual(getattr(adapter, mode)(*args), getattr(legacy, mode)(*args))
+                    actual, expected = getattr(adapter, mode)(*args), getattr(legacy, mode)(*args)
+                    self.assertEqual(actual.argv, expected.argv)
+                    self.assertEqual(actual.unset_env, expected.unset_env)
+                    self.assertEqual(actual.control_endpoint, expected.control_endpoint)
                 self.assertEqual(set(adapter.capabilities(SessionHandle("agent", name, str(self.work)))), set(CAPABILITIES))
                 for required in ('spawn', 'resume', 'send_steer', 'send_follow_up'):
                     self.assertTrue(adapter.capabilities(SessionHandle("agent", name, str(self.work)))[required].required)
+
+    def test_wake_appends_a_literal_interactive_resume_prompt(self):
+        prompt = 'Message from reviewer:\n--literal $(false) `false` {text}'
+        for name in ('codex', 'claude', 'pi'):
+            for bridge in (False, True):
+                with self.subTest(name=name, bridge=bridge):
+                    path = self.root / 'harnesses' / name / 'harness.json'
+                    spec = read(path)
+                    spec['settings']['inbox_bridge'] = bridge
+                    write(path, spec)
+                    adapter = harnesses.load(self.root, name)
+                    values = self.values()
+                    session = self.session(name, values)
+                    command = adapter.resume(session, LaunchContext('resume', values, 'chosen', resume_prompt=prompt))
+                    self.assertEqual(command.argv[-1], prompt)
+                    self.assertNotIn('-p', command.argv)
+                    self.assertNotIn('--print', command.argv)
+                    self.assertIn(values['session_file'] if name == 'pi' else session.native_id, command.argv)
+                    self.assertEqual(adapter.capabilities(session)['wake'].state, 'supported')
+        legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom'], 'resume': ['custom', '{session_id}']})
+        self.assertEqual(legacy.capabilities(SessionHandle('agent', 'custom', '/tmp'))['wake'].state, 'unavailable')
 
     def test_configuration_is_declarative_and_never_rewritten(self):
         config = self.root / 'harnesses/codex/harness.json'
@@ -67,6 +93,26 @@ class AdapterContractTest(BaseTest):
         default = harnesses.load(self.root, 'claude').spawn(LaunchContext('spawn', values, None))
         self.assertIn('NO_COLOR', default.unset_env)
         self.assertEqual(config.read_bytes(), original)
+
+    def test_native_session_naming_capabilities_and_launch_arguments(self):
+        values = self.values()
+        values['name'] = 'literal-name'
+        for provider in ('claude', 'pi'):
+            for bridge in (False, True):
+                adapter = harnesses.BUILTINS[provider].configured(provider, {'inbox_bridge': bridge})
+                session = self.session(provider, values)
+                self.assertEqual(adapter.capabilities(session)['session_name'].state, 'supported')
+                for mode in ('spawn', 'resume'):
+                    with self.subTest(provider=provider, bridge=bridge, mode=mode):
+                        context = LaunchContext(mode, values)
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                        self.assertEqual(command.argv[command.argv.index('--name') + 1], values['name'])
+        for bridge, state in ((False, 'unavailable'), (True, 'supported')):
+            adapter = harnesses.CodexAdapter.configured('codex', {'inbox_bridge': bridge})
+            capability = adapter.capabilities(self.session('codex', values))['session_name']
+            self.assertEqual(capability.state, state)
+        legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom', '{name}']})
+        self.assertEqual(legacy.capabilities(self.session('custom', values))['session_name'].state, 'unavailable')
 
     def test_builtins_accept_empty_initial_prompt_without_empty_native_turn(self):
         for name in harnesses.BUILTINS:
@@ -262,6 +308,21 @@ class AdapterContractTest(BaseTest):
         self.assertEqual(adapter.send(session, Message('id', 'text'), executor).state, 'unavailable')
         executor.rpc.assert_not_called()
         executor.command.assert_not_called()
+
+    def test_pi_sends_framed_text_with_separate_receipt_metadata(self):
+        from multiverse.harnesses.types import Message
+        from unittest.mock import Mock
+        adapter = harnesses.load(self.root, 'pi')
+        session = SessionHandle('agent', 'pi', str(self.work), native_id=str(uuid4()), state='running',
+                                bridge='pi-socket-v1', endpoint=NativeEndpoint('unix-json', '/tmp/test.sock'))
+        executor = Mock()
+        for mode in ('steer', 'follow-up'):
+            message = Message(str(uuid4()), 'literal body', delivery=mode, framed='Message from reviewer:\nliteral body')
+            adapter.send(session, message, executor)
+            payload = executor.request.call_args.args[1]
+            self.assertEqual(payload, {'operation': 'send', 'message_id': message.id,
+                                      'text': message.framed, 'mode': mode})
+            self.assertNotIn(message.id, payload['text'])
 
 
 class NativeDeliveryTest(BaseTest):

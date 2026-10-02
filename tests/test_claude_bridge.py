@@ -103,7 +103,7 @@ class ClaudeBridgeTest(BaseTest):
         executor = Mock()
         executor.write_lines.return_value = NativeResult('ok')
         message_id = str(uuid4())
-        message = Message(message_id, 'body', {}, None, 'steer', 'Message from reviewer:\nbody')
+        message = Message(message_id, 'body', delivery='steer', framed='Message from reviewer:\nbody')
         self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'supported')
         result = adapter.send(session, message, executor)
         self.assertEqual(result.state, 'native_queued')
@@ -158,9 +158,11 @@ class ClaudeBridgeTest(BaseTest):
         auth, frame = inbox.lines
         self.assertEqual(auth['token'], TOKEN)
         self.assertEqual(frame['session_id'], native_id)
-        self.assertEqual(frame['msg_id'], result['id'])
+        self.assertNotIn('id', result)
+        message_id = frame['msg_id']
+        self.assertNotIn(message_id, json.dumps(result))
         self.assertEqual(frame['message']['content'],
-                         f'<<MV2 steer id={result["id"]}>>Message from reviewer:\nPlease rebase<</MV2>>')
+                         f'<<MV2 steer id={message_id}>>Message from reviewer:\nPlease rebase<</MV2>>')
 
     def test_mod_registers_its_bridge_and_reports_waiting_for_the_current_launch(self):
         agent = str(uuid4())

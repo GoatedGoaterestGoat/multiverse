@@ -5,13 +5,32 @@ import socket
 import sys
 from unittest.mock import patch
 
-from multiverse import agents, harnesses
+from multiverse import agents, harnesses, native
 from multiverse.harnesses.types import CommandSpec, SharedServiceSpec
 from multiverse.store import read
 from test_multiverse import TerminalBase, until
 
 
 class NativeServiceTest(TerminalBase):
+    def test_service_cwd_preserves_workspace_relative_executable(self):
+        address = self.work / 'shared.sock'
+        listener = socket.socket(socket.AF_UNIX)
+        listener.bind(str(address))
+        self.addCleanup(listener.close)
+        info = {'socketPath': str(address), 'cliVersion': '1', 'appServerVersion': '1'}
+        seen = self.work / 'daemon-cwd.json'
+        executable = self.work / 'native-test'
+        executable.write_text(f'#!{sys.executable}\nimport json,os,pathlib\n'
+            f'pathlib.Path({str(seen)!r}).write_text(json.dumps(os.getcwd()))\n'
+            f'print({json.dumps(info)!r})\n')
+        executable.chmod(0o755)
+        stable = self.work / 'persistent'
+        stable.mkdir()
+        plan = SharedServiceSpec(('./native-test',), 'socketPath', ('cliVersion', 'appServerVersion'), cwd=str(stable))
+        endpoint = native.start_shared_service(plan, self.work, self.work / 'native.log', ())
+        self.assertEqual(read(seen), str(stable))
+        self.assertEqual(endpoint.address, str(address))
+
     def test_shared_service_survives_terminal_exit_and_scrubs_identity(self):
         address = self.work / 'shared.sock'
         listener = socket.socket(socket.AF_UNIX)

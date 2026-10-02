@@ -11,8 +11,9 @@ from .tools._common import add_universe, output
 # Harness integrations report status with `python -m multiverse.tools.runtime_update`;
 # it is not a command, so agents report their phase but never set their status.
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
-            "stop", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "ack", "report",
-            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor")
+            "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "report",
+            "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor",
+            "refresh")
 
 
 # Former names that keep working for agents launched with older prompts.
@@ -52,7 +53,7 @@ def run(args):
 
 def main():
     args = parser().parse_args()
-    output(lambda: run(args))
+    output(lambda: run(args), render=getattr(tool(args.action or 'tui'), 'format_output', None))
 
 
 if __name__ == "__main__":

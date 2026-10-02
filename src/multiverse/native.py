@@ -1,8 +1,8 @@
 """Shared native controls. Core executes adapter specifications and owns receipts.
 
-Durable send/inbox/ack never depend on these best-effort operations.
+Durable message storage never depends on these best-effort operations.
 """
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import stat
@@ -10,11 +10,12 @@ import socket
 import os
 import subprocess
 import time
+import re
 
 from . import agents, harnesses
-from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint
-from .store import lock, now, read, message_record, update_message
-from .tmux import owned
+from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint, BridgeUnavailable
+from .store import lock, now, read, message_record, update_message, inbox
+from .tmux import owned, observe
 
 
 def environment(command):
@@ -27,11 +28,24 @@ def execute(command: CommandSpec, workspace, timeout=10):
     return subprocess.run(command.argv, cwd=workspace, env=env, text=True, capture_output=True, timeout=timeout)
 
 
-def start_shared_service(specification, workspace, log_path, unset_env):
+def start_shared_service(specification, workspace, log_path, unset_env, observe_versions=None):
     """Ask the native owner to start/reuse its daemon. Never stop or restart it."""
+    try:
+        return _start_shared_service(specification, workspace, log_path, unset_env, observe_versions)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        raise BridgeUnavailable(str(error)) from error
+
+
+def _start_shared_service(specification, workspace, log_path, unset_env, observe_versions):
     command = CommandSpec(specification.argv, unset_env)
     env = {**environment(command), **specification.environment}
-    result = subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
+    # Shared services outlive worktrees and temporary universes. Their adapter
+    # can select a persistent cwd without moving the agent's native terminal.
+    service_cwd = specification.cwd or workspace
+    argv = command.argv
+    if specification.cwd and '/' in argv[0] and not Path(argv[0]).is_absolute():
+        argv = (str((Path(workspace) / argv[0]).resolve()), *argv[1:])
+    result = subprocess.run(argv, cwd=service_cwd, env=env, stdin=subprocess.DEVNULL,
                             capture_output=True, text=True, timeout=30)
     log_path.write_text(result.stdout + result.stderr)
     if result.returncode:
@@ -41,8 +55,22 @@ def start_shared_service(specification, workspace, log_path, unset_env):
     if not isinstance(address, str) or not Path(address).is_absolute() or not stat.S_ISSOCK(Path(address).stat().st_mode):
         raise ValueError('Shared native service did not return an absolute Unix socket')
     versions = [info.get(key) for key in specification.version_fields]
-    if any(not isinstance(v, str) or not v for v in versions) or versions[0] != versions[1]:
+    if any(not isinstance(v, str) or not v for v in versions):
+        raise ValueError('Native service returned invalid CLI/daemon version metadata')
+    if observe_versions:
+        observe_versions({'cli': versions[0], 'daemon': versions[1]})
+    if specification.require_matching_versions and versions[0] != versions[1]:
         raise RuntimeError('Native CLI/daemon version mismatch; update or restart explicitly when sessions are safe')
+    if specification.required_cli_flags:
+        # Read-only CLI help detects old/partial installations without starting
+        # another daemon or constructing a speculative native conversation.
+        help_result = subprocess.run([argv[0], '--help'], cwd=service_cwd, env=env,
+                                     capture_output=True, text=True, timeout=5)
+        help_text = help_result.stdout + help_result.stderr
+        missing = [flag for flag in specification.required_cli_flags
+                   if not re.search(r'(?<!\S)' + re.escape(flag) + r'(?=[\s=<]|$)', help_text)]
+        if help_result.returncode or missing:
+            raise ValueError('Native CLI does not advertise required bridge flags: ' + ', '.join(missing or specification.required_cli_flags))
     return NativeEndpoint('unix-websocket', address)
 
 
@@ -54,11 +82,14 @@ def execute_rpc(spec, workspace, timeout=10):
 class NativeExecutor:
     def __init__(self, workspace, properties=None, facts=None):
         self.workspace, self.properties, self.facts = workspace, properties, facts
+        self.stopping = False
 
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
-        owned(self.properties, self.facts)
+        if self.stopping and observe(self.properties, self.facts)['live'] == 'dormant':
+            return  # Adapter validates exact native identity; no pane control.
+        owned(self.properties, self.facts, states=('alive', 'ending', 'stopped') if self.stopping else ('alive',))
 
     def command(self, specification, timeout=10):
         self.check_session()
@@ -156,6 +187,10 @@ def context(root, reference):
 
 def stop(root, reference):
     directory, adapter, session, executor = context(root, reference)
+    executor.stopping = True
+    live = observe(executor.properties, executor.facts)['live']
+    if live in ('stopped', 'dormant'):
+        session = replace(session, state=live)
     result = adapter.stop(session, executor)
     for message_id in (result.value or {}).get('cancelled_message_ids', []):
         try:
@@ -165,8 +200,9 @@ def stop(root, reference):
         update_message(directory, message_id, submission_state='cancelled', cancelled_at=now(),
                        last_receipt={'state': 'unavailable', 'reason': 'Cancelled by explicit agent stop'})
     if result.state != 'ok':
-        raise RuntimeError(f'Native stop incomplete; terminal left attached: {result.reason}')
-    return result
+        raise RuntimeError(f'Native stop incomplete: {result.reason}')
+    cancelled = end_startup_messages(directory, session.launch_id, 'Cancelled by explicit agent stop', cancelled=True)
+    return replace(result, value={**(result.value or {}), 'cancelled_startup_messages': cancelled})
 
 
 def capabilities(root, reference, run_probe=False):
@@ -212,10 +248,100 @@ def control(root, reference, operation_name):
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 
+def finish_wake(directory, launch_id, message_id, started, reason=''):
+    """A CLI prompt has no native receipt ID; record process-start evidence only."""
+    if not message_id:
+        return
+    with lock(directory / '.delivery.lock'):
+        _, tracking = message_record(directory, message_id)
+        if (tracking.get('wake_launch_id') != launch_id or
+                tracking.get('submission_state') not in ('submitting', 'unknown')):
+            return
+        receipt = {'state': 'ok' if started else 'error', 'ok': started, 'at': now(),
+                   'reason': ('Started the resumed session with this message as its interactive prompt; '
+                              'consumption is unconfirmed') if started else reason,
+                   'launch_id': launch_id, 'value': {'transcript_confirmed': None}}
+        update_message(directory, message_id, submission_state='accepted' if started else 'failed',
+                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'])
+
+
+def send_or_wake(root, reference, message_id, retry=False):
+    """Caller holds .send.lock. Release .launch.lock before start takes it."""
+    directory = agents.directory(root, reference)
+    with lock(directory / '.launch.lock'):
+        message, tracking = message_record(directory, message_id)
+        _, adapter, session, executor = context(root, reference)
+        live = observe(executor.properties, executor.facts)['live']
+        state = tracking.get('submission_state', 'pending')
+        eligible = state == 'pending' or (retry and state == 'failed')
+        wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
+        capability = adapter.capabilities(session).get('wake') if wake else None
+        if wake and (capability is None or capability.state != 'supported'):
+            receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt'}
+            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
+            return receipt
+    if not wake:
+        return deliver(root, reference, message_id, retry=retry)
+    try:
+        previous_socket = (executor.facts.get('tmux') or {}).get('socket')
+        launched = agents.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
+        _, tracking = message_record(directory, message_id)
+        if tracking.get('submission_state') in ('accepted', 'failed'):
+            return tracking['attempts'][-1]
+        return {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
+                'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
+    except Exception as error:
+        _, tracking = message_record(directory, message_id)
+        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}'}
+        # If startup was registered, uncertainty belongs to the runner. Never
+        # turn a possibly submitted command-line prompt into a retryable failure.
+        if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
+            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
+        return receipt
+
+
+def end_startup_messages(directory, launch_id, reason, cancelled=False):
+    """Caller holds .launch.lock; these messages have never reached a harness."""
+    if launch_id is None:
+        return 0
+    count = 0
+    for message in inbox(directory, all_messages=True, limit=None)['messages']:
+        tracking = message['tracking']
+        if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
+            receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
+            update_message(directory, message['id'], submission_state='cancelled' if cancelled else 'failed',
+                           attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
+            count += 1
+    return count
+
+
+def flush_startup(root, directory, launch_id, error=None):
+    # Same lock order as send. Setting ready and taking the batch is atomic with
+    # new sends; hold send.lock through submission to preserve batch ordering.
+    with lock(directory / '.send.lock'):
+        with lock(directory / '.launch.lock'):
+            facts = agents.runtime(directory)
+            if facts.get('launch_id') != launch_id:
+                error = 'Launch changed before delivery; use deliver AGENT --retry'
+            elif facts.get('ending_at'):
+                error = 'Launch stopped before delivery'
+            if error:
+                end_startup_messages(directory, launch_id, error, cancelled=bool(facts.get('ending_at')))
+                if facts.get('launch_id') == launch_id:
+                    agents.update_runtime(directory, launch_id, startup_delivery='failed', delivery_error=error)
+                return
+            agents.update_runtime(directory, launch_id, startup_delivery='ready')
+            batch = [message['id'] for message in inbox(directory, all_messages=True, limit=None)['messages']
+                     if message['tracking'].get('deferred_launch_id') == launch_id
+                     and message['tracking']['submission_state'] == 'pending']
+        for message_id in batch:
+            deliver(root, directory.name, message_id)
+
+
 def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
-    # take their own shorter lock, so ack cannot overwrite delivery evidence.
+    # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
         try:
@@ -229,7 +355,20 @@ def deliver(root, reference, message_id, retry=False, check=False):
             return receipt
         if tracking.get('submission_state') == 'cancelled':
             return {**tracking['last_receipt'], 'message_id': message_id, 'reused': True, 'ok': False}
+        if check and tracking.get('delivery_method') == 'resume_prompt' and tracking.get('submission_state') != 'failed':
+            return {'state': 'unknown', 'ok': False, 'reason': 'Interactive resume prompt has no correlatable native receipt; no resend',
+                    'value': {'transcript_confirmed': None}}
+        deferred = tracking.get('deferred_launch_id')
+        if deferred and tracking.get('submission_state') == 'pending':
+            if (deferred != session.launch_id or observe(executor.properties, executor.facts)['live'] != 'alive'
+                    or executor.facts.get('startup_delivery') == 'failed'):
+                end_startup_messages(directory, deferred, 'Launch ended before delivery; use deliver AGENT --retry')
+                _, tracking = message_record(directory, message_id)
+            elif check:
+                return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         if check:
+            if tracking.get('submission_state') == 'failed':
+                return {**tracking['attempts'][-1], 'ok': False}
             target = tracking.get('target_session') or message.get('target_session')
             if target and target != session.native_id:
                 raise ValueError('Message targets a different native session; refusing reconciliation')
@@ -251,15 +390,21 @@ def deliver(root, reference, message_id, retry=False, check=False):
             raise ValueError('Message targets a different native session; refusing delivery')
         previous = tracking.get('attempts', [])
         state = tracking.get('submission_state', 'pending')
-        if tracking.get('acknowledged_at') or state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
-            receipt = previous[-1] if previous else {'state': 'unavailable', 'reason': 'Message already acknowledged'}
+        if state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
+            receipt = previous[-1] if previous else {'state': 'unknown', 'reason': 'No submission receipt recorded; no resend'}
             if state == 'accepted':
-                receipt = {**receipt, 'state': 'native_queued', 'reason': 'Native acceptance recorded; no resend',
+                receipt = {**receipt, 'state': 'ok' if tracking.get('delivery_method') == 'resume_prompt' else 'native_queued',
+                           'reason': 'Submission already recorded; no resend',
                            'value': tracking.get('native_receipt')}
             if state == 'submitting':
                 receipt = {**receipt, 'state': 'unknown', 'reason': 'Previous submission was interrupted; acceptance unknown'}
                 update_message(directory, message_id, submission_state='unknown')
             return {**receipt, 'reused': True, 'ok': receipt['state'] not in ('error', 'unavailable', 'unknown')}
+        relay_lost = (session.native_relay or {}).get('state') == 'lost'
+        if not relay_lost and executor.facts.get('startup_delivery') == 'waiting' and observe(executor.properties, executor.facts)['live'] == 'alive':
+            update_message(directory, message_id, submission_state='pending', deferred_launch_id=session.launch_id,
+                           delivery_method='native', target_session=target or session.native_id)
+            return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}
         try:
             executor.check_session()
         except Exception as error:
@@ -272,13 +417,13 @@ def deliver(root, reference, message_id, retry=False, check=False):
         # Persist BEFORE the native call: a crash cannot turn uncertain submission
         # into pending and silently replay it on restart.
         update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
-                       attempts=[*previous, attempt])
+                       delivery_method='native', attempts=[*previous, attempt])
         try:
             if not session.native_id:
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')
             else:
                 result = adapter.send(session, Message(message['id'], message['text'], message.get('from', {}),
-                                      message.get('reply_to'), selected_mode, framed_text(root, message)), executor)
+                                      delivery=selected_mode, framed=framed_text(root, message)), executor)
         except Exception as error:
             result = NativeResult('unknown', f'{error}; acceptance unknown; no automatic resend')
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
