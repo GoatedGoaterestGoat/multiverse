@@ -19,7 +19,7 @@ is the first harness that supports it.
 
 - **Turns and leaves.** A turn is one prompt and everything the agent did until
   the next prompt. Its compactable content is a list of leaves, as v1 reads
-  them: thinking blocks, text, messages from you, and tool exchanges. A tool
+  them: text, messages from you, and tool exchanges. A tool
   call and its result are always one leaf (v1's `auto_merge_tool_pairs`), so
   no merge can separate them; left apart, Sonnet split about one pair in
   twelve in v1's cached trees, nearly always right between a call and its
@@ -27,6 +27,10 @@ is the first harness that supports it.
   kept verbatim. A turn the harness marks as not conversation (for Claude, a
   display-only command such as `/compact`, `/context` or `/model`) is left out
   entirely: never summarized, never kept.
+- **No thinking.** Unlike v1, thinking is no part of compaction: it is not a
+  leaf, the merge model never sees it, and it is never delivered. The size of
+  a conversation before compaction includes its thinking; afterwards there is
+  none. See Limits for why.
 - **Trees.** A model builds each turn's tree bottom up: on each step it merges one
   contiguous span of the current frontier into a summary node, until one root
   covers the turn. Node IDs follow merge order.
@@ -82,7 +86,7 @@ and merges into `builder` field by field.
 | `default` | The scheduler of every agent that has none of its own, its budget and `image_mode`. |
 | `builder.background` | Build each turn's tree as soon as the turn ends. |
 | `builder.model`, `builder.effort` | The model that writes summaries (default `sonnet`) and its effort (`low` to `max`). |
-| `builder.fallback_model` | Takes over a turn that `model` still refuses after `turn_retries`, from the merges already made (default `claude-sonnet-4-6`; `null` fails the turn instead). Sonnet 5.5's safeguards refuse some short turns, such as a one-word reply after a thinking block, and one turn that cannot be built stops the whole compaction. Sonnet 4.6 refused nothing in testing but builds nearly flat trees (a 22-leaf turn in 2 merges, where Sonnet 5.5 made 6 nested ones), so it serves only as the fallback. |
+| `builder.fallback_model` | Takes over a turn that `model` still refuses after `turn_retries`, from the merges already made (default `claude-sonnet-4-6`; `null` fails the turn instead). Sonnet 5.5's safeguards refused some short turns when merges still showed thinking, and one turn that cannot be built stops the whole compaction. Sonnet 4.6 refused nothing in testing but builds nearly flat trees (a 22-leaf turn in 2 merges, where Sonnet 5.5 made 6 nested ones), so it serves only as the fallback. |
 | `builder.concurrency` | How many turns are built at once (each turn's merges run one after another). |
 | `builder.turn_retries` | Immediate retries of a turn whose build failed (a refusal, an unusable reply, a crash), resuming from the merges that succeeded. |
 | `builder.rate_limit.retries`, `wait_seconds` | Retries of one merge call that was rate limited, overloaded or failed in the API, waiting `first` seconds, multiplied by `multiplier` each time up to `max`. |
@@ -155,8 +159,8 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   kept tool result hangs off the call from before the compaction, and a kept
   response keeps its message ID, so loading the session again (Claude's own
   resume) brings back the old rows beside the copies. A built message cannot
-  hold a thinking block or an image, so those are left out: a prompt notes how
-  many images it had, and the budget spends nothing on them.
+  hold an image, so a prompt notes how many images it had, and the budget
+  spends nothing on them.
 - **Never Claude's own summary.** The hook answers every main-session
   compaction, or skips it with the reason. If it ever cannot answer (the mod
   failed to load, the hook ran out of time), the `PreCompact` hook refuses Claude's
@@ -166,9 +170,9 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
 - **Merges** are v1's privileged CLI merges, unchanged: `claude -p --resume
   <synthetic session>` with no tools, using your Claude login, v1's newest
   system prompt and instruction. The first step's session holds the turn's own
-  rows; later steps rebuild it from the current frontier (the prompt, then one
-  assistant message with each summary as text, each tool call and result as
-  text, and each thinking block not yet merged verbatim with its signature).
+  rows, without thinking; later steps rebuild it from the current frontier (the
+  prompt, then one assistant message with each summary, text and tool exchange
+  as text).
   The files live in a Claude project of the agent's compaction directory and
   are deleted after each call. A refused merge is retried like any other
   failure (`turn_retries`), unchanged.
@@ -181,19 +185,14 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
 
 - Token counts are v1's estimates: about four characters a token, images by
   their pixel size.
-- **Thinking and the API.** Claude records what the API did to each request.
-  Opus 5.5 drops a thinking block whose preceding conversation changed
-  (`thinking_dropped`, `prefix_binding_mismatch`): so an Opus merge never sees
-  the turn's thinking, and thinking kept in a compacted conversation is
-  dropped once anything before it was summarized, though the budget still
-  counts it. Sonnet 5.5 and Sonnet 4.6 keep the blocks in merge sessions, but
-  Sonnet 5.5's safeguards refuse a turn whose substance is only in its
-  thinking (`[reasoning_extraction]`), and Sonnet 4.6 did not reliably name a
-  decision made only in thinking. Tested with Claude Code 2.1.287 on
-  2026-10-01.
-- Thinking is never kept in the compacted conversation (see above); it still
-  reaches the merge model, and its estimated size still counts toward a raw
-  turn's share.
+- **Why no thinking.** A signed thinking block can only be delivered by keeping
+  Claude's own row, which breaks resume (see above). And Claude records what
+  the API did to each request: Opus 5.5 drops a thinking block whose preceding
+  conversation changed (`thinking_dropped`, `prefix_binding_mismatch`), so
+  thinking kept after a summarized turn would be dropped anyway, and an Opus
+  merge never saw it either. Shown to Sonnet 5.5, a turn whose substance was
+  mostly thinking was refused (`[reasoning_extraction]`). Tested with Claude
+  Code 2.1.287 on 2026-10-01.
 - Claude 2.1.287 links each parallel tool result to its own call, and only the
   last result stored continues the conversation, so the transcript reader takes
   every block of a response and every result answering its calls (v1's reader

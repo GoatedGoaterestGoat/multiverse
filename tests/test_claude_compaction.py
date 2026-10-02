@@ -43,11 +43,11 @@ with open(os.environ['FAKE_LOG'], 'a') as log:
                           'mv2': sorted(k for k in os.environ if k.startswith('MV2_')),
                           'retries': os.environ.get('CLAUDE_CODE_MAX_RETRIES')}}) + '\n')
 mode = os.environ.get('FAKE_MODE', 'merge')
-if mode == 'refuse-thinking' and (thinking or 'thinking' in instruction):
+if mode == 'refuse':
     print(json.dumps({{'type': 'result', 'is_error': True, 'stop_reason': 'refusal', 'api_error_status': None,
                       'result': "API Error: the model's safeguards flagged this message"}}))
     sys.exit(1)
-if mode in ('merge', 'refuse-thinking'):
+if mode == 'merge':
     print(json.dumps({{'type': 'result', 'is_error': False, 'stop_reason': 'end_turn', 'api_error_status': None,
                       'result': json.dumps({{'start': 0, 'end': 2, 'summary': 'I handled two steps.'}})}}))
 elif mode == 'ratelimit':
@@ -186,13 +186,14 @@ class TranscriptTest(Fixture):
         self.assertEqual([t.prompt.content['text'] for t in turns], ['First task', 'Second', 'Third', 'Fourth', 'Fifth'])
         self.assertEqual([t.dropped for t in every if t.dropped], ['the display-only command /compact'] * 2)
         first = turns[0]
-        # A call and its result are one leaf, so no merge can separate them (v1's auto_merge_tool_pairs).
-        self.assertEqual([leaf.kind for leaf in first.leaves],
-                         ['thinking', 'asst_text', 'tool_exchange', 'thinking', 'thinking', 'asst_text'])
-        self.assertEqual(first.leaves[2].refs, (ids['use']['uuid'], ids['result']['uuid']))
-        self.assertEqual(first.leaves[2].preview, 'Bash(ls) -> a.txt b.txt')
-        # Each response's thinking estimate (output less visible text) is shared by signature length.
-        self.assertEqual([first.leaves[i].tokens for i in (0, 3, 4)], [298, 124, 374])
+        # A call and its result are one leaf, so no merge can separate them (v1's auto_merge_tool_pairs);
+        # thinking is no leaf at all.
+        self.assertEqual([leaf.kind for leaf in first.leaves], ['asst_text', 'tool_exchange', 'asst_text'])
+        self.assertEqual(first.leaves[1].refs, (ids['use']['uuid'], ids['result']['uuid']))
+        self.assertEqual(first.leaves[1].preview, 'Bash(ls) -> a.txt b.txt')
+        # Its size is kept for the size before compaction: each response's output less its visible text,
+        # shared by signature length (298, then 124 and 374).
+        self.assertEqual(first.omitted, 298 + 124 + 374)
         recorded = Store(self.agent_dir).installed()
         self.assertEqual(len(recorded), 1)
         self.assertEqual([row['uuid'] for row in recorded[0]['rows']], [ids['built']['uuid'], ids['copy']['uuid']])
@@ -389,28 +390,24 @@ class MergeTest(Fixture):
         self.assertIn('--no-session-persistence', argv)
         self.assertEqual(call['mv2'], [])
         self.assertEqual(call['retries'], '2')
-        # The first step: v1's title row, the turn's own eight rows verbatim, then the context switch.
+        # The first step: v1's title row, the turn's own rows verbatim but its thinking, then the context switch.
         self.assertEqual(call['first'], 'First task')
-        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 3, 'user', *['assistant'] * 3,
+        self.assertEqual(call['kinds'], ['custom-title', 'user', 'assistant', 'assistant', 'user', 'assistant',
                                          'user', 'assistant'])
-        self.assertTrue(call['thinking'])
-        self.assertIn('Current frontier (6 entries):', call['instruction'])
-        self.assertIn('  [0] thinking\n  [1] asst_text | "I will look"\n  [2] tool_exchange | "Bash(ls) -> a.txt b.txt"\n'
-                      '  [3] thinking', call['instruction'])
+        self.assertFalse(call['thinking'])
+        self.assertIn('Current frontier (3 entries):\n\n  [0] asst_text | "I will look"\n'
+                      '  [1] tool_exchange | "Bash(ls) -> a.txt b.txt"\n  [2] asst_text | "done"', call['instruction'])
+        self.assertNotIn('thinking', call['instruction'])
         work = Store(self.agent_dir).directory / 'work'
         self.assertEqual(list((self.config / 'projects' / merge.project_slug(work.resolve())).glob('*.jsonl')), [])
         later = [Node(0, turn.leaves[:2], 'I looked.', 3), *turn.leaves[2:]]
         source.merge(turn, later, builder)
         call = self.calls()[-1]
         # Later steps: the prompt, one assistant row per frontier entry (thinking verbatim), the context switch.
-        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 5, 'user', 'assistant'])
-        self.assertEqual(call['assistant'][:4], [
-            '**Compacted summary (2 entries):**\n\nI looked.',
-            '**Tool call: `Bash`**\n\n```json\n{\n  "command": "ls"\n}\n```\n\n**Result:**\n\n```\na.txt b.txt\n```',
-            'thinking', 'thinking'])
-        self.assertTrue(call['thinking'])
-        self.assertIn('[0] summary node (covers 2 leaves) | "I looked."', call['instruction'])
-        self.assertIn('[2] thinking', call['instruction'])
+        self.assertEqual(call['kinds'], ['custom-title', 'user', 'assistant', 'assistant', 'user', 'assistant'])
+        self.assertEqual(call['assistant'][:2], ['**Compacted summary (2 entries):**\n\nI looked.', 'done'])
+        self.assertFalse(call['thinking'])
+        self.assertIn('[0] summary node (covers 2 leaves) | "I looked."\n  [1] asst_text | "done"', call['instruction'])
 
     def test_a_refused_merge_is_retried_unchanged_then_by_the_fallback_model(self):
         r, _ = conversation()
@@ -420,14 +417,14 @@ class MergeTest(Fixture):
         builder = config.Builder(turn_retries=1, rate_limit=config.RateLimit(retries=0))
         from multiverse.compaction.build import Build, Reporter
         events = []
-        with patch.dict(os.environ, {'FAKE_MODE': 'refuse-thinking'}):
+        with patch.dict(os.environ, {'FAKE_MODE': 'refuse'}):
             failures = Build(source, Store(self.agent_dir), builder, Reporter(Store(self.agent_dir), events.append)).turns([turn])
         self.assertIn('refused', failures[turn.id])
         calls = self.calls()
         # Retried unchanged, then continued with the fallback model, retried unchanged again.
         self.assertEqual([call['argv'][call['argv'].index('--model') + 1] for call in calls],
                          ['sonnet', 'sonnet', 'claude-sonnet-4-6', 'claude-sonnet-4-6'])
-        self.assertTrue(all(call['thinking'] and call['rows'] == 11 for call in calls))
+        self.assertTrue(all(not call['thinking'] and call['rows'] == 8 for call in calls))
         self.assertEqual([event['retrying'] for event in events if event['event'] == 'error'], [True, False, True, False])
 
     def test_a_rate_limited_merge_reports_its_kind(self):

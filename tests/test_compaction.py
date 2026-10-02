@@ -51,7 +51,7 @@ class FakeSource:
         return None
 
     def turns(self):
-        return [Turn(t.id, t.prompt, list(t.leaves), dropped=t.dropped) for t in self._turns]
+        return [Turn(t.id, t.prompt, list(t.leaves), dropped=t.dropped, omitted=t.omitted) for t in self._turns]
 
     def completed(self, turns, marker):
         return turns if marker == 'all' else turns[:-1]
@@ -408,6 +408,14 @@ class PipelineTest(BaseTest):
         self.assertEqual(sorted(source.rendered), ['t0', 't2', 't3'])
         self.assertEqual(source.calls, 2)  # only t0 is summarized; t2 and t3 stay raw
         self.assertEqual((stats['turns'], stats['dropped_turns']), (3, 1))
+
+    def test_omitted_content_counts_before_compaction_and_never_after(self):
+        turns = [turn(f't{i}', 3) for i in range(3)]
+        for t in turns:
+            t.omitted = 1000
+        payload, stats = pipeline.compact(self.agent(FakeSource(turns)), [], Reporter(Store(self.root / 'state/agents/a')))
+        self.assertEqual(stats['tokens_before'], 3 * (5 + 300 + 1000))
+        self.assertLess(stats['tokens_after'], 3 * (5 + 300))
 
     def test_a_turn_without_a_tree_fails_the_whole_compaction(self):
         source = FakeSource([turn(f't{i}', 3) for i in range(3)], [MergeError('usage_limit', 'limit reached')])

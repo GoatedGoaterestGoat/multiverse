@@ -1,13 +1,12 @@
 """One merge step through Claude Code itself, over a synthetic session.
 
 Ported from Multiverse v1's privileged CLI constructor
-(constructor.construct_turn_priv_cli and priv_session) without changing what
-the merge model sees. The first step writes a session holding the turn's own
-rows, verbatim; every later step rebuilds it from the current frontier: the
-prompt, then one assistant message with one block per frontier entry (thinking
-blocks verbatim with their signatures, everything else as text). A "context
-switch" exchange closes the session so the model summarizes the trace instead
-of continuing it. Then `claude -p <instruction> --resume <that session>` runs
+(constructor.construct_turn_priv_cli and priv_session). The first step writes a
+session holding the turn's own rows, verbatim; every later step rebuilds it
+from the current frontier: the prompt, then one assistant message with one text
+block per frontier entry. Unlike v1, the session holds no thinking: thinking is
+no part of compaction (see transcript.py). A "context switch" exchange closes
+the session so the model summarizes the trace instead of continuing it. Then `claude -p <instruction> --resume <that session>` runs
 with no tools under the person's own Claude login; the instruction lists the
 frontier and the reply is one JSON object: {"start", "end", "summary"}. The
 system prompt, instruction and context switch are v1's newest wording, which
@@ -115,12 +114,9 @@ def _clip(text: str, limit: int) -> str:
 
 
 def frontier_index(frontier) -> str:
-    """The frontier as v1's instruction lists it: thinking by a bare label, the rest with a preview."""
+    """The frontier as v1's instruction lists it: each entry's kind and a preview."""
     lines = []
     for position, entry in enumerate(frontier):
-        if isinstance(entry, Leaf) and entry.kind == 'thinking':
-            lines.append(f'  [{position}] thinking')
-            continue
         preview = entry.preview if isinstance(entry, Leaf) else _clip(' '.join(entry.summary.split()), 120)
         preview = _clip(preview.replace('\n', ' ').replace('"', "'"), 100)
         if isinstance(entry, Leaf):
@@ -137,7 +133,7 @@ def _fence(content: str) -> str:
 
 
 def _leaf_text(leaf) -> str:
-    """A leaf other than thinking as the text block v1 puts in a rebuilt session."""
+    """A leaf as the text block v1 puts in a rebuilt session."""
     content = leaf.content
     if leaf.kind == 'asst_text':
         return content.get('text', '')
@@ -167,14 +163,8 @@ def summary_text(node) -> str:
     return f'**Compacted summary ({sum(1 for _ in leaves_under(node))} entries):**\n\n{node.summary.strip()}'
 
 
-def _block(entry, rows_by_uuid) -> dict:
-    if isinstance(entry, Node):
-        return {'type': 'text', 'text': summary_text(entry)}
-    if entry.kind == 'thinking':
-        content = (rows_by_uuid[entry.refs[0]].get('message') or {}).get('content') or []
-        return next(block for block in content if isinstance(block, dict)
-                    and block.get('type') in ('thinking', 'redacted_thinking'))
-    return {'type': 'text', 'text': _leaf_text(entry)}
+def _block(entry) -> dict:
+    return {'type': 'text', 'text': summary_text(entry) if isinstance(entry, Node) else _leaf_text(entry)}
 
 
 def _images(rows) -> list[dict]:
@@ -216,7 +206,7 @@ def _close(rows, session_id, cwd, model) -> list[dict]:
 
 
 def model_of(turn, rows_by_uuid) -> str:
-    """The model that wrote the turn, so its thinking signatures validate."""
+    """The model that wrote the turn, as its rows name it."""
     for leaf in turn.leaves:
         for ref in leaf.refs:
             message = (rows_by_uuid.get(ref) or {}).get('message') or {}
@@ -256,7 +246,7 @@ def session_from_frontier(turn, frontier, rows_by_uuid, session_id, cwd) -> list
                 [{'type': 'text', 'text': text}, *pictures] if pictures else text})
     rows, parent, message_id = [_metadata(session_id), user], user['uuid'], f'msg_priv{uuidlib.uuid4().hex[:24]}'
     for position, entry in enumerate(frontier):
-        row = _assistant(parent, session_id, cwd, model, _block(entry, rows_by_uuid), message_id,
+        row = _assistant(parent, session_id, cwd, model, _block(entry), message_id,
                          position == len(frontier) - 1)
         rows.append(row)
         parent = row['uuid']

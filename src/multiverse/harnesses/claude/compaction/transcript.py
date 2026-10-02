@@ -1,12 +1,17 @@
 """A Claude Code session transcript as turns of leaves, before any compaction.
 
 Ported from Multiverse v1's parser (multiverse-plugin/vendor/compaction/parser.py)
-as v1's compaction_forest() uses it: one leaf per row (`thinking`, `asst_text`,
-`tool_use`, `tool_result`, `user_text`) and v1's token counts (about four
-characters a token, images by their pixel size). Then v1's preprocessing with
+as v1's compaction_forest() uses it: one leaf per row (`asst_text`, `tool_use`,
+`tool_result`, `user_text`) and v1's token counts (about four characters a
+token, images by their pixel size). Then v1's preprocessing with
 `auto_merge_tool_pairs` on: each tool call and its result become one
 `tool_exchange` leaf at the call's place, so no merge can separate them. Changes
 for mv2:
+
+- Thinking is no part of compaction: no leaf, never shown to the merge model,
+  never delivered (a built message cannot hold a signed block, and Opus 5.5
+  drops thinking whose preceding conversation changed). Its estimated size is
+  kept as the turn's `omitted` tokens, for the size before compaction.
 
 - History crosses compactions. `/compact` keeps every earlier row in the same
   file and adds a boundary row whose `logicalParentUuid` names the row before
@@ -237,10 +242,6 @@ def classify(row) -> Leaf | None:
         for block in content:
             if not isinstance(block, dict):
                 continue
-            if block.get('type') in ('thinking', 'redacted_thinking'):
-                text = block.get('thinking', '') or ''
-                return Leaf('thinking', (uuid,), estimate_tokens(text),
-                            _preview(text, 'thinking') if text else '<thinking: encrypted>', {'text': text})
             if block.get('type') == 'text':
                 text = block.get('text', '') or ''
                 return Leaf('asst_text', (uuid,), estimate_tokens(text), _preview(text, 'asst'), {'text': text})
@@ -268,7 +269,8 @@ def thinking_estimates(rows) -> dict[str, int]:
     """Estimated tokens of each thinking row: its response's output tokens less the visible text.
 
     The estimate is per response; a response with several thinking blocks shares
-    it among them by signature length (equally when no signature tells).
+    it among them by signature length (equally when no signature tells). A
+    block whose text is stored never counts less than that text.
     """
     output, visible, blocks = {}, {}, {}
     for row in rows:
@@ -283,13 +285,13 @@ def thinking_estimates(rows) -> dict[str, int]:
         for block in message.get('content') or []:
             if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
                 weight = len(block.get('signature') or block.get('data') or '') or 1
-                blocks.setdefault(response, []).append((row['uuid'], weight))
+                blocks.setdefault(response, []).append((row['uuid'], weight, estimate_tokens(block.get('thinking') or '')))
     estimates = {}
     for response, entries in blocks.items():
         total = max(0, output.get(response, 0) - visible.get(response, 0))
-        weights = sum(weight for _, weight in entries)
-        for uuid, weight in entries:
-            estimates[uuid] = total * weight // weights
+        weights = sum(weight for _, weight, _ in entries)
+        for uuid, weight, shown in entries:
+            estimates[uuid] = max(shown, total * weight // weights)
     return estimates
 
 
@@ -364,17 +366,21 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
         if command:
             commands.setdefault(row['promptId'], command)
     result, current, orphans, last_prompt = [], None, [], None
+    omitted = 0  # thinking before the first prompt
     for row in path:
         leaf = classify(row)
-        if leaf is not None and leaf.kind == 'thinking':
-            leaf.tokens = max(leaf.tokens, estimates.get(row['uuid'], 0))
+        if row['uuid'] in estimates:
+            if current is None:
+                omitted += estimates[row['uuid']]
+            else:
+                current.omitted += estimates[row['uuid']]
         if _starts_turn(row, last_prompt):
             if current is not None:
                 result.append(current)
             last_prompt = row['promptId']
-            current = Turn(row['promptId'], leaf, [])
+            current = Turn(row['promptId'], leaf, [], omitted=omitted)
             current.leaves.extend(orphans)
-            orphans = []
+            orphans, omitted = [], 0
             continue
         if leaf is None:
             continue
@@ -384,8 +390,8 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
             current.leaves.append(leaf)
     if current is not None:
         result.append(current)
-    elif orphans:
-        result.append(Turn('turn-0', None, orphans))
+    elif orphans or omitted:
+        result.append(Turn('turn-0', None, orphans, omitted=omitted))
     for turn in result:
         turn.leaves = pair_tools(turn.leaves)
         discount_evictable(turn.leaves)

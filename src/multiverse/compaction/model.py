@@ -65,12 +65,17 @@ class Turn:
     conversation (Claude: a display-only command such as `/compact` or
     `/context`). Such a turn is never summarized or kept: compaction leaves it
     out entirely.
+
+    `omitted` estimates the tokens of content the harness leaves out of
+    compaction altogether (Claude: thinking): part of the conversation before a
+    compaction, never after.
     """
     id: str
     prompt: Leaf | None
     leaves: list[Leaf]
     root: Entry | None = None
     dropped: str | None = None
+    omitted: int = 0
 
     @property
     def tokens(self) -> int:

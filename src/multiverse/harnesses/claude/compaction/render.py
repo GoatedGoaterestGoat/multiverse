@@ -10,12 +10,11 @@ the compaction, and a kept response keeps its `message.id`, so loading the
 session again (Claude's own resume) gathers the original rows with the copies.
 Built rows get links and ids of their own.
 
-What a built message cannot hold is left out: thinking blocks (a signed block
-cannot be built; Opus 5.5 drops kept thinking once anything before it changed
-anyway) and images (a prompt notes how many it had, as v1 did for images the
-budget left out; a tool result's images are dropped, as in v1). Every built
-message holds exactly one block, so each becomes exactly one stored row (the
-install record counts on it).
+Thinking is no part of compaction (see transcript.py). Images cannot be built:
+a prompt notes how many it had, as v1 did for images the budget left out, and a
+tool result's images are dropped, as in v1. Every built message holds exactly
+one block, so each becomes exactly one stored row (the install record counts on
+it).
 
 A call and its result normally form one leaf, so a merge never separates them.
 A call or result left unpaired (a session cut off mid-call) is handled as in
@@ -93,7 +92,7 @@ def render(turns, frontiers) -> dict:
         elif entry.kind == 'user_text':
             user_text(entry.content.get('text', '') or '', entry.content.get('images', 0))
         else:
-            counts['dropped'] += 1  # thinking, or empty text
+            counts['dropped'] += 1  # empty text, or a kind a built message cannot hold
 
     for turn in turns:
         if turn.prompt is not None:

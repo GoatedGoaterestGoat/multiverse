@@ -60,7 +60,7 @@ def plan(turns: list[Turn], schedule: Schedule, store: Store | None = None) -> l
         share = shares[turn.id]
         has_tree = store.load_tree(turn) if store is not None else turn.root is not None
         rows.append({'turn': turn.id, 'prompt': turn.prompt.preview if turn.prompt else '', 'leaves': len(turn.leaves),
-                     'tokens': turn.tokens, 'share': share, 'raw': kept_raw(turn, share),
+                     'tokens': turn.tokens, 'omitted': turn.omitted, 'share': share, 'raw': kept_raw(turn, share),
                      'needs_tree': needs_tree(turn, share), 'has_tree': has_tree,
                      'prompt_images': 'kept' if turn.id in images else 'dropped' if turn.prompt and turn.prompt.images else None})
     return rows
@@ -94,7 +94,7 @@ def compact(agent: Agent, offered, reporter: Reporter, cancel: threading.Event |
     dropped_images = sum(turn.prompt.images for turn in turns if turn.prompt and turn.id not in images)
     stats = {'turns': len(turns), 'summarized': sum(1 for turn in turns if not kept_raw(turn, shares[turn.id])),
              'dropped_turns': len(every) - len(turns),
-             'tokens_before': prompts + sum(turn.tokens for turn in turns),
+             'tokens_before': prompts + sum(turn.tokens + turn.omitted for turn in turns),
              'tokens_after': prompts - dropped_images + sum(frontier_tokens(frontier) for frontier in frontiers.values()),
              'scheduler': schedule.settings()}
     return payload, stats
