@@ -89,6 +89,7 @@ class SettingsTest(BaseTest):
         self.assertFalse(settings.enabled)
         self.assertEqual(settings.default, config.Schedule('last_k_raw', 0, 2))
         self.assertEqual(settings.builder.rate_limit.claude_max_retries, 3)
+        self.assertEqual((settings.builder.model, settings.builder.effort), ('claude-sonnet-4-6', 'medium'))
 
     def test_harness_overrides_replace_enabled_and_merge_the_builder(self):
         write(self.root / 'compaction.json', {

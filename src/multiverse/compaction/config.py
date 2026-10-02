@@ -7,7 +7,7 @@ for one harness, by the name of its directory under `harnesses/`:
     {"schema": 1,
      "enabled": false,
      "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0},
-     "builder": {"background": true, "model": "sonnet", "effort": "medium",
+     "builder": {"background": true, "model": "claude-sonnet-4-6", "effort": "medium",
                  "concurrency": 1, "turn_retries": 3,
                  "rate_limit": {"claude_max_retries": 3, "retries": 10,
                                 "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}},
@@ -82,7 +82,7 @@ class RateLimit:
 @dataclass(frozen=True)
 class Builder:
     background: bool = True
-    model: str = 'sonnet'
+    model: str = 'claude-sonnet-4-6'
     effort: str = 'medium'
     concurrency: int = 1
     turn_retries: int = 3
@@ -171,7 +171,7 @@ def _settings(value, where) -> Settings:
     background = builder.get('background', True)
     if not isinstance(background, bool):
         raise ValueError(f'{where}: builder.background must be true or false')
-    model = builder.get('model', 'sonnet')
+    model = builder.get('model', 'claude-sonnet-4-6')
     if not isinstance(model, str) or not model or model.startswith('-') or '\0' in model:
         raise ValueError(f'{where}: builder.model must name a model')
     effort = builder.get('effort', 'medium')

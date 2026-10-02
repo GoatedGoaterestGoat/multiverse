@@ -61,7 +61,7 @@ and merges into `builder` field by field.
   "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
   "builder": {
     "background": true,
-    "model": "sonnet",
+    "model": "claude-sonnet-4-6",
     "effort": "medium",
     "concurrency": 1,
     "turn_retries": 3,
@@ -77,7 +77,7 @@ and merges into `builder` field by field.
 | `enabled` | Use tree compaction for this harness's sessions. Read at launch: restart an agent after changing it. |
 | `default` | The scheduler of every agent that has none of its own, its budget and `image_mode`. |
 | `builder.background` | Build each turn's tree as soon as the turn ends. |
-| `builder.model`, `builder.effort` | The model that writes summaries and its effort (`low` to `max`). |
+| `builder.model`, `builder.effort` | The model that writes summaries and its effort (`low` to `max`). The default is Sonnet 4.6: Sonnet 5.5's safeguards refuse to summarize some short turns, such as a one-word reply after a thinking block, and one turn that cannot be built stops the whole compaction. |
 | `builder.concurrency` | How many turns are built at once (each turn's merges run one after another). |
 | `builder.turn_retries` | Immediate retries of a turn whose build failed (a refusal, an unusable reply, a crash), resuming from the merges that succeeded. |
 | `builder.rate_limit.retries`, `wait_seconds` | Retries of one merge call that was rate limited, overloaded or failed in the API, waiting `first` seconds, multiplied by `multiplier` each time up to `max`. |
