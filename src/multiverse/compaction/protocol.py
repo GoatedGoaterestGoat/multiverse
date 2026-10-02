@@ -1,7 +1,9 @@
 """What a harness provides so its sessions can use tree compaction.
 
 A harness adapter that supports compaction has a `compaction(session)` method
-returning a CompactionSource for that exact session. The generic code in this
+returning a CompactionSource for that exact session, and may have
+`compaction_state(root)`: its settings, or why the universe's compaction.json
+cannot be used, for its launches, capabilities and `mv2 doctor`. The generic code in this
 package calls only the methods below; reading a native transcript, running a
 model and installing the result stay in the harness's own package.
 

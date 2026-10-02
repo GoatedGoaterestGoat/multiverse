@@ -466,6 +466,42 @@ class AdapterTest(Fixture):
         write(self.root / 'compaction.json', {'enabled': True, 'harnesses': {'claude': {'enabled': False}}})
         self.assertNotIn('hooks', self.settings(self.adapter.spawn(LaunchContext('spawn', self.values()))))
 
+    def test_an_unusable_compaction_json_never_stops_a_launch(self):
+        from multiverse.tools import doctor
+        session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id,
+                                session_file=str(self.agent_dir / 'session.jsonl'))
+        cases = [({'builder': {'model': 'sonnet'}}, 'belong to one harness'),
+                 ({'harnesses': {'claude': {'enabled': True, 'builder': {'effort': 'extreme'}}}},
+                  'harnesses.claude.builder: effort')]
+        for value, expected in cases:
+            with self.subTest(expected=expected):
+                write(self.root / 'compaction.json', value)
+                command = self.adapter.spawn(LaunchContext('spawn', self.values()))
+                self.assertNotIn('hooks', self.settings(command))
+                self.assertNotIn('MV2_COMPACTION', command.environment)
+                self.assertEqual(command.native_mode['mode'], 'bridge without compaction')
+                self.assertIn(expected, command.native_mode['fallback_reason'])
+                capability = self.adapter.capabilities(session)['compaction']
+                self.assertEqual(capability.state, 'error')
+                self.assertIn(expected, capability.reason)
+                self.assertTrue(any(expected in problem for problem in doctor.run(self.root)['problems']))
+
+    def test_the_compaction_capability_says_whether_this_session_compacts(self):
+        from dataclasses import replace
+        session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id,
+                                session_file=str(self.agent_dir / 'session.jsonl'))
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
+        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'supported')
+        fell_back = replace(session, state='running', native_mode={'fallback_reason': 'Launched without compaction: x'})
+        capability = self.adapter.capabilities(fell_back)['compaction']
+        self.assertEqual((capability.state, 'restart' in capability.reason), ('error', True))
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': False}}})
+        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'unavailable')
+        write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {}})
+        capability = harnesses.load(self.root, 'claude').capabilities(session)['compaction']
+        self.assertEqual(capability.state, 'unavailable')
+        self.assertIn('inbox_bridge', capability.reason)
+
     def test_claude_supplies_its_builder_defaults_and_checks_its_own_settings(self):
         builder = claude_builder()
         self.assertEqual((builder.model, builder.fallback_model, builder.effort, builder.options),
@@ -483,13 +519,13 @@ class AdapterTest(Fixture):
         with self.assertRaisesRegex(ValueError, 'harnesses.claude.builder: effort'):
             pipeline.open_agent(self.root, self.agent_dir.name)
 
-    def test_compaction_needs_the_bridge_and_stays_out_of_core_capabilities(self):
+    def test_compaction_needs_the_bridge(self):
         self.assertIsNone(self.source().unavailable())
         write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {}})
         self.adapter = harnesses.load(self.root, 'claude')
         self.assertIn('inbox_bridge', self.source().unavailable())
         session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id)
-        self.assertNotIn('compaction', self.adapter.capabilities(session))
+        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'unavailable')
 
     def test_kept_rows_stored_again_never_replace_their_responses_usage(self):
         r = Rows()

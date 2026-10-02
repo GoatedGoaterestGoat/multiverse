@@ -235,7 +235,8 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `wake`, `stop`, `send_steer`, `send_follow_up`,
-`ask`, `get_usage`, and `get_delivery`. The `session_name` capability describes
+`ask`, `get_usage`, `get_delivery`, and `compaction` (whether this session's
+`/compact` uses tree compaction; see [compaction](compaction.md)). The `session_name` capability describes
 naming during spawn/resume, not a separate rename operation. Claude and Pi pass
 `--name` in both modes. Codex bridge calls `thread/name/set` after validating and
 binding the launch reply; plain Codex has no CLI naming flag. Legacy manifests
@@ -700,6 +701,11 @@ line, as notices and as toasts, and skips with the reason when it cannot. The
 session never falls back to it. The mod's `Stop` hook starts the background tree
 builder with the time the turn ended. The adapter's `compaction(session)` returns
 the Claude implementation of the compaction protocol (`claude/compaction/`).
+A `compaction.json` that cannot be used (invalid, or builder settings Claude
+rejects) never stops a launch: that launch runs without compaction, without the
+`PreCompact` guard, and records why as its `native_mode` fallback, which the
+inspector shows. The `compaction` capability then reports the error, and
+`mv2 doctor` names the file; `mv2 compaction` refuses until it is fixed.
 
 Claude usage is measured from the session's own transcript under Claude's
 `projects` directory, plus any subagent transcripts: each response's recorded

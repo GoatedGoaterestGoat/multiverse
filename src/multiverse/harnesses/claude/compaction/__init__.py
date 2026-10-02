@@ -32,16 +32,33 @@ class TranscriptError(ValueError):
 
 # Claude Code's --effort levels.
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
+# Claude's builder settings where compaction.json gives none. Sonnet 5.5 builds;
+# Sonnet 4.6 (which refused nothing in testing but builds nearly flat trees)
+# takes over a turn Sonnet 5.5 still refuses. claude_max_retries is Claude
+# Code's own quick retries inside each call (CLAUDE_CODE_MAX_RETRIES), before ours.
+BUILDER_DEFAULTS = {'model': 'sonnet', 'fallback_model': 'claude-sonnet-4-6', 'effort': 'medium',
+                    'claude_max_retries': 3}
+
+
+def check_builder(builder):
+    """Raise ValueError naming the field when Claude cannot build trees with these settings."""
+    if not builder.model:
+        raise ValueError('model must name a Claude model')
+    if builder.effort not in EFFORTS:
+        raise ValueError(f'effort must be one of {", ".join(EFFORTS)}')
+    unknown = set(builder.options) - {'claude_max_retries'}
+    if unknown:
+        raise ValueError(f'unknown Claude settings: {", ".join(sorted(unknown))}')
+    retries = builder.options.get('claude_max_retries')
+    if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 15:
+        raise ValueError('claude_max_retries must be a whole number from 0 to 15')
 
 
 class ClaudeCompaction:
     harness = 'claude'
     keeps_images = False  # render() builds every message, and a built message holds only text
-    # Sonnet 5.5 builds; Sonnet 4.6 (which refused nothing in testing but builds nearly flat
-    # trees) takes over a turn Sonnet 5.5 still refuses. claude_max_retries is Claude Code's
-    # own quick retries inside each call (CLAUDE_CODE_MAX_RETRIES), before ours.
-    builder_defaults = {'model': 'sonnet', 'fallback_model': 'claude-sonnet-4-6', 'effort': 'medium',
-                        'claude_max_retries': 3}
+    builder_defaults = BUILDER_DEFAULTS
+    check_builder = staticmethod(check_builder)
 
     def __init__(self, adapter, session):
         if not session.native_id:
@@ -112,18 +129,6 @@ class ClaudeCompaction:
                     pass
 
     # Protocol ----------------------------------------------------------------
-
-    def check_builder(self, builder):
-        if not builder.model:
-            raise ValueError('model must name a Claude model')
-        if builder.effort not in EFFORTS:
-            raise ValueError(f'effort must be one of {", ".join(EFFORTS)}')
-        unknown = set(builder.options) - {'claude_max_retries'}
-        if unknown:
-            raise ValueError(f'unknown Claude settings: {", ".join(sorted(unknown))}')
-        retries = builder.options.get('claude_max_retries')
-        if isinstance(retries, bool) or not isinstance(retries, int) or not 0 <= retries <= 15:
-            raise ValueError('claude_max_retries must be a whole number from 0 to 15')
 
     def unavailable(self):
         if not getattr(self.adapter, 'settings', {}).get('inbox_bridge'):

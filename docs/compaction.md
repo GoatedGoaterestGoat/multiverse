@@ -172,6 +172,11 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   compaction, or skips it with the reason. If it ever cannot answer (the mod
   failed to load, the hook ran out of time), the `PreCompact` hook refuses Claude's
   own compaction with a message. A subagent's own compaction is left to Claude.
+- **An unusable `compaction.json`** (invalid, or builder settings Claude rejects)
+  never stops a launch or resume: the session starts without compaction and
+  without the guard, so Claude's own `/compact` works until the file is fixed
+  and the agent restarted. The reason shows in the inspector (as the launch's
+  fallback), in the `compaction` capability and in `mv2 doctor`.
 - **Background building.** The mod's `Stop` hook starts the builder with the time
   the turn ended, so the turn that just finished gets its tree at once.
 - **Merges** are v1's privileged CLI merges, unchanged: `claude -p --resume
