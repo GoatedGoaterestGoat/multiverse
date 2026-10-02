@@ -72,15 +72,14 @@ class CodexPermissionTest(TerminalBase):
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        home = isolated_home(self.work / 'native-home')
-        managed = home / 'packages/standalone/current/codex'
-        managed.parent.mkdir(parents=True)
-        managed.symlink_to(Path(shutil.which('codex')).resolve())
-        (home / 'config.toml').write_text(
+        home = isolated_home(self.work / 'native-home', config=
             'model="gpt-6-sol"\nmodel_provider="offline"\n'
             '[model_providers.offline]\nname="Offline"\nwire_api="responses"\nrequires_openai_auth=false\n'
             f'base_url="http://127.0.0.1:{server.server_port}/v1"\n'
             f'[projects.{json.dumps(str(self.work))}]\ntrust_level="trusted"\n')
+        managed = home / 'packages/standalone/current/codex'
+        managed.parent.mkdir(parents=True)
+        managed.symlink_to(Path(shutil.which('codex')).resolve())
         subprocess.run(['git', 'init', '-q', str(self.work)], check=True, timeout=10)
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
                'NO_PROXY': '127.0.0.1,localhost', 'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '',

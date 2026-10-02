@@ -428,10 +428,25 @@ current updater; verify that the daemon PID remains unchanged. mv2 does not
 signal or replace native updater processes automatically.
 
 Native tests use isolated Codex homes with
-`app-server-daemon/settings.json` setting `updater.autoUpdateEnabled=false`.
-The subprocess guard rejects native execution without that setting, as well as
-access to the default native home/socket. This prevents disposable tests from
-leaving scheduled updaters behind; daemon stop alone does not stop the updater.
+`app-server-daemon/settings.json` setting `updater.autoUpdateEnabled=false` and
+top-level `check_for_update_on_startup=false` in `config.toml`. The subprocess
+guard rejects native execution without either setting, as well as access to the
+default native home/socket. `isolated_home(..., config=...)` writes fixture
+configuration together with the TUI setting, so provider configuration cannot
+overwrite it accidentally. Tests seed a newer cached release to verify that
+promptless resume is not blocked by an update dialog. Disabling the daemon updater
+prevents disposable tests from leaving scheduled helpers behind; daemon stop alone
+does not stop the updater. The TUI setting separately suppresses update checks and
+interactive update prompts in Codex 0.159.3 and 0.160.0.
+
+Real launches retain the user's TUI update preference. With its default `true`, a
+cached newer release can display an update dialog before a thread is bound. Codex
+skips this dialog for a nonempty positional prompt, but ordinary resumes and
+promptless spawns can wait for terminal input. A bridge launch remains `starting`
+until the dialog is dismissed; `--wait` reports a timeout. To suppress these
+dialogs only for a universe's managed launches, users can put
+`["-c", "check_for_update_on_startup=false"]` in its Codex harness `settings.args`.
+This does not change the shared daemon's separate automatic-update policy.
 
 A daemon already running from a deleted directory cannot be repaired by reusing
 its socket. Codex 0.159.3 returns `config/read` error -32603, `failed to resolve
