@@ -63,9 +63,9 @@ class FakeBackend(DemoBackend):
         return {**self.agent, "enabled": True, "unavailable": None, "scheduler": own,
                 "scheduler_from": source, "default": {"scheduler": "last_k_raw", "budget": 0, "k": 2},
                 "recent_errors": ["refused"],
-                "plan": [{"turn": 1, "prompt": "Fix the bug", "leaves": 12, "tokens": 82000, "omitted": 0, "share": 0.4,
+                "plan": [{"turn": "5d1c3a4e-1111-4222-8333-444455556666", "prompt": "Fix the bug", "leaves": 12, "tokens": 82000, "omitted": 0, "share": 40000,
                           "raw": False, "needs_tree": True, "has_tree": False, "prompt_images": 0},
-                         {"turn": 2, "prompt": "Now ship it", "leaves": 3, "tokens": 900, "omitted": 0, "share": 1.0,
+                         {"turn": "9e2b7c1f-aaaa-4bbb-8ccc-ddddeeeeffff", "prompt": "Now ship it", "leaves": 3, "tokens": 900, "omitted": 0, "share": 900,
                           "raw": True, "needs_tree": False, "has_tree": False, "prompt_images": 0}],
                 "summary": {"turns": 2, "summarized": 1, "trees_missing": 1, "dropped_turns": 0, "tokens_before": 82900,
                             "tokens_after": 20000 + (scheduler or {}).get("budget", 0), "after_partial": True}}
@@ -255,7 +255,10 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsInstance(agent, AgentScreen)
             self.assertIn("3 trees · building · 1 failed turns", str(agent.query_one("#agent-status", Static).render()))
             self.assertIn("refused", str(agent.query_one("#agent-status", Static).render()))
-            self.assertEqual(agent.query_one("#plan", DataTable).row_count, 2)
+            plan = agent.query_one("#plan", DataTable)
+            self.assertEqual(plan.row_count, 2)
+            self.assertEqual([plan.get_row_at(i)[0] for i in range(2)], ["1", "2"])
+            self.assertEqual(plan.get_row_at(0)[4], "40k")
             summary = str(agent.query_one("#plan-summary", Static).render())
             self.assertIn("2 turns · 1 summarized · 1 trees missing", summary)
             self.assertIn("partial", summary)

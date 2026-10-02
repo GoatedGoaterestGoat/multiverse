@@ -450,8 +450,7 @@ def agent_state(agent):
 
 
 def share_text(value):
-    if isinstance(value, float) and value <= 1:
-        return f'{value:.0%}'
+    """A turn's share of the budget: the allocator gives a token count."""
     return count(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else clean(value)
 
 
@@ -580,10 +579,10 @@ class AgentScreen(FieldScreen):
     def fill_plan(self, detail):
         table = self.query_one("#plan", DataTable)
         table.clear()
-        for turn in detail.get('plan') or ():
+        for position, turn in enumerate(detail.get('plan') or (), 1):
             kept = 'raw' if turn.get('raw') else 'summarized'
             tree = ('built' if turn.get('has_tree') else 'missing') if turn.get('needs_tree') else '—'
-            table.add_row(str(turn.get('turn')), clean(turn.get('prompt', ''))[:30], str(turn.get('leaves', '')),
+            table.add_row(str(position), clean(turn.get('prompt', ''))[:30], str(turn.get('leaves', '')),
                           count(turn['tokens']) if isinstance(turn.get('tokens'), (int, float)) else '—',
                           share_text(turn.get('share')), kept, tree)
         summary = detail.get('summary') or {}
