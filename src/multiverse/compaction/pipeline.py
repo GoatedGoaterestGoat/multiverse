@@ -30,11 +30,13 @@ class Agent:
         return Store(self.directory)
 
     def schedule(self) -> tuple[Schedule, str]:
-        """The agent's scheduler and where it came from; prompt images dropped when the harness cannot keep them."""
+        """The agent's scheduler in effect and where it came from (`agent` or `universe`)."""
         schedule, origin = settings_file.schedule_for(self.directory, self.settings)
-        if not self.source.keeps_images:
-            schedule = replace(schedule, image_mode='drop_all')
-        return schedule, origin
+        return self.effective(schedule), origin
+
+    def effective(self, schedule: Schedule) -> Schedule:
+        """`schedule` as this harness applies it: prompt images dropped when it cannot keep them."""
+        return schedule if self.source.keeps_images else replace(schedule, image_mode='drop_all')
 
 
 def open_agent(root, reference) -> Agent:

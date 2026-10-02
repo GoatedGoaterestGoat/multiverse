@@ -539,6 +539,50 @@ class AdapterTest(Fixture):
         self.assertEqual(Transcript(path).read().responses['m1']['cache_read_input_tokens'], 90)
 
 
+class DashboardBackendTest(Fixture):
+    def test_the_dashboard_reads_and_saves_compaction_through_the_tool(self):
+        from multiverse.dashboard import LocalBackend
+        backend, agent = LocalBackend(), self.agent_dir.name
+        r = Rows()
+        for index in range(4):
+            r.user(f'Task {index}', f'p{index}')
+            r.assistant(f'm{index}', {'type': 'text', 'text': f'first answer {index}'}, 5)
+            r.assistant(f'n{index}', {'type': 'text', 'text': f'second answer {index}'}, 5)
+        self.write_transcript(r.rows)
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
+        view = backend.compaction_overview(self.root)
+        claude = next(row for row in view['harnesses'] if row['name'] == 'claude')
+        self.assertEqual((claude['enabled'], claude['options'], claude['builder']['model'], claude['problem']),
+                         (True, ['claude_max_retries'], 'sonnet', None))
+        self.assertEqual(view['file'], {'harnesses': {'claude': {'enabled': True}}})
+        row = next(row for row in view['agents'] if row['id'] == agent)
+        self.assertEqual((row['scheduler_from'], row['trees_cached']), ('universe', 0))
+        # The whole file and Claude's own checks run before anything is written.
+        with self.assertRaisesRegex(ValueError, 'effort'):
+            backend.save_compaction(self.root, {'harnesses': {'claude': {'enabled': True, 'builder': {'effort': 'extreme'}}}})
+        self.assertEqual(json.loads((self.root / 'compaction.json').read_text()), {'harnesses': {'claude': {'enabled': True}}})
+        saved = backend.save_compaction(self.root, {'default': {'scheduler': 'uniform', 'budget': 0},
+                                                    'harnesses': {'claude': {'enabled': True}}})
+        self.assertEqual(saved['default'], {'scheduler': 'uniform', 'budget': 0})
+        # Previews never save; the default preview follows the universe.
+        current = backend.compaction_agent(self.root, agent)
+        self.assertEqual((current['scheduler_from'], current['summary']['turns'], current['summary']['summarized']),
+                         ('universe', 4, 4))
+        kept = backend.compaction_agent(self.root, agent, scheduler={'scheduler': 'last_k_raw', 'k': 4, 'budget': 0})
+        self.assertEqual((kept['summary']['summarized'], kept['summary']['after_partial']), (0, False))
+        self.assertEqual(kept['summary']['tokens_after'], kept['summary']['tokens_before'])
+        self.assertTrue(backend.compaction_agent(self.root, agent, scheduler=None)['summary']['after_partial'])
+        self.assertFalse(config.agent_file(self.agent_dir).exists())
+        with self.assertRaisesRegex(ValueError, 'scheduler'):
+            backend.compaction_agent(self.root, agent, scheduler={'scheduler': 'nope'})
+        own = backend.set_compaction_scheduler(self.root, agent, {'scheduler': 'last_k_raw', 'k': 1, 'budget': 0})
+        self.assertEqual((own['scheduler_from'], own['scheduler']['k']), ('agent', 1))
+        self.assertEqual(next(row for row in backend.compaction_overview(self.root)['agents']
+                              if row['id'] == agent)['scheduler_from'], 'agent')
+        self.assertEqual(backend.set_compaction_scheduler(self.root, agent, None)['scheduler_from'], 'universe')
+        self.assertFalse(config.agent_file(self.agent_dir).exists())
+
+
 class InstallTest(Fixture):
     def test_install_streams_the_compacted_conversation_for_the_hook(self):
         write(self.root / 'compaction.json', {'harnesses': {'claude': {

@@ -187,16 +187,23 @@ class ClaudeAdapter(ConfiguredAdapter):
             return None
         return root
 
-    def compaction_state(self, root):
+    @staticmethod
+    def compaction_defaults():
+        """Claude's builder settings where compaction.json gives none."""
+        from .compaction import BUILDER_DEFAULTS
+        return dict(BUILDER_DEFAULTS)
+
+    def compaction_state(self, root, loaded=None):
         """(settings, None) for this harness in the universe at `root`, or (None, why its compaction.json cannot be used).
 
-        Launches, capabilities and `mv2 doctor` use it; `mv2 compaction` refuses
-        loudly instead.
+        `loaded` checks a parsed file (config.Config) before it is written
+        instead of the one on disk. Launches, capabilities and `mv2 doctor` use
+        it; `mv2 compaction` refuses loudly instead.
         """
         from ...compaction import config
         from .compaction import BUILDER_DEFAULTS, check_builder
         try:
-            settings = config.load(root).for_harness(self.name, BUILDER_DEFAULTS)
+            settings = (loaded or config.load(root)).for_harness(self.name, BUILDER_DEFAULTS)
         except ValueError as error:
             return None, str(error)
         try:
