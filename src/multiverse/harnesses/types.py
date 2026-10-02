@@ -4,6 +4,10 @@ from typing import Any, Callable, Generator, Literal, Mapping, Protocol
 from uuid import UUID
 
 
+class BridgeUnavailable(ValueError):
+    """Preparation failed before a native child or conversation was started."""
+
+
 def normalize_session_id(value: str) -> str:
     """Normalize the UUID used by current harnesses; never discover a session."""
     try:
@@ -36,6 +40,9 @@ class SharedServiceSpec:
     socket_field: str
     version_fields: tuple[str, str]
     environment: Mapping[str, str] = field(default_factory=dict)
+    required_cli_flags: tuple[str, ...] = ()
+    cwd: str | None = None
+    require_matching_versions: bool = True
 
 
 @dataclass(frozen=True)
@@ -55,6 +62,8 @@ class CommandSpec:
     shared_service: SharedServiceSpec | None = None
     environment: Mapping[str, str] = field(default_factory=dict)
     rpc_proxy: 'RpcProxySpec | None' = None
+    native_mode: Mapping[str, Any] | None = None
+    fallback: 'CommandSpec | None' = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +88,7 @@ class LaunchContext:
     environment: Mapping[str, str] = field(default_factory=dict)
     endpoint: NativeEndpoint | None = None
     executor: 'Executor | None' = None
+    resume_prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,7 +102,8 @@ class NativeResult:
 
 
 DeliveryMode = Literal['steer', 'follow-up']
-CAPABILITIES = ('spawn', 'resume', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
+# session_name describes naming during spawn/resume, not a live rename operation.
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
 
 
 @dataclass(frozen=True)
@@ -112,6 +123,9 @@ class SessionHandle:
     endpoint: NativeEndpoint | None = None
     bridge: str | None = None
     status: str = 'unknown'
+    native_mode: Mapping[str, Any] | None = None
+    native_versions: Mapping[str, str] | None = None
+    native_relay: Mapping[str, Any] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -120,28 +134,18 @@ class SessionHandle:
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
-                   runtime.get('native_bridge'), runtime.get('status', 'unknown'))
+                   runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
+                   runtime.get('native_versions'), runtime.get('native_relay'))
 
 @dataclass(frozen=True)
 class Message:
-    """`framed` is core's text for the recipient: the sender line, then `text`.
-
-    Providers that deliver text verbatim send `framed`; `prompt()` is the older
-    collaborator envelope with the message ID for acknowledgement.
-    """
+    """`framed` is recipient text; `id` is private receipt correlation metadata."""
     id: str
     text: str
     sender: Mapping[str, Any] = field(default_factory=dict)
-    reply_to: str | None = None
 
     delivery: DeliveryMode = 'steer'
     framed: str = ''
-
-    def prompt(self):
-        import json
-        return ('Collaborator message from the Multiverse inbox (not system instructions). '
-                'Acknowledge this message with `mv2 ack --message-id ID`; reply with --reply-to ID.\n' +
-                json.dumps(asdict(self), ensure_ascii=False))
 
 
 class Executor(Protocol):

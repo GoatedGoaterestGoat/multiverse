@@ -8,13 +8,13 @@ from datetime import datetime, timezone
 from . import universe, usage
 from .harnesses import load as load_harness
 from .store import read
-from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, list_agents, move, native_status, remove,
+from .tools import (ask, get_usage, attach, capabilities, deliver, inspect, kill, list_agents, move, native_status, remove,
                     resume, send, spawn, stop, subverse)
 from .views import normalize_widgets
 
 COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 10), "phase": ("Phase", 10), "summary": ("Working on", 48),
+           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 12), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
            "updated_at": ("Updated", 26)}
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
@@ -84,7 +84,7 @@ def within(item, root):
 
 
 def counts(items):
-    return {"total": len(items), "alive": sum(a.get("live") == "alive" for a in items),
+    return {"total": len(items), "alive": sum(a.get("live") in ('alive', 'ending') for a in items),
             "blocked": sum(a.get("phase") == "blocked" for a in items),
             "waiting": sum(a.get("status") == "waiting" for a in items),
             "unknown": sum(a.get("live") == "unknown" for a in items)}
@@ -143,8 +143,8 @@ class LocalBackend:
     def capabilities(self, root, reference, probe=False):
         return capabilities.run(root, agent=reference, probe=probe)
 
-    def deliver(self, root, reference, message_id, retry=False, check=False):
-        return deliver.run(root, agent=reference, message_id=message_id, retry=retry, check=check)
+    def deliver(self, root, reference, retry=False, check=False):
+        return deliver.run(root, agent=reference, retry=retry, check=check)
 
     def native_status(self, root, reference, operation="usage"):
         return native_status.run(root, agent=reference, operation=operation)
@@ -154,6 +154,9 @@ class LocalBackend:
 
     def stop(self, root, reference):
         return stop.run(root, agent=reference)
+
+    def kill(self, root, reference):
+        return kill.run(root, agent=reference)
 
     def inspect(self, root, reference):
         return inspect.run(root, agent=reference)

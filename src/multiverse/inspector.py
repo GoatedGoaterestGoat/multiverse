@@ -85,9 +85,26 @@ class Inspector(Vertical):
             state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
             state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
             state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
+            selection = row.get('runtime', {}).get('native_mode')
+            if selection:
+                state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style='#a6adc8')
+                if selection.get('fallback_reason'):
+                    state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
+            versions = row.get('runtime', {}).get('native_versions')
+            relay = row.get('runtime', {}).get('native_relay') or {}
+            if relay.get('state') == 'lost':
+                state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style='bold #f38ba8')
+                state.append('\n' + clean(relay.get('detail', '')), style='#f9e2af')
+            if versions:
+                mismatch = versions['cli'] != versions['daemon']
+                state.append(f'\nVersions: CLI {clean(versions["cli"])} / daemon {clean(versions["daemon"])}'
+                             + (' (different)' if mismatch else ''), style='#f9e2af' if mismatch else '#a6adc8')
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
-                self.query_one("#preview", Static).update(clean(row.get("reason") or "No live pane. Resume a stopped agent with r."))
+                message = ('Native work is ending.' if live == 'ending' else
+                           'Native process stopped; tmux wrapper remains. Resume with r.' if live == 'stopped' else
+                           'No tmux wrapper. Resume with r.' if live == 'dormant' else 'Terminal state is unknown.')
+                self.query_one("#preview", Static).update(clean(row.get("reason") or message))
         self.query_one("#inspect-state", Static).update(state)
         self.capture_if_needed()
 

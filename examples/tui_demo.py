@@ -27,11 +27,11 @@ class DemoBackend:
         samples = [
             (self.root, "secondbrain", "alive", "idle", "working", "Waiting for the kernel benchmark results"),
             (self.root, "kernel-worker", "alive", "working", "working", "Compare fused attention kernels on the reference inputs"),
-            (self.root, "training-check", "stopped", "—", "done", "Regression suite passed; evidence is ready for review"),
+            (self.root, "training-check", "stopped", "-", "done", "Regression suite passed; evidence is ready for review"),
             (review, "reviewer", "alive", "working", "working", "Trace the changed call sites and verify findings"),
             (review, "pr-writer", "alive", "idle", "blocked", "Waiting for benchmark evidence before drafting the PR"),
             (cad, "harness-builder", "alive", "working", "working", "Validate the new constraint solver adapter"),
-            (verify, "verifier", "stopped", "—", "done", "Reproduced the gearbox trial across three seeds"),
+            (verify, "verifier", "stopped", "-", "done", "Reproduced the gearbox trial across three seeds"),
         ]
         for index, (path, name, live, status, phase, summary) in enumerate(samples):
             self.agents.append({"id": f"00000000-0000-4000-8000-{index + 1:012d}", "name": name,
@@ -66,8 +66,11 @@ class DemoBackend:
             self.messages.append({"id": uid(), "to": reference, "universe": str(root), "text": text})
 
     def stop(self, root, reference):
+        return self.kill(root, reference)
+
+    def kill(self, root, reference):
         with self.lock:
-            self.find(root, reference).update(live="stopped", status="—")
+            self.find(root, reference).update(live="dormant", status="-")
 
     def resume(self, root, reference):
         with self.lock:

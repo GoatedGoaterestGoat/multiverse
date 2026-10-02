@@ -13,6 +13,11 @@ def run(root=None, *, agent=None, phase=None, summary=None):
     return agents.report(root, agent, phase, summary)
 
 
+def format_output(record):
+    summary = ' '.join(str(record.get('summary') or '').splitlines()).strip()
+    return f"Reported {record.get('phase', 'unknown')}" + (f': {summary}' if summary else '')
+
+
 if __name__ == "__main__":
     from ._common import main
     main(configure, run)

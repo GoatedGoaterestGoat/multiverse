@@ -16,6 +16,12 @@ def add_agent(parser):
     parser.add_argument("--agent", default=os.environ.get("MV2_AGENT_ID"))
 
 
+def add_wait(parser):
+    parser.add_argument('--wait', action='store_true', help='Wait until the launch is ready or failed')
+    parser.add_argument('--wait-timeout', type=float, default=60,
+                        help='Readiness limit with --wait, in seconds (default: 60)')
+
+
 def callback(root, agent):
     root = universe.resolve(root)
     if not agent:
@@ -27,11 +33,21 @@ def callback(root, agent):
     return root, directory, launch_id
 
 
-def output(call, **values):
+def delivery_summary(receipt):
+    """Expose delivery evidence without provider or core message identifiers."""
+    result = {key: receipt[key] for key in ('state', 'reason', 'ok', 'reused') if key in receipt}
+    value = receipt.get('value')
+    if isinstance(value, dict) and 'transcript_confirmed' in value:
+        result['transcript_confirmed'] = value['transcript_confirmed']
+    return result
+
+
+def output(call, *, render=None, **values):
     try:
         result = call(**values)
         if result is not None:
-            print(result if isinstance(result, str) else json.dumps(result, indent=2, ensure_ascii=False))
+            display = render(result) if render else result
+            print(display if isinstance(display, str) else json.dumps(display, indent=2, ensure_ascii=False))
         if isinstance(result, dict) and result.get("ok") is False:
             sys.exit(1)
     except (OSError, ValueError, KeyError, RuntimeError, subprocess.SubprocessError) as error:
@@ -43,4 +59,4 @@ def main(configure, run):
     parser = argparse.ArgumentParser(description=sys.modules[run.__module__].__doc__)
     add_universe(parser)
     configure(parser)
-    output(run, **vars(parser.parse_args()))
+    output(run, render=getattr(sys.modules[run.__module__], 'format_output', None), **vars(parser.parse_args()))

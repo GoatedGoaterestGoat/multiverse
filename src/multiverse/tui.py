@@ -30,7 +30,8 @@ Esc            Clear search, cancel a move, or close the current dialog
 AGENTS & GROUPS
 n              New agent in the selected group
 m              Message the selected agent
-s / r          Stop (with confirmation) / resume
+K / s          Kill (with confirmation); s is an alias
+r              Resume a stopped or dormant agent
 v              Full agent details or group configuration
 p              Show / hide the inspector (opens only with this key)
 g              New subverse inside the selected group (inline, name only)
@@ -199,11 +200,12 @@ class MultiverseApp(App):
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
         Binding("backspace", "back", "Back"),
         Binding("n", "spawn", "New agent"), Binding("g", "subverse", "New subverse"),
-        Binding("m", "message", "Message"), Binding("p", "preview", "Inspector"), Binding("x", "cut", "Move"), Binding("d", "remove", "Delete"),
+        Binding("m", "message", "Message"), Binding("p", "preview", "Inspector"), Binding("x", "cut", "Move"), Binding("K", "kill", "Kill"),
         Binding("question_mark", "help", "Keys"), Binding("q", "quit", "Quit"),
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), 
-        Binding("r", "resume", "Resume", show=False), Binding("s", "stop", "Stop", show=False),
+        Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
+        Binding("r", "resume", "Resume", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -279,6 +281,9 @@ class MultiverseApp(App):
         return self.ready() or (self.moving is not None and len(self.screen_stack) == 1 and not self.operating)
 
     def check_action(self, action, parameters):
+        if action in ('kill', 'stop', 'resume'):
+            eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
+            return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
         if action == "filter":
             # Handle the opening slash before buffered keys are forwarded to
             # the old widget, but leave literal slashes in editors and drafts.
@@ -474,9 +479,9 @@ class MultiverseApp(App):
                      "task": clean(row["description"])}.get(field, "")
             return Text(value, style=f'{color} on #1e1e2e')
         value = clean(row.get(field, "—"))
-        color = {"alive": "#a6e3a1", "stopped": "#7f849c", "unknown": "#f9e2af",
+        color = {"alive": "#a6e3a1", "ending": "#fab387", "stopped": "#7f849c", "dormant": "#7f849c", "unknown": "#f9e2af",
                  "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
-                 "waiting": "#fab387"}.get(value, "#a6adc8")
+                 "waiting": "#fab387", "disconnected": "bold #f38ba8"}.get(value, "#a6adc8")
         if field == "context" and row.get("context_level"):
             return Text(value, style={"warn": "#f9e2af", "high": "bold #f38ba8"}[row["context_level"]])
         if field == "status" and value == "waiting":
@@ -741,6 +746,14 @@ class MultiverseApp(App):
                 state = receipt.get('state', 'queued')
                 detail = receipt.get('reason', 'delivery and an answer may follow')
                 self.set_status(f"Message saved; {state}: {detail}", error=state in ('error', 'unavailable'))
+            elif label == 'Kill agent' and (result or {}).get('native_cancellation'):
+                native = result['native_cancellation']
+                detail = native.get('reason', 'Native cancellation complete')
+                if 'cancelled_submissions' in native:
+                    detail += (f" ({native['cancelled_submissions']} queued cancelled, "
+                               f"{native['interrupted_turns']} turn interrupts)")
+                incomplete = native.get('state') != 'ok'
+                self.set_status(('Terminal closed: ' if incomplete else 'Kill complete: ') + detail, error=incomplete)
             else:
                 self.set_status(label + " complete.")
             succeeded = True
@@ -852,7 +865,7 @@ class MultiverseApp(App):
         if row["kind"] == "group" and Path(row["path"]) == self.root:
             return (f"Go back to the parent universe to {verb} {clean(row['name'])}." if self.history
                     else f"The top-level universe cannot be {verb}d here.")
-        running = row["alive"] if row["kind"] == "group" else int(row["live"] == "alive")
+        running = row["alive"] if row["kind"] == "group" else int(row["live"] in ('alive', 'ending'))
         if running:
             what = f"{running} running agent{'s' if running != 1 else ''} inside" if row["kind"] == "group" else "it"
             return f"Stop {what} first (s), then {verb} {clean(row['name'])}."
@@ -922,15 +935,21 @@ class MultiverseApp(App):
                                                                   agent["id"], values["text"]) if values is not None else None)
 
     def action_stop(self):
-        if self.ready() and self.selected and self.selected["live"] == "alive":
+        self.action_kill()
+
+    def action_kill(self):
+        if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant'):
             agent = dict(self.selected)
-            self.push_screen(Form(f'Stop {agent["name"]}?', description=
-                                  "Ctrl+Enter stops its terminal and running work. Files and conversation remain. Esc cancels."),
-                             lambda values: self.submit_operation("Stop agent", self.backend.stop, Path(agent["universe"]),
+            description = ("Ctrl+Enter cancels native work only; no terminal remains to close."
+                           if agent['live'] == 'dormant' else
+                           "Ctrl+Enter ends running work and removes its tmux wrapper.")
+            self.push_screen(Form(f'Kill {agent["name"]}?', description=description +
+                                  " Files and conversation remain for resume. Esc cancels."),
+                             lambda values: self.submit_operation("Kill agent", self.backend.kill, Path(agent["universe"]),
                                                                   agent["id"]) if values is not None else None)
 
     def action_resume(self):
-        if self.ready() and self.selected and self.selected["live"] == "stopped":
+        if self.ready() and self.selected and self.selected["live"] in ('stopped', 'dormant'):
             agent = dict(self.selected)
             self.submit_operation("Resume agent", self.backend.resume, Path(agent["universe"]), agent["id"])
 

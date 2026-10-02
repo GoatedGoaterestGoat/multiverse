@@ -13,4 +13,4 @@ Track ID, owner, status, and commit in the inline table at views/default.json.
 It is a manual view, not a scheduler. Use artifacts/change-report.md for each handoff.
 A developer check is evidence for review, not independent verification. Report
 fix SHA and exact commands to the assigned tester/coordinator and remain available
-for retest findings. Check/ack the inbox at each meaningful checkpoint.
+for retest findings. Check the inbox at each meaningful checkpoint.

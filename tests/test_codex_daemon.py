@@ -17,9 +17,11 @@ from unittest.mock import patch
 
 from multiverse import agents, native, rpc, universe
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
+from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
-from multiverse.store import read, write
+from multiverse.store import inbox, read, write
 from multiverse.tools import send
+from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -69,7 +71,7 @@ class CodexDaemonTest(TerminalBase):
         threading.Thread(target=provider.serve_forever, daemon=True).start()
         self.addCleanup(provider.server_close)
         self.addCleanup(provider.shutdown)
-        home = self.work / 'codex-home'
+        home = isolated_home(self.work / 'codex-home')
         managed = home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())
@@ -95,16 +97,25 @@ class CodexDaemonTest(TerminalBase):
         self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)
         self.assertEqual(len({x['socketPath'] for x in started}), 1)
         endpoint = started[0]['socketPath']
+        def thread_name(root, agent_id):
+            _, _, session, _ = native.context(root, agent_id)
+            def plan():
+                thread = yield from _thread(session)
+                return thread if isinstance(thread, NativeResult) else NativeResult('ok', value=thread.get('name'))
+            return rpc.execute(RpcSpec(endpoint, plan)).value
         roots = [universe.create(work / '.multiverse', 'project', workdir=work) for work in workspaces]
         for root in roots:
             path = root / 'harnesses/codex/harness.json'
             spec = read(path)
-            spec['settings'] = {'inbox_bridge': True,
-                                'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
+            spec['settings'] = {'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
             write(path, spec)
         with patch.dict(os.environ, env), ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda root: agents.start(root, 'same-name', 'Record identity then finish.',
-                                                            'codex', socket_path=self.socket), roots))
+                                                            'codex', socket_path=self.socket,
+                                                            wait=True, wait_timeout=30), roots))
+        self.assertTrue(all(result['ready'] for result in results), results)
+        self.assertTrue(all(result['runtime']['native_mode'] == {
+            'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None} for result in results))
         self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
         pairs = list(zip(roots, results))
         def stop_terminals():
@@ -141,6 +152,7 @@ class CodexDaemonTest(TerminalBase):
                 self.assertNotIn('CLAUDECODE', identity['env'])
                 self.assertNotIn('USER_EXCLUDED', identity['env'])
                 self.assertEqual(agents.runtime(directory)['control_endpoint']['address'], endpoint)
+                self.assertEqual(thread_name(root, launched['id']), 'same-name')
             # Two independent shared-tool callers target distinct native threads.
             with ThreadPoolExecutor(max_workers=2) as pool:
                 sent = list(pool.map(lambda pair: send.run(pair[0], agent=pair[1]['id'],
@@ -159,33 +171,61 @@ class CodexDaemonTest(TerminalBase):
             self.assertEqual(queued['state'], 'native_queued')
             _, _, first_session, _ = native.context(roots[0], results[0]['id'])
             agents.terminal_action(roots[0], results[0]['id'], 'stop')
-            def check_stopped():
+            def check_stopped(session=first_session):
                 def plan():
-                    result = yield from _thread(first_session)
+                    result = yield from _thread(session)
                     if isinstance(result, NativeResult):
                         return result
-                    terminals = rpc_result((yield RpcRequest('thread/backgroundTerminals/list', {'threadId': first_session.native_id})))
+                    terminals = rpc_result((yield RpcRequest('thread/backgroundTerminals/list', {'threadId': session.native_id})))
                     return NativeResult('ok', value={'thread': result, 'terminals': terminals})
                 observed = rpc.execute(RpcSpec(endpoint, plan))
                 return observed.state == 'unavailable' or (observed.state == 'ok' and observed.value['thread']['status']['type'] != 'active' and not observed.value['terminals'].get('data'))
             until(check_stopped, seconds=5)
             self.assertFalse((workspaces[0] / 'active-end').exists())
-            retried = native.deliver(roots[0], results[0]['id'], queued['id'], retry=True)
+            saved = inbox(agents.directory(roots[0], results[0]['id']), all_messages=True)['messages']
+            queued_id = next(m['id'] for m in saved if m['text'] == 'CANCEL_ON_STOP')
+            retried = native.deliver(roots[0], results[0]['id'], queued_id, retry=True)
             self.assertFalse(retried['ok'])
             self.assertIn('Cancelled', retried['reason'])
             self.assertFalse(any('CANCEL_ON_STOP' in json.dumps(r) for r in seen_requests))
             self.assertEqual(daemon('version')['status'], 'running')
             self.assertEqual(native.capabilities(roots[1], results[1]['id'], run_probe=True)['send_steer']['state'], 'supported')
+            # Resume reapplies the mv2 name even if the native session was renamed.
+            renamed = rpc.execute(RpcSpec(endpoint, lambda: name_session(first_session.native_id, 'renamed-native')))
+            self.assertEqual(renamed.state, 'ok')
+            self.assertEqual(thread_name(roots[0], results[0]['id']), 'renamed-native')
             # Resume from a monitor with a DIFFERENT home must retain saved storage.
             with patch.dict(os.environ, {**env, 'CODEX_HOME': str(self.work / 'wrong-home')}):
                 resumed = agents.start(roots[0], resume=results[0]['id'], socket_path=self.socket)
             self.assertEqual(resumed['native_environment']['CODEX_HOME'], str(home))
             self.assertEqual(resumed['native_session_id'], read(agents.directory(roots[0], resumed['id']) / 'properties.json')['native_session_id'])
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
+            until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
+            # Work on the shared daemon survives losing its TUI. Stop still
+            # cancels only this exact thread after its pane has disappeared.
+            message = send.run(roots[1], agent=results[1]['id'], text='STOP_ACTIVE_WORK_ORPHAN', delivery='follow-up')
+            self.assertEqual(message['state'], 'native_queued', message)
+            until(lambda: (workspaces[1] / 'active-start').exists())
+            message = send.run(roots[1], agent=results[1]['id'], text='ORPHAN_CANCEL_ON_STOP', delivery='follow-up')
+            self.assertEqual(message['state'], 'native_queued', message)
+            _, _, second_session, _ = native.context(roots[1], results[1]['id'])
+            self.backend.run('kill-pane', '-t', results[1]['runtime']['tmux']['pane'])
+            until(lambda: agents.listing(roots[1])[0]['live'] == 'dormant')
+            cancelled = agents.terminal_action(roots[1], results[1]['id'], 'stop')['native_cancellation']
+            self.assertEqual(cancelled['cancelled_submissions'], 1)
+            self.assertEqual(cancelled['interrupted_turns'], 1)
+            self.assertTrue(cancelled['background_terminal_cleanup_requested'])
+            self.assertNotIn('cancelled_message_ids', cancelled)
+            until(lambda: check_stopped(second_session), seconds=5)
+            self.assertFalse((workspaces[1] / 'active-end').exists())
+            saved = inbox(agents.directory(roots[1], results[1]['id']), all_messages=True)['messages']
+            self.assertEqual(next(m for m in saved if m['text'] == 'ORPHAN_CANCEL_ON_STOP')['tracking']['submission_state'], 'cancelled')
+            self.assertEqual(daemon('version')['status'], 'running')
+            self.assertEqual(native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'], 'supported')
             # Daemon outage must not trigger a hidden restart/resume on send.
             daemon('stop')
-            failed = send.run(roots[1], agent=results[1]['id'], text='OUTAGE_MESSAGE', delivery='steer')
+            failed = send.run(roots[0], agent=resumed['id'], text='OUTAGE_MESSAGE', delivery='steer')
             self.assertTrue(failed['saved'])
             self.assertNotEqual(failed['state'], 'native_queued')
             self.assertFalse(Path(endpoint).exists(), 'Failed send must not restart the daemon')

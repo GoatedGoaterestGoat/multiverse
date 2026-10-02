@@ -16,6 +16,43 @@ Esc returns to the local view. When attaching from a dashboard inside the same
 tmux server, default `Ctrl-b L` returns to its previous session; `Ctrl-b d`
 detaches the entire tmux client.
 
+The agent inspector shows the Codex native mode (`bridge` or `plain`) and its
+selection policy. If auto fell back to plain during launch, it also shows the
+reason. It also shows the CLI and daemon versions recorded at launch preparation,
+highlighting differences without blocking the bridge. Opening the inspector does
+not retry bridge startup, poll versions or change the mode.
+
+A lost Codex terminal relay shows `STATUS disconnected` in red while `LIVE`
+still describes the process. The inspector shows the connection failure and
+recovery guidance: kill the launch, then resume its saved conversation. New
+messages are refused and remain saved for explicit retry. Native receipt checks
+and cancellation can still reach the exact thread if the daemon is available.
+
+`K` (Shift+k) opens the kill confirmation dialog; `s` is an alias. Lowercase
+`k` still moves up, and `j`/`h`/`l` keep their navigation behavior. The footer
+shows `K Kill`; `d` still deletes to trash and appears in the `?` help screen.
+Kill is enabled for alive, ending, stopped and dormant agent rows. A dormant
+agent's confirmation says that only native work is cancelled; no terminal remains
+to close. It is unavailable for groups and unknown terminal state. `r` resumes a stopped or
+dormant agent.
+
+`m` sends to the selected agent, including stopped and dormant rows. For Claude,
+Codex and Pi it wakes an ended agent in its saved conversation with the message
+as the interactive starting prompt. The status line reports startup or pending
+bridge delivery; saved/accepted does not mean read or answered. Further messages
+to a starting bridge wait for readiness. Live plain sessions report unavailable.
+
+During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while
+native work and the agent process are terminated. Once the native process exits,
+`LIVE` is `stopped` while its tmux wrapper remains; after wrapper removal it is
+`dormant`. The stopped stage can be brief during automatic teardown. A native
+exit or Ctrl+C retains the stopped wrapper until kill, resume, move or removal.
+If native cancellation fails after the child has exited, `K`/`s` still removes
+the owned wrapper. The status line reports that the terminal closed but native
+cancellation is unconfirmed; retry stop when the native service is reachable.
+Ending agents still count as live in the header and groups, and cannot be moved
+or removed. The last reported phase and summary are preserved.
+
 ```json
 {
   "title": "Testing · reproduction queue",

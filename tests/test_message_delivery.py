@@ -1,4 +1,4 @@
-"""Durable message routing, concurrent submissions and selective acknowledgements."""
+"""Durable delivery evidence and automatic inbox read positions."""
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
@@ -9,8 +9,8 @@ from uuid import uuid4
 
 from multiverse import agents, harnesses, native
 from multiverse.harnesses.types import NativeResult
-from multiverse.store import ack, append_message, inbox, message_record, read, update_message, write
-from multiverse.tools import send
+from multiverse.store import append_message, inbox, message_record, read, update_message, write
+from multiverse.tools import send, deliver
 from test_multiverse import BaseTest
 
 
@@ -24,6 +24,7 @@ class InboxDeliveryTest(BaseTest):
             'workspace': str(self.work), 'native_session_id': self.native_id})
         write(self.directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
         self.enterContext(patch.object(native, 'owned'))
+        self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
         self.behavior = NativeResult('native_queued', value={'receipt': 'native'})
         owner = self
@@ -37,12 +38,17 @@ class InboxDeliveryTest(BaseTest):
                 return owner.behavior
         self.enterContext(patch.object(harnesses, 'load', return_value=Adapter()))
 
-    def send(self, text='message', **kwargs):
-        return send.run(self.root, agent=self.agent, text=text, **kwargs)
+    def send(self, text=None, **kwargs):
+        text = text if text is not None else str(uuid4())
+        result = send.run(self.root, agent=self.agent, text=text, **kwargs)
+        # Internal delivery tests recover IDs from raw history, never tool output.
+        self.assertNotIn('id', result)
+        record = next(m for m in inbox(self.directory, limit=None, all_messages=True)['messages'] if m['text'] == text)
+        return {**result, 'id': record['id']}
 
-    def test_modes_are_isolated_and_history_has_receipts_not_fake_ack(self):
+    def test_modes_are_isolated_and_history_preserves_receipts(self):
         normal = self.send(delivery='follow-up')
-        urgent = self.send(delivery='steer', reply_to=normal['id'])
+        urgent = self.send(delivery='steer')
         manual = self.send(delivery='inbox-only')
         self.assertEqual([m['id'] for m in inbox(self.directory)['messages']], [manual['id']])
         history = inbox(self.directory, all_messages=True)['messages']
@@ -50,12 +56,7 @@ class InboxDeliveryTest(BaseTest):
         self.assertEqual(history[0]['tracking']['submission_state'], 'accepted')
         self.assertNotIn('acknowledged_at', history[0]['tracking'])
         self.assertEqual([call[2] for call in self.calls], ['follow-up', 'steer'])
-        self.assertEqual(self.calls[1][1].reply_to, normal['id'])
-        ack(self.directory, message_ids=[urgent['id']])
-        self.assertIn('acknowledged_at', message_record(self.directory, urgent['id'])[1])
-        self.assertNotIn('acknowledged_at', message_record(self.directory, normal['id'])[1])
-        ack(self.directory, inbox(self.directory)['cursor'])
-        self.assertNotIn('acknowledged_at', message_record(self.directory, normal['id'])[1])
+        self.assertFalse(hasattr(self.calls[1][1], 'reply_to'))
         self.assertEqual(inbox(self.directory)['messages'], [])
 
     def test_concurrent_senders_have_unique_ids_and_preserve_individual_modes(self):
@@ -105,7 +106,7 @@ class InboxDeliveryTest(BaseTest):
         with self.assertRaisesRegex(ValueError, 'different native session'):
             native.deliver(self.root, self.agent, message['id'], retry=True)
         with self.assertRaisesRegex(ValueError, 'recipient inbox'):
-            ack(self.directory, message_ids=[str(uuid4())])
+            message_record(self.directory, str(uuid4()))
         write(self.directory / 'properties.json', props)
         write(self.directory / 'runtime.json', {'launch_id': 'resumed', 'state': 'running'})
         self.behavior = NativeResult('native_queued')
@@ -113,7 +114,7 @@ class InboxDeliveryTest(BaseTest):
         self.assertEqual(result['native_session_id'], self.native_id)
         self.assertEqual(result['launch_id'], 'resumed')
 
-    def test_reconciliation_confirms_without_resubmitting_or_acknowledging(self):
+    def test_reconciliation_confirms_without_resubmitting(self):
         self.behavior = TimeoutError('lost response')
         message = self.send()
         self.behavior = NativeResult('native_queued', value={'transcript_confirmed': True})
@@ -142,24 +143,106 @@ class InboxDeliveryTest(BaseTest):
         self.assertIn('malformed settings', tracking['attempts'][-1]['reason'])
 
     def test_old_inbox_records_keep_manual_semantics_without_rewriting(self):
-        old = {'id': 'legacy', 'text': 'old text', 'delivery': 'steer'}
+        old = {'id': 'legacy', 'text': 'old text', 'delivery': 'steer', 'reply_to': 'old-parent'}
         path = self.directory / 'inbox.jsonl'
         path.write_text(json.dumps(old) + '\n')
         before = path.read_bytes()
+        write(self.directory / 'inbox-state.json', {'legacy': {'acknowledged_at': 'old-time'}})
         self.assertEqual(inbox(self.directory)['messages'], [old])
-        ack(self.directory, inbox(self.directory)['cursor'])
+        self.assertEqual(message_record(self.directory, 'legacy')[1], {})
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(inbox(self.directory)['messages'], [])
 
-    def test_ack_during_submission_keeps_receipt_and_ack(self):
+    def test_read_during_submission_keeps_receipts_and_read_position(self):
+        manual = self.send(delivery='inbox-only')
         original = native.update_message
         def update(directory, message_id, **changes):
             if changes.get('submission_state') == 'accepted':
-                ack(directory, message_ids=[message_id])
+                self.assertEqual([m['id'] for m in inbox(directory)['messages']], [manual['id']])
             return original(directory, message_id, **changes)
         with patch.object(native, 'update_message', side_effect=update):
             message = self.send()
         tracking = message_record(self.directory, message['id'])[1]
-        self.assertIn('acknowledged_at', tracking)
+        self.assertEqual(inbox(self.directory)['messages'], [])
+        self.assertNotIn('acknowledged_at', tracking)
         self.assertEqual(tracking['submission_state'], 'accepted')
         self.assertEqual(tracking['native_receipt'], {'receipt': 'native'})
+
+    def test_old_read_marker_does_not_block_delivery_and_is_discarded_on_update(self):
+        message = append_message(self.directory, 'legacy failure', {}, delivery='steer')
+        write(self.directory / 'inbox-state.json', {message['id']: {
+            'acknowledged_at': 'old-time', 'submission_state': 'failed',
+            'attempts': [{'state': 'error', 'reason': 'failed before submission'}]}})
+        self.assertEqual(native.deliver(self.root, self.agent, message['id'], retry=True)['state'], 'native_queued')
+        tracking = read(self.directory / 'inbox-state.json')[message['id']]
+        self.assertNotIn('acknowledged_at', tracking)
+        self.assertEqual(len(tracking['attempts']), 2)
+
+    def test_concurrent_readers_consume_each_manual_message_once(self):
+        for index in range(25):
+            append_message(self.directory, str(index), {})
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            batches = list(pool.map(lambda _: inbox(self.directory, limit=1), range(30)))
+        self.assertEqual(sorted(int(m['text']) for batch in batches for m in batch['messages']), list(range(25)))
+
+    def test_recipient_recovery_selects_only_eligible_messages_and_hides_ids(self):
+        accepted = self.send()
+        self.behavior = NativeResult('error', 'definite failure')
+        failed = self.send()
+        self.behavior = TimeoutError('uncertain')
+        unknown = self.send()
+        pending = append_message(self.directory, 'pending', {}, delivery='follow-up')
+        self.send(delivery='inbox-only')
+        checked = []
+        def check(session, message_id, executor):
+            checked.append(message_id)
+            return NativeResult('native_queued', value={'message_id': message_id, 'transcript_confirmed': True})
+        adapter = harnesses.load(self.root, 'claude')
+        with patch.object(adapter, 'get_delivery', side_effect=check):
+            result = deliver.run(self.root, agent=self.agent, check=True)
+        self.assertEqual(checked, [unknown['id'], pending['id']])
+        self.assertTrue(result['ok'])
+        self.assertTrue(all(m['transcript_confirmed'] for m in result['messages']))
+        for message in (accepted, failed, unknown, pending):
+            self.assertNotIn(message['id'], json.dumps(result))
+        before = len(self.calls)
+        self.behavior = NativeResult('native_queued')
+        retried = deliver.run(self.root, agent=self.agent, retry=True)
+        self.assertTrue(retried['ok'])
+        self.assertEqual(len(self.calls), before + 1)
+        self.assertEqual(self.calls[-1][1].id, failed['id'])
+        self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+        self.assertEqual(len(inbox(self.directory)['messages']), 1)
+
+    def test_check_records_receipts_for_accepted_messages_of_the_current_launch(self):
+        self.behavior = NativeResult('native_queued')  # accepted, no receipt yet
+        older = self.send()
+        update_message(self.directory, older['id'], attempts=[{'state': 'native_queued', 'launch_id': 'earlier'}])
+        current = self.send()
+        missing = self.send()
+        checked = []
+        def check(session, message_id, executor):
+            checked.append(message_id)
+            if message_id == missing['id']:
+                return NativeResult('unknown', 'No receipt yet')
+            return NativeResult('native_queued', value={'transcript_confirmed': True})
+        adapter = harnesses.load(self.root, 'claude')
+        with patch.object(adapter, 'get_delivery', side_effect=check):
+            first = deliver.run(self.root, agent=self.agent, check=True)
+            second = deliver.run(self.root, agent=self.agent, check=True)
+        # Missing evidence for an accepted message is not a failure, and is asked again.
+        self.assertTrue(first['ok'] and second['ok'])
+        self.assertEqual(checked, [current['id'], missing['id'], missing['id']])
+        tracking = inbox(self.directory, all_messages=True, limit=None)['messages']
+        confirmed = {m['id']: m['tracking'].get('transcript_confirmed_at') for m in tracking}
+        self.assertTrue(confirmed[current['id']])
+        self.assertIsNone(confirmed[older['id']])
+
+    def test_recipient_retry_covers_history_beyond_the_default_inbox_page(self):
+        for index in range(55):
+            message = append_message(self.directory, str(index), {}, delivery='steer')
+            update_message(self.directory, message['id'], submission_state='failed')
+        result = deliver.run(self.root, agent=self.agent, retry=True)
+        self.assertTrue(result['ok'])
+        self.assertEqual(len(result['messages']), 55)
+        self.assertEqual(len(self.calls), 55)

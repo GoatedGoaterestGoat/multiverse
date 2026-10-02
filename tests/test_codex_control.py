@@ -11,7 +11,7 @@ from multiverse.harnesses.types import SessionHandle, Message
 class CodexControlTest(unittest.TestCase):
     def setUp(self):
         self.ctx = SessionHandle('agent', 'codex', '/tmp', native_id=str(uuid4()))
-        self.message = Message(str(uuid4()), 'literal `false` $(false)')
+        self.message = Message(str(uuid4()), 'literal `false` $(false)', framed='Message from reviewer:\nliteral `false` $(false)')
         self.requests = []
 
     def run_plan(self, operation, *, state='active', overrides=None):
@@ -22,6 +22,7 @@ class CodexControlTest(unittest.TestCase):
             'thread/turns/list': {'data': [{'id': 'exact-turn', 'status': 'inProgress'}]},
             'thread/queue/list': {'data': []},
             'thread/queue/add': {'queuedSubmission': {'id': 'queue-item', 'clientUserMessageId': self.message.id}},
+            'thread/queue/start': {'turn': {'id': 'queue-turn', 'status': 'inProgress'}},
             'turn/steer': {'turnId': 'exact-turn'},
             'turn/interrupt': {}, 'thread/backgroundTerminals/clean': {},
             'thread/queue/delete': {'deleted': True},
@@ -45,15 +46,52 @@ class CodexControlTest(unittest.TestCase):
         self.assertEqual(last.params['expectedTurnId'], 'exact-turn')
         self.assertEqual(last.params['threadId'], self.ctx.native_id)
         self.assertEqual(last.params['clientUserMessageId'], self.message.id)
-        self.assertIn('literal `false` $(false)', last.params['input'][0]['text'])
+        self.assertEqual(last.params['input'][0]['text'], self.message.framed)
+        self.assertNotIn(self.message.id, last.params['input'][0]['text'])
 
     def test_normal_and_idle_urgent_use_native_queue_without_steering(self):
         for operation, state in [('follow-up', 'active'), ('follow-up', 'idle'), ('steer', 'idle')]:
             with self.subTest(operation=operation, state=state):
                 self.requests.clear()
                 self.assertEqual(self.run_plan(operation, state=state).state, 'native_queued')
-                self.assertEqual(self.requests[-1].method, 'thread/queue/add')
+                add = next(r for r in self.requests if r.method == 'thread/queue/add')
+                self.assertEqual(add.params['input'][0]['text'], self.message.framed)
                 self.assertNotIn('turn/steer', [r.method for r in self.requests])
+                self.assertNotIn('thread/queue/start', [r.method for r in self.requests])
+
+    def test_idle_wake_starts_only_its_exact_sole_accepted_submission(self):
+        for mode in ('steer', 'follow-up'):
+            result = self.run_plan(mode, state='idle', overrides={'thread/queue/list': {'result': {'data': [
+                {'id': 'queue-item', 'clientUserMessageId': self.message.id}]}}})
+            self.assertEqual(result.state, 'native_queued')
+            self.assertEqual(result.value['turn_id'], 'queue-turn')
+            self.assertEqual(self.requests[-1].method, 'thread/queue/start')
+            self.assertEqual(self.requests[-1].params,
+                {'threadId': self.ctx.native_id, 'queuedSubmissionId': 'queue-item'})
+
+    def test_idle_wake_does_not_reorder_or_restart_other_queued_work(self):
+        own = {'id': 'queue-item', 'clientUserMessageId': self.message.id}
+        other = {'id': 'other', 'clientUserMessageId': 'another-message'}
+        for queue in ({'data': [other]}, {'data': [own, other]}, {'data': [own], 'nextCursor': 'more'}):
+            self.requests.clear()
+            result = self.run_plan('follow-up', state='idle', overrides={'thread/queue/list': {'result': queue}})
+            self.assertEqual(result.state, 'native_queued')
+            self.assertIn('other queued work', result.reason)
+            self.assertNotIn('thread/queue/start', [r.method for r in self.requests])
+
+    def test_queue_start_failure_preserves_acceptance_without_replay(self):
+        for response in ({'error': {'code': -32600, 'message': 'thread already has an active or pending turn'}},
+                         {'error': {'code': -32601, 'message': 'unknown method'}}, {'result': {}}):
+            self.requests.clear()
+            result = self.run_plan('follow-up', state='idle', overrides={
+                'thread/queue/list': {'result': {'data': [{'id': 'queue-item', 'clientUserMessageId': self.message.id}]}},
+                'thread/queue/start': response})
+            self.assertEqual(result.state, 'native_queued')
+            self.assertIn('do not resend', result.reason)
+            self.assertEqual(result.value['queued_submission_id'], 'queue-item')
+            self.assertEqual([r.method for r in self.requests].count('thread/queue/add'), 1)
+            self.assertNotIn('turn/start', [r.method for r in self.requests])
+            self.assertNotIn('thread/resume', [r.method for r in self.requests])
 
     def test_unloaded_wrong_identity_and_workspace_never_receive(self):
         cases = [({'id': self.ctx.native_id, 'cwd': '/tmp', 'status': {'type': 'notLoaded'}}, 'unavailable'),
@@ -115,11 +153,19 @@ class CodexControlTest(unittest.TestCase):
             {'id': 'queued-item', 'clientUserMessageId': self.message.id}]}}})
         self.assertEqual(result.state, 'ok')
         self.assertEqual(result.value['cancelled_message_ids'], [self.message.id])
+        self.assertEqual(result.value['cancelled_submissions'], 1)
+        self.assertEqual(result.value['interrupted_turns'], 1)
+        self.assertTrue(result.value['background_terminal_cleanup_requested'])
         for request in self.requests[1:]:
             self.assertEqual(request.params['threadId'], self.ctx.native_id)
         interrupt = next(r for r in self.requests if r.method == 'turn/interrupt')
         self.assertEqual(interrupt.params['turnId'], 'exact-turn')
         self.assertEqual(self.requests[-1].method, 'thread/backgroundTerminals/clean')
+
+    def test_stop_of_exact_unloaded_thread_does_not_reload_it(self):
+        result = self.run_plan('stop', state='notLoaded')
+        self.assertEqual(result.state, 'ok')
+        self.assertEqual([r.method for r in self.requests], ['initialize', 'thread/read'])
 
     def test_stop_limits_and_wrong_thread_fail_before_mutation(self):
         for overrides in (

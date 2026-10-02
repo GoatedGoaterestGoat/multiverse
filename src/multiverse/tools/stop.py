@@ -1,4 +1,4 @@
-"""Stop the owned terminal and its running work."""
+"""Alias for kill: end native work, then remove the owned tmux wrapper."""
 from .. import agents, universe
 
 def configure(parser):
