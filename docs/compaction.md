@@ -168,14 +168,16 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   resume) brings back the old rows beside the copies. A built message cannot
   hold an image, so a prompt notes how many images it had, and the budget
   spends nothing on them.
-- **Never Claude's own summary.** The hook answers every main-session
-  compaction, or skips it with the reason. If it ever cannot answer (the mod
-  failed to load, the hook ran out of time), the `PreCompact` hook refuses Claude's
-  own compaction with a message. A subagent's own compaction is left to Claude.
+- **Claude's own summary only while compaction is off.** With tree compaction
+  enabled, the hook answers every main-session compaction, or skips it with the
+  reason; if it ever cannot answer (the mod failed to load, the hook ran out of
+  time), the `PreCompact` hook refuses Claude's own compaction with a message.
+  A subagent's own compaction is left to Claude. With compaction off, or no
+  `compaction.json`, there is no guard and Claude compacts as usual.
 - **An unusable `compaction.json`** (invalid, or builder settings Claude rejects)
-  never stops a launch or resume: the session starts without compaction and
-  without the guard, so Claude's own `/compact` works until the file is fixed
-  and the agent restarted. The reason shows in the inspector (as the launch's
+  never stops a launch or resume: the session starts as if compaction were off,
+  so Claude's own `/compact` works until the file is fixed and the agent
+  restarted. The reason shows in the inspector (as the launch's
   fallback), in the `compaction` capability and in `mv2 doctor`.
 - **Background building.** The mod's `Stop` hook starts the builder with the time
   the turn ended, so the turn that just finished gets its tree at once.
