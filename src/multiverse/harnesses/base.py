@@ -133,6 +133,7 @@ class ConfiguredAdapter:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
         result['session_name'] = Capability('unavailable', 'Native session naming is not verified for this manifest')
+        result['compaction'] = Capability('unavailable', 'This harness has no tree compaction')
         result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:

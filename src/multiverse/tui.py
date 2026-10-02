@@ -12,6 +12,7 @@ from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static,
 
 from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hierarchy, rate_limits
 from .draft import AgentDraft, SubverseDraft
+from .compaction_screens import CompactionScreen
 from .inspector import Inspector
 from .universe import slug
 from .views import LocalView
@@ -34,6 +35,7 @@ K / s          Kill (with confirmation); s is an alias
 r              Resume a stopped or dormant agent
 v              Full agent details or group configuration
 p              Show / hide the inspector (opens only with this key)
+c              Compaction settings for the selected scope; Enter on an agent opens its plan
 g              New subverse inside the selected group (inline, name only)
 x              Move the selected agent or subverse: choose a group, then Enter or x
 d              Delete the selected agent or subverse (to trash, with confirmation)
@@ -205,7 +207,7 @@ class MultiverseApp(App):
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), 
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
-        Binding("r", "resume", "Resume", show=False),
+        Binding("r", "resume", "Resume", show=False), Binding("c", "compaction", "Compaction", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -769,6 +771,15 @@ class MultiverseApp(App):
         if succeeded and after:
             after(result)
         self.refresh_snapshot()
+
+    def action_compaction(self):
+        if self.ready():
+            root = self.target_scope()
+            self.push_screen(CompactionScreen(root, self.backend, self.scope_name(root)), self.compaction_saved)
+
+    def compaction_saved(self, overview):
+        if overview:
+            self.set_status("Compaction settings saved. Restart agents for a changed enabled setting to apply.")
 
     def action_spawn(self):
         if self.ready():

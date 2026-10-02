@@ -8,7 +8,7 @@ from functools import partial
 from dataclasses import replace
 
 from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint
-from .launch import launch_settings
+from .launch import launch_settings, tui_arguments
 from .protocol import check_connection, send_message, get_delivery, stop_session
 from ..types import BridgeUnavailable
 
@@ -27,6 +27,7 @@ class CodexAdapter(ConfiguredAdapter):
 
     def _launch_command(self, context):
         command = super()._launch_command(context)
+        command = replace(command, argv=tuple(tui_arguments(command.argv)))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})

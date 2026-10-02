@@ -1,0 +1,245 @@
+"""Show or set an agent's compaction: scheduler, summary trees, recent errors.
+
+The CLI runs `run`; the dashboard's compaction screens use `overview`,
+`save_settings`, `agent_view` and `set_scheduler` through LocalBackend.
+"""
+import json
+import sys
+
+from .. import agents, harnesses, universe
+from ..compaction import config as settings_file
+from ..compaction.build import Build, Cancelled, Reporter
+from ..compaction.config import IMAGE_MODES, SCHEDULERS
+from ..compaction.pipeline import conversation, open_agent, plan as planned
+from ..compaction.schedule import allocate, frontier_for, frontier_tokens, needs_tree
+from ..compaction.store import Store
+from ..store import read, write
+
+SAVED = object()  # agent_view previews the agent's saved scheduler
+
+
+def configure(parser):
+    parser.add_argument('agent')
+    parser.add_argument('--scheduler', choices=list(SCHEDULERS),
+                        help="Give the agent its own scheduler (default: the universe's)")
+    parser.add_argument('--budget', type=int, help='Tokens the compacted conversation may keep (prompt text always stays)')
+    parser.add_argument('--k', type=int, help='last_k_raw: how many recent turns stay whole')
+    parser.add_argument('--recency-ratio', type=float, help='recency_boosted: weight of the newest turn')
+    parser.add_argument('--recency-half-life', type=float, help='recency_boosted: turns until the weight halves')
+    parser.add_argument('--image-mode', choices=IMAGE_MODES, help='Which prompt images a compaction keeps')
+    parser.add_argument('--use-default', action='store_true', help="Return the agent to the universe's scheduler")
+    parser.add_argument('--plan', action='store_true', help='Show how each turn would be compacted now')
+    parser.add_argument('--build', action='store_true', help='Build the summary trees a compaction now needs')
+
+
+def _changed_schedule(agent, scheduler, budget, k, recency_ratio, recency_half_life, image_mode):
+    current, _ = settings_file.schedule_for(agent.directory, agent.settings)
+    name = scheduler or current.scheduler
+    values = current.settings() if name == current.scheduler else {'scheduler': name, 'budget': current.budget}
+    if current.image_mode != 'budget_fit':
+        values['image_mode'] = current.image_mode
+    for key, value in (('budget', budget), ('k', k), ('recency_ratio', recency_ratio),
+                       ('recency_half_life', recency_half_life), ('image_mode', image_mode)):
+        if value is not None:
+            values[key] = value
+    return settings_file.parse_schedule(values)
+
+
+def _stderr(event):
+    if event.get('event') == 'error':
+        retry = f" (retry {event['attempt']}/{event['attempts']})" if event.get('retrying') else ''
+        print(f"error: turn {(event.get('turn') or '')[:8]}: {event['kind']}: {event['message']}{retry}", file=sys.stderr)
+    elif event.get('event') == 'progress' and event.get('phase') == 'built':
+        print(f"built {event['turns_done']}/{event['turns']} turn(s)", file=sys.stderr)
+    elif event.get('event') == 'log':
+        print(event['message'], file=sys.stderr)
+
+
+def run(root=None, *, agent, scheduler=None, budget=None, k=None, recency_ratio=None, recency_half_life=None,
+        image_mode=None, use_default=False, plan=False, build=False):
+    root = universe.resolve(root)
+    target = open_agent(root, agent)
+    changing = any(value is not None for value in (scheduler, budget, k, recency_ratio, recency_half_life, image_mode))
+    if use_default and changing:
+        raise ValueError('Use either --use-default or scheduler options, not both')
+    if use_default:
+        settings_file.save_schedule(target.directory, None)
+    elif changing:
+        settings_file.save_schedule(target.directory, _changed_schedule(target, scheduler, budget, k,
+                                                                        recency_ratio, recency_half_life, image_mode))
+    schedule, origin = target.schedule()
+    store = target.store
+    status = store.status()
+    result = {'agent': target.directory.name, 'harness': target.harness, 'enabled': target.settings.enabled,
+              'unavailable': target.source.unavailable(),
+              'scheduler': schedule.settings(), 'scheduler_from': origin,
+              'builder': settings_file.describe(target.settings)['builder'], 'trees_cached': store.tree_count(),
+              'activity': status.get('activity'), 'failed_turns': status.get('failures', {}),
+              'recent_errors': status.get('errors', [])[-5:]}
+    if not (plan or build):
+        return result
+    every = target.source.turns()
+    turns = conversation(every)
+    rows = planned(turns, schedule, store)
+    if build:
+        missing = [turn for turn, row in zip(turns, rows) if needs_tree(turn, row['share']) and turn.root is None]
+        try:
+            failures = Build(target.source, store, target.settings.builder, Reporter(store, _stderr)).turns(missing)
+        except Cancelled:
+            failures = {'*': 'cancelled'}
+        result['built'] = len(missing) - len(failures)
+        result['build_failures'] = failures
+        rows = planned(turns, schedule, store)
+    if plan:
+        result['plan'] = rows
+        result['turns'] = len(rows)
+        result['dropped_turns'] = [{'turn': turn.id, 'reason': turn.dropped} for turn in every if turn.dropped]
+        result['trees_missing'] = sum(1 for row in rows if row['needs_tree'] and not row['has_tree'])
+    return result
+
+
+def _adapters(root):
+    """This universe's harnesses that support compaction, by name."""
+    found = {}
+    for manifest in sorted((root / 'harnesses').glob('*/harness.json')):
+        try:
+            adapter = harnesses.load(root, manifest.parent.name)
+        except (OSError, ValueError, KeyError):
+            continue
+        if hasattr(adapter, 'compaction'):
+            found[manifest.parent.name] = adapter
+    return found
+
+
+def _defaults(adapter):
+    return adapter.compaction_defaults() if adapter is not None and hasattr(adapter, 'compaction_defaults') else {}
+
+
+def _activity(store):
+    activity = store.status().get('activity')
+    if activity:
+        return activity.get('phase') or 'busy'
+    return 'building trees' if store.worker_holder() is not None else None
+
+
+def overview(root=None):
+    """The universe's compaction settings as written and in effect, its harnesses and its agents."""
+    root = universe.resolve(root)
+    path = root / settings_file.FILE
+    written, problem = {}, None
+    if path.exists():
+        try:
+            written = json.loads(path.read_text())
+            if not isinstance(written, dict):
+                written, problem = {}, f'{path}: not a JSON object'
+        except (OSError, ValueError) as error:
+            problem = f'{path}: {error}'
+    try:
+        loaded = settings_file.parse(written)
+    except ValueError as error:
+        loaded, problem = settings_file.Config(), problem or f'{path}: {error}'
+    adapters = _adapters(root)
+    shared = loaded.for_harness('')
+    rows = []
+    for name in sorted(set(adapters) | set(loaded.harnesses)):
+        adapter, defaults = adapters.get(name), _defaults(adapters.get(name))
+        settings = loaded.for_harness(name, defaults)
+        state = adapter.compaction_state(root, loaded) if adapter is not None and not problem else (None, None)
+        rows.append({'name': name, 'supported': adapter is not None, 'enabled': settings.enabled,
+                     'default': settings.default.settings(), 'builder': settings_file.describe(settings)['builder'],
+                     'defaults': defaults, 'options': [key for key in defaults if key not in settings_file.BUILDER],
+                     'problem': state[1]})
+    members = []
+    for item in agents.listing(root):
+        if item.get('harness') not in adapters:
+            continue
+        directory = root / 'state' / 'agents' / item['id']
+        settings = loaded.for_harness(item['harness'], _defaults(adapters[item['harness']]))
+        try:
+            schedule, origin = settings_file.schedule_for(directory, settings)
+        except ValueError:
+            schedule, origin = settings.default, 'agent'
+        store, status = Store(directory), Store(directory).status()
+        errors = status.get('errors', [])
+        members.append({'id': item['id'], 'name': item.get('name'), 'harness': item['harness'], 'live': item.get('live'),
+                        'scheduler': schedule.settings(), 'scheduler_from': origin, 'trees_cached': store.tree_count(),
+                        'activity': _activity(store), 'failed_turns': len(status.get('failures', {})),
+                        'last_error': errors[-1].get('message') if errors else None})
+    return {'universe': str(root), 'path': str(path), 'exists': path.exists(), 'problem': problem, 'file': written,
+            'enabled': shared.enabled, 'default': shared.default.settings(), 'harnesses': rows, 'agents': members,
+            'schedulers': {name: list(fields) for name, fields in SCHEDULERS.items()}, 'image_modes': list(IMAGE_MODES)}
+
+
+def save_settings(root=None, value=None):
+    """Write compaction.json once the whole file and every harness's own checks accept it; returns the new overview."""
+    root = universe.resolve(root)
+    loaded = settings_file.parse(value)
+    for adapter in _adapters(root).values():
+        problem = adapter.compaction_state(root, loaded)[1]
+        if problem:
+            raise ValueError(problem)
+    write(root / settings_file.FILE, value)
+    return overview(root)
+
+
+def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
+    """One agent's compaction: its status, its scheduler, and the plan `scheduler` would make (nothing is saved).
+
+    `scheduler` is SAVED for the agent's own setting, None for the default it
+    would follow, or scheduler settings to try.
+    """
+    root = universe.resolve(root)
+    target = open_agent(root, agent)
+    written, origin = settings_file.schedule_for(target.directory, target.settings)
+    if scheduler is SAVED:
+        trying = written
+    elif scheduler is None:
+        trying = target.settings.default
+    else:
+        trying = settings_file.parse_schedule(scheduler)
+    store, status = target.store, target.store.status()
+    try:
+        name = read(target.directory / 'properties.json').get('name')
+    except (OSError, ValueError):
+        name = None
+    result = {'agent': target.directory.name, 'name': name, 'harness': target.harness, 'enabled': target.settings.enabled,
+              'unavailable': target.source.unavailable(), 'scheduler': written.settings(), 'scheduler_from': origin,
+              'default': target.settings.default.settings(), 'trees_cached': store.tree_count(),
+              'activity': _activity(store), 'failed_turns': len(status.get('failures', {})),
+              'recent_errors': status.get('errors', [])[-5:]}
+    if not preview:
+        return result
+    schedule = target.effective(trying)
+    every = target.source.turns()
+    turns = conversation(every)
+    rows = planned(turns, schedule, store)
+    shares, images = allocate(turns, schedule)
+    before = after = 0
+    partial = False
+    for turn in turns:
+        prompt = turn.prompt.tokens if turn.prompt else 0
+        before += prompt + turn.tokens + turn.omitted
+        after += prompt - (turn.prompt.images if turn.prompt and turn.id not in images else 0)
+        if turn.root is not None or not needs_tree(turn, shares[turn.id]):
+            after += frontier_tokens(frontier_for(turn, shares[turn.id]))
+        else:
+            partial = True
+    result['plan'] = rows
+    result['summary'] = {'turns': len(turns), 'summarized': sum(1 for row in rows if not row['raw']),
+                         'trees_missing': sum(1 for row in rows if row['needs_tree'] and not row['has_tree']),
+                         'dropped_turns': len(every) - len(turns), 'tokens_before': before, 'tokens_after': after,
+                         'after_partial': partial}
+    return result
+
+
+def set_scheduler(root=None, *, agent, scheduler):
+    """Give the agent its own scheduler, or with None return it to the default; returns agent_view without a plan."""
+    root = universe.resolve(root)
+    target = open_agent(root, agent)
+    settings_file.save_schedule(target.directory, None if scheduler is None else settings_file.parse_schedule(scheduler))
+    return agent_view(root, agent=agent, preview=False)
+
+
+if __name__ == '__main__':
+    from ._common import main
+    main(configure, run)

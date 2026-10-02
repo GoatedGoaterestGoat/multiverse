@@ -26,6 +26,52 @@ class CodexLaunchTest(unittest.TestCase):
                        'session_id': self.native_id, 'control_socket': '/tmp/owned/rpc.sock'}
         self.context = LaunchContext('spawn', self.values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'))
 
+    def test_update_check_default_covers_spawn_resume_wake_and_plain_fallback(self):
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+        for settings in ({}, {'inbox_bridge': True}, {'inbox_bridge': False}):
+            adapter = CodexAdapter.configured('codex', settings)
+            for mode in ('spawn', 'empty', 'resume', 'wake'):
+                with self.subTest(settings=settings, mode=mode):
+                    context = replace(self.context, values={**self.values, 'task': ''}) if mode == 'empty' else self.context
+                    if mode == 'wake':
+                        context = replace(context, resume_prompt='--config check_for_update_on_startup=true')
+                    command = adapter.spawn(context) if mode in ('spawn', 'empty') else adapter.resume(session, context)
+                    for candidate in (command, command.fallback):
+                        if candidate is None:
+                            continue
+                        end = candidate.argv.index('--') if '--' in candidate.argv else len(candidate.argv)
+                        self.assertEqual(candidate.argv[:end].count('check_for_update_on_startup=false'), 1)
+                        position = candidate.argv.index('check_for_update_on_startup=false')
+                        self.assertEqual(candidate.argv[position - 1], '-c')
+
+    def test_explicit_update_check_value_is_preserved_for_each_argument_source(self):
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
+        for value in ('true', 'false'):
+            for flags in (['-c', f'check_for_update_on_startup={value}'],
+                          ['--config', f'check_for_update_on_startup = {value}'],
+                          [f'--config=check_for_update_on_startup={value}'],
+                          [f'-ccheck_for_update_on_startup={value}'],
+                          [f'-c=check_for_update_on_startup={value}']):
+                for source in ('args', 'spawn_args', 'resume_args'):
+                    for bridge in (False, True):
+                        settings = {'inbox_bridge': bridge, source: flags}
+                        adapter = CodexAdapter.configured('codex', settings)
+                        for mode in ('spawn', 'resume'):
+                            with self.subTest(value=value, flags=flags, source=source, bridge=bridge, mode=mode):
+                                command = adapter.spawn(self.context) if mode == 'spawn' else adapter.resume(session, self.context)
+                                before_prompt = command.argv[:command.argv.index('--')]
+                                observed = [arg for arg in before_prompt if 'check_for_update_on_startup' in arg]
+                                expected = value if source in ('args', mode + '_args') else 'false'
+                                self.assertEqual(len(observed), 1, before_prompt)
+                                self.assertEqual(observed[0].rsplit('=', 1)[1].strip(), expected)
+                        self.assertEqual(settings[source], flags)
+
+    def test_unrelated_config_text_does_not_suppress_update_check_default(self):
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': True,
+            'args': ['-c', 'developer_instructions="check_for_update_on_startup=true"']})
+        command = adapter.spawn(self.context)
+        self.assertIn('check_for_update_on_startup=false', command.argv)
+
     def test_launch_moves_bootstrap_and_grants_to_relay_and_keeps_permissions(self):
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True,
                     'spawn_args': ['--dangerously-bypass-approvals-and-sandbox', '--add-dir', '/custom']})

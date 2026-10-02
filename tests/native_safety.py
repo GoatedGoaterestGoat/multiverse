@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import socket
 import sys
+import tomllib
 
 
 # Capture the caller's native home before a fixture changes its environment.
@@ -13,8 +14,8 @@ if os.environ.get('CODEX_HOME'):
 _installed = False
 
 
-def isolated_home(path):
-    """Keep disposable daemons from spawning updater processes that outlive tests."""
+def isolated_home(path, *, config=''):
+    """Disable daemon auto-updates and interactive TUI update prompts in tests."""
     path = Path(path).resolve()
     if any(path == protected or protected in path.parents for protected in PROTECTED_HOMES):
         raise AssertionError('Cannot configure the default Codex daemon from a test')
@@ -23,6 +24,7 @@ def isolated_home(path):
     value = json.loads(settings.read_text()) if settings.exists() else {}
     value['updater'] = {**value.get('updater', {}), 'autoUpdateEnabled': False}
     settings.write_text(json.dumps(value) + '\n')
+    (path / 'config.toml').write_text('check_for_update_on_startup = false\n' + config)
     return path
 
 
@@ -48,6 +50,12 @@ def check_spawn(argv, environment):
         settings = {}
     if settings.get('updater', {}).get('autoUpdateEnabled') is not False:
         raise AssertionError('Native tests must disable daemon automatic updates in their isolated CODEX_HOME')
+    try:
+        config = tomllib.loads((home / 'config.toml').read_text())
+    except (OSError, ValueError):
+        config = {}
+    if config.get('check_for_update_on_startup') is not False:
+        raise AssertionError('Native tests must disable TUI startup update checks in their isolated CODEX_HOME')
 
 
 def check_connect(address):

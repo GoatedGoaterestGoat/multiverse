@@ -22,7 +22,6 @@ class CodexDaemonCwdTest(BaseTest):
         managed = home / 'packages/standalone/current/codex'
         managed.parent.mkdir(parents=True)
         managed.symlink_to(Path(shutil.which('codex')).resolve())
-        (home / 'config.toml').write_text('')
         workspace = self.work / 'throwaway-workspace'
         workspace.mkdir()
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home)}

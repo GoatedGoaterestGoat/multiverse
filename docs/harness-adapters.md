@@ -235,7 +235,8 @@ The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
 `LocalBackend` delegates to the same tools, with no provider-name branches.
 Public capabilities are `spawn`, `resume`, `wake`, `stop`, `send_steer`, `send_follow_up`,
-`ask`, `get_usage`, and `get_delivery`. The `session_name` capability describes
+`ask`, `get_usage`, `get_delivery`, and `compaction` (whether this session's
+`/compact` uses tree compaction; see [compaction](compaction.md)). The `session_name` capability describes
 naming during spawn/resume, not a separate rename operation. Claude and Pi pass
 `--name` in both modes. Codex bridge calls `thread/name/set` after validating and
 binding the launch reply; plain Codex has no CLI naming flag. Legacy manifests
@@ -428,10 +429,34 @@ current updater; verify that the daemon PID remains unchanged. mv2 does not
 signal or replace native updater processes automatically.
 
 Native tests use isolated Codex homes with
-`app-server-daemon/settings.json` setting `updater.autoUpdateEnabled=false`.
-The subprocess guard rejects native execution without that setting, as well as
-access to the default native home/socket. This prevents disposable tests from
-leaving scheduled updaters behind; daemon stop alone does not stop the updater.
+`app-server-daemon/settings.json` setting `updater.autoUpdateEnabled=false` and
+top-level `check_for_update_on_startup=false` in `config.toml`. The subprocess
+guard rejects native execution without either setting, as well as access to the
+default native home/socket. `isolated_home(..., config=...)` writes fixture
+configuration together with the TUI setting, so provider configuration cannot
+overwrite it accidentally. Tests seed a newer cached release and enable checks
+in a trusted project override: an unmodified remote TUI shows the update notice,
+while mv2's launch argument suppresses it on promptless resume. Disabling the daemon updater
+prevents disposable tests from leaving scheduled helpers behind; daemon stop alone
+does not stop the updater. The TUI setting separately suppresses update checks and
+interactive update prompts in Codex 0.159.3 and 0.160.0.
+
+The Codex adapter adds `-c check_for_update_on_startup=false` before `--` on
+spawn and resume, including wake prompts, plain mode, bridge mode and plain
+fallbacks. This suppresses unattended startup update dialogs and banners even if
+the user's configuration enables them. Remote TUI mode honors this local setting;
+the relay does not move it into the thread request like `developer_instructions`.
+If the applicable `args`, `spawn_args` or `resume_args` already sets that key with
+`-c` or `--config`, its value is retained and no default is added. Both separated
+and joined forms (such as `--config=check_for_update_on_startup=true`) are recognized.
+Prompt text after `--` is never treated as configuration.
+
+Users can explicitly restore native update prompts with
+`["-c", "check_for_update_on_startup=true"]` in `settings.args`, or just one
+mode's argument list. With that opt-in, ordinary resumes and promptless spawns
+can wait for terminal input before binding; a bridge stays `starting` and
+`--wait` can time out. Native configuration files and the shared daemon's
+separate automatic-update policy are unchanged.
 
 A daemon already running from a deleted directory cannot be repaired by reusing
 its socket. Codex 0.159.3 returns `config/read` error -32603, `failed to resolve
@@ -675,10 +700,27 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
+With the bridge, a universe's `compaction.json` can enable tree compaction for
+the Claude harness ([compaction](compaction.md)). The launch then sets
+`MV2_COMPACTION=1` and adds a `PreCompact` command hook. The mod answers the
+session's `/compact` with mv2's compacted turns from `python -m
+multiverse.compaction install`, showing progress and every error in the status
+line, as notices and as toasts, and skips with the reason when it cannot. The
+`PreCompact` hook refuses Claude's own compaction should the mod not answer, so a
+session never falls back to it. The mod's `Stop` hook starts the background tree
+builder with the time the turn ended. The adapter's `compaction(session)` returns
+the Claude implementation of the compaction protocol (`claude/compaction/`).
+A `compaction.json` that cannot be used (invalid, or builder settings Claude
+rejects) never stops a launch: that launch runs without compaction, without the
+`PreCompact` guard, and records why as its `native_mode` fallback, which the
+inspector shows. The `compaction` capability then reports the error, and
+`mv2 doctor` names the file; `mv2 compaction` refuses until it is fixed.
+
 Claude usage is measured from the session's own transcript under Claude's
 `projects` directory, plus any subagent transcripts: each response's recorded
 usage, counted once per response ID. It works with or without the bridge. The
-adapter reads each transcript once, then only what was appended.
+adapter reads each transcript once, then only what was appended. A row that a
+compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
 confirms delivery. The mod was tested against Claude Code 2.1.287; the mod API

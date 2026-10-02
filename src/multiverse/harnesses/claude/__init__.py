@@ -9,6 +9,13 @@ registers the `claude-mod-v1` bridge for its launch and reports the session's
 status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
+
+With the bridge, a universe can opt this harness into tree compaction
+(`compaction.json`; see multiverse.compaction). The launch then tells the mod
+to answer the session's `/compact` with mv2's compacted conversation, and adds
+a PreCompact hook that refuses Claude's own compaction should the mod ever fail
+to answer. `compaction(session)` returns the protocol implementation in
+`compaction/`.
 """
 from dataclasses import asdict, replace
 import hashlib
@@ -32,6 +39,10 @@ CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
+USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
+# Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
+# it). Runs with the agent's Python, like the mod's reports; a missing one blocks too.
+COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
 def claude_home():
@@ -56,7 +67,9 @@ class Transcript:
     """Usage recorded in one transcript file, read once and then as it grows.
 
     Claude writes one record per content block of a response, each with the
-    response's usage, so usage is counted once per response ID.
+    response's usage, so usage is counted once per response ID. A compaction
+    that keeps a row stores it again with zero usage; that copy never replaces
+    the response's real usage.
     """
 
     def __init__(self, path):
@@ -77,6 +90,8 @@ class Transcript:
                 continue
             message = record.get('message') if isinstance(record, dict) and record.get('type') == 'assistant' else None
             if isinstance(message, dict) and isinstance(message.get('usage'), dict) and message.get('id'):
+                if message['id'] in self.responses and not any(counted(message['usage'], key) for key in USAGE_KEYS):
+                    continue
                 self.responses[message['id']] = message['usage']
                 self.last = record.get('timestamp') or self.last
         self.offset += end
@@ -143,12 +158,64 @@ class ClaudeAdapter(ConfiguredAdapter):
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
-        settings = json.dumps({'crossSessionInbound': 'accept'})
+        settings = {'crossSessionInbound': 'accept'}
+        environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
+        native_mode = command.native_mode
+        root = self._universe(context.values.get('agent_dir'))
+        compaction, problem = self.compaction_state(root) if root else (None, None)
+        if compaction is not None and compaction.enabled:
+            settings['hooks'] = {'PreCompact': [{'hooks': [{'type': 'command', 'command': COMPACTION_GUARD}]}]}
+            environment['MV2_COMPACTION'] = '1'
+        elif problem:
+            # An unusable compaction.json never stops a launch: this one runs without compaction.
+            native_mode = {'policy': 'inbox_bridge', 'mode': 'bridge without compaction',
+                           'fallback_reason': f'Launched without compaction: {problem}'}
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', settings, *command.argv[1:]),
+                  '--settings', json.dumps(settings), *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
-            environment={**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'})
+            environment=environment, native_mode=native_mode)
+
+    @staticmethod
+    def _universe(agent_dir):
+        """The universe an agent directory belongs to, or None outside one."""
+        if not agent_dir:
+            return None
+        directory = Path(agent_dir)
+        root = directory.parent.parent.parent
+        if directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
+            return None
+        return root
+
+    @staticmethod
+    def compaction_defaults():
+        """Claude's builder settings where compaction.json gives none."""
+        from .compaction import BUILDER_DEFAULTS
+        return dict(BUILDER_DEFAULTS)
+
+    def compaction_state(self, root, loaded=None):
+        """(settings, None) for this harness in the universe at `root`, or (None, why its compaction.json cannot be used).
+
+        `loaded` checks a parsed file (config.Config) before it is written
+        instead of the one on disk. Launches, capabilities and `mv2 doctor` use
+        it; `mv2 compaction` refuses loudly instead.
+        """
+        from ...compaction import config
+        from .compaction import BUILDER_DEFAULTS, check_builder
+        try:
+            settings = (loaded or config.load(root)).for_harness(self.name, BUILDER_DEFAULTS)
+        except ValueError as error:
+            return None, str(error)
+        try:
+            check_builder(settings.builder)
+        except ValueError as error:
+            return None, f'{Path(root) / config.FILE}: harnesses.{self.name}.builder: {error}'
+        return settings, None
+
+    def compaction(self, session):
+        """The compaction protocol for this exact session (multiverse.compaction.protocol)."""
+        from .compaction import ClaudeCompaction
+        return ClaudeCompaction(self, session)
 
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
@@ -166,7 +233,24 @@ class ClaudeAdapter(ConfiguredAdapter):
             result['ask'] = Capability('supported', mechanism='claude-model-fork')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
+        result['compaction'] = self._compaction_capability(session)
         return result
+
+    def _compaction_capability(self, session):
+        if not getattr(self, 'settings', {}).get('inbox_bridge'):
+            return Capability('unavailable', 'Needs the multiverse mod: set "inbox_bridge": true in harness.json')
+        root = self._universe(Path(session.session_file).parent if session.session_file else None)
+        if root is None:
+            return Capability('unavailable', 'Not an agent of a universe')
+        settings, problem = self.compaction_state(root)
+        if problem:
+            return Capability('error', f'{problem}; launches run without compaction')
+        if not settings.enabled:
+            return Capability('unavailable', f'Off for {self.name} in compaction.json')
+        fallback = (session.native_mode or {}).get('fallback_reason')
+        if session.state == 'running' and fallback:
+            return Capability('error', f'{fallback}; restart the agent to use compaction')
+        return Capability('supported', mechanism='claude-mod-session-compact')
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""

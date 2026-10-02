@@ -73,16 +73,15 @@ class CodexTimingTest(TerminalBase):
         thread.start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
-        native_home = isolated_home(self.work / 'native-home')
-        managed = native_home / 'packages/standalone/current/codex'
-        managed.parent.mkdir(parents=True)
-        managed.symlink_to(Path(shutil.which('codex')).resolve())
-        (native_home / 'config.toml').write_text(
+        native_home = isolated_home(self.work / 'native-home', config=
             'model = "gpt-6-sol"\nmodel_provider = "mv2-test"\n'
             '[model_providers.mv2-test]\nname = "Offline test"\n'
             f'base_url = "http://127.0.0.1:{server.server_port}/v1"\n'
             'wire_api = "responses"\nrequires_openai_auth = false\n'
             f'[projects.{json.dumps(str(work))}]\ntrust_level = "trusted"\n')
+        managed = native_home / 'packages/standalone/current/codex'
+        managed.parent.mkdir(parents=True)
+        managed.symlink_to(Path(shutil.which('codex')).resolve())
         path = self.root / 'harnesses/codex/harness.json'
         spec = read(path)
         spec['settings'] = {'inbox_bridge': True, 'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}

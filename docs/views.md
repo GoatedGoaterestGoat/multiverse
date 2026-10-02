@@ -102,3 +102,21 @@ hierarchy remain usable. Limits keep local views small: 32 widgets, 16 columns,
 500 rows per table, 100 artifacts per widget, 32 KiB per Markdown block, and
 2,000 characters per cell/description. Invalid JSON displays a configuration
 error with the default hierarchy columns. Missing configuration uses defaults.
+
+## Compaction settings
+
+`c` opens the tree-compaction settings of the selected scope: the `compaction.json` at
+its root, and the scope's agents. One screen edits the shared settings (`enabled`, the
+default scheduler with its budget, image mode and parameters) and a section per
+harness (its own `enabled`, default scheduler, and tree builder settings). A blank
+field means "use the default", which each field shows as its placeholder. A save
+writes the file as it was with only the edited fields changed; clearing a field deletes
+its key. Ctrl+Enter saves, Escape closes and discards, and a rejected value is shown on
+the screen's error line without closing it. If `compaction.json` cannot be used, the
+reason shows at the top.
+
+Enter on an agent in the table opens its screen: status, whether it follows the default
+scheduler or has its own, and a per-turn plan preview (share, raw or summarized, tree
+built or missing) that follows the fields as they are edited, without saving. Ctrl+Enter
+saves the scheduler or returns the agent to the default. See [compaction.md](compaction.md)
+for what the settings mean. The key is not in the footer, which is full.

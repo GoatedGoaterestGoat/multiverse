@@ -13,7 +13,7 @@ from .tools._common import add_universe, output
 COMMANDS = ("init", "subverse", "list", "catalog", "command", "spawn", "resume",
             "stop", "kill", "move", "remove", "trash", "attach", "inspect", "send", "inbox", "report",
             "session-bind", "capabilities", "deliver", "native-status", "ask", "get-usage", "tui", "doctor",
-            "refresh")
+            "refresh", "compaction")
 
 
 # Former names that keep working for agents launched with older prompts.

@@ -3,6 +3,7 @@
 The provider is a local deterministic HTTP fixture; no credentials or paid calls.
 """
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -21,7 +22,7 @@ from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
 from multiverse.store import inbox, read, write
 from multiverse.tools import send
-from native_safety import isolated_home
+from native_safety import check_spawn, isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -71,18 +72,25 @@ class CodexDaemonTest(TerminalBase):
         threading.Thread(target=provider.serve_forever, daemon=True).start()
         self.addCleanup(provider.server_close)
         self.addCleanup(provider.shutdown)
-        home = isolated_home(self.work / 'codex-home')
-        managed = home / 'packages/standalone/current/codex'
-        managed.parent.mkdir(parents=True)
-        managed.symlink_to(Path(shutil.which('codex')).resolve())
         workspaces = [self.work / 'project-a', self.work / 'project-b']
         for work in workspaces:
             work.mkdir()
-        (home / 'config.toml').write_text('model="gpt-6-sol"\nmodel_provider="offline"\n'
+            (work / '.codex').mkdir()
+            # Override the guard-required home setting. The launch argument,
+            # not the isolated home's config, must suppress the update dialog.
+            (work / '.codex/config.toml').write_text('check_for_update_on_startup=true\n')
+        home = isolated_home(self.work / 'codex-home', config='model="gpt-6-sol"\nmodel_provider="offline"\n'
             '[shell_environment_policy]\nexclude=["USER_EXCLUDED"]\n'
             '[model_providers.offline]\nname="Offline"\nwire_api="responses"\nrequires_openai_auth=false\n'
             f'base_url="http://127.0.0.1:{provider.server_port}/v1"\n' +
             ''.join(f'[projects.{json.dumps(str(work))}]\ntrust_level="trusted"\n' for work in workspaces))
+        managed = home / 'packages/standalone/current/codex'
+        managed.parent.mkdir(parents=True)
+        managed.symlink_to(Path(shutil.which('codex')).resolve())
+        # A known newer release must not block a promptless resume. Seed the
+        # cache so this regression does not depend on a live update lookup.
+        write(home / 'version.json', {'latest_version': '9999.0.0',
+              'last_checked_at': datetime.now(timezone.utc).isoformat(), 'dismissed_version': None})
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
                'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '', 'http_proxy': '', 'https_proxy': '', 'all_proxy': '',
                'NO_PROXY': '127.0.0.1,localhost', 'USER_EXCLUDED': 'must-remain-excluded', 'MV2_FOREIGN_AGENT': 'must-not-leak', 'CLAUDECODE': 'foreign'}
@@ -97,6 +105,20 @@ class CodexDaemonTest(TerminalBase):
         self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)
         self.assertEqual(len({x['socketPath'] for x in started}), 1)
         endpoint = started[0]['socketPath']
+        # Positive control: this exact home/workspace/remote endpoint shows the
+        # cached update without mv2's argument. Packaged CLIs show a dialog;
+        # binaries without a detected updater show a banner. No turn is started.
+        probe_argv = ['codex', '--cd', str(workspaces[0]), '--remote', 'unix://' + endpoint]
+        check_spawn(probe_argv, env)
+        probe_env = ['CODEX_HOME=' + str(home), 'CODEX_SQLITE_HOME=' + str(home)]
+        probe = self.backend.create('update-prompt-probe', workspaces[0], ['env', *probe_env, *probe_argv])
+        try:
+            until(lambda: 'Update available' in self.backend.run('capture-pane', '-p', '-t', probe['pane']), seconds=15)
+        except AssertionError:
+            print('Update prompt probe:', self.backend.run('capture-pane', '-p', '-t', probe['pane']))
+            raise
+        finally:
+            self.backend.run('kill-pane', '-t', probe['pane'])
         def thread_name(root, agent_id):
             _, _, session, _ = native.context(root, agent_id)
             def plan():
@@ -202,6 +224,8 @@ class CodexDaemonTest(TerminalBase):
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
             until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
+            pane = agents.runtime(agents.directory(roots[0], resumed['id']))['tmux']['pane']
+            self.assertNotIn('Update available', self.backend.run('capture-pane', '-p', '-t', pane))
             # Work on the shared daemon survives losing its TUI. Stop still
             # cancels only this exact thread after its pane has disappeared.
             message = send.run(roots[1], agent=results[1]['id'], text='STOP_ACTIVE_WORK_ORPHAN', delivery='follow-up')
@@ -231,7 +255,8 @@ class CodexDaemonTest(TerminalBase):
             self.assertFalse(Path(endpoint).exists(), 'Failed send must not restart the daemon')
             print('Shared daemon evidence:', json.dumps({'startup_statuses': [s['status'] for s in started],
                   'universes': len(roots), 'unique_agent_ids': len({r['id'] for r in results}),
-                  'socket': endpoint, 'outage_delivery': failed['state']}))
+                  'socket': endpoint, 'outage_delivery': failed['state'],
+                  'update_check': 'project enables; raw remote shows update; mv2 resume suppresses it'}))
         except Exception:
             for root, result in pairs:
                 directory = agents.directory(root, result['id'])
