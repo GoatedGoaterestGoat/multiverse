@@ -1,10 +1,12 @@
 """A Claude Code session transcript as turns of leaves, before any compaction.
 
 Ported from Multiverse v1's parser (multiverse-plugin/vendor/compaction/parser.py)
-as v1's compaction_forest() and default preprocessing use it: one leaf per row
-(`thinking`, `asst_text`, `tool_use`, `tool_result`, `user_text`), a tool call
-and its result as separate leaves, and v1's token counts (about four characters
-a token, images by their pixel size). Changes for mv2:
+as v1's compaction_forest() uses it: one leaf per row (`thinking`, `asst_text`,
+`tool_use`, `tool_result`, `user_text`) and v1's token counts (about four
+characters a token, images by their pixel size). Then v1's preprocessing with
+`auto_merge_tool_pairs` on: each tool call and its result become one
+`tool_exchange` leaf at the call's place, so no merge can separate them. Changes
+for mv2:
 
 - History crosses compactions. `/compact` keeps every earlier row in the same
   file and adds a boundary row whose `logicalParentUuid` names the row before
@@ -35,8 +37,8 @@ SKIP_COMMANDS = frozenset({'/context', '/model', '/effort', '/compact', '/cost',
 COMMAND_NAME = re.compile(r'<command-name>(/[\w:-]+)</command-name>')
 # Claude also stores the command as typed, a prompt of its own: "/compact" or "/compact keep the plan".
 TYPED_COMMAND = re.compile(r'\s*(/[\w:-]+)(?:\s|$)')
-# Tools whose results Claude itself may evict under pressure: their output does
-# not earn a turn a bigger share of the budget (it is still summarized).
+# Tools whose results Claude itself may evict under pressure: an unpaired result
+# of one does not earn a turn a bigger share of the budget (v1's allocation weight).
 EVICTABLE = frozenset({'Read', 'Bash', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Edit', 'Write', 'MultiEdit',
                        'NotebookEdit', 'BashOutput'})
 
@@ -291,9 +293,46 @@ def thinking_estimates(rows) -> dict[str, int]:
     return estimates
 
 
+def _summarize_result(text: str, is_error: bool, limit: int = 50) -> str:
+    """v1's one-line outcome of a tool result, for a tool exchange's preview."""
+    if not text:
+        return '<empty result>'
+    flat = text.strip()
+    if is_error:
+        first = flat.splitlines()[0] if flat else ''
+        return 'error: ' + (first if len(first) <= limit else first[:limit - 3] + '...')
+    lines = flat.count('\n') + 1
+    if lines == 1:
+        return flat if len(flat) <= limit else flat[:limit - 3] + '...'
+    return f'ok ({lines} lines, {estimate_tokens(flat)} tok)'
+
+
+def pair_tools(leaves: list[Leaf]) -> list[Leaf]:
+    """v1's auto_merge_tool_pairs: each call and its result as one `tool_exchange` leaf at the call's place."""
+    results = {leaf.content.get('tool_use_id'): leaf for leaf in leaves
+               if leaf.kind == 'tool_result' and leaf.content.get('tool_use_id')}
+    used, paired = set(), []
+    for leaf in leaves:
+        result = results.get(leaf.content.get('tool_use_id')) if leaf.kind == 'tool_use' else None
+        if result is not None:
+            used.add(id(result))
+            name, arguments = leaf.content.get('name', '?'), leaf.content.get('input', {})
+            text, error = result.content.get('text', '') or '', bool(result.content.get('is_error'))
+            preview = f'{name}({_short_args(arguments, 60)}) -> {_summarize_result(text, error)}'
+            paired.append(Leaf('tool_exchange', (*leaf.refs, *result.refs), leaf.tokens + result.tokens,
+                               preview if len(preview) <= 120 else preview[:117] + '...',
+                               {'tool_use_id': leaf.content.get('tool_use_id'), 'name': name, 'input': arguments,
+                                'result_text': text, 'is_error': error},
+                               images=leaf.images + result.images))
+        elif not (leaf.kind == 'tool_result' and id(leaf) in used):
+            paired.append(leaf)
+    return paired
+
+
 def discount_evictable(leaves: list[Leaf]) -> None:
-    """Give the results of evictable tools no weight in a scheduler's shares (v1's allocation weight)."""
-    names = {leaf.content.get('tool_use_id'): leaf.content.get('name') for leaf in leaves if leaf.kind == 'tool_use'}
+    """v1's allocation weight: an unpaired result of an evictable tool counts for nothing."""
+    names = {leaf.content.get('tool_use_id'): leaf.content.get('name') for leaf in leaves
+             if leaf.kind in ('tool_use', 'tool_exchange')}
     for leaf in leaves:
         if leaf.kind == 'tool_result' and names.get(leaf.content.get('tool_use_id')) in EVICTABLE:
             leaf.weight = 0
@@ -348,6 +387,7 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
     elif orphans:
         result.append(Turn('turn-0', None, orphans))
     for turn in result:
+        turn.leaves = pair_tools(turn.leaves)
         discount_evictable(turn.leaves)
         if turn.id in commands:
             turn.dropped = f'the display-only command {commands[turn.id]}'

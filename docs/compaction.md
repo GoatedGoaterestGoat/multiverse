@@ -19,8 +19,11 @@ is the first harness that supports it.
 
 - **Turns and leaves.** A turn is one prompt and everything the agent did until
   the next prompt. Its compactable content is a list of leaves, as v1 reads
-  them: thinking blocks, text, messages from you, tool calls and tool results
-  (a call and its result are separate leaves). The prompt itself is always
+  them: thinking blocks, text, messages from you, and tool exchanges. A tool
+  call and its result are always one leaf (v1's `auto_merge_tool_pairs`), so
+  no merge can separate them; left apart, Sonnet split about one pair in
+  twelve in v1's cached trees, nearly always right between a call and its
+  result. The prompt itself is always
   kept verbatim. A turn the harness marks as not conversation (for Claude, a
   display-only command such as `/compact`, `/context` or `/model`) is left out
   entirely: never summarized, never kept.
@@ -41,8 +44,8 @@ is the first harness that supports it.
     ones by size. Unlike v1, the last `k` (and their prompt images) stay raw
     even when they exceed the budget, so a budget of 0 summarizes every earlier
     turn to its root.
-  - `proportional`: by turn size; bulky output of `Read`, `Bash`, `Grep` and similar
-    tools does not earn a bigger share.
+  - `proportional`: by turn size, tool output included (as in v1 with tool
+    pairs joined).
   - `uniform`: equal shares.
   - `recency_boosted`: proportional, with recent turns weighted up to
     `recency_ratio` times, halving over `recency_half_life` turns.
@@ -136,11 +139,11 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
 - **`/compact`** runs the mod's `session.compact` hook, which returns the
   compacted conversation in place of the old turns, every message built from
   the transcript's content: prompts and your messages as user text, summaries
-  as plain first-person text (without v1's "Compacted summary" label), tool
-  calls and results as tool calls and results. As in v1, a tool call whose
-  result was summarized is answered with "(result summarized)", and a result
-  whose call was summarized gets a `summarized_tool` call; every call is
-  answered before anything else follows it. Claude writes a boundary, those
+  as plain first-person text (without v1's "Compacted summary" label), and
+  each tool exchange as its call followed at once by its result. A call or
+  result left unpaired (a session cut off mid-call) gets v1's placeholder:
+  "(result summarized)" for a missing result, a `summarized_tool` call for a
+  missing call. Claude writes a boundary, those
   rows and the `/compact` command's own rows, and re-announces its tool, agent,
   MCP and skill listings on the next turn. While it runs, the status line shows
   a progress bar, and every error and retry also appears as a transcript

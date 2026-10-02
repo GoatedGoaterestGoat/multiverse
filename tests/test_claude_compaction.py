@@ -186,13 +186,13 @@ class TranscriptTest(Fixture):
         self.assertEqual([t.prompt.content['text'] for t in turns], ['First task', 'Second', 'Third', 'Fourth', 'Fifth'])
         self.assertEqual([t.dropped for t in every if t.dropped], ['the display-only command /compact'] * 2)
         first = turns[0]
+        # A call and its result are one leaf, so no merge can separate them (v1's auto_merge_tool_pairs).
         self.assertEqual([leaf.kind for leaf in first.leaves],
-                         ['thinking', 'asst_text', 'tool_use', 'tool_result', 'thinking', 'thinking', 'asst_text'])
-        self.assertEqual([first.leaves[2].refs, first.leaves[3].refs], [(ids['use']['uuid'],), (ids['result']['uuid'],)])
+                         ['thinking', 'asst_text', 'tool_exchange', 'thinking', 'thinking', 'asst_text'])
+        self.assertEqual(first.leaves[2].refs, (ids['use']['uuid'], ids['result']['uuid']))
+        self.assertEqual(first.leaves[2].preview, 'Bash(ls) -> a.txt b.txt')
         # Each response's thinking estimate (output less visible text) is shared by signature length.
-        self.assertEqual([first.leaves[i].tokens for i in (0, 4, 5)], [298, 124, 374])
-        # v1's allocation weight leaves out the output of tools Claude may evict.
-        self.assertEqual((first.leaves[3].weight, first.weight), (0, first.tokens - first.leaves[3].tokens))
+        self.assertEqual([first.leaves[i].tokens for i in (0, 3, 4)], [298, 124, 374])
         recorded = Store(self.agent_dir).installed()
         self.assertEqual(len(recorded), 1)
         self.assertEqual([row['uuid'] for row in recorded[0]['rows']], [ids['built']['uuid'], ids['copy']['uuid']])
@@ -248,7 +248,7 @@ class TranscriptTest(Fixture):
         r.assistant('m2', {'type': 'text', 'text': 'done'}, 3)
         turns = transcript.turns(r.rows, set())
         self.assertEqual([leaf.preview for leaf in turns[0].leaves],
-                         ['Bash(c0)', 'Bash(c1)', 'Bash(c2)', 'out2', 'out0', 'out1', 'done'])
+                         ['Bash(c0) -> out0', 'Bash(c1) -> out1', 'Bash(c2) -> out2', 'done'])
 
     def test_rewound_branches_and_sidechains_are_left_out(self):
         r = Rows()
@@ -291,7 +291,19 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(payload['sources'], [{'stands_for': None}] * 5)
         self.assertEqual((payload['count'], payload['built'], payload['dropped']), (5, 5, 1))
 
-    def test_a_call_or_result_whose_partner_was_summarized_gets_v1s_placeholder(self):
+    def test_a_tool_exchange_is_delivered_as_its_call_then_its_result(self):
+        from multiverse.compaction.model import Turn
+        exchanges = [Leaf('tool_exchange', (f'u{n}', f'r{n}'), 9, content={
+            'tool_use_id': n, 'name': 'Bash', 'input': {'command': n}, 'result_text': f'out {n}', 'is_error': n == 'b'})
+            for n in 'ab']
+        messages = render.render([Turn('t', None, exchanges)], {'t': exchanges})['messages']
+        self.assertEqual(messages, [
+            {'role': 'assistant', 'text': '', 'toolUses': [{'tool_use_id': 'a', 'tool': 'Bash', 'input': {'command': 'a'}}]},
+            {'role': 'user', 'text': '', 'toolUses': [], 'toolResults': [{'tool_use_id': 'a', 'text': 'out a', 'isError': False}]},
+            {'role': 'assistant', 'text': '', 'toolUses': [{'tool_use_id': 'b', 'tool': 'Bash', 'input': {'command': 'b'}}]},
+            {'role': 'user', 'text': '', 'toolUses': [], 'toolResults': [{'tool_use_id': 'b', 'text': 'out b', 'isError': True}]}])
+
+    def test_an_unpaired_call_or_result_gets_v1s_placeholder(self):
         from multiverse.compaction.model import Turn
         use = Leaf('tool_use', ('use',), 10, content={'tool_use_id': 'tu1', 'name': 'mcp:odd name', 'input': {}})
         result = Leaf('tool_result', ('res',), 20, content={'tool_use_id': 'tu1', 'text': 'a b', 'is_error': False})
@@ -303,7 +315,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual([describe(m) for m in results], ['I listed.', 'summarized_tool', 'result:a b', 'done'])
         self.assertEqual(results[1]['toolUses'][0]['tool_use_id'], 'tu1')
 
-    def test_every_call_of_a_parallel_batch_is_answered_before_anything_follows(self):
+    def test_unpaired_calls_of_a_batch_are_answered_before_anything_follows(self):
         from multiverse.compaction.model import Turn
         uses = [Leaf('tool_use', (f'u{n}',), 5, content={'tool_use_id': n, 'name': 'Bash', 'input': {}}) for n in 'abc']
         results = [Leaf('tool_result', (f'r{n}',), 5, content={'tool_use_id': n, 'text': n, 'is_error': False}) for n in 'cab']
@@ -382,22 +394,23 @@ class MergeTest(Fixture):
         self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 3, 'user', *['assistant'] * 3,
                                          'user', 'assistant'])
         self.assertTrue(call['thinking'])
-        self.assertIn('Current frontier (7 entries):', call['instruction'])
-        self.assertIn('  [0] thinking\n  [1] asst_text | "I will look"\n  [2] tool_use | "Bash(ls)"\n'
-                      '  [3] tool_result | "a.txt b.txt"', call['instruction'])
+        self.assertIn('Current frontier (6 entries):', call['instruction'])
+        self.assertIn('  [0] thinking\n  [1] asst_text | "I will look"\n  [2] tool_exchange | "Bash(ls) -> a.txt b.txt"\n'
+                      '  [3] thinking', call['instruction'])
         work = Store(self.agent_dir).directory / 'work'
         self.assertEqual(list((self.config / 'projects' / merge.project_slug(work.resolve())).glob('*.jsonl')), [])
         later = [Node(0, turn.leaves[:2], 'I looked.', 3), *turn.leaves[2:]]
         source.merge(turn, later, builder)
         call = self.calls()[-1]
         # Later steps: the prompt, one assistant row per frontier entry (thinking verbatim), the context switch.
-        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 6, 'user', 'assistant'])
-        self.assertEqual(call['assistant'][:5], [
-            '**Compacted summary (2 entries):**\n\nI looked.', '**Tool call: `Bash`**\n\n```json\n{\n  "command": "ls"\n}\n```',
-            '**Tool result:**\n\n```\na.txt b.txt\n```', 'thinking', 'thinking'])
+        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 5, 'user', 'assistant'])
+        self.assertEqual(call['assistant'][:4], [
+            '**Compacted summary (2 entries):**\n\nI looked.',
+            '**Tool call: `Bash`**\n\n```json\n{\n  "command": "ls"\n}\n```\n\n**Result:**\n\n```\na.txt b.txt\n```',
+            'thinking', 'thinking'])
         self.assertTrue(call['thinking'])
         self.assertIn('[0] summary node (covers 2 leaves) | "I looked."', call['instruction'])
-        self.assertIn('[3] thinking', call['instruction'])
+        self.assertIn('[2] thinking', call['instruction'])
 
     def test_a_refused_merge_is_retried_unchanged(self):
         r, _ = conversation()

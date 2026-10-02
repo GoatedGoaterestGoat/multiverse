@@ -2,8 +2,8 @@
 
 Each turn becomes its prompt, then its frontier in order, every message built
 from the transcript's content: prompts and messages from you as user text,
-summaries and text as assistant text, a tool call as an assistant tool use and
-a result as a user tool result. Nothing is kept by handle. Claude 2.1.287
+summaries and text as assistant text, and a tool exchange as an assistant tool
+use followed at once by its user tool result. Nothing is kept by handle. Claude 2.1.287
 stores a kept row again under a new id but with its old links: a kept tool
 result keeps its `sourceToolAssistantUUID` and so hangs off the call from before
 the compaction, and a kept response keeps its `message.id`, so loading the
@@ -17,12 +17,12 @@ budget left out; a tool result's images are dropped, as in v1). Every built
 message holds exactly one block, so each becomes exactly one stored row (the
 install record counts on it).
 
-As in Multiverse v1's renderer (render_frontier_as_messages), a tool call whose
-result was summarized away is answered with "(result summarized)", and a result
-whose call was summarized away gets a `summarized_tool` call before it. Unlike
-v1, every call is answered before anything else follows it: when a summary
-splits a batch of parallel calls, it waits until the batch's results that are
-still raw have followed their calls.
+A call and its result normally form one leaf, so a merge never separates them.
+A call or result left unpaired (a session cut off mid-call) is handled as in
+Multiverse v1's renderer (render_frontier_as_messages): a call whose result is
+missing is answered with "(result summarized)", and a result whose call is
+missing gets a `summarized_tool` call before it; every call is answered before
+anything else follows it.
 """
 import re
 
@@ -79,7 +79,11 @@ def render(turns, frontiers) -> dict:
         result(entry.content.get('tool_use_id'), entry.content.get('text', '') or '', bool(entry.content.get('is_error')))
 
     def content(entry):
-        if isinstance(entry, Leaf) and entry.kind == 'tool_result':  # its call was summarized away
+        if isinstance(entry, Leaf) and entry.kind == 'tool_exchange':
+            call(entry.content.get('tool_use_id'), _tool_name(entry.content.get('name')), entry.content.get('input') or {})
+            result(entry.content.get('tool_use_id'), entry.content.get('result_text', '') or '',
+                   bool(entry.content.get('is_error')))
+        elif isinstance(entry, Leaf) and entry.kind == 'tool_result':  # its call was summarized away
             call(entry.content.get('tool_use_id'), PLACEHOLDER_TOOL, {})
             deliver(entry)
         elif isinstance(entry, Node):

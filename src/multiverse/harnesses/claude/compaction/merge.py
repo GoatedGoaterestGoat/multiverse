@@ -152,6 +152,13 @@ def _leaf_text(leaf) -> str:
         text = content.get('text', '')
         fence = _fence(text)
         return f'**Tool result:**\n\n{fence}\n{text}\n{fence}'
+    if leaf.kind == 'tool_exchange':
+        arguments = content.get('input', {})
+        rendered = json.dumps(arguments, indent=2) if isinstance(arguments, (dict, list)) else str(arguments)
+        result = content.get('result_text', '')
+        marker = ' *(error)*' if content.get('is_error') else ''
+        return (f"**Tool call: `{content.get('name', '?')}`**{marker}\n\n{_fence(rendered)}json\n{rendered}\n"
+                f"{_fence(rendered)}\n\n**Result:**\n\n{_fence(result)}\n{result}\n{_fence(result)}")
     return f'**[{leaf.kind}]** {content!r}'
 
 
