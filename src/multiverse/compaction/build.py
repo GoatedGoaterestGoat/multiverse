@@ -8,6 +8,8 @@ single root covers the turn. Two kinds of retry apply:
   to `max` seconds. Running out of these fails the turn.
 - Any other failed merge (a refusal, an unusable reply, a crash) is retried at
   once, from the frontier reached so far, up to `turn_retries` times per turn.
+- A turn still refused after those retries continues with `fallback_model`
+  (when set), from the frontier reached, with its retries counted afresh.
 
 Every error is reported, including those that a retry later recovers from.
 Turns are built by at most `concurrency` workers; each takes the turn's lock,
@@ -15,6 +17,7 @@ so two processes never build the same turn, and a caller that needs a turn
 another process is building can wait for it.
 """
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 import json
 import sys
 import threading
@@ -99,13 +102,13 @@ class Build:
         if self.cancel.is_set():
             raise Cancelled()
 
-    def _merge(self, turn: Turn, frontier):
+    def _merge(self, turn: Turn, frontier, builder: Builder):
         attempt = 0
-        limits = self.settings.rate_limit
+        limits = builder.rate_limit
         while True:
             self._check()
             try:
-                return self.source.merge(turn, frontier, self.settings)
+                return self.source.merge(turn, frontier, builder)
             except MergeError as error:
                 self._check()
                 if error.kind != 'rate_limit':
@@ -125,12 +128,13 @@ class Build:
         frontier = list(turn.leaves)
         merges, next_id, failures, steps = [], 0, 0, 0
         limit = 3 * len(frontier)
+        builder = self.settings
         while len(frontier) > 1:
             self._check()
             if steps >= limit:
                 raise BuildFailed(turn.id, f'no root after {steps} merges')
             try:
-                merge = self._merge(turn, frontier)
+                merge = self._merge(turn, frontier, builder)
                 if (not 0 <= merge.start < merge.end <= len(frontier) or merge.end - merge.start < 2
                         or not merge.summary.strip()):
                     raise MergeError('invalid', f'the model chose [{merge.start}, {merge.end}) of a '
@@ -141,6 +145,12 @@ class Build:
                 retrying = error.kind != 'usage_limit' and failures <= self.settings.turn_retries
                 self.reporter.error(turn, str(error), kind=error.kind, retrying=retrying, attempt=failures,
                                     attempts=self.settings.turn_retries)
+                fallback = builder.fallback_model
+                if not retrying and error.kind == 'refused' and fallback and builder.model != fallback:
+                    self.reporter.info(f'turn {turn.id[:8]}: {builder.model} refused {failures} times; '
+                                       f'continuing this turn with {fallback}')
+                    builder, failures = replace(builder, model=fallback), 0
+                    continue
                 if not retrying:
                     raise BuildFailed(turn.id, f'{error.kind}: {error}') from error
                 continue
@@ -148,7 +158,7 @@ class Build:
             node = Node(next_id, frontier[merge.start:merge.end], summary, estimate_tokens(summary))
             frontier = [*frontier[:merge.start], node, *frontier[merge.end:]]
             merges.append({'step': steps, 'start': merge.start, 'end': merge.end, 'node': next_id,
-                           'frontier': len(frontier)})
+                           'frontier': len(frontier), 'model': builder.model})
             next_id += 1
             steps += 1
             self.reporter.progress(phase='building', turn=turn.id, turn_number=position, turns=self.total,

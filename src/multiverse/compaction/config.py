@@ -7,7 +7,8 @@ for one harness, by the name of its directory under `harnesses/`:
     {"schema": 1,
      "enabled": false,
      "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0},
-     "builder": {"background": true, "model": "claude-sonnet-4-6", "effort": "medium",
+     "builder": {"background": true, "model": "sonnet", "fallback_model": "claude-sonnet-4-6",
+                 "effort": "medium",
                  "concurrency": 1, "turn_retries": 3,
                  "rate_limit": {"claude_max_retries": 3, "retries": 10,
                                 "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}},
@@ -82,7 +83,9 @@ class RateLimit:
 @dataclass(frozen=True)
 class Builder:
     background: bool = True
-    model: str = 'claude-sonnet-4-6'
+    model: str = 'sonnet'
+    # Takes over a turn that `model` still refuses after its retries; None to fail the turn instead.
+    fallback_model: str | None = 'claude-sonnet-4-6'
     effort: str = 'medium'
     concurrency: int = 1
     turn_retries: int = 3
@@ -167,13 +170,18 @@ def _settings(value, where) -> Settings:
         raise ValueError(f'{where}: enabled must be true or false')
     default = parse_schedule(value.get('default', {}), f'{where}: default')
     builder = _fields(value.get('builder', {}),
-                      ('background', 'model', 'effort', 'concurrency', 'turn_retries', 'rate_limit'), f'{where}: builder')
+                      ('background', 'model', 'fallback_model', 'effort', 'concurrency', 'turn_retries', 'rate_limit'),
+                      f'{where}: builder')
     background = builder.get('background', True)
     if not isinstance(background, bool):
         raise ValueError(f'{where}: builder.background must be true or false')
-    model = builder.get('model', 'claude-sonnet-4-6')
+    model = builder.get('model', 'sonnet')
     if not isinstance(model, str) or not model or model.startswith('-') or '\0' in model:
         raise ValueError(f'{where}: builder.model must name a model')
+    fallback = builder.get('fallback_model', 'claude-sonnet-4-6')
+    if fallback is not None and (not isinstance(fallback, str) or not fallback or fallback.startswith('-')
+                                 or '\0' in fallback):
+        raise ValueError(f'{where}: builder.fallback_model must name a model, or be null')
     effort = builder.get('effort', 'medium')
     if effort not in EFFORTS:
         raise ValueError(f'{where}: builder.effort must be one of {", ".join(EFFORTS)}')
@@ -189,8 +197,9 @@ def _settings(value, where) -> Settings:
     if rate_limit.maximum < rate_limit.first:
         raise ValueError(f'{where}: wait_seconds.max must be at least wait_seconds.first')
     return Settings(enabled, default, Builder(
-        background, model, effort, _integer(builder.get('concurrency', 1), f'{where}: builder.concurrency', 1),
-        _integer(builder.get('turn_retries', 3), f'{where}: builder.turn_retries'), rate_limit))
+        background=background, model=model, fallback_model=fallback, effort=effort,
+        concurrency=_integer(builder.get('concurrency', 1), f'{where}: builder.concurrency', 1),
+        turn_retries=_integer(builder.get('turn_retries', 3), f'{where}: builder.turn_retries'), rate_limit=rate_limit))
 
 
 def parse(value) -> Config:

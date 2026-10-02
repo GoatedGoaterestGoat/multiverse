@@ -89,7 +89,8 @@ class SettingsTest(BaseTest):
         self.assertFalse(settings.enabled)
         self.assertEqual(settings.default, config.Schedule('last_k_raw', 0, 2))
         self.assertEqual(settings.builder.rate_limit.claude_max_retries, 3)
-        self.assertEqual((settings.builder.model, settings.builder.effort), ('claude-sonnet-4-6', 'medium'))
+        self.assertEqual((settings.builder.model, settings.builder.fallback_model, settings.builder.effort),
+                         ('sonnet', 'claude-sonnet-4-6', 'medium'))
 
     def test_harness_overrides_replace_enabled_and_merge_the_builder(self):
         write(self.root / 'compaction.json', {
@@ -116,6 +117,7 @@ class SettingsTest(BaseTest):
                  ({'builder': {'rate_limit': {'claude_max_retries': 16}}}, 'claude_max_retries'),
                  ({'builder': {'rate_limit': {'wait_seconds': {'first': 10, 'max': 5}}}}, 'max'),
                  ({'harnesses': {'claude': {'builder': {'model': ''}}}}, 'harnesses.claude'),
+                 ({'builder': {'fallback_model': 5}}, 'fallback_model'),
                  ({'colour': 'red'}, 'Unknown')]
         for value, expected in cases:
             with self.subTest(value=value):
@@ -303,6 +305,30 @@ class BuildTest(BaseTest):
         failures = Build(source, self.store, FAST, self.reporter).turns(source.turns())
         self.assertIn('invalid', failures['t'])
         self.assertEqual([e['retrying'] for e in self.events.of('error')], [True, True, True, False])
+
+    def test_a_turn_still_refused_after_its_retries_continues_with_the_fallback_model(self):
+        source = FakeSource([turn('t', 4)])
+        original, models = source.merge, []
+        refusals = iter([None, 'refused', 'refused', None, None])
+
+        def merge(t, frontier, builder):
+            models.append(builder.model)
+            if next(refusals):
+                raise MergeError('refused', 'no')
+            return original(t, frontier, builder)
+        source.merge = merge
+        builder = config.Builder(model='strong', fallback_model='lenient', turn_retries=1, rate_limit=FAST.rate_limit)
+        t = source.turns()[0]
+        self.assertEqual(Build(source, self.store, builder, self.reporter).turns([t]), {})
+        self.assertEqual(models, ['strong', 'strong', 'strong', 'lenient', 'lenient'])
+        self.assertIn('continuing this turn with lenient', (self.store.directory / 'build.log').read_text())
+        stored = json.loads(self.store.tree_path('t').read_text())
+        self.assertEqual([merge['model'] for merge in stored['merges']], ['strong', 'lenient', 'lenient'])
+        source = FakeSource([turn('u', 3)], [MergeError('refused', 'no')] * 4)
+        failures = Build(source, self.store, config.Builder(fallback_model=None, turn_retries=1, rate_limit=FAST.rate_limit),
+                         self.reporter).turns(source.turns())
+        self.assertIn('refused', failures['u'])
+        self.assertEqual(source.calls, 2)
 
     def test_usage_limits_are_not_retried(self):
         source = FakeSource([turn('t', 3)], [MergeError('usage_limit', 'limit reached')])

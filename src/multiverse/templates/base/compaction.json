@@ -9,7 +9,8 @@
   },
   "builder": {
     "background": true,
-    "model": "claude-sonnet-4-6",
+    "model": "sonnet",
+    "fallback_model": "claude-sonnet-4-6",
     "effort": "medium",
     "concurrency": 1,
     "turn_retries": 3,

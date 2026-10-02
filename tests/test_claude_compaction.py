@@ -412,7 +412,7 @@ class MergeTest(Fixture):
         self.assertIn('[0] summary node (covers 2 leaves) | "I looked."', call['instruction'])
         self.assertIn('[2] thinking', call['instruction'])
 
-    def test_a_refused_merge_is_retried_unchanged(self):
+    def test_a_refused_merge_is_retried_unchanged_then_by_the_fallback_model(self):
         r, _ = conversation()
         self.write_transcript(r.rows[:12])
         source = self.source()
@@ -424,9 +424,11 @@ class MergeTest(Fixture):
             failures = Build(source, Store(self.agent_dir), builder, Reporter(Store(self.agent_dir), events.append)).turns([turn])
         self.assertIn('refused', failures[turn.id])
         calls = self.calls()
-        self.assertEqual(len(calls), 2)
+        # Retried unchanged, then continued with the fallback model, retried unchanged again.
+        self.assertEqual([call['argv'][call['argv'].index('--model') + 1] for call in calls],
+                         ['sonnet', 'sonnet', 'claude-sonnet-4-6', 'claude-sonnet-4-6'])
         self.assertTrue(all(call['thinking'] and call['rows'] == 11 for call in calls))
-        self.assertEqual([event['retrying'] for event in events if event['event'] == 'error'], [True, False])
+        self.assertEqual([event['retrying'] for event in events if event['event'] == 'error'], [True, False, True, False])
 
     def test_a_rate_limited_merge_reports_its_kind(self):
         r, _ = conversation()
