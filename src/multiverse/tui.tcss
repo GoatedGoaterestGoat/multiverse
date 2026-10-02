@@ -70,7 +70,7 @@ Footer { background: #181825; }
 .short.drawer #inspect-work { max-height: 1; }
 .drawer #inspect-group { margin-top: 0; }
 .narrow #totals { width: auto; }
-Form, Details, ArtifactPreview { align: center middle; background: #11111b 75%; }
+Form, Details, ArtifactPreview, CompactionScreen, AgentScreen { align: center middle; background: #11111b 75%; }
 #dialog { width: 72; max-width: 94%; height: auto; max-height: 90%; border: round #94e2d5; background: #1e1e2e; padding: 1 2; }
 #dialog-title { text-style: bold; height: auto; margin-bottom: 1; }
 #dialog-description { height: auto; color: #a6adc8; margin-bottom: 1; }
@@ -87,3 +87,20 @@ Form, Details, ArtifactPreview { align: center middle; background: #11111b 75%; 
 .detail-title { text-style: bold; height: 2; }
 #full-details { height: 1fr; scrollbar-size: 1 1; }
 #full-details Static { height: auto; }
+#compaction-dialog { width: 92%; max-width: 100; height: 92%; border: round #94e2d5; background: #1e1e2e; padding: 0 1; }
+#compaction-problem { height: auto; color: #f38ba8; text-style: bold; margin-bottom: 1; }
+#compaction-body { height: 1fr; scrollbar-size: 1 1; }
+.csection { height: 1; margin-top: 1; color: #94e2d5; text-style: bold; }
+.cwarn { height: auto; color: #f9e2af; }
+.cerror { height: auto; color: #f38ba8; }
+.frow { height: 1; }
+.flabel { width: 22; color: #a6adc8; }
+.frow Input { width: 1fr; height: 1; border: none; padding: 0 1; background: #313244; }
+.frow Input:focus { background: #45475a; border: none; }
+.frow Input > .input--placeholder { color: #7f849c; }
+.frow Choice { width: 1fr; height: 1; padding: 0 1; background: #313244; }
+.frow Choice:focus { background: #45475a; color: #94e2d5; }
+#compaction-agents { height: auto; max-height: 12; }
+#plan { height: auto; max-height: 14; }
+#plan-summary, #agent-follows, #agent-status { height: auto; color: #a6adc8; }
+#compaction-dialog .detail-title { height: 1; }
