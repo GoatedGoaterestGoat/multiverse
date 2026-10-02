@@ -35,8 +35,11 @@ thinking = any(isinstance(block, dict) and block.get('type') == 'thinking'
                for row in rows for block in (row.get('message', {{}}).get('content') or []) if isinstance(row.get('message', {{}}).get('content'), list))
 instruction = argv[argv.index('-p') + 1]
 with open(os.environ['FAKE_LOG'], 'a') as log:
+    messages = [row['message'] for row in rows if 'message' in row]
     log.write(json.dumps({{'argv': argv, 'rows': len(rows), 'thinking': thinking, 'instruction': instruction,
-                          'first': rows[0].get('message', {{}}).get('content'),
+                          'first': messages[0].get('content'), 'kinds': [row.get('type') for row in rows],
+                          'assistant': [m['content'][0].get('text', m['content'][0].get('type'))
+                                        for m in messages if m.get('role') == 'assistant'],
                           'mv2': sorted(k for k in os.environ if k.startswith('MV2_')),
                           'retries': os.environ.get('CLAUDE_CODE_MAX_RETRIES')}}) + '\n')
 mode = os.environ.get('FAKE_MODE', 'merge')
@@ -178,18 +181,22 @@ class TranscriptTest(Fixture):
         value['created_at'] = (datetime.fromisoformat(ids['ours']['timestamp']) - timedelta(seconds=1)).isoformat()
         (self.agent_dir / 'compaction/installs' / f'{install}.json').write_text(json.dumps(value))
         source = self.source()
-        turns = source.turns()
+        every = source.turns()
+        turns = [t for t in every if not t.dropped]
         self.assertEqual([t.prompt.content['text'] for t in turns], ['First task', 'Second', 'Third', 'Fourth', 'Fifth'])
+        self.assertEqual([t.dropped for t in every if t.dropped], ['the display-only command /compact'] * 2)
         first = turns[0]
-        self.assertEqual([leaf.kind for leaf in first.leaves], ['thinking', 'text', 'tool', 'thinking', 'thinking', 'text'])
-        self.assertEqual(first.leaves[2].refs, (ids['use']['uuid'], ids['result']['uuid']))
+        self.assertEqual([leaf.kind for leaf in first.leaves],
+                         ['thinking', 'asst_text', 'tool_use', 'tool_result', 'thinking', 'thinking', 'asst_text'])
+        self.assertEqual([first.leaves[2].refs, first.leaves[3].refs], [(ids['use']['uuid'],), (ids['result']['uuid'],)])
         # Each response's thinking estimate (output less visible text) is shared by signature length.
-        self.assertEqual([first.leaves[i].tokens for i in (0, 3, 4)], [297, 124, 374])
-        self.assertEqual(source.copies, {ids['answer5']['uuid']: [ids['copy']['uuid']]})
+        self.assertEqual([first.leaves[i].tokens for i in (0, 4, 5)], [298, 124, 374])
+        # v1's allocation weight leaves out the output of tools Claude may evict.
+        self.assertEqual((first.leaves[3].weight, first.weight), (0, first.tokens - first.leaves[3].tokens))
         recorded = Store(self.agent_dir).installed()
         self.assertEqual(len(recorded), 1)
         self.assertEqual([row['uuid'] for row in recorded[0]['rows']], [ids['built']['uuid'], ids['copy']['uuid']])
-        self.assertEqual(len(source.turns()), 5)
+        self.assertEqual(len(source.turns()), 7)
         self.assertEqual(len(Store(self.agent_dir).installed()), 1)
 
     def test_an_install_with_no_payload_stops_the_read(self):
@@ -211,17 +218,37 @@ class TranscriptTest(Fixture):
         self.assertEqual(len(source.completed(turns, str(int(r.clock.timestamp() * 1000) + 1))), 3)
         self.assertEqual(len(source.completed(turns, None)), 2)
 
-    def test_a_typed_display_command_is_not_a_turn(self):
+    def test_display_command_turns_are_marked_dropped(self):
         r = Rows()
         r.user('Real work', 'p1')
         r.assistant('m1', {'type': 'text', 'text': 'done'}, 5)
         r.user('/compact', 'p2')
         r.user('/compact keep the plan', 'p3')
-        r.command('/compact', 'p4')
+        r.command('/context', 'p4')
         r.user('/rename better', 'p5')
         r.user('/compactly is not a command', 'p6')
-        texts = [t.prompt.content['text'] for t in transcript.turns(r.rows, set())]
-        self.assertEqual(texts, ['Real work', '/rename better', '/compactly is not a command'])
+        r.add('system', subtype='local_command', content='<command-name>/model</command-name>')
+        r.user('<local-command-stdout>Set model</local-command-stdout>', None, isMeta=True)
+        r.assistant('m2', {'type': 'text', 'text': 'after'}, 5)
+        turns = transcript.turns(r.rows, set())
+        self.assertEqual([(t.prompt.content['text'][:20], bool(t.dropped)) for t in turns],
+                         [('Real work', False), ('/compact', True), ('/compact keep the pl', True),
+                          ('<local-command-cavea', True), ('/rename better', False),
+                          ('/compactly is not a ', False)])
+        self.assertEqual([leaf.content['text'] for leaf in turns[-1].leaves], ['after'])  # older command rows go
+
+    def test_parallel_tool_calls_are_read_although_claude_links_them_as_branches(self):
+        r = Rows()
+        r.user('Run three', 'p1')
+        calls = [r.assistant('m1', {'type': 'tool_use', 'id': f'tu{n}', 'name': 'Bash', 'input': {'command': f'c{n}'}}, 9)
+                 for n in range(3)]
+        for n in (2, 0, 1):  # each result hangs off its own call; the last one continues the chain
+            r.parent = calls[n]['uuid']
+            r.result(f'tu{n}', f'out{n}', 'p1')
+        r.assistant('m2', {'type': 'text', 'text': 'done'}, 3)
+        turns = transcript.turns(r.rows, set())
+        self.assertEqual([leaf.preview for leaf in turns[0].leaves],
+                         ['Bash(c0)', 'Bash(c1)', 'Bash(c2)', 'out2', 'out0', 'out1', 'done'])
 
     def test_rewound_branches_and_sidechains_are_left_out(self):
         r = Rows()
@@ -236,29 +263,77 @@ class TranscriptTest(Fixture):
         self.assertEqual([[leaf.content['text'] for leaf in t.leaves] for t in turns], [['kept']])
 
 
+def describe(message):
+    """A built message in a word: its text, its tool, or its result."""
+    if message.get('toolResults'):
+        return 'result:' + message['toolResults'][0]['text']
+    return message['toolUses'][0]['tool'] if message['toolUses'] else message['text']
+
+
 class RenderTest(unittest.TestCase):
-    def test_offered_rows_are_kept_and_the_rest_is_built_one_block_each(self):
-        prompt = Leaf('user_text', ('p',), 2, content={'text': 'Do it'})
-        thinking = Leaf('thinking', ('t',), 50)
-        tool = Leaf('tool', ('use', 'res'), 30, content={'id': 'tu1', 'name': 'Bash', 'input': {'command': 'ls'},
-                                                         'result': 'a b', 'is_error': False})
-        text = Leaf('text', ('x',), 3, content={'text': 'done'})
-        old = Leaf('text', ('orig',), 3, content={'text': 'kept by its copy'})
-        summary = Node(0, [thinking, tool], 'I listed the files.', 5)
+    def test_every_message_is_built_one_block_each_and_thinking_is_left_out(self):
         from multiverse.compaction.model import Turn
-        turns = [Turn('one', prompt, [thinking, tool, text]), Turn('two', None, [old]), Turn('three', None, [thinking, tool])]
-        frontiers = {'one': [summary, text], 'two': [old], 'three': [thinking, tool]}
-        offered = [{'handle': handle, 'role': 'x'} for handle in ('x', 'copy2', 'use', 'res')]
-        payload = render.render(turns, frontiers, offered, {'orig': ['copy1', 'copy2']})
+        prompt = Leaf('user_text', ('p',), 2, content={'text': 'Do it'})
+        thinking = Leaf('thinking', ('t',), 50, content={'text': ''})
+        use = Leaf('tool_use', ('use',), 10, content={'tool_use_id': 'tu1', 'name': 'Bash', 'input': {'command': 'ls'}})
+        result = Leaf('tool_result', ('res',), 20, content={'tool_use_id': 'tu1', 'text': 'a b', 'is_error': False})
+        text = Leaf('asst_text', ('x',), 3, content={'text': 'done'})
+        summary = Node(0, [thinking, use, result], 'I listed the files.', 5)
+        turns = [Turn('one', prompt, [thinking, use, result, text]), Turn('two', None, [thinking, use, result])]
+        payload = render.render(turns, {'one': [summary, text], 'two': [thinking, use, result]})
         self.assertEqual(payload['messages'], [
             {'role': 'user', 'text': 'Do it', 'toolUses': []},
             {'role': 'assistant', 'text': 'I listed the files.', 'toolUses': []},
-            {'keep': 'x'}, {'keep': 'copy2'}, {'keep': 'use'}, {'keep': 'res'}])
-        self.assertEqual(payload['sources'][3], {'stands_for': 'orig'})
-        self.assertEqual((payload['count'], payload['kept'], payload['built'], payload['dropped']), (6, 4, 2, 1))
-        built = render.render(turns[2:], {'three': [tool]}, [], {})['messages']
-        self.assertEqual(built[0]['toolUses'][0]['tool_use_id'], 'tu1')
-        self.assertEqual(built[1]['toolResults'], [{'tool_use_id': 'tu1', 'text': 'a b', 'isError': False}])
+            {'role': 'assistant', 'text': 'done', 'toolUses': []},
+            {'role': 'assistant', 'text': '', 'toolUses': [{'tool_use_id': 'tu1', 'tool': 'Bash', 'input': {'command': 'ls'}}]},
+            {'role': 'user', 'text': '', 'toolUses': [], 'toolResults': [{'tool_use_id': 'tu1', 'text': 'a b', 'isError': False}]}])
+        self.assertNotIn('keep', json.dumps(payload))
+        self.assertEqual(payload['sources'], [{'stands_for': None}] * 5)
+        self.assertEqual((payload['count'], payload['built'], payload['dropped']), (5, 5, 1))
+
+    def test_a_call_or_result_whose_partner_was_summarized_gets_v1s_placeholder(self):
+        from multiverse.compaction.model import Turn
+        use = Leaf('tool_use', ('use',), 10, content={'tool_use_id': 'tu1', 'name': 'mcp:odd name', 'input': {}})
+        result = Leaf('tool_result', ('res',), 20, content={'tool_use_id': 'tu1', 'text': 'a b', 'is_error': False})
+        later = Leaf('asst_text', ('x',), 3, content={'text': 'done'})
+        turn = Turn('t', None, [use, result, later])
+        calls = render.render([turn], {'t': [use, Node(0, [result, later], 'I saw two files.', 4)]})['messages']
+        self.assertEqual([describe(m) for m in calls], ['mcp_odd_name', 'result:(result summarized)', 'I saw two files.'])
+        results = render.render([turn], {'t': [Node(0, [use], 'I listed.', 2), result, later]})['messages']
+        self.assertEqual([describe(m) for m in results], ['I listed.', 'summarized_tool', 'result:a b', 'done'])
+        self.assertEqual(results[1]['toolUses'][0]['tool_use_id'], 'tu1')
+
+    def test_every_call_of_a_parallel_batch_is_answered_before_anything_follows(self):
+        from multiverse.compaction.model import Turn
+        uses = [Leaf('tool_use', (f'u{n}',), 5, content={'tool_use_id': n, 'name': 'Bash', 'input': {}}) for n in 'abc']
+        results = [Leaf('tool_result', (f'r{n}',), 5, content={'tool_use_id': n, 'text': n, 'is_error': False}) for n in 'cab']
+        a, b, c = uses
+        rc, ra, rb = results
+        end = Leaf('asst_text', ('end',), 5, content={'text': 'end'})
+        turn = Turn('t', None, [*uses, *results, end])
+
+        def shape(frontier):
+            return [describe(m) for m in render.render([turn], {'t': frontier})['messages']]
+        # A summary inside the batch waits for the raw results of its calls.
+        self.assertEqual(shape([a, b, Node(0, [c, rc], 'S', 1), ra, rb, end]),
+                         ['Bash', 'Bash', 'result:a', 'result:b', 'S', 'end'])
+        # A raw result whose call was summarized waits too, then gets its placeholder call.
+        self.assertEqual(shape([a, Node(0, [b, c], 'S', 1), rc, ra, rb, end]),
+                         ['Bash', 'result:a', 'S', 'summarized_tool', 'result:c', 'summarized_tool', 'result:b', 'end'])
+        # Calls whose results were summarized are answered once the raw ones have followed.
+        self.assertEqual(shape([a, b, c, Node(0, [rc, ra], 'S', 1), rb, end]),
+                         ['Bash', 'Bash', 'Bash', 'result:b', 'result:(result summarized)', 'result:(result summarized)',
+                          'S', 'end'])
+
+    def test_images_are_noted_and_an_empty_prompt_gets_v1s_placeholder(self):
+        from multiverse.compaction.model import Turn
+        prompt = Leaf('user_text', ('p',), 3000, content={'text': 'Look', 'images': 2}, images=2990)
+        shown = Leaf('user_text', ('s',), 1600, content={'text': '', 'images': 1}, images=1600)
+        payload = render.render([Turn('t', prompt, [shown]), Turn('u', Leaf('user_text', ('q',), 0, content={'text': ''}), [])],
+                                {'t': [shown], 'u': []})
+        self.assertEqual([m['text'] for m in payload['messages']], [
+            'Look\n\n_[2 image(s) omitted to fit compaction budget]_', '_[1 image(s) omitted to fit compaction budget]_',
+            '_(no user prompt for this turn)_'])
 
 
 class MergeTest(Fixture):
@@ -297,24 +372,34 @@ class MergeTest(Fixture):
         self.assertEqual(argv[argv.index('--model') + 1], 'sonnet')
         self.assertEqual(argv[argv.index('--effort') + 1], 'low')
         self.assertEqual(argv[argv.index('--tools') + 1], '')
+        self.assertEqual(argv[argv.index('--system-prompt') + 1], merge.SYSTEM_PROMPT)
         self.assertIn('--strict-mcp-config', argv)
         self.assertIn('--no-session-persistence', argv)
         self.assertEqual(call['mv2'], [])
         self.assertEqual(call['retries'], '2')
-        self.assertEqual(call['first'], 'First task')  # the turn's own rows, verbatim
-        self.assertEqual(call['rows'], 8 + 2)  # the turn's eight rows, then the context-switch exchange
+        # The first step: v1's title row, the turn's own eight rows verbatim, then the context switch.
+        self.assertEqual(call['first'], 'First task')
+        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 3, 'user', *['assistant'] * 3,
+                                         'user', 'assistant'])
         self.assertTrue(call['thinking'])
-        self.assertIn('[0] part 1: thinking', call['instruction'])
+        self.assertIn('Current frontier (7 entries):', call['instruction'])
+        self.assertIn('  [0] thinking\n  [1] asst_text | "I will look"\n  [2] tool_use | "Bash(ls)"\n'
+                      '  [3] tool_result | "a.txt b.txt"', call['instruction'])
         work = Store(self.agent_dir).directory / 'work'
         self.assertEqual(list((self.config / 'projects' / merge.project_slug(work.resolve())).glob('*.jsonl')), [])
         later = [Node(0, turn.leaves[:2], 'I looked.', 3), *turn.leaves[2:]]
         source.merge(turn, later, builder)
         call = self.calls()[-1]
-        self.assertEqual(call['rows'], 8 + 2)  # every step reads the same original rows
-        self.assertIn('[0] summary of parts 1-2, ~3 tokens | "I looked."', call['instruction'])
-        self.assertIn('[1] part 3: tool', call['instruction'])
+        # Later steps: the prompt, one assistant row per frontier entry (thinking verbatim), the context switch.
+        self.assertEqual(call['kinds'], ['custom-title', 'user', *['assistant'] * 6, 'user', 'assistant'])
+        self.assertEqual(call['assistant'][:5], [
+            '**Compacted summary (2 entries):**\n\nI looked.', '**Tool call: `Bash`**\n\n```json\n{\n  "command": "ls"\n}\n```',
+            '**Tool result:**\n\n```\na.txt b.txt\n```', 'thinking', 'thinking'])
+        self.assertTrue(call['thinking'])
+        self.assertIn('[0] summary node (covers 2 leaves) | "I looked."', call['instruction'])
+        self.assertIn('[3] thinking', call['instruction'])
 
-    def test_a_refused_turn_continues_without_its_thinking_and_never_names_it(self):
+    def test_a_refused_merge_is_retried_unchanged(self):
         r, _ = conversation()
         self.write_transcript(r.rows[:12])
         source = self.source()
@@ -324,15 +409,11 @@ class MergeTest(Fixture):
         events = []
         with patch.dict(os.environ, {'FAKE_MODE': 'refuse-thinking'}):
             failures = Build(source, Store(self.agent_dir), builder, Reporter(Store(self.agent_dir), events.append)).turns([turn])
-        self.assertEqual(failures, {})
+        self.assertIn('refused', failures[turn.id])
         calls = self.calls()
-        self.assertTrue(calls[0]['thinking'])
-        self.assertTrue(all(not call['thinking'] and 'thinking' not in call['instruction'] for call in calls[1:]))
-        self.assertIn('part 1: not shown', calls[1]['instruction'])
-        self.assertEqual(calls[1]['rows'], 5 + 2)
-        refusal = [event for event in events if event['event'] == 'error']
-        self.assertEqual(len(refusal), 1)
-        self.assertIn('leave its thinking out', refusal[0]['message'])
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(all(call['thinking'] and call['rows'] == 11 for call in calls))
+        self.assertEqual([event['retrying'] for event in events if event['event'] == 'error'], [True, False])
 
     def test_a_rate_limited_merge_reports_its_kind(self):
         r, _ = conversation()
@@ -403,10 +484,12 @@ class InstallTest(Fixture):
         self.assertEqual(code, 0, events[-1])
         messages = [event['message'] for event in events if event['event'] == 'message']
         self.assertEqual(len(messages), events[-1]['count'])
-        # Turns 0 and 1 become their prompt and one summary; turns 2 and 3 stay whole, by handle.
-        self.assertEqual(sum(1 for message in messages if 'keep' in message), 4 + 4 + 2)
+        # Turns 0 and 1 become their prompt and one summary; turns 2 and 3 stay whole, all of it built.
+        self.assertFalse(any('keep' in message for message in messages))
+        self.assertEqual(len(messages), 2 * 2 + 2 * 4)
         summaries = [message['text'] for message in messages if message.get('role') == 'assistant']
-        self.assertEqual(summaries, ['I handled two steps.', 'I handled two steps.'])
+        self.assertEqual(summaries, ['I handled two steps.'] * 2 + [f'step {step} of task {task}' for task in (2, 3)
+                                                                     for step in range(3)])
         self.assertEqual(len(self.calls()), 4)  # two merges for each three-leaf turn
         self.assertEqual(Store(self.agent_dir).tree_count(), 2)
         events = []

@@ -4,7 +4,8 @@
   "default": {
     "scheduler": "last_k_raw",
     "k": 2,
-    "budget": 0
+    "budget": 0,
+    "image_mode": "budget_fit"
   },
   "builder": {
     "background": true,

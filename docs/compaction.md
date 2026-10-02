@@ -8,27 +8,39 @@ replaced by those partially expanded summaries. It is the same conversation in
 the same session: the agent keeps its identity and system prompt, and nothing
 tells it that a summary was made.
 
-The algorithm comes from Multiverse v1 (`multiverse-plugin/vendor/compaction`).
-It is implemented once, independent of any harness, in `src/multiverse/compaction/`;
-Claude Code is the first harness that supports it.
+The algorithm is Multiverse v1's (`multiverse-plugin/vendor/compaction`), with
+the same parser, merge prompts, schedulers and expansion. What changed is the
+delivery: v1 rewrote the live transcript, while mv2 answers the harness's own
+compaction (for Claude, the mod's `session.compact` hook). It is implemented
+once, independent of any harness, in `src/multiverse/compaction/`; Claude Code
+is the first harness that supports it.
 
 ## How it works
 
 - **Turns and leaves.** A turn is one prompt and everything the agent did until
-  the next prompt. Its compactable content is a list of leaves: thinking blocks,
-  text, messages from you, and each tool call together with its result. The
-  prompt itself is always kept verbatim.
+  the next prompt. Its compactable content is a list of leaves, as v1 reads
+  them: thinking blocks, text, messages from you, tool calls and tool results
+  (a call and its result are separate leaves). The prompt itself is always
+  kept verbatim. A turn the harness marks as not conversation (for Claude, a
+  display-only command such as `/compact`, `/context` or `/model`) is left out
+  entirely: never summarized, never kept.
 - **Trees.** A model builds each turn's tree bottom up: on each step it merges one
   contiguous span of the current frontier into a summary node, until one root
   covers the turn. Node IDs follow merge order.
 - **Expansion.** A turn whose share covers all of its leaves stays raw. Any other
   turn starts from its root and undoes the newest merges while the next one still
   fits its share.
-- **Schedulers** share the budget, which counts assistant content only (prompts
-  are always kept):
-  - `last_k_raw`: the last `k` turns whole; `budget` shared by the earlier ones
-    by size. Unlike v1, the last `k` stay raw even with a budget of 0, which
-    summarizes every earlier turn to its root.
+- **Budget.** As in v1, `budget` covers the whole compacted conversation.
+  Prompt text is always kept and comes off the top. Prompt images follow
+  `image_mode`: `budget_fit` (the default) keeps the newest prompts' images
+  while they fit half of what is left, `keep_all` keeps every one and
+  `drop_all` none; a dropped image leaves a note in its prompt. A harness that
+  cannot deliver images (Claude, below) always drops them. A scheduler
+  shares the rest among the turns' assistant content:
+  - `last_k_raw`: the last `k` turns whole; what is left shared by the earlier
+    ones by size. Unlike v1, the last `k` (and their prompt images) stay raw
+    even when they exceed the budget, so a budget of 0 summarizes every earlier
+    turn to its root.
   - `proportional`: by turn size; bulky output of `Read`, `Bash`, `Grep` and similar
     tools does not earn a bigger share.
   - `uniform`: equal shares.
@@ -46,7 +58,7 @@ and merges into `builder` field by field.
 {
   "schema": 1,
   "enabled": false,
-  "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0},
+  "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
   "builder": {
     "background": true,
     "model": "sonnet",
@@ -63,7 +75,7 @@ and merges into `builder` field by field.
 | Field | Meaning |
 | --- | --- |
 | `enabled` | Use tree compaction for this harness's sessions. Read at launch: restart an agent after changing it. |
-| `default` | The scheduler of every agent that has none of its own. |
+| `default` | The scheduler of every agent that has none of its own, its budget and `image_mode`. |
 | `builder.background` | Build each turn's tree as soon as the turn ends. |
 | `builder.model`, `builder.effort` | The model that writes summaries and its effort (`low` to `max`). |
 | `builder.concurrency` | How many turns are built at once (each turn's merges run one after another). |
@@ -81,6 +93,7 @@ default:
 mv2 compaction worker                                  # settings, trees, recent errors
 mv2 compaction worker --scheduler proportional --budget 60000
 mv2 compaction worker --scheduler last_k_raw --k 4 --budget 20000
+mv2 compaction worker --image-mode drop_all             # never keep prompt images
 mv2 compaction worker --use-default                     # back to the universe default
 mv2 compaction worker --plan                            # each turn's share, raw or summarized
 mv2 compaction worker --build                           # build the trees a compaction needs now
@@ -120,28 +133,40 @@ stays as it was. It never falls back to the harness's own compaction.
 Compaction needs the `multiverse` mod (`"inbox_bridge": true`). An enabled launch
 sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings.
 
-- **`/compact`** runs the mod's `session.compact` hook. The hook keeps each row
-  Claude offers it whole (thinking blocks with their signatures, images, tool
-  calls and results), builds the rest (summaries as plain first-person text, a
-  tool call as a call followed by its result), and returns them in place of the
-  old turns. Claude writes a boundary, those rows and the `/compact` command's
-  own rows, and re-announces its tool, agent, MCP and skill listings on the next
-  turn. While it runs, the status line shows a progress bar, and every error and
-  retry also appears as a transcript notice and a toast.
+- **`/compact`** runs the mod's `session.compact` hook, which returns the
+  compacted conversation in place of the old turns, every message built from
+  the transcript's content: prompts and your messages as user text, summaries
+  as plain first-person text (without v1's "Compacted summary" label), tool
+  calls and results as tool calls and results. As in v1, a tool call whose
+  result was summarized is answered with "(result summarized)", and a result
+  whose call was summarized gets a `summarized_tool` call; every call is
+  answered before anything else follows it. Claude writes a boundary, those
+  rows and the `/compact` command's own rows, and re-announces its tool, agent,
+  MCP and skill listings on the next turn. While it runs, the status line shows
+  a progress bar, and every error and retry also appears as a transcript
+  notice and a toast.
+- **Nothing is kept by reference.** The hook could hand back a row Claude
+  offered it, but Claude 2.1.287 stores such a row again with its old links: a
+  kept tool result hangs off the call from before the compaction, and a kept
+  response keeps its message ID, so loading the session again (Claude's own
+  resume) brings back the old rows beside the copies. A built message cannot
+  hold a thinking block or an image, so those are left out: a prompt notes how
+  many images it had, and the budget spends nothing on them.
 - **Never Claude's own summary.** The hook answers every main-session
   compaction, or skips it with the reason. If it ever cannot answer (the mod
   failed to load, the hook ran out of time), the `PreCompact` hook refuses Claude's
   own compaction with a message. A subagent's own compaction is left to Claude.
 - **Background building.** The mod's `Stop` hook starts the builder with the time
   the turn ended, so the turn that just finished gets its tree at once.
-- **Merges** run `claude -p --resume <synthetic session>` with no tools, using your
-  Claude login. The session holds the turn's own rows unchanged, so the merge
-  model reads the agent's original thinking; the instruction lists the current
-  frontier. The files live in a Claude project of the agent's compaction
-  directory and are deleted after each call.
-- **Refusals.** Current models' safeguards sometimes refuse to summarize a turn
-  with its thinking. After a refusal, that turn's next attempts leave the
-  thinking blocks out, and the tree keeps its shape.
+- **Merges** are v1's privileged CLI merges, unchanged: `claude -p --resume
+  <synthetic session>` with no tools, using your Claude login, v1's newest
+  system prompt and instruction. The first step's session holds the turn's own
+  rows; later steps rebuild it from the current frontier (the prompt, then one
+  assistant message with each summary as text, each tool call and result as
+  text, and each thinking block not yet merged verbatim with its signature).
+  The files live in a Claude project of the agent's compaction directory and
+  are deleted after each call. A refused merge is retried like any other
+  failure (`turn_retries`), unchanged.
 - **History across compactions.** Claude keeps every row in the transcript and
   links each boundary to the conversation before it, so later compactions read
   the whole conversation as it was. The rows an install added are told apart by
@@ -149,8 +174,24 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
 
 ### Limits
 
-- Token counts are estimates (about four characters a token).
-- A thinking block from before an earlier compaction cannot be put back (Claude
-  offers only rows since the last boundary), so it is summarized, never kept.
+- Token counts are v1's estimates: about four characters a token, images by
+  their pixel size.
+- **Thinking and the API.** Claude records what the API did to each request.
+  Opus 5.5 drops a thinking block whose preceding conversation changed
+  (`thinking_dropped`, `prefix_binding_mismatch`): so an Opus merge never sees
+  the turn's thinking, and thinking kept in a compacted conversation is
+  dropped once anything before it was summarized, though the budget still
+  counts it. Sonnet 5.5 and Sonnet 4.6 keep the blocks in merge sessions, but
+  Sonnet 5.5's safeguards refuse a turn whose substance is only in its
+  thinking (`[reasoning_extraction]`), and Sonnet 4.6 did not reliably name a
+  decision made only in thinking. Tested with Claude Code 2.1.287 on
+  2026-10-01.
+- Thinking is never kept in the compacted conversation (see above); it still
+  reaches the merge model, and its estimated size still counts toward a raw
+  turn's share.
+- Claude 2.1.287 links each parallel tool result to its own call, and only the
+  last result stored continues the conversation, so the transcript reader takes
+  every block of a response and every result answering its calls (v1's reader
+  missed these).
 - Claude Code's mod API is early access; this was built and tested on Claude
   Code 2.1.287.

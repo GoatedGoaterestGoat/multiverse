@@ -49,6 +49,9 @@ class CompactionSource(Protocol):
     """One session's transcript and model, as compaction needs them."""
 
     harness: str
+    # Whether render() can deliver prompt images; when it cannot, every prompt's
+    # images are left out and the budget spends nothing on them.
+    keeps_images: bool
 
     def unavailable(self) -> str | None:
         """Why this session cannot install a compaction (its harness integration is off), or None."""
@@ -59,6 +62,9 @@ class CompactionSource(Protocol):
 
         Rows that a compaction added (summaries, copies of kept rows) are left
         out, so turns and their leaves keep the same identity across compactions.
+        A turn that is not conversation (Claude: a display-only command such as
+        `/compact`) is marked `dropped` with the reason; compaction never builds,
+        keeps or renders it.
         """
         ...
 
@@ -81,11 +87,15 @@ class CompactionSource(Protocol):
         """
         ...
 
-    def render(self, turns: list[Turn], frontiers: dict[str, list[Entry]], offered: Any) -> dict[str, Any]:
+    def render(self, turns: list[Turn], frontiers: dict[str, list[Entry]], offered: Any,
+               images: set[str]) -> dict[str, Any]:
         """The harness's installable form of the compacted conversation.
 
-        `frontiers` maps each turn to the entries it keeps; `offered` is what the
-        harness's install trigger passed in (for Claude, the rows it may keep).
+        `turns` are the turns that stay (dropped ones are not passed);
+        `frontiers` maps each to the entries it keeps, and `images` names the
+        turns whose prompt keeps its images (the others are noted as omitted).
+        `offered` is what the harness's install trigger passed in (for Claude,
+        the rows it may keep).
         The result is stored as the install's payload and must include
         `messages`, which the install streams to the trigger, and `count`, the
         number of rows the harness will store for them.

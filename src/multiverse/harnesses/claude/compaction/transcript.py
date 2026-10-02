@@ -1,29 +1,36 @@
 """A Claude Code session transcript as turns of leaves, before any compaction.
 
 Ported from Multiverse v1's parser (multiverse-plugin/vendor/compaction/parser.py)
-with these changes for mv2:
+as v1's compaction_forest() and default preprocessing use it: one leaf per row
+(`thinking`, `asst_text`, `tool_use`, `tool_result`, `user_text`), a tool call
+and its result as separate leaves, and v1's token counts (about four characters
+a token, images by their pixel size). Changes for mv2:
 
 - History crosses compactions. `/compact` keeps every earlier row in the same
   file and adds a boundary row whose `logicalParentUuid` names the row before
   it, so the walk from the newest row follows that link back. The rows a
   compaction added (Claude's summary, rows our install wrote, the boundary
-  itself, the `/compact` command turn) are left out.
+  itself) are left out.
+- Display-only command turns are marked `dropped` instead of being cut out of
+  the rows, so compaction leaves them out wherever it looks. `/compact` and a
+  few more display commands join v1's `/context`, `/model` and `/effort`, and
+  the plain "/compact" prompt row Claude 2.1 also stores is recognized.
 - A response with several thinking blocks shares its thinking estimate among
   them by signature length; v1 charged each block the whole estimate.
-- A tool call and its result always form one `tool` leaf, so a call is never
-  kept without its result (Claude drops an unanswered call from the request).
-- Token counts are estimates (about four characters a token).
+- v1 folded Multiverse v1's inter-agent messages into prompts; mv2 delivers
+  messages as prompts or queued commands, which are read as they are.
 """
 import json
 from pathlib import Path
 import re
 
 from ....compaction.model import Leaf, Turn, estimate_tokens
+from . import images as image_tokens
 
 # Rows that carry no conversation content.
 SKIP_TYPES = frozenset({'custom-title', 'agent-name', 'permission-mode', 'file-history-snapshot', 'attachment',
                         'last-prompt', 'queue-operation', 'system', 'summary', 'mode', 'cost-state', 'atis-latch'})
-# Command turns that only display something; their rows never reach a compacted conversation.
+# Command turns that only display something: they are dropped from compaction.
 SKIP_COMMANDS = frozenset({'/context', '/model', '/effort', '/compact', '/cost', '/usage', '/status', '/statusline'})
 COMMAND_NAME = re.compile(r'<command-name>(/[\w:-]+)</command-name>')
 # Claude also stores the command as typed, a prompt of its own: "/compact" or "/compact keep the plan".
@@ -32,7 +39,6 @@ TYPED_COMMAND = re.compile(r'\s*(/[\w:-]+)(?:\s|$)')
 # not earn a turn a bigger share of the budget (it is still summarized).
 EVICTABLE = frozenset({'Read', 'Bash', 'Grep', 'Glob', 'WebSearch', 'WebFetch', 'Edit', 'Write', 'MultiEdit',
                        'NotebookEdit', 'BashOutput'})
-IMAGE_TOKENS = 1600
 
 
 def read_rows(path) -> list[dict]:
@@ -62,6 +68,11 @@ def chain(rows: list[dict]) -> list[dict]:
     a rewound conversation is left out); the walk goes back through parent
     links and, at a compaction boundary, on to the conversation before it.
     Boundary rows are included so callers can tell what each compaction added.
+
+    Parallel tool calls branch: Claude links each result to its own call, and
+    only the last result stored continues the conversation. So the walk also
+    takes every block of each response it passes and every result answering
+    one of their calls (v1's walk left these out).
     """
     by_uuid, parented, order = {}, set(), {}
     for index, row in enumerate(rows):
@@ -76,14 +87,28 @@ def chain(rows: list[dict]) -> list[dict]:
     if not tips:
         return []
     current = max(tips, key=lambda uuid: (by_uuid[uuid].get('timestamp') or '', order[uuid]))
-    result, seen = [], set()
+    seen = set()
     while current in by_uuid and current not in seen:
         seen.add(current)
         row = by_uuid[current]
-        result.append(row)
         current = row.get('logicalParentUuid') if is_boundary(row) else row.get('parentUuid')
-    result.reverse()
-    return result
+    responses = {_response(by_uuid[uuid]) for uuid in seen} - {None}
+    seen |= {uuid for uuid, row in by_uuid.items() if _response(row) in responses}
+    calls = {block.get('id') for uuid in seen for block in _blocks(by_uuid[uuid])
+             if by_uuid[uuid].get('type') == 'assistant' and block.get('type') == 'tool_use'} - {None}
+    seen |= {uuid for uuid, row in by_uuid.items() if row.get('type') == 'user' and any(
+        block.get('type') == 'tool_result' and block.get('tool_use_id') in calls for block in _blocks(row))}
+    return [by_uuid[uuid] for uuid in sorted(seen, key=order.get)]
+
+
+def _response(row) -> str | None:
+    message = row.get('message')
+    return message.get('id') if row.get('type') == 'assistant' and isinstance(message, dict) else None
+
+
+def _blocks(row) -> list[dict]:
+    content = (row.get('message') or {}).get('content')
+    return [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
 
 
 def _text_blob(row) -> str:
@@ -104,18 +129,16 @@ def _command(row) -> str | None:
     return match.group(1) if match and match.group(1) in SKIP_COMMANDS else None
 
 
-def strip_command_turns(rows: list[dict]) -> list[dict]:
-    """Drop the display-only command turns (`/context`, `/compact`, ...) from a chain.
+def strip_command_rows(rows: list[dict]) -> list[dict]:
+    """Drop the rows of display-only commands stored outside any turn.
 
-    Commands are stored as the prompt typed (`/compact`), as user rows sharing
-    one promptId (a caveat, the command name, its output), or as
-    `system`/`local_command` rows; all of them go.
+    Some versions store a command as `system`/`local_command` rows followed by
+    meta user rows, all without a promptId, which would otherwise read as part
+    of the turn before. Commands stored as user rows under a promptId of their
+    own form a turn, which `turns` marks as dropped.
     """
-    skip_prompts = {row['promptId'] for row in rows if row.get('type') == 'user' and row.get('promptId') and _command(row)}
     result, in_command = [], False
     for row in rows:
-        if row.get('promptId') in skip_prompts and row.get('type') == 'user':
-            continue
         if row.get('type') == 'system' and row.get('subtype') == 'local_command':
             match = COMMAND_NAME.search(row.get('content') or '') if isinstance(row.get('content'), str) else None
             if match:
@@ -130,18 +153,20 @@ def strip_command_turns(rows: list[dict]) -> list[dict]:
     return result
 
 
-def _preview(text: str, limit: int = 120) -> str:
-    flat = ' '.join((text or '').split())
+def _preview(text: str, kind: str, limit: int = 120) -> str:
+    if not text:
+        return f'<empty {kind}>'
+    flat = ' '.join(text.split())
     return flat if len(flat) <= limit else flat[:limit - 3] + '...'
 
 
 def _short_args(value, limit=80) -> str:
     if isinstance(value, dict):
-        for key in ('command', 'file_path', 'path', 'url', 'query', 'pattern', 'description'):
+        for key in ('command', 'file_path', 'path', 'url', 'query', 'pattern'):
             if isinstance(value.get(key), str):
                 text = value[key]
                 return text if len(text) <= limit else text[:limit - 3] + '...'
-        text = json.dumps(value, ensure_ascii=False)
+        text = json.dumps(value)
     else:
         text = str(value)
     return text if len(text) <= limit else text[:limit - 3] + '...'
@@ -155,9 +180,13 @@ def _attachment_leaf(row) -> Leaf | None:
     prompt = attachment.get('prompt')
     if isinstance(prompt, list):
         prompt = '\n'.join(block.get('text', '') for block in prompt if isinstance(block, dict) and block.get('type') == 'text')
-    if not isinstance(prompt, str) or not prompt.strip():
+    if not isinstance(prompt, str) or not prompt:
         return None
-    return Leaf('user_text', (row['uuid'],), estimate_tokens(prompt), _preview(prompt), {'text': prompt})
+    return Leaf('user_text', (row['uuid'],), estimate_tokens(prompt), _preview(prompt, 'user'), {'text': prompt})
+
+
+def _images(blocks) -> list[dict]:
+    return [block for block in blocks if isinstance(block, dict) and block.get('type') == 'image']
 
 
 def classify(row) -> Leaf | None:
@@ -175,28 +204,32 @@ def classify(row) -> Leaf | None:
         return None
     content, uuid = message.get('content'), row['uuid']
     if kind == 'user' and isinstance(content, str):
-        return Leaf('user_text', (uuid,), estimate_tokens(content), _preview(content), {'text': content})
+        return Leaf('user_text', (uuid,), estimate_tokens(content), _preview(content, 'user'), {'text': content})
     if kind == 'user' and isinstance(content, list):
-        images = [block for block in content if isinstance(block, dict) and block.get('type') == 'image']
+        top = _images(content)
+        pictures = sum(image_tokens.tokens(block) for block in top)
         for block in content:
             if not isinstance(block, dict):
                 continue
             if block.get('type') == 'tool_result':
                 result = block.get('content')
+                inner = []
                 if isinstance(result, list):
                     text = '\n'.join(part.get('text', '') for part in result if isinstance(part, dict) and part.get('type') == 'text')
-                    images += [part for part in result if isinstance(part, dict) and part.get('type') == 'image']
+                    inner = _images(result)
                 else:
                     text = '' if result is None else str(result)
-                return Leaf('tool_result', (uuid,), estimate_tokens(text) + IMAGE_TOKENS * len(images), _preview(text),
-                            {'id': block.get('tool_use_id'), 'text': text, 'is_error': bool(block.get('is_error'))})
+                both = pictures + sum(image_tokens.tokens(part) for part in inner)
+                return Leaf('tool_result', (uuid,), estimate_tokens(text) + both, _preview(text, 'tool_result'),
+                            {'tool_use_id': block.get('tool_use_id'), 'text': text, 'is_error': bool(block.get('is_error'))},
+                            images=both)
             if block.get('type') == 'text':
                 text = block.get('text', '') or ''
-                return Leaf('user_text', (uuid,), estimate_tokens(text) + IMAGE_TOKENS * len(images), _preview(text),
-                            {'text': text, 'images': len(images)})
-        if images:
-            return Leaf('user_text', (uuid,), IMAGE_TOKENS * len(images), f'<{len(images)} image(s)>',
-                        {'text': '', 'images': len(images)})
+                return Leaf('user_text', (uuid,), estimate_tokens(text) + pictures, _preview(text, 'user'),
+                            {'text': text, 'images': len(top)}, images=pictures)
+        if top:
+            return Leaf('user_text', (uuid,), pictures, f'<{len(top)} image(s)>', {'text': '', 'images': len(top)},
+                        images=pictures)
         return None
     if kind == 'assistant' and isinstance(content, list):
         for block in content:
@@ -204,16 +237,16 @@ def classify(row) -> Leaf | None:
                 continue
             if block.get('type') in ('thinking', 'redacted_thinking'):
                 text = block.get('thinking', '') or ''
-                return Leaf('thinking', (uuid,), estimate_tokens(text), _preview(text) if text else '<thinking>',
-                            {'message': message.get('id'), 'signature': len(block.get('signature') or block.get('data') or '')})
+                return Leaf('thinking', (uuid,), estimate_tokens(text),
+                            _preview(text, 'thinking') if text else '<thinking: encrypted>', {'text': text})
             if block.get('type') == 'text':
                 text = block.get('text', '') or ''
-                return Leaf('text', (uuid,), estimate_tokens(text), _preview(text), {'text': text})
+                return Leaf('asst_text', (uuid,), estimate_tokens(text), _preview(text, 'asst'), {'text': text})
             if block.get('type') == 'tool_use':
                 name, arguments = block.get('name', '?'), block.get('input', {})
                 rendered = f'{name}({_short_args(arguments)})'
-                return Leaf('tool_use', (uuid,), estimate_tokens(name + json.dumps(arguments, ensure_ascii=False)), rendered,
-                            {'id': block.get('id'), 'name': name, 'input': arguments})
+                return Leaf('tool_use', (uuid,), estimate_tokens(rendered) + estimate_tokens(json.dumps(arguments)),
+                            rendered, {'tool_use_id': block.get('id'), 'name': name, 'input': arguments})
     return None
 
 
@@ -225,7 +258,7 @@ def _visible_tokens(message) -> int:
         if block.get('type') == 'text':
             total += estimate_tokens(block.get('text', '') or '')
         elif block.get('type') == 'tool_use':
-            total += estimate_tokens(block.get('name', '') + json.dumps(block.get('input', {}), ensure_ascii=False))
+            total += estimate_tokens(block.get('name', '') + json.dumps(block.get('input', {})))
     return total
 
 
@@ -258,26 +291,12 @@ def thinking_estimates(rows) -> dict[str, int]:
     return estimates
 
 
-def pair_tools(leaves: list[Leaf]) -> list[Leaf]:
-    """Join each tool call with its result into one `tool` leaf at the call's place."""
-    results = {leaf.content.get('id'): leaf for leaf in leaves if leaf.kind == 'tool_result' and leaf.content.get('id')}
-    used, paired = set(), []
+def discount_evictable(leaves: list[Leaf]) -> None:
+    """Give the results of evictable tools no weight in a scheduler's shares (v1's allocation weight)."""
+    names = {leaf.content.get('tool_use_id'): leaf.content.get('name') for leaf in leaves if leaf.kind == 'tool_use'}
     for leaf in leaves:
-        if leaf.kind == 'tool_use' and leaf.content.get('id') in results:
-            result = results[leaf.content['id']]
-            used.add(id(result))
-            name, outcome = leaf.content['name'], result.content.get('text', '')
-            summary = ('error: ' + _preview(outcome, 50)) if result.content.get('is_error') else _preview(outcome, 50)
-            weight = leaf.tokens if name in EVICTABLE else leaf.tokens + result.tokens
-            paired.append(Leaf('tool', (*leaf.refs, *result.refs), leaf.tokens + result.tokens,
-                               _preview(f'{leaf.preview} -> {summary}'),
-                               {'id': leaf.content['id'], 'name': name, 'input': leaf.content.get('input', {}),
-                                'result': outcome, 'is_error': result.content.get('is_error', False)}, weight))
-        elif leaf.kind == 'tool_result' and id(leaf) in used:
-            continue
-        else:
-            paired.append(leaf)
-    return paired
+        if leaf.kind == 'tool_result' and names.get(leaf.content.get('tool_use_id')) in EVICTABLE:
+            leaf.weight = 0
 
 
 def _starts_turn(row, last_prompt) -> bool:
@@ -293,12 +312,18 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
     """The conversation's turns, oldest first, without rows any compaction added.
 
     `added` are the rows our installs wrote (from their records); Claude's own
-    compaction summaries carry `isCompactSummary`.
+    compaction summaries carry `isCompactSummary`. A display-only command's turn
+    is marked dropped.
     """
     path = [row for row in chain(rows) if not is_boundary(row) and row['uuid'] not in added
             and not row.get('isCompactSummary')]
-    path = strip_command_turns(path)
+    path = strip_command_rows(path)
     estimates = thinking_estimates(path)
+    commands = {}
+    for row in path:
+        command = row.get('type') == 'user' and row.get('promptId') and _command(row)
+        if command:
+            commands.setdefault(row['promptId'], command)
     result, current, orphans, last_prompt = [], None, [], None
     for row in path:
         leaf = classify(row)
@@ -323,7 +348,9 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
     elif orphans:
         result.append(Turn('turn-0', None, orphans))
     for turn in result:
-        turn.leaves = pair_tools(turn.leaves)
+        discount_evictable(turn.leaves)
+        if turn.id in commands:
+            turn.dropped = f'the display-only command {commands[turn.id]}'
     return result
 
 

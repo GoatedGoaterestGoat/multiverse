@@ -1,77 +1,139 @@
 """Compacted turns as the messages a `session.compact` hook returns.
 
-Each turn becomes its prompt, then its frontier in order. A row Claude offered
-the hook (it has a handle) is kept whole: thinking with its signature, images,
-tool calls and results exactly as stored. Anything else is built: summaries
-and text as plain messages, a tool call as an assistant tool use followed by a
-user tool result. Every built message holds exactly one block, so each message
-becomes exactly one stored row (the install record counts on it).
+Each turn becomes its prompt, then its frontier in order, every message built
+from the transcript's content: prompts and messages from you as user text,
+summaries and text as assistant text, a tool call as an assistant tool use and
+a result as a user tool result. Nothing is kept by handle. Claude 2.1.287
+stores a kept row again under a new id but with its old links: a kept tool
+result keeps its `sourceToolAssistantUUID` and so hangs off the call from before
+the compaction, and a kept response keeps its `message.id`, so loading the
+session again (Claude's own resume) gathers the original rows with the copies.
+Built rows get links and ids of their own.
 
-What cannot be built is left out: a thinking block whose row is no longer
-offered (it belongs to a conversation before an earlier compaction) and an
-unanswered tool call or orphaned result, which Claude would drop anyway.
+What a built message cannot hold is left out: thinking blocks (a signed block
+cannot be built; Opus 5.5 drops kept thinking once anything before it changed
+anyway) and images (a prompt notes how many it had, as v1 did for images the
+budget left out; a tool result's images are dropped, as in v1). Every built
+message holds exactly one block, so each becomes exactly one stored row (the
+install record counts on it).
+
+As in Multiverse v1's renderer (render_frontier_as_messages), a tool call whose
+result was summarized away is answered with "(result summarized)", and a result
+whose call was summarized away gets a `summarized_tool` call before it. Unlike
+v1, every call is answered before anything else follows it: when a summary
+splits a batch of parallel calls, it waits until the batch's results that are
+still raw have followed their calls.
 """
+import re
+
 from ....compaction.model import Leaf, Node
 
+PLACEHOLDER_TOOL = 'summarized_tool'
+PLACEHOLDER_RESULT = '(result summarized)'
+# Tool names the API accepts.
+TOOL_NAME = re.compile(r'[^a-zA-Z0-9_-]')
 
-def render(turns, frontiers, offered, copies: dict[str, list[str]]) -> dict:
-    """{'messages', 'sources', 'count', 'kept', 'built', 'dropped'} for the hook and the install record.
 
-    `offered` is the hook's list of {handle, role}; `copies` maps an original
-    row to the rows earlier installs stored for it (Claude stores a kept row
-    again under a new id), newest last.
-    """
-    handles = {item['handle'] for item in offered or [] if isinstance(item, dict) and isinstance(item.get('handle'), str)}
-    messages, sources = [], []
-    counts = {'kept': 0, 'built': 0, 'dropped': 0}
+def _tool_name(name) -> str:
+    return TOOL_NAME.sub('_', str(name or '')).strip('_') or 'tool'
 
-    def current(ref):
-        for candidate in [*reversed(copies.get(ref, [])), ref]:
-            if candidate in handles:
-                return candidate
-        return None
 
-    def keep(leaf) -> bool:
-        found = [current(ref) for ref in leaf.refs]
-        if not leaf.refs or None in found:
-            return False
-        for ref, handle in zip(leaf.refs, found):
-            messages.append({'keep': handle})
-            sources.append({'stands_for': ref})
-            counts['kept'] += 1
-        return True
+def _images_note(count: int) -> str:
+    return f'_[{count} image(s) omitted to fit compaction budget]_'
 
-    def build(message):
+
+def render(turns, frontiers) -> dict:
+    """{'messages', 'sources', 'count', 'built', 'dropped'} for the hook and the install record."""
+    messages = []
+    counts = {'dropped': 0}
+    pending: list[str] = []  # calls delivered and not yet answered
+
+    def build(role, text='', uses=(), results=None):
+        message = {'role': role, 'text': text, 'toolUses': list(uses)}
+        if results is not None:
+            message['toolResults'] = results
         messages.append(message)
-        sources.append({'stands_for': None})
-        counts['built'] += 1
 
-    def text(role, value):
-        build({'role': role, 'text': value, 'toolUses': []})
+    def user_text(value, images, empty=None):
+        if images:
+            value = f'{value}\n\n{_images_note(images)}' if value else _images_note(images)
+        if value or empty:
+            build('user', value or empty)
+        else:
+            counts['dropped'] += 1
+
+    def call(tool_use_id, name, arguments):
+        build('assistant', uses=[{'tool_use_id': tool_use_id, 'tool': name, 'input': arguments}])
+
+    def result(tool_use_id, value, error=False):
+        build('user', results=[{'tool_use_id': tool_use_id, 'text': value, 'isError': error}])
+
+    def answer(orphans_only=True):
+        """Answer pending calls whose result is not coming (or, at the end, every one) with v1's placeholder."""
+        for tool_use_id in list(pending):
+            if not orphans_only or tool_use_id not in coming:
+                pending.remove(tool_use_id)
+                result(tool_use_id, PLACEHOLDER_RESULT)
+
+    def deliver(entry):
+        result(entry.content.get('tool_use_id'), entry.content.get('text', '') or '', bool(entry.content.get('is_error')))
+
+    def content(entry):
+        if isinstance(entry, Leaf) and entry.kind == 'tool_result':  # its call was summarized away
+            call(entry.content.get('tool_use_id'), PLACEHOLDER_TOOL, {})
+            deliver(entry)
+        elif isinstance(entry, Node):
+            build('assistant', entry.summary.strip())
+        elif entry.kind == 'asst_text' and entry.content.get('text', '').strip():
+            build('assistant', entry.content['text'])
+        elif entry.kind == 'user_text':
+            user_text(entry.content.get('text', '') or '', entry.content.get('images', 0))
+        else:
+            counts['dropped'] += 1  # thinking, or empty text
 
     for turn in turns:
-        if turn.prompt is not None and not keep(turn.prompt):
-            prompt = turn.prompt.content.get('text', '')
-            if prompt or turn.prompt.content.get('images'):
-                text('user', prompt or '(an image was here)')
-        for entry in frontiers[turn.id]:
-            if isinstance(entry, Node):
-                text('assistant', entry.summary)
-                continue
-            if not isinstance(entry, Leaf) or keep(entry):
-                continue
-            content = entry.content
-            if entry.kind == 'text':
-                text('assistant', content.get('text', ''))
-            elif entry.kind == 'user_text':
-                text('user', content.get('text', '') or '(an image was here)')
-            elif entry.kind == 'tool':
-                build({'role': 'assistant', 'text': '', 'toolUses': [
-                    {'tool_use_id': content['id'], 'tool': content['name'], 'input': content.get('input', {}),
-                     'text': content.get('result', '')}]})
-                build({'role': 'user', 'text': '', 'toolUses': [], 'toolResults': [
-                    {'tool_use_id': content['id'], 'text': content.get('result', ''),
-                     'isError': bool(content.get('is_error'))}]})
+        if turn.prompt is not None:
+            user_text(turn.prompt.content.get('text', '') or '', turn.prompt.content.get('images', 0),
+                      '_(no user prompt for this turn)_')
+        frontier = frontiers[turn.id]
+        # Results still raw on this frontier, not yet delivered.
+        coming = {entry.content.get('tool_use_id') for entry in frontier
+                  if isinstance(entry, Leaf) and entry.kind == 'tool_result'}
+        held = []  # content waiting until this batch's raw results have followed their calls
+        replied = False  # a result was delivered since the last call
+
+        def waiting():
+            return any(tool_use_id in coming for tool_use_id in pending)
+
+        for entry in frontier:
+            kind = entry.kind if isinstance(entry, Leaf) else None
+            tool_use_id = entry.content.get('tool_use_id') if kind in ('tool_use', 'tool_result') else None
+            if kind == 'tool_use':
+                if replied:  # a new response: answer what the last one left open
+                    answer()
+                    replied = False
+                call(tool_use_id, _tool_name(entry.content.get('name')), entry.content.get('input') or {})
+                pending.append(tool_use_id)
+            elif kind == 'tool_result' and tool_use_id in pending:
+                pending.remove(tool_use_id)
+                coming.discard(tool_use_id)
+                deliver(entry)
+                replied = True
+                if not waiting():
+                    answer()
+                    for later in held:
+                        content(later)
+                    held = []
             else:
-                counts['dropped'] += 1  # thinking no longer offered, unanswered call, orphaned result
-    return {'messages': messages, 'sources': sources, 'count': len(messages), **counts}
+                if kind == 'tool_result':
+                    coming.discard(tool_use_id)
+                if waiting():
+                    held.append(entry)
+                else:
+                    answer()
+                    content(entry)
+        answer(orphans_only=False)
+        for later in held:
+            content(later)
+    return {'messages': messages, 'sources': [{'stands_for': None}] * len(messages), 'count': len(messages),
+            'built': len(messages), **counts}

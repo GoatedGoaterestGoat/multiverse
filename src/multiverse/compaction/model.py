@@ -4,8 +4,8 @@ from typing import Any, Union
 
 
 def estimate_tokens(text: str) -> int:
-    """A stable estimate (about four characters a token); budgets need no tokenizer."""
-    return (len(text) + 3) // 4 if text else 0
+    """About four characters a token, as Multiverse v1 counts without tiktoken."""
+    return max(1, len(text) // 4) if text else 0
 
 
 @dataclass
@@ -13,10 +13,11 @@ class Leaf:
     """One unit of a turn, as its harness read it from the transcript.
 
     `refs` are the harness's ids for the transcript rows the leaf stands for
-    (Claude: row UUIDs). `tokens` estimates what the leaf costs kept verbatim;
-    `weight`, when set, is what it counts for when a scheduler shares a budget
-    (a harness may discount bulky tool output). `content` is the harness's own
-    payload and is never stored in a tree.
+    (Claude: row UUIDs). `tokens` estimates what the leaf costs kept verbatim,
+    `images` the part of it that is images; `weight`, when set, is what it
+    counts for when a scheduler shares a budget (a harness may discount bulky
+    tool output). `content` is the harness's own payload and is never stored in
+    a tree.
     """
     kind: str
     refs: tuple[str, ...]
@@ -24,6 +25,7 @@ class Leaf:
     preview: str = ''
     content: dict = field(default_factory=dict)
     weight: int | None = None
+    images: int = 0
 
     @property
     def share(self) -> int:
@@ -58,11 +60,17 @@ class Turn:
     The prompt is kept verbatim and is never summarized; `leaves` are the
     compactable rest, and `root` their tree once built (a single leaf is its
     own root).
+
+    `dropped`, when set, is why the harness does not count the turn as
+    conversation (Claude: a display-only command such as `/compact` or
+    `/context`). Such a turn is never summarized or kept: compaction leaves it
+    out entirely.
     """
     id: str
     prompt: Leaf | None
     leaves: list[Leaf]
     root: Entry | None = None
+    dropped: str | None = None
 
     @property
     def tokens(self) -> int:

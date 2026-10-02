@@ -38,6 +38,7 @@ class FakeSource:
     """A harness whose model always merges the first two entries, unless told to fail first."""
 
     harness = 'fake'
+    keeps_images = True
 
     def __init__(self, turns=(), failures=()):
         self._turns = list(turns)
@@ -50,7 +51,7 @@ class FakeSource:
         return None
 
     def turns(self):
-        return [Turn(t.id, t.prompt, list(t.leaves)) for t in self._turns]
+        return [Turn(t.id, t.prompt, list(t.leaves), dropped=t.dropped) for t in self._turns]
 
     def completed(self, turns, marker):
         return turns if marker == 'all' else turns[:-1]
@@ -61,8 +62,9 @@ class FakeSource:
             raise self.failures.pop(0)
         return Merge(0, 2, f'summary of {len(frontier)}')
 
-    def render(self, turns, frontiers, offered):
+    def render(self, turns, frontiers, offered, images):
         self.rendered = {t.id: frontiers[t.id] for t in turns}
+        self.images = images
         messages = [{'text': getattr(entry, 'summary', None) or entry.preview} for t in turns for entry in frontiers[t.id]]
         return {'messages': messages, 'count': len(messages)}
 
@@ -142,20 +144,40 @@ class SettingsTest(BaseTest):
 class ScheduleTest(unittest.TestCase):
     def test_last_k_raw_keeps_the_tail_whole_even_at_budget_zero(self):
         turns = [turn(f't{i}') for i in range(5)]
-        shares = schedule.allocate(turns, config.Schedule('last_k_raw', 0, 2))
+        shares, _ = schedule.allocate(turns, config.Schedule('last_k_raw', 0, 2))
         self.assertEqual([shares[t.id] for t in turns], [0, 0, 0, 400, 400])
         self.assertEqual([schedule.needs_tree(t, shares[t.id]) for t in turns], [True, True, True, False, False])
-        shares = schedule.allocate(turns, config.Schedule('last_k_raw', 300, 0))
-        self.assertEqual(sum(shares.values()), 300)
+        shares, _ = schedule.allocate(turns, config.Schedule('last_k_raw', 300, 0))
+        self.assertEqual(sum(shares.values()), 300 - 5 * 5)  # the prompts' text comes off the top
+
+    def test_the_budget_covers_prompts_and_the_raw_tail_as_in_v1(self):
+        turns = [turn(f't{i}') for i in range(4)]
+        shares, _ = schedule.allocate(turns, config.Schedule('last_k_raw', 1000, 2))
+        self.assertEqual([shares[t.id] for t in turns], [90, 90, 400, 400])  # (1000 - 4 * 5 - 800) / 2
+
+    def test_prompt_images_are_kept_newest_first_while_they_fit(self):
+        turns = [turn(f't{i}') for i in range(4)]
+        for t in turns[:3]:
+            t.prompt = Leaf('user_text', (f'{t.id}-prompt',), 305, images=300)
+        cases = [(config.Schedule('proportional', 1300), {'t1', 't2'}),  # half of 1300 - 20 fits two
+                 (config.Schedule('proportional', 1300, image_mode='keep_all'), {'t0', 't1', 't2'}),
+                 (config.Schedule('proportional', 1300, image_mode='drop_all'), set()),
+                 (config.Schedule('last_k_raw', 0, 2), {'t2'})]  # the raw tail keeps its own
+        for value, kept in cases:
+            with self.subTest(schedule=value):
+                shares, images = schedule.allocate(turns, value)
+                self.assertEqual(images, kept)
+        shares, _ = schedule.allocate(turns, config.Schedule('proportional', 1300))
+        self.assertLessEqual(sum(shares.values()), 1300 - 20 - 600)
 
     def test_every_scheduler_stays_within_its_budget(self):
         turns = [turn('a', 2), turn('b', 8), turn('c', 4, tokens=500)]
         for name in ('proportional', 'uniform', 'recency_boosted'):
             with self.subTest(name=name):
-                shares = schedule.allocate(turns, config.Schedule(name, 1000))
+                shares, _ = schedule.allocate(turns, config.Schedule(name, 1000))
                 self.assertLessEqual(sum(shares.values()), 1000)
                 self.assertEqual(set(shares), {'a', 'b', 'c'})
-        boosted = schedule.allocate([turn('old'), turn('new')], config.Schedule('recency_boosted', 1000))
+        boosted, _ = schedule.allocate([turn('old'), turn('new')], config.Schedule('recency_boosted', 1000))
         self.assertGreater(boosted['new'], boosted['old'])
 
     def test_expansion_undoes_the_newest_merges_that_fit(self):
@@ -351,6 +373,15 @@ class PipelineTest(BaseTest):
         pipeline.compact(self.agent(source), [], Reporter(Store(self.root / 'state/agents/a')))
         self.assertEqual(source.calls, 0)
 
+    def test_turns_the_harness_drops_are_neither_built_nor_rendered(self):
+        turns = [turn(f't{i}', 3) for i in range(4)]
+        turns[1].dropped = 'the display-only command /context'
+        source = FakeSource(turns)
+        payload, stats = pipeline.compact(self.agent(source), [], Reporter(Store(self.root / 'state/agents/a')))
+        self.assertEqual(sorted(source.rendered), ['t0', 't2', 't3'])
+        self.assertEqual(source.calls, 2)  # only t0 is summarized; t2 and t3 stay raw
+        self.assertEqual((stats['turns'], stats['dropped_turns']), (3, 1))
+
     def test_a_turn_without_a_tree_fails_the_whole_compaction(self):
         source = FakeSource([turn(f't{i}', 3) for i in range(3)], [MergeError('usage_limit', 'limit reached')])
         with self.assertRaisesRegex(pipeline.CompactionError, 'Could not build 1 summary tree'):
@@ -446,6 +477,13 @@ class EntryPointTest(BaseTest):
             entry.worker(str(self.directory))
         self.assertTrue(Store(self.directory).tree_path('u0').exists())
         self.assertFalse(Store(self.directory).tree_path('u1').exists())
+        dropped = turn('v0', 3)
+        dropped.dropped = 'a command'
+        with self.patched(FakeSource([dropped, turn('v1', 3)])):
+            Store(self.directory).mark_turn_end('all')
+            entry.worker(str(self.directory))
+        self.assertFalse(Store(self.directory).tree_path('v0').exists())
+        self.assertTrue(Store(self.directory).tree_path('v1').exists())
 
     def test_guard_allows_subagents_and_refuses_the_session(self):
         with patch.dict(os.environ, {'MV2_AGENT_DIR': str(self.directory)}), patch('sys.stderr', new=io.StringIO()) as err:

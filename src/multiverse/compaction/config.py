@@ -29,26 +29,34 @@ FILE = 'compaction.json'
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 # Each scheduler and the parameters it takes besides `budget`.
 SCHEDULERS = {'last_k_raw': ('k',), 'proportional': (), 'uniform': (), 'recency_boosted': ('recency_ratio', 'recency_half_life')}
+IMAGE_MODES = ('budget_fit', 'keep_all', 'drop_all')
 SECTION = ('enabled', 'default', 'builder')
 
 
 @dataclass(frozen=True)
 class Schedule:
-    """How a budget is shared across turns; `budget` covers assistant content only.
+    """How a budget is shared across turns, as Multiverse v1 shares it.
 
-    Prompts are always kept verbatim and are not counted. `last_k_raw` keeps the
-    last `k` turns whole and shares `budget` among the earlier ones.
+    `budget` covers the whole compacted conversation. Prompt text is always
+    kept and comes off the top; prompt images are kept as `image_mode` says
+    (`budget_fit`: newest first while they fit half of what is left,
+    `keep_all`, or `drop_all`); the scheduler shares the rest among the turns'
+    assistant content. `last_k_raw` keeps the last `k` turns whole and shares
+    what is left among the earlier ones.
     """
     scheduler: str = 'last_k_raw'
     budget: int = 0
     k: int = 2
     recency_ratio: float = 3.0
     recency_half_life: float = 10.0
+    image_mode: str = 'budget_fit'
 
     def settings(self):
         """Only the fields this scheduler uses, as they are written in a file."""
         values = {'scheduler': self.scheduler, 'budget': self.budget}
         values.update({name: getattr(self, name) for name in SCHEDULERS[self.scheduler]})
+        if self.image_mode != 'budget_fit':
+            values['image_mode'] = self.image_mode
         return values
 
 
@@ -132,11 +140,11 @@ def _number(value, where, low=0.0, strict=False):
 
 
 def parse_schedule(value, where='scheduler settings') -> Schedule:
-    value = _fields(value, ('scheduler', 'budget', 'k', 'recency_ratio', 'recency_half_life'), where)
+    value = _fields(value, ('scheduler', 'budget', 'k', 'recency_ratio', 'recency_half_life', 'image_mode'), where)
     name = value.get('scheduler', 'last_k_raw')
     if name not in SCHEDULERS:
         raise ValueError(f'Unknown scheduler {name!r}; choose one of {", ".join(SCHEDULERS)}')
-    extra = set(value) - {'scheduler', 'budget', *SCHEDULERS[name]}
+    extra = set(value) - {'scheduler', 'budget', 'image_mode', *SCHEDULERS[name]}
     if extra:
         raise ValueError(f'{name} does not take {", ".join(sorted(extra))}')
     schedule = Schedule(name, _integer(value.get('budget', 0), 'budget'))
@@ -146,6 +154,10 @@ def parse_schedule(value, where='scheduler settings') -> Schedule:
         schedule = replace(schedule, recency_ratio=_number(value['recency_ratio'], 'recency_ratio', 1.0))
     if 'recency_half_life' in value:
         schedule = replace(schedule, recency_half_life=_number(value['recency_half_life'], 'recency_half_life', strict=True))
+    if 'image_mode' in value:
+        if value['image_mode'] not in IMAGE_MODES:
+            raise ValueError(f'image_mode must be one of {", ".join(IMAGE_MODES)}')
+        schedule = replace(schedule, image_mode=value['image_mode'])
     return schedule
 
 

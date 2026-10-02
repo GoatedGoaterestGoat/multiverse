@@ -32,6 +32,7 @@ class TranscriptError(ValueError):
 
 class ClaudeCompaction:
     harness = 'claude'
+    keeps_images = False  # render() builds every message, and a built message holds only text
 
     def __init__(self, adapter, session):
         if not session.native_id:
@@ -43,8 +44,6 @@ class ClaudeCompaction:
         self.store = Store(self.agent_dir)
         self.rows_by_uuid: dict[str, dict] = {}
         self.order: list[str] = []
-        self.copies: dict[str, list[str]] = {}
-        self.refused: set[str] = set()  # turns whose merges continue without thinking (merge.py)
         self._processes: set[subprocess.Popen] = set()
         self._lock = threading.Lock()
         self._cancelled = False
@@ -114,12 +113,7 @@ class ClaudeCompaction:
         rows = transcript.read_rows(self.transcript_path())
         records = self.store.installed()
         records += self._record_installs(rows, records)
-        added, self.copies = set(), {}
-        for record in records:
-            for row in record.get('rows', []):
-                added.add(row['uuid'])
-                if row.get('stands_for'):
-                    self.copies.setdefault(row['stands_for'], []).append(row['uuid'])
+        added = {row['uuid'] for record in records for row in record.get('rows', [])}
         self.rows_by_uuid = {row['uuid']: row for row in rows if row.get('uuid')}
         self.order = [row['uuid'] for row in transcript.chain(rows) if row.get('uuid')]
         return transcript.turns(rows, added)
@@ -145,8 +139,8 @@ class ClaudeCompaction:
     def merge(self, turn, frontier, builder):
         return merging.run(self, turn, frontier, builder)
 
-    def render(self, turns, frontiers, offered):
-        return rendering.render(turns, frontiers, offered, self.copies)
+    def render(self, turns, frontiers, offered, images):
+        return rendering.render(turns, frontiers)
 
     # Recovery ------------------------------------------------------------------
 

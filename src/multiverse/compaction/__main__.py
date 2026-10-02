@@ -20,7 +20,7 @@ import sys
 import threading
 
 from .build import Build, Cancelled, Reporter, json_lines
-from .pipeline import CompactionError, compact, open_agent
+from .pipeline import CompactionError, compact, conversation, open_agent
 from .store import Store
 
 # A turn whose background build failed is not retried in the background for this long;
@@ -127,7 +127,7 @@ def worker(directory: str) -> int:
         reporter = Reporter(store)
         # A turn may finish while we build: look again until nothing new is left.
         for _ in range(5):
-            turns = agent.source.completed(agent.source.turns(), store.turn_end())
+            turns = conversation(agent.source.completed(agent.source.turns(), store.turn_end()))
             build = Build(agent.source, store, agent.settings.builder, reporter, cancel)
             skip = lambda turn: store.recent_failure(turn.id, BACKGROUND_RETRY_AFTER) is not None
             try:
