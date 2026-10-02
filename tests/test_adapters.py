@@ -45,7 +45,11 @@ class AdapterContractTest(BaseTest):
                     context = LaunchContext(mode, self.values(), 'chosen')
                     args = (self.session(name, context.values), context) if mode == 'resume' else (context,)
                     actual, expected = getattr(adapter, mode)(*args), getattr(legacy, mode)(*args)
-                    self.assertEqual(actual.argv, expected.argv)
+                    expected_argv = list(expected.argv)
+                    if name == 'codex':
+                        position = expected_argv.index('--')
+                        expected_argv[position:position] = ['-c', 'check_for_update_on_startup=false']
+                    self.assertEqual(actual.argv, tuple(expected_argv))
                     self.assertEqual(actual.unset_env, expected.unset_env)
                     self.assertEqual(actual.control_endpoint, expected.control_endpoint)
                 self.assertEqual(set(adapter.capabilities(SessionHandle("agent", name, str(self.work)))), set(CAPABILITIES))

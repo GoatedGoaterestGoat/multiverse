@@ -434,20 +434,29 @@ top-level `check_for_update_on_startup=false` in `config.toml`. The subprocess
 guard rejects native execution without either setting, as well as access to the
 default native home/socket. `isolated_home(..., config=...)` writes fixture
 configuration together with the TUI setting, so provider configuration cannot
-overwrite it accidentally. Tests seed a newer cached release to verify that
-promptless resume is not blocked by an update dialog. Disabling the daemon updater
+overwrite it accidentally. Tests seed a newer cached release and enable checks
+in a trusted project override: an unmodified remote TUI shows the update notice,
+while mv2's launch argument suppresses it on promptless resume. Disabling the daemon updater
 prevents disposable tests from leaving scheduled helpers behind; daemon stop alone
 does not stop the updater. The TUI setting separately suppresses update checks and
 interactive update prompts in Codex 0.159.3 and 0.160.0.
 
-Real launches retain the user's TUI update preference. With its default `true`, a
-cached newer release can display an update dialog before a thread is bound. Codex
-skips this dialog for a nonempty positional prompt, but ordinary resumes and
-promptless spawns can wait for terminal input. A bridge launch remains `starting`
-until the dialog is dismissed; `--wait` reports a timeout. To suppress these
-dialogs only for a universe's managed launches, users can put
-`["-c", "check_for_update_on_startup=false"]` in its Codex harness `settings.args`.
-This does not change the shared daemon's separate automatic-update policy.
+The Codex adapter adds `-c check_for_update_on_startup=false` before `--` on
+spawn and resume, including wake prompts, plain mode, bridge mode and plain
+fallbacks. This suppresses unattended startup update dialogs and banners even if
+the user's configuration enables them. Remote TUI mode honors this local setting;
+the relay does not move it into the thread request like `developer_instructions`.
+If the applicable `args`, `spawn_args` or `resume_args` already sets that key with
+`-c` or `--config`, its value is retained and no default is added. Both separated
+and joined forms (such as `--config=check_for_update_on_startup=true`) are recognized.
+Prompt text after `--` is never treated as configuration.
+
+Users can explicitly restore native update prompts with
+`["-c", "check_for_update_on_startup=true"]` in `settings.args`, or just one
+mode's argument list. With that opt-in, ordinary resumes and promptless spawns
+can wait for terminal input before binding; a bridge stays `starting` and
+`--wait` can time out. Native configuration files and the shared daemon's
+separate automatic-update policy are unchanged.
 
 A daemon already running from a deleted directory cannot be repaired by reusing
 its socket. Codex 0.159.3 returns `config/read` error -32603, `failed to resolve

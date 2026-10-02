@@ -22,7 +22,7 @@ from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
 from multiverse.store import inbox, read, write
 from multiverse.tools import send
-from native_safety import isolated_home
+from native_safety import check_spawn, isolated_home
 from test_multiverse import TerminalBase, until
 
 
@@ -75,6 +75,10 @@ class CodexDaemonTest(TerminalBase):
         workspaces = [self.work / 'project-a', self.work / 'project-b']
         for work in workspaces:
             work.mkdir()
+            (work / '.codex').mkdir()
+            # Override the guard-required home setting. The launch argument,
+            # not the isolated home's config, must suppress the update dialog.
+            (work / '.codex/config.toml').write_text('check_for_update_on_startup=true\n')
         home = isolated_home(self.work / 'codex-home', config='model="gpt-6-sol"\nmodel_provider="offline"\n'
             '[shell_environment_policy]\nexclude=["USER_EXCLUDED"]\n'
             '[model_providers.offline]\nname="Offline"\nwire_api="responses"\nrequires_openai_auth=false\n'
@@ -101,6 +105,20 @@ class CodexDaemonTest(TerminalBase):
         self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)
         self.assertEqual(len({x['socketPath'] for x in started}), 1)
         endpoint = started[0]['socketPath']
+        # Positive control: this exact home/workspace/remote endpoint shows the
+        # cached update without mv2's argument. Packaged CLIs show a dialog;
+        # binaries without a detected updater show a banner. No turn is started.
+        probe_argv = ['codex', '--cd', str(workspaces[0]), '--remote', 'unix://' + endpoint]
+        check_spawn(probe_argv, env)
+        probe_env = ['CODEX_HOME=' + str(home), 'CODEX_SQLITE_HOME=' + str(home)]
+        probe = self.backend.create('update-prompt-probe', workspaces[0], ['env', *probe_env, *probe_argv])
+        try:
+            until(lambda: 'Update available' in self.backend.run('capture-pane', '-p', '-t', probe['pane']), seconds=15)
+        except AssertionError:
+            print('Update prompt probe:', self.backend.run('capture-pane', '-p', '-t', probe['pane']))
+            raise
+        finally:
+            self.backend.run('kill-pane', '-t', probe['pane'])
         def thread_name(root, agent_id):
             _, _, session, _ = native.context(root, agent_id)
             def plan():
@@ -206,6 +224,8 @@ class CodexDaemonTest(TerminalBase):
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
             until(lambda: thread_name(roots[0], resumed['id']) == 'same-name')
             self.assertEqual(agents.runtime(agents.directory(roots[0], resumed['id']))['control_endpoint']['address'], endpoint)
+            pane = agents.runtime(agents.directory(roots[0], resumed['id']))['tmux']['pane']
+            self.assertNotIn('Update available', self.backend.run('capture-pane', '-p', '-t', pane))
             # Work on the shared daemon survives losing its TUI. Stop still
             # cancels only this exact thread after its pane has disappeared.
             message = send.run(roots[1], agent=results[1]['id'], text='STOP_ACTIVE_WORK_ORPHAN', delivery='follow-up')
@@ -235,7 +255,8 @@ class CodexDaemonTest(TerminalBase):
             self.assertFalse(Path(endpoint).exists(), 'Failed send must not restart the daemon')
             print('Shared daemon evidence:', json.dumps({'startup_statuses': [s['status'] for s in started],
                   'universes': len(roots), 'unique_agent_ids': len({r['id'] for r in results}),
-                  'socket': endpoint, 'outage_delivery': failed['state']}))
+                  'socket': endpoint, 'outage_delivery': failed['state'],
+                  'update_check': 'project enables; raw remote shows update; mv2 resume suppresses it'}))
         except Exception:
             for root, result in pairs:
                 directory = agents.directory(root, result['id'])

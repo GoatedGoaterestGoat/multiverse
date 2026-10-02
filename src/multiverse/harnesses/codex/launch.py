@@ -8,6 +8,29 @@ from ..types import NativeResult, RpcRequest, RpcSpec, normalize_session_id
 from .protocol import result, object_field
 
 
+def tui_arguments(argv):
+    """Avoid unattended update dialogs unless launch arguments explicitly opt in."""
+    argv = list(argv)
+    end = argv.index('--') if '--' in argv else len(argv)
+    index = 1
+    while index < end:
+        arg = argv[index]
+        value = ''
+        if arg in ('-c', '--config'):
+            index += 1
+            if index < end:
+                value = argv[index]
+        elif arg.startswith('--config='):
+            value = arg[len('--config='):]
+        elif arg.startswith('-c') and not arg.startswith('--'):
+            value = arg[2:].removeprefix('=')
+        if value.partition('=')[0].strip() == 'check_for_update_on_startup':
+            return argv
+        index += 1
+    argv[end:end] = ['-c', 'check_for_update_on_startup=false']
+    return argv
+
+
 def remote_arguments(argv, context):
     """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)
