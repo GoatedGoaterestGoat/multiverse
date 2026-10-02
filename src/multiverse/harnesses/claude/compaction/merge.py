@@ -353,7 +353,7 @@ def run(source, turn, frontier, builder) -> Merge:
     instruction = INSTRUCTION.format(n_entries=len(frontier), frontier_index=frontier_index(frontier))
     try:
         returncode, stdout, stderr = source.call(command(source.executable(), instruction, session_id, builder),
-                                                 cwd=work, env=environment(builder.rate_limit.claude_max_retries, source.unset_env()),
+                                                 cwd=work, env=environment(builder.options.get('claude_max_retries', 3), source.unset_env()),
                                                  timeout=TIMEOUT)
     finally:
         path.unlink(missing_ok=True)

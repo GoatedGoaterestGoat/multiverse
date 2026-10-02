@@ -56,27 +56,33 @@ is the first harness that supports it.
 
 ## Configuration
 
-A universe or subverse opts in with `compaction.json` at its root. The top level
-is shared by every harness; `harnesses.<name>` overrides it for one harness (by
-its directory under `harnesses/`). An override replaces `enabled` and `default`,
-and merges into `builder` field by field.
+A universe or subverse opts in with `compaction.json` at its root. `enabled` and
+the scheduler `default` are shared by every harness, and `harnesses.<name>` (by
+its directory under `harnesses/`) may replace either. Tree building belongs to
+one harness, since its transcripts and models are its own: `builder` exists only
+under `harnesses.<name>`. The harness supplies the defaults of its model,
+fallback model, effort and own options, and checks them.
 
 ```json
 {
   "schema": 1,
   "enabled": false,
   "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
-  "builder": {
-    "background": true,
-    "model": "sonnet",
-    "fallback_model": "claude-sonnet-4-6",
-    "effort": "medium",
-    "concurrency": 1,
-    "turn_retries": 3,
-    "rate_limit": {"claude_max_retries": 3, "retries": 10,
-                   "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}
-  },
-  "harnesses": {"claude": {"enabled": true}}
+  "harnesses": {
+    "claude": {
+      "enabled": true,
+      "builder": {
+        "model": "sonnet",
+        "fallback_model": "claude-sonnet-4-6",
+        "effort": "medium",
+        "claude_max_retries": 3,
+        "background": true,
+        "concurrency": 1,
+        "turn_retries": 3,
+        "rate_limit": {"retries": 10, "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}
+      }
+    }
+  }
 }
 ```
 
@@ -84,16 +90,17 @@ and merges into `builder` field by field.
 | --- | --- |
 | `enabled` | Use tree compaction for this harness's sessions. Read at launch: restart an agent after changing it. |
 | `default` | The scheduler of every agent that has none of its own, its budget and `image_mode`. |
+| `builder.model`, `builder.effort` | The harness's model that writes summaries, and its effort. Claude: default `sonnet`, efforts `low` to `max` (default `medium`). |
+| `builder.fallback_model` | Takes over a turn that `model` still refuses after `turn_retries`, from the merges already made; `null` fails the turn instead. Claude: default `claude-sonnet-4-6`. Sonnet 5.5's safeguards refused some short turns when merges still showed thinking, and one turn that cannot be built stops the whole compaction. Sonnet 4.6 refused nothing in testing but builds nearly flat trees (a 22-leaf turn in 2 merges, where Sonnet 5.5 made 6 nested ones), so it serves only as the fallback. |
+| `builder.claude_max_retries` | Claude only: Claude Code's own quick retries inside each call (`CLAUDE_CODE_MAX_RETRIES`, 0-15, default 3). |
 | `builder.background` | Build each turn's tree as soon as the turn ends. |
-| `builder.model`, `builder.effort` | The model that writes summaries (default `sonnet`) and its effort (`low` to `max`). |
-| `builder.fallback_model` | Takes over a turn that `model` still refuses after `turn_retries`, from the merges already made (default `claude-sonnet-4-6`; `null` fails the turn instead). Sonnet 5.5's safeguards refused some short turns when merges still showed thinking, and one turn that cannot be built stops the whole compaction. Sonnet 4.6 refused nothing in testing but builds nearly flat trees (a 22-leaf turn in 2 merges, where Sonnet 5.5 made 6 nested ones), so it serves only as the fallback. |
 | `builder.concurrency` | How many turns are built at once (each turn's merges run one after another). |
 | `builder.turn_retries` | Immediate retries of a turn whose build failed (a refusal, an unusable reply, a crash), resuming from the merges that succeeded. |
 | `builder.rate_limit.retries`, `wait_seconds` | Retries of one merge call that was rate limited, overloaded or failed in the API, waiting `first` seconds, multiplied by `multiplier` each time up to `max`. |
-| `builder.rate_limit.claude_max_retries` | Claude Code's own quick retries inside each call (`CLAUDE_CODE_MAX_RETRIES`, 0-15). |
 
-The base template ships the file with compaction off; the development template
-enables it for Claude. A missing file means compaction is off.
+The base template ships the file with compaction off and Claude's builder
+settings written out; the development template also enables it for Claude. A
+missing file means compaction is off.
 
 Each agent can have its own scheduler; without one it follows the current
 default:

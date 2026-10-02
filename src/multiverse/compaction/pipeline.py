@@ -38,13 +38,21 @@ class Agent:
 
 
 def open_agent(root, reference) -> Agent:
-    """The agent's compaction context, through its harness adapter's compaction support."""
+    """The agent's compaction context, through its harness adapter's compaction support.
+
+    The harness supplies its builder defaults and checks the builder settings.
+    """
     directory, adapter, session, _ = native.context(root, reference)
-    settings = settings_file.load(root).for_harness(session.harness)
     factory = getattr(adapter, 'compaction', None)
     if factory is None:
         raise CompactionError(f'The {session.harness} harness does not support compaction')
-    return Agent(root, directory, session.harness, settings, factory(session))
+    source = factory(session)
+    settings = settings_file.load(root).for_harness(session.harness, source.builder_defaults)
+    try:
+        source.check_builder(settings.builder)
+    except ValueError as error:
+        raise ValueError(f'{settings_file.FILE}: harnesses.{session.harness}.builder: {error}') from error
+    return Agent(root, directory, session.harness, settings, source)
 
 
 def conversation(turns: list[Turn]) -> list[Turn]:

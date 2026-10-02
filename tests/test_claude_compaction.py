@@ -56,6 +56,12 @@ elif mode == 'ratelimit':
 '''
 
 
+def claude_builder(**changes):
+    """Claude's builder settings as an empty compaction.json gives them, with `changes`."""
+    from dataclasses import replace
+    return replace(config.Config().for_harness('claude', ClaudeCompaction.builder_defaults).builder, **changes)
+
+
 class Rows:
     """A Claude transcript under construction: rows chained by parentUuid with rising timestamps."""
 
@@ -376,7 +382,7 @@ class MergeTest(Fixture):
         self.write_transcript(rows)
         source = self.source()
         turn = source.turns()[0]
-        builder = config.Builder(model='sonnet', effort='low', rate_limit=config.RateLimit(claude_max_retries=2))
+        builder = config.Builder(model='sonnet', effort='low', options={'claude_max_retries': 2})
         with patch.dict(os.environ, {'MV2_AGENT_ID': 'leak', 'CLAUDECODE': '1'}):
             result = source.merge(turn, list(turn.leaves), builder)
         self.assertEqual(result, merge.Merge(0, 2, 'I handled two steps.'))
@@ -414,7 +420,7 @@ class MergeTest(Fixture):
         self.write_transcript(r.rows[:12])
         source = self.source()
         turn = source.turns()[0]
-        builder = config.Builder(turn_retries=1, rate_limit=config.RateLimit(retries=0))
+        builder = claude_builder(turn_retries=1, rate_limit=config.RateLimit(retries=0))
         from multiverse.compaction.build import Build, Reporter
         events = []
         with patch.dict(os.environ, {'FAKE_MODE': 'refuse'}):
@@ -433,7 +439,7 @@ class MergeTest(Fixture):
         source = self.source()
         turn = source.turns()[0]
         with patch.dict(os.environ, {'FAKE_MODE': 'ratelimit'}), self.assertRaises(MergeError) as caught:
-            source.merge(turn, list(turn.leaves), config.Builder())
+            source.merge(turn, list(turn.leaves), claude_builder())
         self.assertEqual(caught.exception.kind, 'rate_limit')
 
 
@@ -460,6 +466,23 @@ class AdapterTest(Fixture):
         write(self.root / 'compaction.json', {'enabled': True, 'harnesses': {'claude': {'enabled': False}}})
         self.assertNotIn('hooks', self.settings(self.adapter.spawn(LaunchContext('spawn', self.values()))))
 
+    def test_claude_supplies_its_builder_defaults_and_checks_its_own_settings(self):
+        builder = claude_builder()
+        self.assertEqual((builder.model, builder.fallback_model, builder.effort, builder.options),
+                         ('sonnet', 'claude-sonnet-4-6', 'medium', {'claude_max_retries': 3}))
+        source = self.source()
+        source.check_builder(builder)
+        cases = [(claude_builder(effort='extreme'), 'effort'), (claude_builder(model=None), 'model'),
+                 (claude_builder(options={'claude_max_retries': 16}), 'claude_max_retries'),
+                 (claude_builder(options={'claude_max_retries': 3, 'colour': 'red'}), 'colour')]
+        for value, expected in cases:
+            with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, expected):
+                source.check_builder(value)
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {'builder': {'effort': 'extreme'}}}})
+        from multiverse.compaction import pipeline
+        with self.assertRaisesRegex(ValueError, 'harnesses.claude.builder: effort'):
+            pipeline.open_agent(self.root, self.agent_dir.name)
+
     def test_compaction_needs_the_bridge_and_stays_out_of_core_capabilities(self):
         self.assertIsNone(self.source().unavailable())
         write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {}})
@@ -482,8 +505,8 @@ class AdapterTest(Fixture):
 
 class InstallTest(Fixture):
     def test_install_streams_the_compacted_conversation_for_the_hook(self):
-        write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}},
-                                               'builder': {'rate_limit': {'wait_seconds': {'first': 0.01, 'max': 0.01}}}})
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {
+            'enabled': True, 'builder': {'rate_limit': {'wait_seconds': {'first': 0.01, 'max': 0.01}}}}}})
         r = Rows()
         for index in range(4):
             r.user(f'Task {index}', f'p{index}')

@@ -1,37 +1,44 @@
 """Compaction settings: the universe's `compaction.json` and each agent's own scheduler.
 
-A universe or subverse opts in with `compaction.json` at its root. The top
-level holds settings shared by every harness; `harnesses.<name>` overrides them
-for one harness, by the name of its directory under `harnesses/`:
+A universe or subverse opts in with `compaction.json` at its root:
 
     {"schema": 1,
      "enabled": false,
-     "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0},
-     "builder": {"background": true, "model": "sonnet", "fallback_model": "claude-sonnet-4-6",
-                 "effort": "medium",
-                 "concurrency": 1, "turn_retries": 3,
-                 "rate_limit": {"claude_max_retries": 3, "retries": 10,
-                                "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}},
-     "harnesses": {"claude": {"enabled": true}}}
+     "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
+     "harnesses": {
+       "claude": {
+         "enabled": true,
+         "builder": {"model": "sonnet", "fallback_model": "claude-sonnet-4-6", "effort": "medium",
+                     "claude_max_retries": 3,
+                     "background": true, "concurrency": 1, "turn_retries": 3,
+                     "rate_limit": {"retries": 10, "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}}}}}
 
-An override replaces `enabled` and the `default` scheduler, and merges into
-`builder` field by field. Every field is optional; a missing file means
+`enabled` and the `default` scheduler are shared by every harness, and
+`harnesses.<name>` (by its directory under `harnesses/`) may replace either.
+Tree building belongs to one harness, so `builder` exists only under
+`harnesses.<name>`: its model, fallback model and effort name that harness's
+own, and any field not listed above is an option of that harness (Claude's
+`claude_max_retries`). The harness supplies their defaults and checks them
+(CompactionSource.builder_defaults and check_builder); the other fields mean
+the same for every harness. Every field is optional; a missing file means
 compaction is off everywhere. An agent may have its own scheduler in
 `state/agents/<id>/compaction/config.json`; without one it follows its
 harness's default as it is now.
 """
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
 
 from ..store import write
 
 FILE = 'compaction.json'
-EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 # Each scheduler and the parameters it takes besides `budget`.
 SCHEDULERS = {'last_k_raw': ('k',), 'proportional': (), 'uniform': (), 'recency_boosted': ('recency_ratio', 'recency_half_life')}
 IMAGE_MODES = ('budget_fit', 'keep_all', 'drop_all')
+SHARED = ('enabled', 'default')
 SECTION = ('enabled', 'default', 'builder')
+# Builder fields every harness understands; any other field is the harness's own option.
+BUILDER = ('model', 'fallback_model', 'effort', 'background', 'concurrency', 'turn_retries', 'rate_limit')
 
 
 @dataclass(frozen=True)
@@ -63,12 +70,7 @@ class Schedule:
 
 @dataclass(frozen=True)
 class RateLimit:
-    """Waits between retries of one merge call that was rate limited or overloaded.
-
-    `claude_max_retries` is passed to each Claude call (CLAUDE_CODE_MAX_RETRIES)
-    for its own quick retries before ours.
-    """
-    claude_max_retries: int = 3
+    """Waits between retries of one merge call that was rate limited or overloaded."""
     retries: int = 10
     first: float = 20.0
     multiplier: float = 2.0
@@ -82,11 +84,18 @@ class RateLimit:
 
 @dataclass(frozen=True)
 class Builder:
+    """One harness's tree building.
+
+    `model`, `fallback_model` (takes over a turn that `model` still refuses
+    after its retries; None fails the turn instead) and `effort` name that
+    harness's own; `options` are its other settings, as written. The harness
+    supplies their defaults and checks them.
+    """
+    model: str | None = None
+    fallback_model: str | None = None
+    effort: str | None = None
+    options: dict = field(default_factory=dict)
     background: bool = True
-    model: str = 'sonnet'
-    # Takes over a turn that `model` still refuses after its retries; None to fail the turn instead.
-    fallback_model: str | None = 'claude-sonnet-4-6'
-    effort: str = 'medium'
     concurrency: int = 1
     turn_retries: int = 3
     rate_limit: RateLimit = field(default_factory=RateLimit)
@@ -102,14 +111,15 @@ class Settings:
 
 @dataclass(frozen=True)
 class Config:
-    """The whole file: shared settings and per-harness overrides, as written."""
+    """The whole file: shared settings and each harness's own, as written."""
     shared: dict = field(default_factory=dict)
     harnesses: dict = field(default_factory=dict)
 
-    def for_harness(self, name: str) -> Settings:
+    def for_harness(self, name: str, defaults: dict | None = None) -> Settings:
+        """One harness's settings; `defaults` are its builder defaults (CompactionSource.builder_defaults)."""
         override = self.harnesses.get(name, {})
-        merged = {**self.shared, **{key: override[key] for key in ('enabled', 'default') if key in override}}
-        merged['builder'] = _merge(self.shared.get('builder', {}), override.get('builder', {}))
+        merged = {**self.shared, **{key: override[key] for key in SHARED if key in override}}
+        merged['builder'] = _merge(defaults or {}, override.get('builder', {}))
         return _settings(merged, f'harnesses.{name}' if name in self.harnesses else FILE)
 
 
@@ -164,32 +174,27 @@ def parse_schedule(value, where='scheduler settings') -> Schedule:
     return schedule
 
 
+def _name(value, where):
+    """A model or effort name, or None."""
+    if value is not None and (not isinstance(value, str) or not value or value.startswith('-') or '\0' in value):
+        raise ValueError(f'{where} must be a name, or null')
+    return value
+
+
 def _settings(value, where) -> Settings:
     enabled = value.get('enabled', False)
     if not isinstance(enabled, bool):
         raise ValueError(f'{where}: enabled must be true or false')
     default = parse_schedule(value.get('default', {}), f'{where}: default')
-    builder = _fields(value.get('builder', {}),
-                      ('background', 'model', 'fallback_model', 'effort', 'concurrency', 'turn_retries', 'rate_limit'),
-                      f'{where}: builder')
+    builder = value.get('builder', {})
+    if not isinstance(builder, dict):
+        raise ValueError(f'{where}: builder must be an object')
     background = builder.get('background', True)
     if not isinstance(background, bool):
         raise ValueError(f'{where}: builder.background must be true or false')
-    model = builder.get('model', 'sonnet')
-    if not isinstance(model, str) or not model or model.startswith('-') or '\0' in model:
-        raise ValueError(f'{where}: builder.model must name a model')
-    fallback = builder.get('fallback_model', 'claude-sonnet-4-6')
-    if fallback is not None and (not isinstance(fallback, str) or not fallback or fallback.startswith('-')
-                                 or '\0' in fallback):
-        raise ValueError(f'{where}: builder.fallback_model must name a model, or be null')
-    effort = builder.get('effort', 'medium')
-    if effort not in EFFORTS:
-        raise ValueError(f'{where}: builder.effort must be one of {", ".join(EFFORTS)}')
-    limits = _fields(builder.get('rate_limit', {}), ('claude_max_retries', 'retries', 'wait_seconds'),
-                     f'{where}: builder.rate_limit')
+    limits = _fields(builder.get('rate_limit', {}), ('retries', 'wait_seconds'), f'{where}: builder.rate_limit')
     waits = _fields(limits.get('wait_seconds', {}), ('first', 'multiplier', 'max'), f'{where}: builder.rate_limit.wait_seconds')
     rate_limit = RateLimit(
-        _integer(limits.get('claude_max_retries', 3), f'{where}: claude_max_retries', 0, 15),
         _integer(limits.get('retries', 10), f'{where}: rate_limit.retries'),
         _number(waits.get('first', 20), f'{where}: wait_seconds.first', strict=True),
         _number(waits.get('multiplier', 2), f'{where}: wait_seconds.multiplier', 1.0),
@@ -197,13 +202,19 @@ def _settings(value, where) -> Settings:
     if rate_limit.maximum < rate_limit.first:
         raise ValueError(f'{where}: wait_seconds.max must be at least wait_seconds.first')
     return Settings(enabled, default, Builder(
-        background=background, model=model, fallback_model=fallback, effort=effort,
+        model=_name(builder.get('model'), f'{where}: builder.model'),
+        fallback_model=_name(builder.get('fallback_model'), f'{where}: builder.fallback_model'),
+        effort=_name(builder.get('effort'), f'{where}: builder.effort'),
+        options={key: item for key, item in builder.items() if key not in BUILDER},
+        background=background,
         concurrency=_integer(builder.get('concurrency', 1), f'{where}: builder.concurrency', 1),
         turn_retries=_integer(builder.get('turn_retries', 3), f'{where}: builder.turn_retries'), rate_limit=rate_limit))
 
 
 def parse(value) -> Config:
-    value = _fields(value, ('schema', *SECTION, 'harnesses'), FILE)
+    if isinstance(value, dict) and 'builder' in value:
+        raise ValueError('builder settings belong to one harness: move them to harnesses.<name>.builder')
+    value = _fields(value, ('schema', *SHARED, 'harnesses'), FILE)
     if value.get('schema', 1) != 1:
         raise ValueError(f'Unsupported {FILE} schema')
     harnesses = value.get('harnesses', {})
@@ -211,7 +222,7 @@ def parse(value) -> Config:
         raise ValueError('harnesses must map harness names to settings')
     for name, override in harnesses.items():
         _fields(override, SECTION, f'harnesses.{name}')
-    config = Config({key: value[key] for key in SECTION if key in value}, dict(harnesses))
+    config = Config({key: value[key] for key in SHARED if key in value}, dict(harnesses))
     # Report a mistake in any section now, not when that harness first compacts.
     _settings(config.shared, FILE)
     for name in harnesses:
@@ -256,9 +267,10 @@ def save_schedule(agent_dir, schedule: Schedule | None):
 
 def describe(settings: Settings) -> dict:
     """Settings in effect, in the file's own shape."""
-    builder = asdict(settings.builder)
-    limits = builder.pop('rate_limit')
-    builder['rate_limit'] = {'claude_max_retries': limits['claude_max_retries'], 'retries': limits['retries'],
-                             'wait_seconds': {'first': limits['first'], 'multiplier': limits['multiplier'],
-                                              'max': limits['maximum']}}
-    return {'enabled': settings.enabled, 'default': settings.default.settings(), 'builder': builder}
+    builder, limits = settings.builder, settings.builder.rate_limit
+    shown = {'model': builder.model, 'fallback_model': builder.fallback_model, 'effort': builder.effort,
+             **builder.options, 'background': builder.background, 'concurrency': builder.concurrency,
+             'turn_retries': builder.turn_retries,
+             'rate_limit': {'retries': limits.retries,
+                            'wait_seconds': {'first': limits.first, 'multiplier': limits.multiplier, 'max': limits.maximum}}}
+    return {'enabled': settings.enabled, 'default': settings.default.settings(), 'builder': shown}

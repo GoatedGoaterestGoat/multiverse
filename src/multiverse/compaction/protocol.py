@@ -52,6 +52,13 @@ class CompactionSource(Protocol):
     # Whether render() can deliver prompt images; when it cannot, every prompt's
     # images are left out and the budget spends nothing on them.
     keeps_images: bool
+    # This harness's builder settings where compaction.json gives none, in the
+    # file's shape: its model, fallback model and effort, and its own options.
+    builder_defaults: dict
+
+    def check_builder(self, builder: Any) -> None:
+        """Raise ValueError naming the field when this harness cannot build trees with `builder`."""
+        ...
 
     def unavailable(self) -> str | None:
         """Why this session cannot install a compaction (its harness integration is off), or None."""
@@ -81,9 +88,10 @@ class CompactionSource(Protocol):
     def merge(self, turn: Turn, frontier: list[Entry], builder: Any) -> Merge:
         """Ask the model for the next merge of this turn's frontier.
 
-        `builder` is the universe's builder settings (model, effort and the
-        harness's own retry count). Raises MergeError; never retries itself
-        beyond the harness's own short transport retries.
+        `builder` is this harness's builder settings (config.Builder: its
+        model, effort and own options, checked by check_builder). Raises
+        MergeError; never retries itself beyond the harness's own short
+        transport retries.
         """
         ...
 

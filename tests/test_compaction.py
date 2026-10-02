@@ -39,6 +39,7 @@ class FakeSource:
 
     harness = 'fake'
     keeps_images = True
+    builder_defaults = {'model': 'fake-model'}
 
     def __init__(self, turns=(), failures=()):
         self._turns = list(turns)
@@ -49,6 +50,10 @@ class FakeSource:
 
     def unavailable(self):
         return None
+
+    def check_builder(self, builder):
+        if builder.options:
+            raise ValueError(f'unknown fake settings: {sorted(builder.options)}')
 
     def turns(self):
         return [Turn(t.id, t.prompt, list(t.leaves), dropped=t.dropped, omitted=t.omitted) for t in self._turns]
@@ -85,39 +90,56 @@ class Events:
 
 class SettingsTest(BaseTest):
     def test_missing_file_means_compaction_is_off(self):
+        (self.root / 'compaction.json').unlink(missing_ok=True)
         settings = config.load(self.root).for_harness('claude')
         self.assertFalse(settings.enabled)
         self.assertEqual(settings.default, config.Schedule('last_k_raw', 0, 2))
-        self.assertEqual(settings.builder.rate_limit.claude_max_retries, 3)
-        self.assertEqual((settings.builder.model, settings.builder.fallback_model, settings.builder.effort),
-                         ('sonnet', 'claude-sonnet-4-6', 'medium'))
+        self.assertEqual((settings.builder.model, settings.builder.effort, settings.builder.options), (None, None, {}))
+        built = config.load(self.root).for_harness('x', {'model': 'm', 'fallback_model': 'f', 'effort': 'e', 'own': 1}).builder
+        self.assertEqual((built.model, built.fallback_model, built.effort, built.options), ('m', 'f', 'e', {'own': 1}))
 
-    def test_harness_overrides_replace_enabled_and_merge_the_builder(self):
+    def test_the_templates_give_claude_its_builder_and_nothing_shared(self):
+        from multiverse.harnesses.claude.compaction import ClaudeCompaction
+        templates = Path(config.__file__).resolve().parents[1] / 'templates'
+        for name, enabled in (('base', False), ('development', True)):
+            with self.subTest(template=name):
+                value = json.loads((templates / name / config.FILE).read_text())
+                self.assertNotIn('builder', value)
+                loaded = config.parse(value).for_harness('claude', ClaudeCompaction.builder_defaults)
+                self.assertEqual(loaded.enabled, enabled)
+                self.assertEqual(value['harnesses']['claude']['builder']['model'], ClaudeCompaction.builder_defaults['model'])
+
+    def test_each_harness_has_its_own_builder_and_may_replace_the_shared_settings(self):
         write(self.root / 'compaction.json', {
             'schema': 1, 'enabled': False, 'default': {'scheduler': 'proportional', 'budget': 900},
-            'builder': {'model': 'sonnet', 'effort': 'medium', 'rate_limit': {'retries': 4, 'wait_seconds': {'first': 5}}},
-            'harnesses': {'claude': {'enabled': True, 'builder': {'effort': 'high', 'rate_limit': {'wait_seconds': {'max': 60}}}},
-                          'codex': {'default': {'scheduler': 'uniform', 'budget': 10}}}})
+            'harnesses': {'claude': {'enabled': True, 'builder': {
+                              'effort': 'high', 'claude_max_retries': 5,
+                              'rate_limit': {'retries': 4, 'wait_seconds': {'first': 5, 'max': 60}}}},
+                          'codex': {'default': {'scheduler': 'uniform', 'budget': 10}, 'builder': {'model': 'gpt-x'}}}})
         loaded = config.load(self.root)
-        claude, codex, pi = (loaded.for_harness(name) for name in ('claude', 'codex', 'pi'))
-        self.assertTrue(claude.enabled)
-        self.assertFalse(codex.enabled)
-        self.assertFalse(pi.enabled)
-        self.assertEqual(claude.builder.effort, 'high')
-        self.assertEqual(claude.builder.model, 'sonnet')
+        claude = loaded.for_harness('claude', {'model': 'sonnet', 'effort': 'medium', 'claude_max_retries': 3})
+        codex = loaded.for_harness('codex', {'model': 'codex-default', 'effort': 'medium'})
+        pi = loaded.for_harness('pi')
+        self.assertEqual([claude.enabled, codex.enabled, pi.enabled], [True, False, False])
+        self.assertEqual((claude.builder.model, claude.builder.effort, claude.builder.options),
+                         ('sonnet', 'high', {'claude_max_retries': 5}))
         self.assertEqual((claude.builder.rate_limit.retries, claude.builder.rate_limit.first,
                           claude.builder.rate_limit.maximum), (4, 5.0, 60.0))
         self.assertEqual(claude.default.scheduler, 'proportional')
+        self.assertEqual((codex.builder.model, codex.builder.effort, codex.builder.options), ('gpt-x', 'medium', {}))
+        self.assertEqual(codex.builder.rate_limit, config.RateLimit())
         self.assertEqual(codex.default, config.Schedule('uniform', 10))
+        self.assertEqual(config.describe(claude)['builder']['claude_max_retries'], 5)
 
     def test_mistakes_are_reported_with_their_place(self):
         cases = [({'enabled': 'yes'}, 'enabled'), ({'default': {'scheduler': 'nope'}}, 'Unknown scheduler'),
                  ({'default': {'scheduler': 'uniform', 'k': 2}}, 'does not take'),
-                 ({'builder': {'effort': 'extreme'}}, 'effort'), ({'builder': {'concurrency': 0}}, 'concurrency'),
-                 ({'builder': {'rate_limit': {'claude_max_retries': 16}}}, 'claude_max_retries'),
-                 ({'builder': {'rate_limit': {'wait_seconds': {'first': 10, 'max': 5}}}}, 'max'),
+                 ({'builder': {'model': 'sonnet'}}, 'belong to one harness'),
+                 ({'harnesses': {'claude': {'builder': {'concurrency': 0}}}}, 'concurrency'),
+                 ({'harnesses': {'claude': {'builder': {'rate_limit': {'claude_max_retries': 3}}}}}, 'rate_limit'),
+                 ({'harnesses': {'claude': {'builder': {'rate_limit': {'wait_seconds': {'first': 10, 'max': 5}}}}}}, 'max'),
                  ({'harnesses': {'claude': {'builder': {'model': ''}}}}, 'harnesses.claude'),
-                 ({'builder': {'fallback_model': 5}}, 'fallback_model'),
+                 ({'harnesses': {'claude': {'builder': {'fallback_model': 5}}}}, 'fallback_model'),
                  ({'colour': 'red'}, 'Unknown')]
         for value, expected in cases:
             with self.subTest(value=value):
