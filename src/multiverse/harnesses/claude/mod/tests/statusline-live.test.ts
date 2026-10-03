@@ -149,6 +149,18 @@ describe('status line', () => {
     expect(w.lines.at(-1)).toBe('blocked · compaction on')
   })
 
+  // compaction.ts takes "enabled" from the launch's MV2_COMPACTION, which cannot change in a running
+  // process, so an agent launched without it has no compaction state to show.
+  test('an agent launched without compaction shows no compaction item, even when the config asks for it', async ($, on) => {
+    const w = session(on)  // no MV2_COMPACTION in this launch
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${UNIVERSE}/statusline.json`, '{"schema": 1, "items": {"compaction": true}}')
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working'])
+  })
+
   test('outside a Multiverse agent there is no line and no timer work', async ($, on) => {
     const w = session(on, {})
     await start($)

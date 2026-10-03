@@ -766,8 +766,9 @@ The order of the keys is the order on screen; a missing key keeps the default sh
 an unknown key is ignored, and an unreadable file means the defaults (logged once).
 `agent` is the name and universe, `phase` and `summary` the agent's last `mv2 report`
 (shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
-count (only when above zero, `50+` at the cap), and `compaction` the state of tree
-compaction. A 2 s timer compares the size and time of four files (`properties.json`,
+count (only when above zero, `50+` at the cap), and `compaction` the built trees out of
+all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),
+shown only for an agent launched with tree compaction enabled. A 2 s timer compares the size and time of four files (`properties.json`,
 the inbox and its cursor, `statusline.json`) with no subprocess, reads only what
 changed, and runs `mv2 inbox --peek` only when the inbox changed; the line also
 refreshes at session start and at each turn's start and end. A running `/compact`'s

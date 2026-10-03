@@ -130,6 +130,7 @@ async function refreshStatus($: EngineInterface) {
         if (Array.isArray(messages)) statusFacts.inbox = Math.min(messages.length, INBOX_LIMIT)
       } catch { /* keep the last count */ }
     }
+    // compactionLine() is undefined unless this launch enabled compaction (MV2_COMPACTION=1).
     statusFacts.compaction = compactionLine()
     setBase(render(statusConfig, statusFacts))
     const line = currentLine()
