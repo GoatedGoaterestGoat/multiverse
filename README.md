@@ -39,7 +39,10 @@ Or install with `pip install .` to put `mv2` on PATH, including its Textual depe
 mv2 -u /path/to/project subverse pr-review
 mv2 -u /path/to/project/.multiverse/subverses/pr-review spawn --name reviewer --task 'Review the current branch using the review workflow.'
 mv2 -u /path/to/project list --recursive
-mv2 -u /path/to/project/.multiverse/subverses/pr-review send reviewer --text 'Focus on correctness and regression risks.'
+mv2 -u /path/to/project/.multiverse/subverses/pr-review send reviewer <<'EOF'
+Focus on correctness and regression risks.
+Include reproduction steps for any failures.
+EOF
 ```
 
 `-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. Ambiguity is an error.
@@ -191,6 +194,17 @@ Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to r
 The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Arbitrary view plugins and dashboard links remain follow-up work.
 
 ## Messages, commands and prompts
+
+Send messages spanning several lines with a quoted heredoc:
+
+```sh
+mv2 send AGENT <<'EOF'
+Please review the current diff.
+Keep the user's $variables and `backticks` literal.
+EOF
+```
+
+When no `--text`, `--file` or `--stdin` is supplied, `send` automatically reads piped or redirected stdin. Quoting `EOF` preserves quotes, apostrophes, dollar signs and backticks without escaping. Choose a delimiter that does not occur alone on a message line. `--stdin` remains an explicit alternative, `--file PATH` reads a file and `--text` accepts short messages. Empty messages are errors; terminal stdin without a message option reports an error instead of waiting for input.
 
 `send` durably saves each message, then submits its sender line and text with `--delivery steer` or `--delivery follow-up`. Core retains delivery attempts and native receipts. `inbox` prints unread inbox-only messages as sender/content blocks, with full text and no metadata, and marks them read only after successful output. `inbox --peek` leaves them unread. `inbox --all` browses readable history without consuming it; add `--last 20` or `--since 2h` (or an ISO timestamp) for recent messages. `--json` keeps structured output for scripts, including raw history and delivery evidence with `--all`; cursor paging uses `--all --json --after CURSOR`. Use `--delivery inbox-only` (or `--queue-only`) for manual delivery. `deliver AGENT --retry` retries the recipient's definite failures, never uncertain or accepted submissions. `deliver AGENT --check` reconciles pending or uncertain native receipts, and records receipts for messages the current launch accepted, without submitting. Native acceptance is not proof of reading or an answer. See [the adapter contract](docs/harness-adapters.md).
 

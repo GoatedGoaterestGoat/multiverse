@@ -81,4 +81,15 @@ mv2 -u /path/to/project/.multiverse refresh --apply
 
 Run `catalog` in each changed scope and load newly added prompts with `command`. Run `doctor` for basic workspace/configuration diagnostics; it does not prove every prompt or native setting works. Use `capabilities --agent NAME` and `inspect NAME` for an existing agent's actual support and launch state. Report the paths changed, template used, workspace selected and any capability that remains unverified.
 
+For messages spanning several lines, lead with a quoted heredoc:
+
+```sh
+mv2 send AGENT <<'EOF'
+Please review the universe configuration.
+Check the user's $workspace and `bootstrap.md` without changing them.
+EOF
+```
+
+Inside an agent, use `"$MV2_CLI"` in place of `mv2`. Piped or redirected stdin is read automatically when no `--text`, `--file` or `--stdin` option is supplied. Quoting `EOF` preserves quotes, apostrophes, dollar signs and backticks without escaping; choose a delimiter absent from the message's standalone lines. `--stdin` still explicitly reads stdin, `--file PATH` reads a file and `--text` accepts short messages. Empty input is an error; without a message option, terminal stdin reports an error instead of waiting for input.
+
 If the user asks to launch or coordinate agents, read the target's `skills/coordination/SKILL.md`. Spawn/resume use saved workspaces and exact native sessions. Sends may wake stopped agents; queued or accepted delivery is not an answer. Reported phase/summary and observed process/status are separate. Move/remove operations require stopped agents, including those in a moved subverse; removal goes to trash. Detaching a dashboard or terminal does not stop agent work.

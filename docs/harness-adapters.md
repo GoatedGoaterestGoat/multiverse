@@ -251,13 +251,27 @@ without restarting the daemon.
 mv2 spawn --name worker --harness codex
 mv2 spawn --name reviewer --prompt 'Review the current diff.'
 mv2 resume worker
-mv2 send worker --text 'Consider this now' --delivery steer
-mv2 send worker --text 'Next, inspect the tests' --delivery follow-up
+mv2 send worker --delivery steer <<'EOF'
+Consider this now.
+Preserve the user's $variables and `backticks` literally.
+EOF
+mv2 send worker --delivery follow-up <<'EOF'
+Next, inspect the tests.
+Report any failures with reproduction steps.
+EOF
 mv2 ask worker --question 'What would this alternative cost?'
 mv2 get-usage worker
 mv2 list --json
 mv2 capabilities --agent worker --probe
 ```
+
+For multiline messages, use `mv2 send AGENT <<'EOF'` with a quoted delimiter.
+No escaping is needed for quotes, apostrophes, dollar signs or backticks in the
+body; use a delimiter that does not appear alone on a message line. Piped or
+redirected stdin is read automatically when no `--text`, `--file` or `--stdin`
+option is supplied. `--stdin` explicitly reads stdin, `--file PATH` reads a file
+and `--text` remains available for short messages. Empty messages are rejected;
+terminal stdin without a message option fails clearly instead of waiting.
 
 The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
@@ -333,7 +347,9 @@ mv2 inbox                         # show unread sender/content blocks and mark t
 mv2 inbox --all --last 20          # recent history, oldest first
 mv2 inbox --all --since 2h         # history from the last two hours
 mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
-mv2 send worker --text 'Later' --delivery inbox-only
+mv2 send worker --delivery inbox-only <<'EOF'
+Later, check the workspace configuration.
+EOF
 mv2 deliver worker --retry        # retry this recipient's definite failures
 mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```

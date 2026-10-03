@@ -8,10 +8,10 @@ from ._common import delivery_summary
 
 def configure(parser):
     parser.add_argument("agent")
-    message = parser.add_mutually_exclusive_group(required=True)
+    message = parser.add_mutually_exclusive_group()
     message.add_argument("--text")
     message.add_argument("--file", type=Path)
-    message.add_argument("--stdin", action="store_true")
+    message.add_argument("--stdin", action="store_true", help="Read stdin (automatic for piped or redirected input)")
     parser.add_argument("--queue-only", action="store_true", help="Save for manual inbox reading; do not submit natively")
     parser.add_argument("--delivery", choices=("steer", "follow-up", "inbox-only"), default="steer",
                         help="Native timing: next safe boundary or the next turn")
@@ -21,7 +21,14 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
     root = universe.resolve(root)
-    text = Path(file).read_text() if file is not None else sys.stdin.read() if stdin else text
+    if file is not None:
+        text = Path(file).read_text()
+    elif stdin or (text is None and not sys.stdin.isatty()):
+        text = sys.stdin.read()
+    if text is None:
+        raise ValueError("Specify --text, --file or --stdin, or pipe a message to stdin")
+    if not text.strip():
+        raise ValueError("Message text must not be empty")
     if sender is None:
         sender = {"agent_id": os.environ.get("MV2_AGENT_ID"), "universe": os.environ.get("MV2_UNIVERSE"),
                   "name": "agent" if os.environ.get("MV2_AGENT_ID") else "user"}
