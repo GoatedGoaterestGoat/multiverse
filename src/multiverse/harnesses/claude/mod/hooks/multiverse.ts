@@ -4,12 +4,14 @@ import type { EngineInterface, On } from 'claude-code'
 //   /multiverse | /multiverse list   the universe catalog, as command output
 //   /multiverse <name> [args]        that command, workflow or skill, submitted as the
 //                                    person's own prompt (what `mv2 command` prints)
-//   /multiverse send <agent> <text>  a message to another agent, from the person
-//   /multiverse inbox                this agent's unread inbox-only messages, not
-//                                    marked read (`mv2 inbox --peek`)
+//   /multiverse send <agent> <text>  a message to another agent, sent as this agent
+//   /multiverse inbox                this agent's unread inbox-only messages, which
+//                                    this marks read (`mv2 inbox`)
 //
-// Sending and submitting speak as the person, so they run only for a prompt the
-// person typed (the composer, or Remote Control); any other origin may read.
+// Everything but `list` acts with the person's authority at this terminal (it
+// sends as this agent, submits a prompt as the person's, or changes what the
+// agent has read), so it runs only for a prompt the person typed (the composer,
+// or Remote Control); any other origin may only list.
 
 export const NAME = "multiverse"
 export const DESCRIPTION = "Multiverse: list, run a command or skill, message an agent, read the inbox"
@@ -67,14 +69,13 @@ export function inbox(json: string): string {
   }
   if (messages.length === 0) return "No unread inbox-only messages."
   const noun = messages.length === 1 ? "message" : "messages"
-  return [`${messages.length} unread inbox-only ${noun} (not marked read; the agent reads them with mv2 inbox):`,
-          ...messages.map(describe)].join("\n")
+  return [`${messages.length} unread inbox-only ${noun} (now marked read):`, ...messages.map(describe)].join("\n")
 }
 
 // Run an mv2 command. Output and failure both come back as text.
-async function mv2($: EngineInterface, cli: string, argv: string[], env?: Record<string, string>) {
+async function mv2($: EngineInterface, cli: string, argv: string[]) {
   try {
-    const result = await $.process.run([cli, ...argv], { env, timeoutMs: TIMEOUT_MS })
+    const result = await $.process.run([cli, ...argv], { timeoutMs: TIMEOUT_MS })
     return { ok: result.exitCode === 0, out: result.stdout, err: result.stderr.trim() || result.stdout.trim() }
   } catch (error) {
     return { ok: false, out: "", err: `mv2 did not finish: ${error instanceof Error ? error.message : String(error)}` }
@@ -93,22 +94,23 @@ export function registerMultiverse(on: On) {
       return { text: result.ok ? result.out.trim() || "Nothing in this universe's catalog." : `mv2 catalog failed: ${result.err}` }
     }
 
+    if (!PEOPLE.has(e.origin.kind)) {
+      return { text: `/multiverse ${parsed.kind === "prompt" ? parsed.name : parsed.kind} acts with the person's authority, so only a prompt the person typed can run it.` }
+    }
+
     if (parsed.kind === "inbox") {
-      const result = await mv2($, cli, ["inbox", "--peek"])
+      // A normal read: it marks the messages read, and the person sees what the agent has now been shown.
+      const result = await mv2($, cli, ["inbox"])
       return { text: result.ok ? inbox(result.out) : `mv2 inbox failed: ${result.err}` }
     }
 
-    if (!PEOPLE.has(e.origin.kind)) {
-      return { text: `/multiverse ${parsed.kind === "send" ? "send" : parsed.name} speaks as the person, so only a prompt the person typed can run it.` }
-    }
-
     if (parsed.kind === "send") {
-      // The person typed this, so it reads as from the user, not from this agent.
-      const result = await mv2($, cli, ["send", parsed.agent, `--text=${parsed.text}`], { MV2_AGENT_ID: "" })
+      // With this session's own MV2_AGENT_ID, so the recipient reads "Message from <this agent>".
+      const result = await mv2($, cli, ["send", parsed.agent, `--text=${parsed.text}`])
       if (!result.ok) return { text: `Not sent: ${result.err}` }
       let state = "sent"
       try { state = String((JSON.parse(result.out) as { state?: unknown }).state ?? state) } catch { /* plain text output */ }
-      return { text: `Sent to ${parsed.agent} as you (${state}).` }
+      return { text: `Sent to ${parsed.agent} (${state}).` }
     }
 
     const result = await mv2($, cli, ["command", parsed.name, ...(parsed.args ? ["--", parsed.args] : [])])

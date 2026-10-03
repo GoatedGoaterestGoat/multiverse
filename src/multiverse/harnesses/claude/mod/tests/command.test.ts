@@ -49,13 +49,13 @@ describe('parse', () => {
 })
 
 describe('inbox formatting', () => {
-  test('unread messages are listed with sender and time and a note that none was marked read', async () => {
+  test('unread messages are listed with sender and time and a note that they are now marked read', async () => {
     const text = inbox(JSON.stringify({ messages: [
       { at: '2026-10-03T09:15:42.123456+00:00', from: { agent_id: '7e2c007f-45a2-4185-870e-dd409c4cdbb3', name: 'agent' }, text: 'Rebase done.' },
       { at: '2026-10-03T09:20:00+00:00', from: { agent_id: '', name: 'user' }, text: 'Thanks\u001b[31m!' },
     ] }))
     expect(text.split('\n')).toEqual([
-      '2 unread inbox-only messages (not marked read; the agent reads them with mv2 inbox):',
+      '2 unread inbox-only messages (now marked read):',
       '• agent 7e2c007f (2026-10-03 09:15:42 UTC): Rebase done.',
       '• user (2026-10-03 09:20:00 UTC): Thanks [31m!',
     ])
@@ -64,7 +64,7 @@ describe('inbox formatting', () => {
   test('none, one, a long one and bad output', async () => {
     expect(inbox(JSON.stringify({ messages: [] }))).toBe('No unread inbox-only messages.')
     expect(inbox(JSON.stringify({ messages: [{ from: { name: 'user' }, text: 'x'.repeat(900) }] })).split('\n')[0])
-      .toBe('1 unread inbox-only message (not marked read; the agent reads them with mv2 inbox):')
+      .toBe('1 unread inbox-only message (now marked read):')
     const long = inbox(JSON.stringify({ messages: [{ from: { name: 'user' }, text: 'x'.repeat(900) }] })).split('\n')[1] ?? ''
     expect(long.length).toBeLessThan(520)
     expect(long.endsWith('…')).toBe(true)
@@ -82,21 +82,22 @@ describe('/multiverse', () => {
     expect(w.submitted).toEqual([])
   })
 
-  test('inbox only peeks: it never reads the inbox the consuming way', async ($, on) => {
+  test('inbox is a normal, consuming read: the messages it shows are marked read', async ($, on) => {
     const w = world(on, () => ({ stdout: JSON.stringify({ messages: [{ from: { name: 'user' }, text: 'ping' }], cursor: 10 }) }))
     const result = await run($, 'inbox')
     expect(result.text).toContain('1 unread inbox-only message')
     expect(result.text).toContain('• user: ping')
-    expect(w.runs.map((r) => r.argv)).toEqual([['/mv2', 'inbox', '--peek']])
+    expect(w.runs.map((r) => r.argv)).toEqual([['/mv2', 'inbox']])  // not --peek: that is the status line's count
   })
 
-  test('send speaks as the user, from the person’s own prompt', async ($, on) => {
+  test('send goes out as this agent, from the person’s own prompt', async ($, on) => {
     const w = world(on, () => ({ stdout: JSON.stringify({ state: 'native_queued', ok: true }) }))
     const result = await run($, 'send reviewer --text looks odd, "quoted" $(not run)')
-    expect(result.text).toBe('Sent to reviewer as you (native_queued).')
-    // The text is one argument, so it can never read as an option, and an empty agent id reads as the user.
-    expect(w.runs).toEqual([{ argv: ['/mv2', 'send', 'reviewer', '--text=--text looks odd, "quoted" $(not run)'], env: { MV2_AGENT_ID: '' } }])
-    expect((await run($, 'send lead hi', 'bridge')).text).toBe('Sent to lead as you (native_queued).')
+    expect(result.text).toBe('Sent to reviewer (native_queued).')
+    // The text is one argument, so it can never read as an option, and the session's own
+    // MV2_AGENT_ID is left alone, so the recipient reads "Message from <this agent>".
+    expect(w.runs).toEqual([{ argv: ['/mv2', 'send', 'reviewer', '--text=--text looks odd, "quoted" $(not run)'], env: undefined }])
+    expect((await run($, 'send lead hi', 'bridge')).text).toBe('Sent to lead (native_queued).')
   })
 
   test('a send that fails says so', async ($, on) => {
@@ -104,17 +105,18 @@ describe('/multiverse', () => {
     expect((await run($, 'send nobody hi')).text).toBe('Not sent: mv2: No agent matches nobody')
   })
 
-  test('only the person can send or submit: other origins may only read', async ($, on) => {
+  test('only the person can send, read the inbox or submit: other origins may only list', async ($, on) => {
     const w = world(on, () => ({ stdout: 'prompt text' }))
     for (const origin of ['plugin', 'sdk', 'peer', 'channel']) {
-      expect((await run($, 'send lead hi', origin)).text).toContain('only a prompt the person typed can run it')
-      expect((await run($, 'review-pr 12', origin)).text).toContain('only a prompt the person typed can run it')
+      for (const args of ['send lead hi', 'inbox', 'review-pr 12']) {
+        expect((await run($, args, origin)).text).toContain('only a prompt the person typed can run it')
+      }
     }
-    expect(w.runs).toEqual([])
+    expect(w.runs).toEqual([])  // nothing ran, so nothing was sent, marked read or loaded
     await w.clock.settle()
     expect(w.submitted).toEqual([])
     expect((await run($, 'list', 'plugin')).text).toBe('prompt text')
-    expect((await run($, 'inbox', 'sdk')).text).toContain('Could not read the inbox')
+    expect((await run($, 'inbox', 'bridge')).text).toContain('Could not read the inbox')  // Remote Control is the person
   })
 
   test('a catalog entry is loaded and submitted as the person’s own prompt, after the command returns', async ($, on) => {

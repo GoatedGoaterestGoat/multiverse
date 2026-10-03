@@ -741,17 +741,21 @@ typeahead with an argument hint, and runnable while a turn is running):
   no model turn.
 - `/multiverse <name> [args]` loads that command, workflow or skill with `mv2
   command` and submits it as the person's own prompt.
-- `/multiverse send <agent> <text>` runs `mv2 send` with an empty `MV2_AGENT_ID`,
-  so the recipient reads `Message from user`: the person typed it, so it is not
-  attributed to this agent.
-- `/multiverse inbox` shows this agent's unread inbox-only messages with `mv2 inbox
-  --peek`, which marks nothing read. Like any local command output, the text also
-  reaches the model on its next turn, under Claude's "do not respond" caveat.
+- `/multiverse send <agent> <text>` runs `mv2 send` with this session's own
+  `MV2_AGENT_ID`, so the recipient reads `Message from <this agent>`. The person
+  types it to speak as this agent; to message an agent as themselves they type to
+  it directly or run `mv2 send` from a shell.
+- `/multiverse inbox` is a normal `mv2 inbox` read: it shows this agent's unread
+  inbox-only messages and marks them read. The output is ordinary command output,
+  so the model sees it on its next turn under Claude's "do not respond" caveat and
+  acts only if asked. (The status line's count uses `mv2 inbox --peek` instead,
+  which marks nothing read.)
 
 `list`, `send` and `inbox` are reserved: a catalog entry with one of those names is
-shadowed. Sending and submitting speak as the person, so they run only for a prompt
-the person typed (the composer, or Remote Control); a plugin, the SDK or a peer
-can only read.
+shadowed. Everything but `list` acts with the person's authority at this terminal
+(it sends as this agent, submits a prompt as the person's, or changes what the
+agent has read), so it runs only for a prompt the person typed (the composer, or
+Remote Control); a plugin, the SDK or a peer can only list.
 
 The mod also keeps one status line under the prompt (Claude allows one per plugin;
 the person's own `statusLine` command is untouched). Its items come from
