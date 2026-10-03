@@ -10,9 +10,10 @@ mv2 init /path/to/dev-workspace --template development
 mv2 -u /path/to/universe subverse tests --template testing --workspace /path/to/test-worktree
 ```
 
-Both include the plain declarative Codex adapter, the existing coordination
-skill, and review workflow. Additional adapters can be copied from the base
-template when needed. No adapter code or extension is required. Installed
+Both include the declarative Codex adapter, the coordination and mv2-help
+skills, and review workflow. mv2-help explains capabilities and helps agents
+set up and customize universes and subverses. Additional adapters can be copied
+from the base template when needed. No adapter code or extension is required. Installed
 universes own their definitions; later package updates do not silently replace
 custom prompts or harness settings. `mv2 refresh` previews template updates and
 `mv2 refresh --apply` takes them for files you have not edited.

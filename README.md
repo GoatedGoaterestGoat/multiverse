@@ -87,6 +87,7 @@ project/.multiverse/
   harnesses/claude/             # declarative source adapter reference and preferences
   harnesses/pi/                 # declarative reference; optional source-owned bridge
   skills/coordination/          # entry.json metadata + SKILL.md
+  skills/mv2-help/              # universe/subverse setup and configuration guidance
   commands/help/                # entry.json metadata + prompt.md
   workflows/review/             # entry.json metadata + prompt.md
   views/default.json            # local dashboard title, accent and columns
