@@ -734,6 +734,47 @@ to 120 s) and removes. Before the session's first response, or right after
 resolves the session under the launch lock but waits for the answer outside it,
 so sends and stop are not held.
 
+The mod registers a native `/multiverse` command at session start (listed in the
+typeahead with an argument hint, and runnable while a turn is running):
+
+- `/multiverse` or `/multiverse list` prints `mv2 catalog` as command output, with
+  no model turn.
+- `/multiverse <name> [args]` loads that command, workflow or skill with `mv2
+  command` and submits it as the person's own prompt.
+- `/multiverse send <agent> <text>` runs `mv2 send` with an empty `MV2_AGENT_ID`,
+  so the recipient reads `Message from user`: the person typed it, so it is not
+  attributed to this agent.
+- `/multiverse inbox` shows this agent's unread inbox-only messages with `mv2 inbox
+  --peek`, which marks nothing read. Like any local command output, the text also
+  reaches the model on its next turn, under Claude's "do not respond" caveat.
+
+`list`, `send` and `inbox` are reserved: a catalog entry with one of those names is
+shadowed. Sending and submitting speak as the person, so they run only for a prompt
+the person typed (the composer, or Remote Control); a plugin, the SDK or a peer
+can only read.
+
+The mod also keeps one status line under the prompt (Claude allows one per plugin;
+the person's own `statusLine` command is untouched). Its items come from
+`statusline.json` at the universe root, which every template ships and `mv2
+refresh` manages (a local edit is kept):
+
+```json
+{"schema": 1, "items": {"agent": false, "phase": true, "summary": false, "inbox": true, "compaction": true}}
+```
+
+The order of the keys is the order on screen; a missing key keeps the default shown,
+an unknown key is ignored, and an unreadable file means the defaults (logged once).
+`agent` is the name and universe, `phase` and `summary` the agent's last `mv2 report`
+(shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
+count (only when above zero, `50+` at the cap), and `compaction` the state of tree
+compaction. A 2 s timer compares the size and time of four files (`properties.json`,
+the inbox and its cursor, `statusline.json`) with no subprocess, reads only what
+changed, and runs `mv2 inbox --peek` only when the inbox changed; the line also
+refreshes at session start and at each turn's start and end. A running `/compact`'s
+progress takes the slot while it lasts and the normal line returns after. Text
+reported by other agents is shown with control characters removed and a summary is
+shortened.
+
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
 reported unavailable until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents

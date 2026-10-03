@@ -1,5 +1,8 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { registerCompaction } from './compaction'
+import { compactionLine, registerCompaction } from './compaction'
+import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
+import { INBOX_LIMIT, currentLine, defaultConfig, parseConfig, render, setBase } from './statusline'
+import type { Config, Facts } from './statusline'
 import { registerUsage } from './usage'
 
 // Multiverse sends each message over this session's peer inbox at `next`
@@ -52,6 +55,92 @@ const asked = new Map<string, string>()
 
 // Tools whose call is itself a question to the person.
 const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
+
+// The status line under the prompt (statusline.ts holds the logic and the slot
+// it shares with /compact's progress). A timer looks at four files' size and
+// time, with no subprocess, and reads only what changed; `mv2 inbox --peek`
+// runs only when the inbox changed.
+const REFRESH_MS = 2000
+const watched = new Map<string, string>()
+let statusConfig: Config = defaultConfig()
+const statusFacts: Facts = { inbox: 0 }
+let statusTimer: { cancel: () => void } | undefined
+let statusRunning = false
+let shown: string | undefined
+
+// True when the file differs from the last time it was looked at (or is new).
+async function changed($: EngineInterface, path: string): Promise<boolean> {
+  let key = "missing"
+  try {
+    const stat = await $.fs.stat(path)
+    key = `${stat.mtimeMs}:${stat.size}`
+  } catch { /* no such file */ }
+  if (watched.get(path) === key) return false
+  watched.set(path, key)
+  return true
+}
+
+async function readFile($: EngineInterface, path: string): Promise<string | undefined> {
+  try {
+    return await $.fs.read(path)
+  } catch {
+    return undefined
+  }
+}
+
+function field(data: unknown, key: string): string | undefined {
+  const value = typeof data === "object" && data !== null ? (data as Record<string, unknown>)[key] : undefined
+  return typeof value === "string" ? value : undefined
+}
+
+async function refreshStatus($: EngineInterface) {
+  if (statusRunning) return
+  statusRunning = true
+  try {
+    const [directory, universe, cli] = await Promise.all(
+      [$.env.get("MV2_AGENT_DIR"), $.env.get("MV2_UNIVERSE"), $.env.get("MV2_CLI")])
+    if (!directory || !universe) return
+    const configFile = `${universe}/statusline.json`
+    const properties = `${directory}/properties.json`
+    const [configChanged, propertiesChanged, inboxChanged, cursorChanged] = await Promise.all([
+      changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`)])
+    if (configChanged) {
+      const { config, problem } = parseConfig(await readFile($, configFile))
+      statusConfig = config
+      if (problem) $.ui.log(`multiverse: ${problem}; using the defaults`)
+    }
+    if (propertiesChanged) {
+      try {
+        const data: unknown = JSON.parse((await readFile($, properties)) ?? "")
+        statusFacts.agent = field(data, "name")
+        statusFacts.phase = field(data, "phase")
+        statusFacts.summary = field(data, "summary")
+      } catch { /* mid-write: the next change reads it */ }
+    }
+    if (statusFacts.universe === undefined) {
+      try {
+        statusFacts.universe = field(JSON.parse((await readFile($, `${universe}/universe.json`)) ?? ""), "name") ?? ""
+      } catch { /* the name shows once universe.json reads */ }
+    }
+    if ((inboxChanged || cursorChanged) && cli) {
+      try {
+        const result = await $.process.run([cli, "inbox", "--peek"], { timeoutMs: 10000 })
+        const data: unknown = result.exitCode === 0 ? JSON.parse(result.stdout) : undefined
+        const messages = typeof data === "object" && data !== null ? (data as { messages?: unknown }).messages : undefined
+        if (Array.isArray(messages)) statusFacts.inbox = Math.min(messages.length, INBOX_LIMIT)
+      } catch { /* keep the last count */ }
+    }
+    statusFacts.compaction = compactionLine()
+    setBase(render(statusConfig, statusFacts))
+    const line = currentLine()
+    if (line !== shown) {
+      shown = line
+      $.ui.status(line)
+    }
+  } finally {
+    statusRunning = false
+  }
+}
 
 let prompts = 0
 let reported: string | undefined
@@ -144,15 +233,28 @@ export const register: Register = (on) => {
   registerUsage(on)
   registerCompaction(on)
 
+  registerMultiverse(on)
+
   on("session.start", async ($, e, next) => {
     const result = await next(e)
     void report($)
+    $.command.register({ name: NAME, description: DESCRIPTION, argumentHint: HINT, immediate: true })
+      .catch((error: unknown) => $.ui.log(`multiverse: could not register /${NAME}: ${String(error)}`))
+    // A new session (or a reload) knows nothing of what is on screen or on disk.
+    statusTimer?.cancel()
+    watched.clear()
+    shown = undefined
+    statusConfig = defaultConfig()
+    Object.assign(statusFacts, { agent: undefined, universe: undefined, phase: undefined, summary: undefined, inbox: 0 })
+    statusTimer = $.clock.every(REFRESH_MS, () => { void refreshStatus($) })
+    void refreshStatus($)
     return result
   })
 
   on("turn.start", async ($, e, next) => {
     turnRunning = true
     void report($)
+    void refreshStatus($)
     return next(e)
   })
 
@@ -164,6 +266,7 @@ export const register: Register = (on) => {
       waiting.clear()
       asked.clear()
       void report($)
+      void refreshStatus($)
     }
     return result
   })

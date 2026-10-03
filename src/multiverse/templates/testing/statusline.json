@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "items": {
+    "agent": false,
+    "phase": true,
+    "summary": false,
+    "inbox": true,
+    "compaction": true
+  }
+}
