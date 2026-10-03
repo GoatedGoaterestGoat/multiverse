@@ -178,6 +178,12 @@ class TerminalBase(BaseTest):
 
 
 class TerminalTest(TerminalBase):
+    def test_empty_running_server_has_no_panes(self):
+        self.backend.run("new-session", "-d", "-s", "only", "sleep 60")
+        self.backend.run("set-option", "-g", "exit-empty", "off")
+        self.backend.run("kill-session", "-t", "only")
+        self.assertEqual(self.backend.snapshot(), ({}, None))
+
     def test_real_tmux_identity_resume_and_literal_arguments(self):
         result, agent_dir = self.spawn()
         self.assertEqual(read(agent_dir / "seen.json")[0], self.literal)
