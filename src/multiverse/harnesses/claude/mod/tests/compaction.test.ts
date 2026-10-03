@@ -159,11 +159,12 @@ describe('status line', () => {
     expect(parseStatus('{"event":"log"}\nnot json\n')).toBeUndefined()
   })
 
-  test('the session start reads where compaction stands', async ($, on) => {
+  test('the session start catches up as at a turn end: every turn so far has ended', async ($, on) => {
     const w = world(on, [])
-    await $.classic.SessionStart({ source: 'startup' })
+    await $.classic.SessionStart({ source: 'resume' })
     await w.clock.settle()
-    expect(statusRuns(w.runs)).toEqual([['/python', '-m', 'multiverse.compaction', 'status', '--agent-dir', '/agent']])
+    expect(w.runs).toEqual([['/python', '-m', 'multiverse.compaction', 'background', '--agent-dir', '/agent',
+                             '--turn-ended', String(w.clock.now())]])
   })
 
   test('nothing is read when compaction is off', async ($, on) => {

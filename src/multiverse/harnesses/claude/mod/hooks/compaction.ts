@@ -17,13 +17,17 @@ import { currentLine, setProgress } from './statusline'
 //   at once. It returns at once when a builder is running (which takes the new
 //   marker up) or background building is off.
 //
-// - classic.SessionStart: reads where compaction stands for the status line.
+// - classic.SessionStart: every turn so far has ended, so the background builder
+//   is told the session's start as a turn end: it builds what a lost turn end
+//   left (a reload, a turn that ended in an error, a restart), when background
+//   building is on.
 //
 // The status line's compaction item is `compactionLine()`: pure, from what
 // these hooks last learned (`python -m multiverse.compaction status`, which
-// `background` also prints): turns with their tree out of all turns, whether a
-// builder runs, and failures. They learn it when the session starts, when a turn ends,
-// every 15 s while a builder runs, and after each /compact. The progress of a
+// `background` also prints): completed turns with their tree out of all
+// completed turns (the turn in progress never counts), whether a builder runs,
+// and failures. They learn it when the session starts, when a turn ends, every
+// 15 s while a builder runs, and after each /compact. The progress of a
 // running /compact shares the plugin's one status slot (statusline.ts).
 //
 // The rows an install adds are found later from the transcript: they follow
@@ -274,13 +278,14 @@ export function registerCompaction(on: On) {
     return { skip: `mv2 compaction: ${next.error.kind === "timeout" ? "the hook ran out of time" : next.error.message ?? "failed"}` }
   })
 
-  // A new or resumed session: start from what is known on disk.
+  // A new or resumed session: every turn so far has ended, so catch up on any
+  // whose end was lost, as at a turn end.
   on("classic.SessionStart", async ($, e, next) => {
     const result = await next(e)
     known.status = undefined
     known.failed = false
     $.clock.after(0, () => {
-      refresh($).then(() => follow($)).catch(() => undefined)
+      background($).catch((error) => $.ui.log(`mv2 compaction: background build failed: ${String(error)}`))
     })
     return result
   })
