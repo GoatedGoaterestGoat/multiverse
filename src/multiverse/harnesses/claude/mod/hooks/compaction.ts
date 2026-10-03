@@ -21,8 +21,8 @@ import { currentLine, setProgress } from './statusline'
 //
 // The status line's compaction item is `compactionLine()`: pure, from what
 // these hooks last learned (`python -m multiverse.compaction status`, which
-// `background` also prints): trees built, and whether a /compact now would
-// still build any. They learn it when the session starts, when a turn ends,
+// `background` also prints): turns with their tree out of all turns, whether a
+// builder runs, and failures. They learn it when the session starts, when a turn ends,
 // every 15 s while a builder runs, and after each /compact. The progress of a
 // running /compact shares the plugin's one status slot (statusline.ts).
 //
@@ -31,7 +31,7 @@ import { currentLine, setProgress } from './statusline'
 
 type Event = { event: string; [key: string]: unknown }
 // What `python -m multiverse.compaction status` reports.
-export type Status = { enabled?: boolean; trees?: number; missing?: number; building?: boolean; failed?: number }
+export type Status = { enabled?: boolean; trees?: number; turns?: number; missing?: number; building?: boolean; failed?: number }
 
 // What the status line's compaction item knows; its hooks keep it up to date.
 const known: { enabled: boolean; status?: Status; failed: boolean; following: boolean } =
@@ -50,10 +50,8 @@ export function describeCompaction(enabled: boolean, status: Status | undefined,
   if (status?.trees === undefined) {
     parts.push("compaction on")
   } else {
-    parts.push(`trees ${status.trees}`)
-    const missing = status.missing
-    if (missing === 0) parts.push("ready")
-    else if (missing !== undefined) parts.push(status.building ? `building ${missing}` : `${missing} to build`)
+    parts.push(status.turns === undefined ? `trees ${status.trees}` : `trees ${status.trees}/${status.turns}`)
+    if (status.building) parts.push("building")
     if (status.failed) parts.push(`${status.failed} failed`)
   }
   if (compactFailed) parts.push("/compact failed")

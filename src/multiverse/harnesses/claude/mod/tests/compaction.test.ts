@@ -142,14 +142,15 @@ describe('turn end', () => {
 const statusRuns = (runs: (readonly string[])[]) => runs.filter((run) => run[3] === 'status')
 
 describe('status line', () => {
-  test('the compaction item says how many trees exist and whether a /compact would build more', () => {
+  test('the compaction item shows built trees out of all turns', () => {
     expect(describeCompaction(false, undefined, false)).toBeUndefined()
     expect(describeCompaction(true, undefined, false)).toBe('compaction on')
     expect(describeCompaction(true, { enabled: false, trees: 3 }, false)).toBeUndefined()
-    expect(describeCompaction(true, { enabled: true, trees: 3, missing: 0 }, false)).toBe('trees 3 · ready')
-    expect(describeCompaction(true, { enabled: true, trees: 1, missing: 2, building: true }, false)).toBe('trees 1 · building 2')
-    expect(describeCompaction(true, { enabled: true, trees: 1, missing: 2, failed: 1 }, true))
-      .toBe('trees 1 · 2 to build · 1 failed · /compact failed')
+    expect(describeCompaction(true, { enabled: true, trees: 76, turns: 76, missing: 0 }, false)).toBe('trees 76/76')
+    expect(describeCompaction(true, { enabled: true, trees: 70, turns: 76, missing: 2, building: true }, false))
+      .toBe('trees 70/76 · building')
+    expect(describeCompaction(true, { enabled: true, trees: 1, turns: 3, missing: 2, failed: 1 }, true))
+      .toBe('trees 1/3 · 1 failed · /compact failed')
     expect(describeCompaction(true, { enabled: true, trees: 4 }, false)).toBe('trees 4')
   })
 

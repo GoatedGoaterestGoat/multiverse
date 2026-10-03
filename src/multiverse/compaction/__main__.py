@@ -7,8 +7,9 @@ background  note that a turn ended (--turn-ended MARKER) and start the backgroun
             tree builder unless one is running; returns at once, printing the
             status
 status      print where the agent's compaction stands, as one JSON line: on or
-            off, trees built, trees a compaction would still need, whether a
-            builder runs, turns whose build failed (the mod's status line)
+            off, turns with their tree out of all turns, trees a compaction
+            would still need, whether a builder runs, turns whose build failed
+            (the mod's status line)
 worker      the background builder itself
 guard       a harness's last line of defence: refuse its own compaction (exit 2)
 
@@ -114,7 +115,13 @@ def background(directory: str, marker: str | None = None, emit=None) -> int:
 
 
 def status(agent, emit=None, building=False) -> int:
-    """One JSON line on where the agent's compaction stands; `missing` counts the trees a compaction now would build."""
+    """One JSON line on where the agent's compaction stands.
+
+    With compaction on, `trees` counts the conversation's turns that have their
+    tree (a turn of one leaf is its own tree; one with none needs no tree) out
+    of `turns`, and `missing` the trees a compaction now would build. Otherwise,
+    or when the conversation cannot be read, `trees` counts the tree files.
+    """
     emit = emit or json_lines()
     store = agent.store
     facts = {'event': 'status', 'enabled': agent.settings.enabled, 'trees': store.tree_count(),
@@ -125,6 +132,8 @@ def status(agent, emit=None, building=False) -> int:
             schedule, _ = agent.schedule()
             rows = plan(conversation(agent.source.turns()), schedule, store)
             facts['missing'] = sum(1 for row in rows if row['needs_tree'] and not row['has_tree'])
+            facts['trees'] = sum(1 for row in rows if row['has_tree'] or not row['leaves'])
+            facts['turns'] = len(rows)
         except (OSError, ValueError, KeyError) as error:
             facts['problem'] = str(error)
     emit(facts)

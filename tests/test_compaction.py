@@ -516,10 +516,16 @@ class EntryPointTest(BaseTest):
             held = Store(self.directory).worker_lock()
             entry.status(entry._agent(str(self.directory)), events)
             held.release()
-        self.assertEqual([{key: event[key] for key in ('enabled', 'trees', 'missing', 'building', 'failed')}
+        self.assertEqual([{key: event[key] for key in ('enabled', 'trees', 'turns', 'missing', 'building', 'failed')}
                           for event in events.of('status')],
-                         [{'enabled': True, 'trees': 0, 'missing': 2, 'building': False, 'failed': 0},
-                          {'enabled': True, 'trees': 1, 'missing': 1, 'building': True, 'failed': 1}])
+                         [{'enabled': True, 'trees': 0, 'turns': 3, 'missing': 2, 'building': False, 'failed': 0},
+                          {'enabled': True, 'trees': 1, 'turns': 3, 'missing': 1, 'building': True, 'failed': 1}])
+        # A turn of one leaf is its own tree, and one with none needs no tree.
+        single = Turn('s', leaf('s-prompt', 5, 'user_text'), [leaf('s-0')])
+        empty = Turn('e', leaf('e-prompt', 5, 'user_text'), [])
+        with self.patched(FakeSource([single, empty, turn('t9', 3)])):
+            entry.status(entry._agent(str(self.directory)), events)
+        self.assertEqual((events.items[-1]['trees'], events.items[-1]['turns']), (2, 3))
         with self.patched(FakeSource([turn('t0', 3)]), enabled=False):
             entry.status(entry._agent(str(self.directory)), events)
         self.assertEqual(events.items[-1], {'event': 'status', 'enabled': False, 'trees': 1, 'building': False, 'failed': 1})

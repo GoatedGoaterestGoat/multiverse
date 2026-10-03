@@ -182,9 +182,9 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
 - **Background building.** The mod's `Stop` hook starts the builder with the time
   the turn ended, so the turn that just finished gets its tree at once.
 - **Status line.** The mod's status line (`statusline.json`'s `compaction` item)
-  shows trees built and whether a `/compact` now would build more: `trees 76 ·
-  ready`, `trees 70 · building 3` while the background builder works, `trees 70
-  · 3 to build`, plus turns whose build failed and a failed `/compact`. It is
+  shows the turns that have their tree out of all turns, `trees 70/76` (a turn
+  of one leaf is its own tree), with `· building` while the background builder
+  works, turns whose build failed, and a failed `/compact`. It is
   read when the session starts, when a turn ends, every 15 s while a builder
   runs and after each `/compact` (`python -m multiverse.compaction status`). A
   running `/compact` shows its progress in the same slot.
