@@ -23,7 +23,10 @@ class Tmux:
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             reason = str(error)
             # An absent server is different from one we lack permission to inspect.
-            if "no server running" in reason or "No such file or directory" in reason and "connecting to" in reason:
+            # tmux before 3.3 fails `list-panes -a` on a running server with no
+            # sessions ("no current target"); that server has no panes either.
+            if ("no server running" in reason or "No such file or directory" in reason and "connecting to" in reason
+                    or reason == "no current target"):
                 return {}, None
             return {}, reason
 
