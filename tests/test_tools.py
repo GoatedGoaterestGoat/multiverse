@@ -62,11 +62,11 @@ class ToolsTest(unittest.TestCase):
             self.assertIn("Expected one exact match", result.stderr)
             self.assertNotIn("Traceback", result.stderr)
             write(self.directory / "runtime.json", {"state": "failed", "error": "launch failed"})
-            self.assertFalse(json.loads(self.invoke("doctor", standalone=standalone, code=1).stdout)["ok"])
+            self.assertFalse(json.loads(self.invoke("doctor", "--json", standalone=standalone, code=1).stdout)["ok"])
 
     def test_message_roundtrip_across_tool_cli_and_tui_keeps_sender_and_cursor(self):
         message = "literal 'quoted'\n$(false) `false`"
-        first = json.loads(self.invoke("send", self.agent, "--stdin", "--queue-only", text=message).stdout)
+        first = json.loads(self.invoke("send", self.agent, "--stdin", "--queue-only", "--json", text=message).stdout)
         self.assertEqual(first["state"], "queued")
         batch = json.loads(self.invoke("inbox", "--agent", self.agent, "--json", standalone=False).stdout)
         self.assertEqual(batch["messages"][0]["text"], message)

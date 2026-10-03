@@ -127,7 +127,7 @@ class WaitTerminalTest(TerminalBase):
         executable.chmod(0o755)
         write(self.root / 'harnesses/fake/harness.json', {'schema': 1, 'spawn': [str(executable)]})
         completed = subprocess.run([sys.executable, '-m', 'multiverse.cli', '-u', str(self.root),
-            'spawn', '--name', 'failed', '--harness', 'fake', '--wait', '--wait-timeout', '5'],
+            'spawn', '--name', 'failed', '--harness', 'fake', '--wait', '--wait-timeout', '5', '--json'],
             env={**os.environ, 'MV2_TMUX_SOCKET': self.socket}, capture_output=True, text=True, timeout=10)
         self.assertEqual(completed.returncode, 1, completed.stderr)
         result = json.loads(completed.stdout)
@@ -135,3 +135,10 @@ class WaitTerminalTest(TerminalBase):
         self.assertFalse(result['ready'])
         self.assertEqual(result['runtime']['state'], 'failed')
         self.assertIn('No such file', result['error'])
+        # Without --json the failure is one plain sentence on stderr and nothing on stdout.
+        plain = subprocess.run([sys.executable, '-m', 'multiverse.cli', '-u', str(self.root),
+            'spawn', '--name', 'failed-text', '--harness', 'fake', '--wait', '--wait-timeout', '5'],
+            env={**os.environ, 'MV2_TMUX_SOCKET': self.socket}, capture_output=True, text=True, timeout=10)
+        self.assertEqual((plain.returncode, plain.stdout), (1, ''), plain.stderr)
+        self.assertRegex(plain.stderr, r'^mv2: failed-text did not start: .*No such file')
+        self.assertNotRegex(plain.stderr, r'[0-9a-f]{8}-[0-9a-f]{4}-')  # no record ID
