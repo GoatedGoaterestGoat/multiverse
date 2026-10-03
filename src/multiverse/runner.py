@@ -16,6 +16,44 @@ from multiverse.agents import update_runtime, bind_session, runtime
 from multiverse.store import lock, now, read, write
 
 
+STARTUP_SECONDS = 2
+OUTPUT_LINES = 40
+OUTPUT_BYTES = 8192
+
+
+def bounded_output(text):
+    """Keep a small, printable terminal tail, including partial Unicode safely."""
+    text = ''.join(character for character in text if character.isprintable() or character in '\n\t')
+    text = '\n'.join(text.rstrip().splitlines()[-OUTPUT_LINES:])
+    return text.encode('utf-8')[-OUTPUT_BYTES:].decode('utf-8', errors='ignore')
+
+
+def launch_diagnostic(agent_dir, launch_id, reason):
+    """Snapshot only this launch's owned pane; never redirect the child's TTY."""
+    from multiverse.tmux import owned
+    facts = runtime(agent_dir)
+    if facts.get('launch_id') != launch_id:
+        return {}
+    output, unavailable = '', None
+    try:
+        backend, pane = owned(read(agent_dir / 'properties.json'), facts, states=('alive', 'ending', 'stopped'))
+        output = bounded_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane))
+    except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
+        unavailable = bounded_output(str(error))
+    reason = bounded_output(reason)
+    if output:
+        reason += '\nLast terminal output:\n' + output
+    else:
+        reason += '\nTerminal output unavailable' + (': ' + unavailable if unavailable else ' (pane was empty)')
+    relative = Path('launches') / launch_id / 'output-tail.txt'
+    try:
+        (agent_dir / relative).parent.mkdir(parents=True, exist_ok=True)
+        (agent_dir / relative).write_text(output, encoding='utf-8')
+    except OSError as error:
+        return {'reason': reason + '\nCould not save terminal output: ' + bounded_output(str(error))}
+    return {'reason': reason, 'output_tail_file': str(relative)}
+
+
 class UsagePublisher:
     """Publish adapter observations only into their exact running launch."""
     def __init__(self, agent_dir, launch_id):
@@ -161,6 +199,9 @@ class StartupDelivery:
         except Exception as failure:
             error = f'Startup delivery failed: {failure}; messages remain saved for deliver AGENT --check'
         try:
+            facts = runtime(self.agent_dir)
+            if error and facts.get('launch_id') == self.launch_id and facts.get('reason'):
+                error = facts['reason'] + '\nStartup messages remain saved for deliver AGENT --retry'
             native.flush_startup(self.root, self.agent_dir, self.launch_id, error)
         except Exception as failure:
             try:
@@ -188,7 +229,9 @@ def main():
     watcher = None
     proxy = None
     startup = None
+    startup_checked = False
     request = {}
+    diagnostic = {}
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -210,7 +253,7 @@ def main():
         # A bridge resume already has a saved ID, but it must validate the new
         # native reply (including requested grants) before accepting more input.
         update_runtime(agent_dir, launch.name, state="starting" if request.get('rpc_proxy') else "running", status="unknown",
-                       runner_pid=os.getpid())
+                       runner_pid=os.getpid(), startup_checked=False)
         if request.get('rpc_proxy'):
             from multiverse import harnesses, rpc
             properties = read(agent_dir / 'properties.json')
@@ -253,7 +296,6 @@ def main():
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
         from multiverse.native import finish_wake
-        finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
                                       proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
@@ -261,29 +303,42 @@ def main():
         if request.get('shared_service'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             watcher.start()
-        code = process.wait()
+        try:
+            code = process.wait(timeout=STARTUP_SECONDS)
+        except subprocess.TimeoutExpired:
+            startup_checked = True
+            finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
+            update_runtime(agent_dir, launch.name, startup_checked=True)
+            code = process.wait()
+        ending = runtime(agent_dir).get('ending_at')
+        diagnostic = {}
+        if not ending and (code != 0 or not startup_checked):
+            reason = f'Native process exited with code {code}' + (' during startup.' if not startup_checked else '.')
+            diagnostic = launch_diagnostic(agent_dir, launch.name, reason)
         update_runtime(agent_dir, launch.name,
-                       state="stopped" if code == 0 or runtime(agent_dir).get('ending_at') else "failed",
-                       exit_code=code, status="unknown", stopped_at=now())
+                       state="stopped" if code == 0 or ending else "failed",
+                       exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
         if watcher is not None:
             watcher.close()
             watcher = None
         return code
     except Exception as error:
         print(f"Multiverse launch failed: {error}", file=sys.stderr)
-        update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error))
+        diagnostic = launch_diagnostic(agent_dir, launch.name, f'Multiverse launch failed: {error}')
+        update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error), **diagnostic)
         return 1
     finally:
-        if request.get('resume_message_id') and process is None:
+        if request.get('resume_message_id') and not startup_checked:
             from multiverse.native import finish_wake
             finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
-                        'Runner exited before starting the native process; use deliver AGENT --retry')
+                        diagnostic.get('reason') or 'Runner ended before launch readiness',
+                        uncertain=process is not None)
         if startup is not None:
             startup.close()
         elif request.get('control_endpoint'):
             from multiverse.native import flush_startup
             flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
-                          'Runner ended before bridge readiness; use deliver AGENT --retry')
+                          diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
         if proxy is not None:
             proxy.close()
         if watcher is not None:

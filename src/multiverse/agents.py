@@ -54,8 +54,10 @@ def listing(root, recursive=False):
                 from . import native, usage
                 measured = native.usage_snapshot(scope, properties, facts)
                 relay = facts.get('native_relay') or {}
+                launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
+                             "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
                              "connection_error": relay.get('reason') if relay.get('state') == 'lost' else None,
@@ -291,10 +293,13 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+        if facts.get('reason'):
+            return {**result, 'ok': False, 'ready': False, 'error': facts['reason']}
         if (facts.get('native_relay') or {}).get('state') == 'lost':
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
-        running = facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+        running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+                   and facts.get('startup_checked', True))
         session = SessionHandle.from_records(result, facts, agent_dir)
         ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
             adapter.capabilities(session)['send_steer'].state == 'supported')))
@@ -336,7 +341,10 @@ def terminal_action(root, reference, action):
         return kill(root, reference)
     agent_dir = directory(root, reference)
     facts = runtime(agent_dir)
-    backend, pane = owned(read(agent_dir / "properties.json"), facts)
+    if action == 'inspect' and facts.get('reason'):
+        return facts['reason']
+    backend, pane = owned(read(agent_dir / "properties.json"), facts,
+                          states=('alive', 'stopped') if action == 'inspect' else ('alive',))
     if action == "inspect":
         return backend.run("capture-pane", "-p", "-S", "-100", "-t", pane)
     return backend, pane

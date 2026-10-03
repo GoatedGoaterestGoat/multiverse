@@ -14,6 +14,7 @@ def run(root=None, *, recursive=False, json=False):
         f'{r["id"][:8]}  {r["name"]:16} {r["live"]:8} {r["status"]:12} {r.get("phase", "?"):9} '
         f'{r.get("summary", "")} [{r["universe"]}]'
         + (f' — {r["connection_error"]}' if r.get('connection_error') else '')
+        + (' — ' + ' | '.join(r['launch_error'].splitlines()) if r.get('launch_error') else '')
         for r in rows) or "No agents."
 
 

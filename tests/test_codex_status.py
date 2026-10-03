@@ -249,7 +249,7 @@ class RunnerLifetimeTest(unittest.TestCase):
             (launch / 'ready').touch()
             process = Mock(pid=123)
             process.poll.return_value = 0
-            def waited():
+            def waited(timeout=None):
                 self.assertEqual(read(directory / 'runtime.json')['state'], 'starting')
                 proxy_factory.call_args.args[2](native_id)
                 self.assertEqual(read(directory / 'runtime.json')['state'], 'running')

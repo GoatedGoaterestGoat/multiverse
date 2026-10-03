@@ -211,6 +211,22 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('Mode: plain (auto)', state)
             self.assertIn('Fallback: Native config API unavailable', state)
 
+    async def test_inspector_preserves_saved_native_error_after_wrapper_is_gone(self):
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            reason = 'Native process exited with code 1 during startup.\nLast terminal output:\nNo conversation found'
+            row = next(row for row in self.backend.agents if row['id'] == self.app.selected['id'])
+            row.update(live='dormant', launch_error=reason, reason=reason)
+            self.app.refresh_snapshot()
+            await self.settle(pilot)
+            with patch.object(self.backend, 'inspect') as capture:
+                self.app.action_preview()
+                await self.settle(pilot)
+                capture.assert_not_called()
+            self.assertIn('code 1', str(self.app.query_one('#inspect-state', Static).render()))
+            self.assertIn('No conversation found', str(self.app.query_one('#preview', Static).render()))
+            self.assertEqual(self.app.query_one('#pane-scroll').border_title, 'SAVED LAUNCH OUTPUT')
+
     async def test_inspector_shows_nonblocking_native_version_difference(self):
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)

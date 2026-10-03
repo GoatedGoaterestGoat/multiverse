@@ -15,7 +15,7 @@ def run(root=None):
                 problems.append(f"Missing workspace: {scope}")
             universe.catalog(scope)
             for item in agents.listing(scope):
-                if item["live"] == "unknown" or item.get("runtime", {}).get("state") == "failed":
+                if item["live"] == "unknown" or item.get('launch_error') or item.get("runtime", {}).get("state") == "failed":
                     problems.append(f'{item["name"]}: {item.get("reason") or item.get("runtime", {}).get("error", "Launch failed")}')
                 inbox(scope / "state" / "agents" / item["id"], all_messages=True)
             problems.extend(_compaction(scope))

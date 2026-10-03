@@ -96,7 +96,8 @@ authentication, session binding or the first model turn has finished.
 
 `spawn --wait` and `resume AGENT --wait` opt into a readiness wait after
 registration (`--wait-timeout SECONDS`, default 60). Core waits outside the launch
-lock so native binding can finish. Plain/legacy launches require a running child;
+lock so native binding can finish. Every child must first survive a two-second
+startup check (`runtime.startup_checked`); plain/legacy launches then require a running child;
 bridge launches also require the exact native ID and delivery readiness. For
 Codex, `running` means the relay validated the native reply and effective grants.
 Claude/Pi wait for their bridge registration capability. A changed generation is
@@ -104,6 +105,18 @@ refused. The usual result carries the latest runtime/session plus `ready` and
 `ok`; failures return `error` and CLI exit 1. Timeout also sets `timed_out`, keeps
 the launch intact and never retries it. This waits for launch readiness, not
 completion of the first model turn. The dashboard remains asynchronous.
+
+If a native child exits during that check or later exits nonzero, core captures
+its owned pane before publishing the end state. The child keeps its real TTY;
+stdout/stderr are not redirected. The saved tail contains at most 40 lines and
+8 KiB of UTF-8 text, with terminal controls removed. It lives in
+`launches/<uuid>/output-tail.txt`; `runtime.json` records `output_tail_file` and
+a `reason` containing the exit code and tail. A missing, inaccessible or replaced
+pane produces an explicit output-unavailable reason instead. `list` (including
+JSON), `inspect`, the dashboard inspector and `doctor` retain the diagnostic even
+after the wrapper disappears. `--wait` returns it as its error. Explicit shutdown
+and clean exits after the startup check do not create failure tails. Readiness
+cannot guarantee that a child will not fail later.
 
 `tools/kill.py` and its `stop` alias call the same core shutdown operation.
 Core verifies the pane's universe, agent and launch tags under the launch lock,
@@ -261,10 +274,12 @@ these adapters in both plain and bridge modes; legacy manifests have no verified
 resume-prompt recipe. Dashboard `m` uses the same send path. Inbox-only never
 wakes, and a live plain session still reports native delivery unavailable.
 
-Core records the wake attempt before releasing the runner. Successful process
-startup becomes `accepted` with `delivery_method: resume_prompt` and consumption
+Core records the wake attempt before releasing the runner. Surviving the startup
+check becomes `accepted` with `delivery_method: resume_prompt` and consumption
 unconfirmed. There is no bridge/mod delivery for this first prompt and no
 correlatable native receipt for it. Failure before process startup is retryable;
+an early exit after the child starts records the native diagnostic as `unknown`
+for `deliver AGENT --check`, because the prompt may already have been consumed;
 an interrupted/uncertain attempt is never replayed, including by receipt checks.
 The saved task is unchanged; each launch retains its own prompt in `task.md`.
 

@@ -97,7 +97,7 @@ project/.multiverse/
       inbox.jsonl               # append-only messages and sender metadata
       inbox.cursor              # inbox read position
       session.jsonl             # native Pi conversation
-      launches/<uuid>/          # exact bootstrap, task and argv for each launch
+      launches/<uuid>/          # bootstrap, task, argv and bounded failure output
   subverses/pr-review/           # the same structure, recursively
   trash/<stamp>-<name>/          # removed agents and subverses, files replaced by refresh
 ```
@@ -211,7 +211,9 @@ Tree compaction replaces a harness's own conversation summary with Multiverse's:
 
 Spawn/resume apply the mv2 agent name to the native session where supported: Claude and Pi use `--name`, and Codex bridge uses `thread/name/set`. The `session_name` capability reports support; plain Codex and unverified legacy manifests report naming unavailable. Native display names remain labels, separate from exact session identity.
 
-`spawn --wait` and `resume AGENT --wait` wait for readiness after registering the launch, with `--wait-timeout SECONDS` (default 60). Plain/legacy launches are ready once the runner starts their child; bridges also require the exact native binding and delivery readiness, including validated Codex permissions. The result includes `ready` and `ok` plus the latest runtime and session identity. Failure or timeout exits nonzero; timeout adds `timed_out` and leaves the launch running. The dashboard and calls without `--wait` stay asynchronous.
+`spawn --wait` and `resume AGENT --wait` wait for readiness after registering the launch, with `--wait-timeout SECONDS` (default 60). Every child must survive a two-second startup check; bridges also require the exact native binding and delivery readiness, including validated Codex permissions. The result includes `ready` and `ok` plus the latest runtime and session identity. Failure or timeout exits nonzero; timeout adds `timed_out` and leaves the launch running. The dashboard and calls without `--wait` stay asynchronous.
+
+Early exits and later nonzero exits retain the native terminal's last 40 lines, capped at 8 KiB, in the launch's `output-tail.txt` and `runtime.json.reason`. `list`, `inspect`, the dashboard inspector and `doctor` show that diagnostic even after the wrapper is gone; `--wait` returns the same error. Explicit shutdown and later clean exits do not create failure tails. A failed wake also retains the error for `deliver AGENT --check`; if its process started, prompt consumption remains uncertain and mv2 will not replay it automatically. Readiness checks cannot predict later failures.
 
 Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as an alias). Spawn/resume return an exact session handle; `list` reads current identity and core process state. The adapter takes `resume(session, context)`, keeping the exact saved conversation separate from launch options. `ask` and `get-usage` are explicit operations. `ask` answers a side question from a bridged Claude session's transcript without adding to it, and reports unavailable for the others. `get-usage` reports the latest request's context and any cumulative totals: Claude measures both from its session transcript, and its mod adds the window, cost and rate limits when the bridge is on; Codex bridge launches report the latest request's tokens and window from app-server; Pi reports unavailable.
 

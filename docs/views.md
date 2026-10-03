@@ -22,6 +22,11 @@ reason. It also shows the CLI and daemon versions recorded at launch preparation
 highlighting differences without blocking the bridge. Opening the inspector does
 not retry bridge startup, poll versions or change the mode.
 
+For early or nonzero native exits, the inspector shows the saved launch error
+and terminal tail (at most 40 lines / 8 KiB), including after the tmux wrapper
+has gone. It labels this as saved launch output, not a live capture. The same
+diagnostic is available through `list`, `inspect` and `doctor`.
+
 A lost Codex terminal relay shows `STATUS disconnected` in red while `LIVE`
 still describes the process. The inspector shows the connection failure and
 recovery guidance: kill the launch, then resume its saved conversation. New
