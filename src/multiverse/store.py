@@ -117,8 +117,10 @@ def _manual(message):
     return message.get('schema') != 2 or message['delivery'] == 'inbox-only'
 
 
-def inbox(agent_dir, limit=50, *, after=None, all_messages=False):
-    """Consume unread manual messages; full history is a non-consuming raw view."""
+def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False):
+    """Read unread manual messages; peek and full history do not consume them."""
+    if peek and (all_messages or after is not None):
+        raise ValueError('--peek cannot be combined with --all or --after')
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
@@ -146,7 +148,7 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False):
             else:
                 continue
             cursors.append(offset)
-        if not all_messages and cursor > read_cursor:
+        if not all_messages and not peek and cursor > read_cursor:
             write(agent_dir / 'inbox.cursor', cursor)
         result = {'messages': messages, 'cursor': cursor}
         if after is not None:

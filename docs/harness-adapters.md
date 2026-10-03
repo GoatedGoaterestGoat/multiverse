@@ -343,6 +343,8 @@ Concurrent readers cannot consume the same manual message twice. Stale launch
 callbacks cannot read or advance the current launch's inbox. An interrupted
 caller can recover already-consumed text from history.
 
+`inbox --peek` returns the same unread page (up to 50 messages) without changing the read position; it cannot be combined with `--all` or `--after`.
+
 `inbox --all` is a non-consuming raw view, including internal identifiers and
 native delivery evidence. Page through it with `--after CURSOR`; ordinary reads
 page forward automatically. Diagnostics and recovery use the non-consuming view.
