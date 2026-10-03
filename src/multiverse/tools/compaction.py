@@ -186,7 +186,8 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
     """One agent's compaction: its status, its scheduler, and the plan `scheduler` would make (nothing is saved).
 
     `scheduler` is SAVED for the agent's own setting, None for the default it
-    would follow, or scheduler settings to try.
+    would follow, or scheduler settings to try. `failures` says why each turn
+    whose build is still failed failed, as 'turn <n>: <reason>'.
     """
     root = universe.resolve(root)
     target = open_agent(root, agent)
@@ -207,11 +208,15 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
               'default': target.settings.default.settings(), 'trees_cached': store.tree_count(),
               'activity': _activity(store), 'failed_turns': len(status.get('failures', {})),
               'recent_errors': status.get('errors', [])[-5:]}
+    failed = status.get('failures', {})
     if not preview:
+        # Numbering failed turns needs the turns; read them only when some failed.
+        result['failures'] = _failures(failed, conversation(target.source.turns()) if failed else [])
         return result
     schedule = target.effective(trying)
     every = target.source.turns()
     turns = conversation(every)
+    result['failures'] = _failures(failed, turns)
     rows = planned(turns, schedule, store)
     shares, images = allocate(turns, schedule)
     before = after = 0
@@ -230,6 +235,17 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
                          'dropped_turns': len(every) - len(turns), 'tokens_before': before, 'tokens_after': after,
                          'after_partial': partial}
     return result
+
+
+def _failures(failed: dict, turns) -> list[str]:
+    """Each turn whose build is still failed, as 'turn <n>: <reason>', numbered as the plan numbers turns.
+
+    A failed turn no longer in the conversation is named by its id instead.
+    """
+    position = {turn.id: index for index, turn in enumerate(turns, 1)}
+    ordered = sorted(failed.items(), key=lambda item: (position.get(item[0], len(position) + 1), item[0]))
+    return [f"turn {position[turn_id] if turn_id in position else turn_id[:8]}: {(entry or {}).get('reason') or 'failed'}"
+            for turn_id, entry in ordered]
 
 
 def set_scheduler(root=None, *, agent, scheduler):

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
-from multiverse.compaction import __main__ as entry, config
+from multiverse.compaction import __main__ as entry, config, pipeline
 from multiverse.compaction.model import Leaf, Node
 from multiverse.compaction.protocol import MergeError
 from multiverse.compaction.store import Store
@@ -618,6 +618,18 @@ class DashboardBackendTest(Fixture):
         self.assertEqual(kept['summary']['tokens_after'], kept['summary']['tokens_before'])
         self.assertTrue(backend.compaction_agent(self.root, agent, scheduler=None)['summary']['after_partial'])
         self.assertFalse(config.agent_file(self.agent_dir).exists())
+        self.assertEqual(current['failures'], [])
+        # A turn whose build is still failed says why, numbered as the plan numbers it.
+        from multiverse.compaction.store import Store
+        turns = pipeline.conversation(pipeline.open_agent(self.root, agent).source.turns())
+        store = Store(self.agent_dir)
+        store.set_failure(turns[2].id, 'the model refused this merge')
+        store.set_failure('0123456789abcdef', 'gone')
+        failing = backend.compaction_agent(self.root, agent)
+        self.assertEqual(failing['failures'], ['turn 3: the model refused this merge', 'turn 01234567: gone'])
+        self.assertEqual(backend.compaction_agent(self.root, agent, preview=False)['failures'], failing['failures'])
+        store.set_failure(turns[2].id, None)
+        store.set_failure('0123456789abcdef', None)
         with self.assertRaisesRegex(ValueError, 'scheduler'):
             backend.compaction_agent(self.root, agent, scheduler={'scheduler': 'nope'})
         own = backend.set_compaction_scheduler(self.root, agent, {'scheduler': 'last_k_raw', 'k': 1, 'budget': 0})
