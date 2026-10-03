@@ -51,7 +51,10 @@ During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while
 native work and the agent process are terminated. Once the native process exits,
 `LIVE` is `stopped` while its tmux wrapper remains; after wrapper removal it is
 `dormant`. The stopped stage can be brief during automatic teardown. A native
-exit or Ctrl+C retains the stopped wrapper until kill, resume, move or removal.
+session exit automatically detaches clients viewing the agent pane, then removes
+the wrapper and becomes dormant. Ctrl+C that only interrupts native work leaves
+the session attached. Startup failures and older runners can retain stopped
+wrappers; kill, resume, move and removal still clean them up.
 If native cancellation fails after the child has exited, `K`/`s` still removes
 the owned wrapper. The status line reports that the terminal closed but native
 cancellation is unconfirmed; retry stop when the native service is reachable.

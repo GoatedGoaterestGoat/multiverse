@@ -156,7 +156,18 @@ Once the child exits, `LIVE` is `stopped` while the tmux wrapper still exists.
 Core removes that owned wrapper with `kill-pane`, then records `dormant`. A
 shutdown error leaves diagnostic evidence and any remaining wrapper for retry.
 The stopped stage may be brief during automatic teardown. New launches always
-set `remain-on-exit`; Ctrl+C or a native exit therefore retains a stopped pane.
+set `remain-on-exit` while the runner closes its relay, status watcher and startup
+delivery. After a running native child exits, a short-lived core cleanup process
+outside the pane takes the launch lock, verifies the exact generation and pane
+ownership, detaches only clients viewing that pane, then removes it and records
+`dormant`. Detachment precedes removal so tmux cannot switch those clients into
+another agent. The runner lets the native CLI handle SIGINT: Ctrl+C that only
+interrupts a turn leaves the runner and wrapper alive. A startup exit before the
+two-second check retains its wrapper for diagnostics, except SIGINT/exit 130.
+Explicit kill retains its existing teardown path. Cleanup failures retain a
+retry diagnostic in `runtime.json.wrapper_cleanup` and `error`; use `kill` to
+retry. Conversations and saved native IDs survive teardown. This cleanup does
+not cancel work in a shared native daemon; use `stop`/`kill` if such work remains.
 Absent or foreign panes are dormant for the recorded launch and never authorize
 signals or pane control. Observation errors remain unknown.
 
@@ -585,7 +596,8 @@ TUI's relay connection (or an upstream connection failure before binding) record
 agent then shows `STATUS disconnected` in list and the dashboard; the inspector
 shows recovery guidance. Secondary-client failures and optional naming errors do
 not mark a healthy primary connection lost. An ordinary terminal exit still
-produces `LIVE stopped` and `STATUS -`.
+briefly produces `LIVE stopped` and `STATUS -`, then automatically detaches
+its clients and removes the wrapper (`LIVE dormant`).
 
 Relay loss is sticky for that launch. New sends fail before submission and stay
 saved for explicit retry; `--wait` returns failure immediately. Already accepted

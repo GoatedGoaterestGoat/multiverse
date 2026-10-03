@@ -54,6 +54,65 @@ def launch_diagnostic(agent_dir, launch_id, reason):
     return {'reason': reason, 'output_tail_file': str(relative)}
 
 
+def cleanup_wrapper(launch):
+    """Run outside the pane so removing it cannot interrupt its own cleanup."""
+    from multiverse.tmux import owned, observe
+    agent_dir = launch.parent.parent
+    if not (agent_dir / 'properties.json').exists():
+        return
+    with lock(agent_dir / '.launch.lock'):
+        facts = runtime(agent_dir)
+        if facts.get('launch_id') != launch.name or 'exit_code' not in facts or facts.get('ending_at'):
+            return  # A replacement or an explicit kill owns its own teardown.
+        try:
+            properties = read(agent_dir / 'properties.json')
+            try:
+                backend, pane = owned(properties, facts, states=('stopped',))
+            except ValueError:
+                if observe(properties, facts)['live'] != 'dormant':
+                    raise
+            else:
+                # Detach before removing the pane: tmux would otherwise move
+                # its clients into another agent's remaining session.
+                clients = backend.run('list-clients', '-t', pane, '-F', '#{client_name}\t#{pane_id}')
+                for client in clients.splitlines():
+                    name, _, viewed_pane = client.partition('\t')
+                    if name and viewed_pane == pane:
+                        try:
+                            backend.run('detach-client', '-t', name)
+                        except RuntimeError:
+                            # A client can detach itself between observation and
+                            # the command. Only a still-attached client blocks removal.
+                            remaining = backend.run('list-clients', '-t', pane, '-F', '#{client_name}\t#{pane_id}')
+                            if client in remaining.splitlines():
+                                raise
+                backend.run('kill-pane', '-t', pane)
+            update_runtime(agent_dir, launch.name, state='dormant', status='unknown', dormant_at=now(),
+                           wrapper_cleanup={'state': 'done'})
+        except (OSError, ValueError, KeyError, RuntimeError, subprocess.TimeoutExpired) as error:
+            update_runtime(agent_dir, launch.name,
+                           error=f'Automatic wrapper cleanup failed: {error}; use kill AGENT to retry',
+                           wrapper_cleanup={'state': 'failed', 'reason': str(error)})
+
+
+def schedule_wrapper_cleanup(launch):
+    agent_dir = launch.parent.parent
+    try:
+        with lock(agent_dir / '.launch.lock'):
+            facts = runtime(agent_dir)
+            if facts.get('launch_id') != launch.name or facts.get('ending_at'):
+                return
+            update_runtime(agent_dir, launch.name, wrapper_cleanup={'state': 'pending'})
+            subprocess.Popen([sys.executable, str(Path(__file__).resolve()), '--cleanup-wrapper', str(launch)],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+    except (OSError, ValueError) as error:
+        if runtime(agent_dir).get('launch_id') == launch.name:
+            update_runtime(agent_dir, launch.name,
+                           error=f'Automatic wrapper cleanup failed: {error}; use kill AGENT to retry',
+                           wrapper_cleanup={'state': 'failed', 'reason': str(error)})
+
+
 class UsagePublisher:
     """Publish adapter observations only into their exact running launch."""
     def __init__(self, agent_dir, launch_id):
@@ -230,6 +289,7 @@ def main():
     proxy = None
     startup = None
     startup_checked = False
+    remove_wrapper = False
     request = {}
     diagnostic = {}
 
@@ -237,6 +297,9 @@ def main():
         raise SystemExit(128 + _signum)
 
     previous_handlers = {signum: signal.signal(signum, stop) for signum in (signal.SIGHUP, signal.SIGTERM)}
+    # The native CLI decides whether Ctrl+C interrupts a turn or exits. A caught
+    # handler resets to the default on exec, unlike inheriting SIG_IGN.
+    previous_handlers[signal.SIGINT] = signal.signal(signal.SIGINT, lambda *_: None)
     try:
         deadline = time.monotonic() + 15
         while not (launch / "ready").exists():
@@ -311,6 +374,7 @@ def main():
             update_runtime(agent_dir, launch.name, startup_checked=True)
             code = process.wait()
         ending = runtime(agent_dir).get('ending_at')
+        remove_wrapper = not ending and (startup_checked or code in (-signal.SIGINT, 130))
         diagnostic = {}
         if not ending and (code != 0 or not startup_checked):
             reason = f'Native process exited with code {code}' + (' during startup.' if not startup_checked else '.')
@@ -353,9 +417,14 @@ def main():
         # Shared services deliberately outlive terminal clients and monitors.
         if service_dir:
             shutil.rmtree(service_dir, ignore_errors=True)
+        if remove_wrapper:
+            schedule_wrapper_cleanup(launch)
         for signum, handler in previous_handlers.items():
             signal.signal(signum, handler)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    if sys.argv[1:2] == ['--cleanup-wrapper']:
+        cleanup_wrapper(Path(sys.argv[2]))
+    else:
+        sys.exit(main())
