@@ -329,25 +329,40 @@ map to failed. Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh
-mv2 inbox                         # show unread inbox-only messages and mark them read
-mv2 inbox --all                    # browse full raw history and delivery evidence
+mv2 inbox                         # show unread sender/content blocks and mark them read
+mv2 inbox --all --last 20          # recent history, oldest first
+mv2 inbox --all --since 2h         # history from the last two hours
+mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
 mv2 send worker --text 'Later' --delivery inbox-only
 mv2 deliver worker --retry        # retry this recipient's definite failures
 mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```
 
-Ordinary inbox reads return sender, text, time and delivery mode, without message
-identifiers. They advance the read position under the inbox lock, including
-across skipped native records, stopping at the last complete record in the page.
-Concurrent readers cannot consume the same manual message twice. Stale launch
-callbacks cannot read or advance the current launch's inbox. An interrupted
-caller can recover already-consumed text from history.
+The CLI prints one `Message from NAME:` block per unread inbox-only message,
+with its full text and no metadata. Names are resolved from the sender's agent
+record; people appear as `user`, and another universe keeps core's
+`(in universe NAME)` wording. An empty page prints `No unread messages.`
+Unread pages contain up to 50 messages. The CLI advances the read position only
+after output has been written and flushed successfully, while holding the
+launch and inbox locks. A failed write or flush leaves the page unread;
+concurrent consumers cannot overtake the output. Stale launch callbacks cannot
+read or advance the current launch's inbox. Cursor advancement includes skipped
+native records and stops at the last complete record in the page.
+Python `inbox.run()` still returns and consumes the existing dictionary for
+callers such as the dashboard. CLI `--json` preserves that machine output
+(sender, text, time and delivery mode on ordinary reads).
 
 `inbox --peek` returns the same unread page (up to 50 messages) without changing the read position; it cannot be combined with `--all` or `--after`.
 
-`inbox --all` is a non-consuming raw view, including internal identifiers and
-native delivery evidence. Page through it with `--after CURSOR`; ordinary reads
-page forward automatically. Diagnostics and recovery use the non-consuming view.
+`inbox --all` prints the full history, including native messages, without changing
+the ordinary read position. `--last N` selects the newest positive N messages,
+still printed oldest first; `--since TIME` filters by an ISO timestamp or a
+relative duration such as `30m` or `2h` (also `s`, `d` and `w`). Timestamps without
+a zone use UTC; undated legacy records do not match time filters. Time filtering
+precedes `--last`. Both options require `--all`, and `--last` cannot combine with
+cursor paging. `inbox --all --json` retains the raw view, including internal
+identifiers and delivery evidence, with 50-message pages; `--last` can select a
+larger batch. Page with `--after CURSOR`, which requires `--all --json`.
 Reading history does not cancel pending native delivery, so viewing a message
 there and later receiving it natively can produce a duplicate.
 

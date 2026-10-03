@@ -117,10 +117,15 @@ def _manual(message):
     return message.get('schema') != 2 or message['delivery'] == 'inbox-only'
 
 
-def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False):
+def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
+          last=None, since=None, present=None):
     """Read unread manual messages; peek and full history do not consume them."""
     if peek and (all_messages or after is not None):
         raise ValueError('--peek cannot be combined with --all or --after')
+    if (last is not None or since is not None) and not all_messages:
+        raise ValueError('--last and --since require --all')
+    if last is not None and (last <= 0 or after is not None):
+        raise ValueError('--last must be positive and cannot be combined with --after')
     if limit is not None and limit <= 0:
         raise ValueError('Inbox limit must be positive')
     agent_dir = Path(agent_dir)
@@ -132,6 +137,18 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False):
             if not all_messages and after > read_cursor:
                 raise ValueError('Ordinary inbox reads advance automatically; use --all to browse ahead')
         start = (after or 0) if all_messages else read_cursor
+        def recent(message):
+            if since is None:
+                return True
+            try:
+                timestamp = datetime.fromisoformat(message.get('at', ''))
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                return timestamp >= since
+            except (ValueError, TypeError):
+                return False  # Undated legacy records cannot match a time filter.
+        if last is not None:
+            records = [(offset, message) for offset, message in records if recent(message)][-last:]
         cursor = start
         messages, cursors = [], []
         for offset, message in records:
@@ -140,6 +157,8 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False):
             if limit is not None and len(messages) >= limit:
                 break
             cursor = offset
+            if not recent(message):
+                continue
             state = states.get(message['id'], {})
             if all_messages:
                 messages.append({**message, 'tracking': {'submission_state': 'manual' if _manual(message) else 'pending', **state}})
@@ -148,12 +167,16 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False):
             else:
                 continue
             cursors.append(offset)
-        if not all_messages and not peek and cursor > read_cursor:
-            write(agent_dir / 'inbox.cursor', cursor)
         result = {'messages': messages, 'cursor': cursor}
         if after is not None:
             result.update(start_cursor=start, read_cursor=read_cursor, message_cursors=cursors,
                           has_more=b'\n' in data[cursor:])
+        # A CLI reader presents and flushes while holding the inbox lock. Failed
+        # output leaves the page unread; concurrent consumers cannot overtake it.
+        if present is not None:
+            present(result)
+        if not all_messages and not peek and cursor > read_cursor:
+            write(agent_dir / 'inbox.cursor', cursor)
         return result
 
 
