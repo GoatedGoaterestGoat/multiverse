@@ -186,10 +186,12 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   fallback), in the `compaction` capability and in `mv2 doctor`.
 - **Background building.** The mod's `Stop` hook starts the builder with the time
   the turn ended, so the turn that just finished gets its tree at once. A turn
-  end can be lost (a turn that ends in an error runs no `Stop` hook; a mod reload
-  or a restart can interrupt one), so the session's start counts as a turn end
-  too: every turn so far has ended, and the builder catches up on any left
-  unbuilt. Both start a builder only while background building is on.
+  end can be lost (a turn that ends in an error runs no `Stop` hook; a restart
+  can interrupt one), so the session's start counts as a turn end too: every
+  turn so far has ended, and the builder catches up on any left unbuilt. Both
+  start a builder only while background building is on. A hot reload of the mod
+  (its files changed) starts its state over: the hook awaits its builder call so
+  a reload cannot cancel it, and reads the status again after one.
 - **Status line.** The mod's status line (`statusline.json`'s `compaction` item)
   shows completed turns that have their tree out of all completed turns,
   `trees 51/52` (a turn of one leaf is its own tree; the turn in progress never

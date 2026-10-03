@@ -290,12 +290,27 @@ export function registerCompaction(on: On) {
     return result
   })
 
-  // The main conversation's turn has ended (a subagent's end is SubagentStop).
-  on("classic.Stop", async ($, e, next) => {
+  // A hot reload (the mod's files changed) starts this module's variables over
+  // and cancels its timers: learn the status again. It also fires once at the
+  // session's start, beside classic.SessionStart. (index.ts holds the unmatched
+  // session.start hook; this one is matched.)
+  on("session.start", { isInteractive: true }, async ($, e, next) => {
     const result = await next(e)
     $.clock.after(0, () => {
-      background($).catch((error) => $.ui.log(`mv2 compaction: background build failed: ${String(error)}`))
+      refresh($).then(() => follow($)).catch(() => undefined)
     })
+    return result
+  })
+
+  // The main conversation's turn has ended (a subagent's end is SubagentStop).
+  // Awaited, not left on a timer: a reload at the turn's end would cancel it.
+  on("classic.Stop", async ($, e, next) => {
+    const result = await next(e)
+    try {
+      await background($)
+    } catch (error) {
+      $.ui.log(`mv2 compaction: background build failed: ${String(error)}`)
+    }
     return result
   })
 }

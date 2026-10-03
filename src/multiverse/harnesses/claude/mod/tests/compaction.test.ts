@@ -37,6 +37,7 @@ function world(on: On, events: object[], options: Options = {}) {
   })
   on('classic.Stop', async () => ({}))
   on('classic.SessionStart', async () => ({}))
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
   const statuses: (string | undefined)[] = [], logs: string[] = [], toasts: string[] = []
   on('ui.status', async ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.log', async ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -165,6 +166,22 @@ describe('status line', () => {
     await w.clock.settle()
     expect(w.runs).toEqual([['/python', '-m', 'multiverse.compaction', 'background', '--agent-dir', '/agent',
                              '--turn-ended', String(w.clock.now())]])
+  })
+
+  test('a reload (session.start) reads the status again in an interactive session', async ($, on) => {
+    const w = world(on, [])
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    expect(statusRuns(w.runs)).toEqual([['/python', '-m', 'multiverse.compaction', 'status', '--agent-dir', '/agent']])
+    await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
+    await w.clock.settle()
+    expect(statusRuns(w.runs).length).toBe(1)
+  })
+
+  test('the turn end runs the builder call before the hook returns, so a reload cannot cancel it', async ($, on) => {
+    const w = world(on, [])
+    await $.classic.Stop({ stop_hook_active: false })
+    expect(w.runs.filter((run) => run[3] === 'background').length).toBe(1)
   })
 
   test('nothing is read when compaction is off', async ($, on) => {
