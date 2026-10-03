@@ -210,6 +210,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                       [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
+            if isinstance(adapter, harnesses.CodexAdapter):
+                # Codex detects mouse support during TUI startup. Set only its
+                # wrapper session, before releasing the runner's ready gate.
+                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.

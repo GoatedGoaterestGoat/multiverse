@@ -471,6 +471,17 @@ prevents disposable tests from leaving scheduled helpers behind; daemon stop alo
 does not stop the updater. The TUI setting separately suppresses update checks and
 interactive update prompts in Codex 0.159.3 and 0.160.0.
 
+Before releasing the native child, core enables tmux's session-scoped `mouse`
+option for Codex adapter wrappers on every spawn and resume, including custom
+profiles and both plain and bridge modes. With Codex 0.160.0 this lets wheel
+events scroll the TUI transcript rather than recall composer history. Global
+tmux options, root key bindings, alternate-screen behavior and other sessions
+are unchanged; legacy schema-1 definitions keep their existing behavior.
+Already-running Codex terminals need a resume to pick up the setting. An
+isolated real-TUI test injects wheel events through an attached PTY and verifies
+native transcript scrolling, an unchanged composer, and no tmux copy mode on
+plain spawn and bridge spawn/resume.
+
 The Codex adapter adds `-c check_for_update_on_startup=false` before `--` on
 spawn and resume, including wake prompts, plain mode, bridge mode and plain
 fallbacks. This suppresses unattended startup update dialogs and banners even if
