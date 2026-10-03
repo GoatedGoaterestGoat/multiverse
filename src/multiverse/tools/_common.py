@@ -59,4 +59,6 @@ def main(configure, run):
     parser = argparse.ArgumentParser(description=sys.modules[run.__module__].__doc__)
     add_universe(parser)
     configure(parser)
-    output(run, render=getattr(sys.modules[run.__module__], 'format_output', None), **vars(parser.parse_args()))
+    module = sys.modules[run.__module__]
+    render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
+    output(getattr(module, 'cli_run', run), render=render, **vars(parser.parse_args()))
