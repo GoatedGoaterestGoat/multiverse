@@ -4,7 +4,8 @@ import type { EngineInterface, On } from 'claude-code'
 //   /multiverse | /multiverse list   the universe catalog, as command output
 //   /multiverse <name> [args]        that command, workflow or skill, submitted as the
 //                                    person's own prompt (what `mv2 command` prints)
-//   /multiverse send <agent> <text>  a message to another agent, sent as this agent
+//   /multiverse send <agent> <text>  a message to another agent, sent as this agent; the
+//                                    result is `mv2 send`'s own text
 //   /multiverse inbox                this agent's unread inbox-only messages, which
 //                                    this marks read (`mv2 inbox --json`, parsed here)
 //
@@ -106,11 +107,10 @@ export function registerMultiverse(on: On) {
 
     if (parsed.kind === "send") {
       // With this session's own MV2_AGENT_ID, so the recipient reads "Message from <this agent>".
+      // The CLI's own words are the result: what was delivered, or what was saved and why not delivered
+      // (stdout, with exit 1), or why the send could not start (stderr).
       const result = await mv2($, cli, ["send", parsed.agent, `--text=${parsed.text}`])
-      if (!result.ok) return { text: `Not sent: ${result.err}` }
-      let state = "sent"
-      try { state = String((JSON.parse(result.out) as { state?: unknown }).state ?? state) } catch { /* plain text output */ }
-      return { text: `Sent to ${parsed.agent} (${state}).` }
+      return { text: result.out.trim() || result.err || "mv2 send printed nothing." }
     }
 
     const result = await mv2($, cli, ["command", parsed.name, ...(parsed.args ? ["--", parsed.args] : [])])

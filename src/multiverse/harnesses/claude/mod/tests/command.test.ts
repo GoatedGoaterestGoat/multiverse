@@ -90,19 +90,32 @@ describe('/multiverse', () => {
     expect(w.runs.map((r) => r.argv)).toEqual([['/mv2', 'inbox', '--json']])  // not --peek: that is the status line's count
   })
 
-  test('send goes out as this agent, from the person’s own prompt', async ($, on) => {
-    const w = world(on, () => ({ stdout: JSON.stringify({ state: 'native_queued', ok: true }) }))
+  test('send goes out as this agent, from the person’s own prompt, and shows the CLI’s own words', async ($, on) => {
+    const w = world(on, () => ({ stdout: 'Sent to reviewer; it reads this at its next pause.\n' }))
     const result = await run($, 'send reviewer --text looks odd, "quoted" $(not run)')
-    expect(result.text).toBe('Sent to reviewer (native_queued).')
+    expect(result.text).toBe('Sent to reviewer; it reads this at its next pause.')  // as printed, not labelled
     // The text is one argument, so it can never read as an option, and the session's own
     // MV2_AGENT_ID is left alone, so the recipient reads "Message from <this agent>".
     expect(w.runs).toEqual([{ argv: ['/mv2', 'send', 'reviewer', '--text=--text looks odd, "quoted" $(not run)'], env: undefined }])
-    expect((await run($, 'send lead hi', 'bridge')).text).toBe('Sent to lead (native_queued).')
+    expect(w.runs[0]!.argv).not.toContain('--json')  // the readable result is the intended one
+    expect((await run($, 'send lead,reviewer hi', 'bridge')).text).toBe('Sent to reviewer; it reads this at its next pause.')
+    expect(w.runs.at(-1)?.argv.slice(0, 3)).toEqual(['/mv2', 'send', 'lead,reviewer'])  // several recipients are one argument
   })
 
-  test('a send that fails says so', async ($, on) => {
-    world(on, () => ({ exitCode: 1, stderr: 'mv2: No agent matches nobody\n' }))
-    expect((await run($, 'send nobody hi')).text).toBe('Not sent: mv2: No agent matches nobody')
+  test('a message that was saved but not delivered shows the CLI’s explanation, exit code or not', async ($, on) => {
+    const said = 'Not delivered to reviewer: messaging is not connected for this session. Saved; resume it, then mv2 deliver reviewer --retry.'
+    world(on, () => ({ exitCode: 1, stdout: said + '\n', stderr: '' }))
+    expect((await run($, 'send reviewer hi')).text).toBe(said)
+  })
+
+  test('a send that could not start shows the error the CLI printed', async ($, on) => {
+    world(on, () => ({ exitCode: 1, stderr: 'mv2: Could not find one matching agent. Run mv2 list and use its name.\n' }))
+    expect((await run($, 'send nobody hi')).text).toBe('mv2: Could not find one matching agent. Run mv2 list and use its name.')
+  })
+
+  test('a send that prints nothing still says something', async ($, on) => {
+    world(on, () => ({}))
+    expect((await run($, 'send reviewer hi')).text).toBe('mv2 send printed nothing.')
   })
 
   test('only the person can send, read the inbox or submit: other origins may only list', async ($, on) => {
