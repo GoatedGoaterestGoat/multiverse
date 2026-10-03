@@ -1,5 +1,7 @@
 """Native failures retain bounded terminal evidence across lifecycle surfaces."""
+import subprocess
 import sys
+import threading
 from unittest.mock import patch
 
 from multiverse import agents, native, runner
@@ -12,6 +14,27 @@ ERROR = 'No conversation found with session ID: exact-saved-session'
 
 
 class LaunchDiagnosticTerminalTest(TerminalBase):
+    def test_teardown_waits_for_detached_cleanup_after_panes_are_gone(self):
+        launch = self.root / 'state/agents/cleanup-test/launches/old'
+        launch.mkdir(parents=True)
+        output = launch / 'late-write'
+        # Use the cleanup helper's trailing arguments, but make its final write
+        # slow and deterministic without changing the production runner.
+        helper = subprocess.Popen([sys.executable, '-c',
+            'import sys,time; from pathlib import Path; time.sleep(.5); '
+            'Path(sys.argv[-1], "late-write").write_text("finished")',
+            str(runner.__file__), '--cleanup-wrapper', str(launch)])
+        self.addCleanup(lambda: helper.wait(timeout=5))
+        self.addCleanup(lambda: helper.terminate() if helper.poll() is None else None)
+        # Real helpers are reaped by their runner/init; reap this test child too.
+        reaper = threading.Thread(target=helper.wait, daemon=True)
+        reaper.start()
+        self.addCleanup(lambda: reaper.join(timeout=5))
+        self.assertEqual(self.backend.snapshot()[0], {})
+        self.kill_server()
+        self.assertIsNotNone(helper.poll())
+        self.assertEqual(output.read_text(), 'finished')
+
     def failing_harness(self, code=1, delay=.15):
         script = self.work / 'failure.py'
         script.write_text('import sys,time\n'
