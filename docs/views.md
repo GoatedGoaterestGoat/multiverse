@@ -116,15 +116,16 @@ error with the default hierarchy columns. Missing configuration uses defaults.
 `c` opens the tree-compaction settings of the selected scope: the `compaction.json` at
 its root, and the scope's agents. One screen edits the shared settings (`enabled`, the
 default scheduler with its budget, image mode and parameters) and a section per
-harness (its own `enabled`, default scheduler, and tree builder settings). A blank
+harness (`enabled` and its default scheduler either follow the universe settings or
+override them, plus its tree builder settings). A blank
 field means "use the default", which each field shows as its placeholder. A save
 writes the file as it was with only the edited fields changed; clearing a field deletes
 its key. Ctrl+Enter saves, Escape closes and discards, and a rejected value is shown on
 the screen's error line without closing it. If `compaction.json` cannot be used, the
 reason shows at the top.
 
-Enter on an agent in the table opens its screen: status, whether it follows the default
-scheduler or has its own, and a per-turn plan preview (share, raw or summarized, tree
+Enter on an agent in the table opens its screen: status, whether it follows the harness's
+settings or overrides them with its own scheduler, and a per-turn plan preview (share, raw or summarized, tree
 built or missing) that follows the fields as they are edited, without saving. Ctrl+Enter
 saves the scheduler or returns the agent to the default. See [compaction.md](compaction.md)
 for what the settings mean. The key is not in the footer, which is full.

@@ -170,6 +170,11 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.widget(screen, "claude.builder.fallback_model").placeholder, "claude-sonnet-4-6")
             self.assertEqual(self.widget(screen, "claude.builder.concurrency").placeholder, "1")
             self.assertEqual(self.widget(screen, "claude.default.mode").value, None)
+            labels = [label for _, label in self.widget(screen, "claude.default.mode").options]
+            self.assertEqual(labels, ["follow universe settings", "override universe settings"])
+            self.assertIn("follow universe settings", [label for _, label in self.widget(screen, "claude.enabled").options])
+            self.assertIn("Enter to configure agent-specific compaction settings",
+                          [str(w.render()) for w in screen.query(".csection")][-1])
             # k is hidden for schedulers that do not take it; a harness following the universe hides its own fields.
             self.assertTrue(screen.rows["shared.k"].display)
             self.assertFalse(screen.rows["shared.recency_ratio"].display)
@@ -263,6 +268,9 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("2 turns · 1 summarized · 1 trees missing", summary)
             self.assertIn("partial", summary)
             self.assertTrue(agent.query_one("#agent-follows").display)
+            self.assertEqual([label for _, label in self.widget(agent, "agent.mode").options],
+                             ["follow harness settings", "override harness settings"])
+            self.assertIn("Following harness settings", str(agent.query_one("#agent-follows", Static).render()))
             self.assertFalse(agent.rows["agent.budget"].display)
             first = len(self.backend.previews)
             self.widget(agent, "agent.mode").action_step(1)

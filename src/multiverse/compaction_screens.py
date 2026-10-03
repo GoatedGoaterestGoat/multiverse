@@ -80,7 +80,7 @@ def scheduler_fields(group, base, data, defaults, mode=None):
     fields = []
     if mode is not None:
         path, follows = mode
-        fields.append(field(f'{group}.mode', path, 'default scheduler', 'choice', {}, options=((None, follows), ('own', 'its own')),
+        fields.append(field(f'{group}.mode', path, 'default scheduler', 'choice', {}, options=((None, follows), ('own', 'override universe settings')),
                             group=group, role='mode'))
         fields[-1].initial = 'own' if lookup(data, path) is not MISSING else None
     name = defaults.get('scheduler', 'last_k_raw')
@@ -135,9 +135,9 @@ def sections(overview):
     for entry in overview.get('harnesses', ()):
         name = entry['name']
         own = [field(f'{name}.enabled', ('harnesses', name, 'enabled'), 'enabled', 'choice', data,
-                     options=((None, "follows the universe's"), *BOOL_OPTIONS))]
+                     options=((None, 'follow universe settings'), *BOOL_OPTIONS))]
         own += scheduler_fields(f'{name}.default', ('harnesses', name, 'default'), data, config.Schedule().settings(),
-                                mode=(('harnesses', name, 'default'), "follows the universe's"))
+                                mode=(('harnesses', name, 'default'), 'follow universe settings'))
         own += builder_fields(entry, data)
         found.append((f'Harness {name}' + ('' if entry.get('supported', True) else ' (tree compaction not supported)'), own))
     return found
@@ -375,7 +375,7 @@ class CompactionScreen(FieldScreen):
         for entry in overview.get('harnesses', ()):
             if entry.get('problem'):
                 widgets.append(Static(f"{entry['name']}: {entry['problem']}", classes="cwarn", markup=False))
-        widgets.append(Static("Agents · Enter opens one", classes="csection", markup=False))
+        widgets.append(Static("Agents · Enter to configure agent-specific compaction settings", classes="csection", markup=False))
         table = DataTable(id="compaction-agents", cursor_type="row", zebra_stripes=False)
         widgets.append(table)
         await body.mount(*widgets)
@@ -513,7 +513,7 @@ class AgentScreen(FieldScreen):
         self.fields, self.rows, self.widgets = [], {}, {}
         own = detail.get('scheduler_from') == 'agent'
         data = {'scheduler': scheduler}
-        mode = Field('agent.mode', ('scheduler',), 'scheduler', 'choice', options=((None, 'the default'), ('own', 'its own')),
+        mode = Field('agent.mode', ('scheduler',), 'scheduler', 'choice', options=((None, 'follow harness settings'), ('own', 'override harness settings')),
                      initial='own' if own else None, group='agent', role='mode')
         rows = self.field_rows([mode, *scheduler_fields('agent', ('scheduler',), data, default)])
         await body.mount(*rows, before=self.query_one("#agent-follows"))
@@ -522,7 +522,7 @@ class AgentScreen(FieldScreen):
         self.fill_plan(detail)
 
     def follows(self, default):
-        text = "Follows the default: " + ", ".join(f"{key} {value}" for key, value in default.items())
+        text = "Following harness settings: " + ", ".join(f"{key} {value}" for key, value in default.items())
         self.query_one("#agent-follows", Static).update(text)
         self.refresh_rows()
 
