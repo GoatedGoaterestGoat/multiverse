@@ -291,6 +291,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
     deadline = time.monotonic() + timeout
+    exit_deadline = None
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
@@ -318,6 +319,17 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         elif include_delivery and facts.get('startup_delivery') == 'failed':
             error = facts.get('delivery_error') or 'Startup delivery failed; inspect the launch and saved messages'
         if error:
+            if facts.get('state') in ('starting', 'running') and live in ('stopped', 'dormant'):
+                # observe() can finish after the runner writes its exit record,
+                # leaving this iteration with stale runtime facts. Allow its
+                # diagnostic to settle, but never wait indefinitely for a dead
+                # runner or exceed the caller's readiness deadline.
+                if exit_deadline is None:
+                    exit_deadline = min(deadline, time.monotonic() + .5)
+                remaining = exit_deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(.05, remaining))
+                    continue
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()
         if remaining <= 0:

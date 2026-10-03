@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -96,6 +97,34 @@ class WaitTest(BaseTest):
     def test_wait_never_follows_replacement_generation(self):
         write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
         with self.assertRaisesRegex(ValueError, 'refusing to follow a replacement'):
+            self.wait()
+
+    def test_exit_observation_waits_for_runner_to_publish_its_failure(self):
+        def exited(*args):
+            # The pane snapshot can finish after the runner's final write,
+            # while wait_ready still holds its earlier runtime snapshot.
+            agents.update_runtime(self.directory, self.launch, state='failed',
+                                  reason='Native startup failed: No such file or directory')
+            return {'live': 'stopped'}
+        agents.update_runtime(self.directory, self.launch, state='running')
+        with patch.object(agents, 'observe', side_effect=exited):
+            result = self.wait()
+        self.assertFalse(result['ready'])
+        self.assertEqual(result['runtime']['state'], 'failed')
+        self.assertEqual(result['error'], 'Native startup failed: No such file or directory')
+
+    def test_exit_without_runner_finalization_is_bounded_and_preserves_generation_checks(self):
+        started = time.monotonic()
+        with patch.object(agents, 'observe', return_value={'live': 'dormant'}):
+            result = self.wait(timeout=2)
+        self.assertFalse(result['ready'])
+        self.assertIn('ended before becoming ready', result['error'])
+        self.assertLess(time.monotonic() - started, 1, 'A dead runner must not consume the full readiness timeout')
+        # A replacement during the finalization grace is never followed.
+        def replaced(*args):
+            write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
+            return {'live': 'stopped'}
+        with patch.object(agents, 'observe', side_effect=replaced), self.assertRaisesRegex(ValueError, 'replacement'):
             self.wait()
 
     def test_invalid_timeout_is_rejected_before_creating_an_agent(self):
