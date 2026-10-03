@@ -4,7 +4,11 @@ install     compact the session now: read the install trigger's request on
             stdin; write progress, then each message, then the result as JSON
             lines on stdout
 background  note that a turn ended (--turn-ended MARKER) and start the background
-            tree builder unless one is running; returns at once
+            tree builder unless one is running; returns at once, printing the
+            status
+status      print where the agent's compaction stands, as one JSON line: on or
+            off, trees built, trees a compaction would still need, whether a
+            builder runs, turns whose build failed (the mod's status line)
 worker      the background builder itself
 guard       a harness's last line of defence: refuse its own compaction (exit 2)
 
@@ -20,7 +24,7 @@ import sys
 import threading
 
 from .build import Build, Cancelled, Reporter, json_lines
-from .pipeline import CompactionError, compact, conversation, open_agent
+from .pipeline import CompactionError, compact, conversation, open_agent, plan
 from .store import Store
 
 # A turn whose background build failed is not retried in the background for this long;
@@ -88,24 +92,42 @@ def install(directory: str, request: dict, emit) -> int:
     return 0
 
 
-def background(directory: str, marker: str | None = None) -> int:
+def background(directory: str, marker: str | None = None, emit=None) -> int:
     """Start the builder in its own session so it outlives the caller; never wait for it.
 
     `marker` is the harness's turn-end signal: where the finished turn ended. A
-    builder already running takes it up on its next pass.
+    builder already running takes it up on its next pass. Prints the status.
     """
     agent = _agent(directory)
-    if not (agent.settings.enabled and agent.settings.builder.background):
-        return 0
+    started = False
+    if agent.settings.enabled and agent.settings.builder.background:
+        store = agent.store
+        if marker:
+            store.mark_turn_end(marker)
+        if store.worker_holder() is None:
+            store.directory.mkdir(parents=True, exist_ok=True)
+            with (store.directory / 'build.log').open('a') as log:
+                subprocess.Popen([sys.executable, '-m', 'multiverse.compaction', 'worker', '--agent-dir', str(agent.directory)],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+            started = True
+    return status(agent, emit, building=started)
+
+
+def status(agent, emit=None, building=False) -> int:
+    """One JSON line on where the agent's compaction stands; `missing` counts the trees a compaction now would build."""
+    emit = emit or json_lines()
     store = agent.store
-    if marker:
-        store.mark_turn_end(marker)
-    if store.worker_holder() is not None:
-        return 0
-    store.directory.mkdir(parents=True, exist_ok=True)
-    with (store.directory / 'build.log').open('a') as log:
-        subprocess.Popen([sys.executable, '-m', 'multiverse.compaction', 'worker', '--agent-dir', str(agent.directory)],
-                         stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
+    facts = {'event': 'status', 'enabled': agent.settings.enabled, 'trees': store.tree_count(),
+             'building': building or store.worker_holder() is not None,
+             'failed': len(store.status().get('failures', {}))}
+    if agent.settings.enabled:
+        try:
+            schedule, _ = agent.schedule()
+            rows = plan(conversation(agent.source.turns()), schedule, store)
+            facts['missing'] = sum(1 for row in rows if row['needs_tree'] and not row['has_tree'])
+        except (OSError, ValueError, KeyError) as error:
+            facts['problem'] = str(error)
+    emit(facts)
     return 0
 
 
@@ -157,7 +179,7 @@ def guard(stdin_text: str) -> int:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog='python -m multiverse.compaction', description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('action', choices=('install', 'background', 'worker', 'guard'))
+    parser.add_argument('action', choices=('install', 'background', 'status', 'worker', 'guard'))
     parser.add_argument('--agent-dir', default=os.environ.get('MV2_AGENT_DIR'))
     parser.add_argument('--turn-ended', help="background: the harness's marker for where the finished turn ended")
     args = parser.parse_args(argv)
@@ -178,6 +200,8 @@ def main(argv=None) -> int:
     try:
         if args.action == 'background':
             return background(args.agent_dir, args.turn_ended)
+        if args.action == 'status':
+            return status(_agent(args.agent_dir))
         return worker(args.agent_dir)
     except (OSError, ValueError, KeyError, CompactionError) as error:
         print(f'mv2 compaction {args.action}: {error}', file=sys.stderr)

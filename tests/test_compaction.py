@@ -506,20 +506,40 @@ class EntryPointTest(BaseTest):
         self.assertIn('already running', events.items[-1]['message'])
         held.release()
 
+    def test_status_says_how_many_trees_exist_and_how_many_a_compaction_would_still_build(self):
+        events = Events()
+        with self.patched(FakeSource([turn('t0', 3), turn('t1', 3), turn('t2', 3)])):
+            entry.status(entry._agent(str(self.directory)), events)
+            first = turn('t0', 3)
+            Store(self.directory).save_tree(first, Node(0, first.leaves, 'built', 2))
+            Store(self.directory).set_failure('t1', 'refused')
+            held = Store(self.directory).worker_lock()
+            entry.status(entry._agent(str(self.directory)), events)
+            held.release()
+        self.assertEqual([{key: event[key] for key in ('enabled', 'trees', 'missing', 'building', 'failed')}
+                          for event in events.of('status')],
+                         [{'enabled': True, 'trees': 0, 'missing': 2, 'building': False, 'failed': 0},
+                          {'enabled': True, 'trees': 1, 'missing': 1, 'building': True, 'failed': 1}])
+        with self.patched(FakeSource([turn('t0', 3)]), enabled=False):
+            entry.status(entry._agent(str(self.directory)), events)
+        self.assertEqual(events.items[-1], {'event': 'status', 'enabled': False, 'trees': 1, 'building': False, 'failed': 1})
+
     def test_background_stores_the_turn_end_and_starts_one_builder(self):
+        events = Events()
         with self.patched(FakeSource([turn('t0', 3)])), patch.object(entry.subprocess, 'Popen') as popen:
-            self.assertEqual(entry.background(str(self.directory), '1234'), 0)
+            self.assertEqual(entry.background(str(self.directory), '1234', events), 0)
+            self.assertTrue(events.of('status')[-1]['building'])
             self.assertEqual(Store(self.directory).turn_end(), '1234')
             self.assertEqual(popen.call_count, 1)
             self.assertIn('worker', popen.call_args.args[0])
             self.assertTrue(popen.call_args.kwargs['start_new_session'])
             held = Store(self.directory).worker_lock()
-            self.assertEqual(entry.background(str(self.directory), '5678'), 0)
+            self.assertEqual(entry.background(str(self.directory), '5678', events), 0)
             self.assertEqual(popen.call_count, 1)
             self.assertEqual(Store(self.directory).turn_end(), '5678')
             held.release()
         with self.patched(FakeSource([turn('t0', 3)]), background=False), patch.object(entry.subprocess, 'Popen') as popen:
-            entry.background(str(self.directory), '9')
+            entry.background(str(self.directory), '9', events)
             popen.assert_not_called()
 
     def test_the_worker_builds_every_turn_the_marker_says_has_ended(self):
