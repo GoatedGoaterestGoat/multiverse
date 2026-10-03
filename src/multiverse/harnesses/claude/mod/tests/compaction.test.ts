@@ -89,7 +89,7 @@ describe('session.compact', () => {
     test(`${name} skips with its reason`, async ($, on) => {
       const w = world(on, events, { exit })
       const result = await $.session.compact({ trigger: 'manual', messages: offered })
-      expect('skip' in result && result.skip.includes(reason)).toBe(true)
+      expect(result.skip?.includes(reason)).toBe(true)
       expect(w.core).toEqual([])
     })
   }
