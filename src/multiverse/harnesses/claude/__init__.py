@@ -45,8 +45,21 @@ USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'c
 COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
-def claude_home():
-    return Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+def claude_home(environment=None):
+    """Claude's storage root: `environment` as a launch sees it, else this process's."""
+    source = environment or os.environ
+    if source.get('CLAUDE_CONFIG_DIR'):
+        return Path(source['CLAUDE_CONFIG_DIR'])
+    return (Path(source['HOME']) if source.get('HOME') else Path.home()) / '.claude'
+
+
+def has_saved_conversation(native_id, environment=None):
+    """Whether Claude has written a transcript for this session.
+
+    Claude writes nothing until the first message, so a session that was never
+    used has none, and `--resume` refuses it.
+    """
+    return any((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
 
 
 def peer_token(socket_path):
@@ -141,6 +154,9 @@ def measured_usage(native_id):
     return Usage(native_id, inputs, outputs, inputs + outputs, 'claude-transcript', last, cached, written)
 
 
+FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
+
+
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
@@ -150,7 +166,34 @@ class ClaudeAdapter(ConfiguredAdapter):
         return self._with_bridge(super().spawn(context), context)
 
     def resume(self, session, context):
-        return self._with_bridge(super().resume(session, context), context)
+        command = super().resume(session, context)
+        fresh = None
+        if session.native_id and not has_saved_conversation(session.native_id, context.environment):
+            fresh = self._reserve_session(command, session.native_id)
+        command = self._with_bridge(fresh or command, context)
+        if fresh is None:
+            return command
+        # Say so in the agent's details: it now runs without any earlier context.
+        mode = dict(command.native_mode or {'policy': 'inbox_bridge' if self.settings.get('inbox_bridge') else 'default',
+                                            'mode': 'bridge' if self.settings.get('inbox_bridge') else 'plain'})
+        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
+        return replace(command, native_mode=mode)
+
+    @staticmethod
+    def _reserve_session(command, native_id):
+        """The command starting this exact session fresh, or None if it does not resume it.
+
+        Claude never reserved the ID, so `--session-id` takes it over with every
+        other flag, and any wake prompt after `--`, unchanged. If a transcript does
+        exist, Claude refuses the ID as already in use, so this cannot overwrite one.
+        """
+        argv = list(command.argv)
+        options = argv.index('--') if '--' in argv else len(argv)
+        for index in range(options - 1):
+            if argv[index] == '--resume' and argv[index + 1] == native_id:
+                argv[index] = '--session-id'
+                return replace(command, argv=tuple(argv))
+        return None
 
     def _with_bridge(self, command, context):
         if not self.settings.get('inbox_bridge'):

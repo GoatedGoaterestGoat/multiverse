@@ -21,7 +21,11 @@ maintain another copy of those records. Spawn/resume return `session` in their
 result. `list` reads current core identity, process state and reported status after
 asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
-must not guess a recent session. Claude receives an assigned UUID; Pi owns an
+must not guess a recent session. Claude receives an assigned UUID, and resumes it
+with `--resume` only once Claude has saved a transcript for it (it writes none before
+the first message); a session stopped before then restarts fresh under the same
+UUID with `--session-id`, without replaying its task, and says so in the agent's
+details. Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.

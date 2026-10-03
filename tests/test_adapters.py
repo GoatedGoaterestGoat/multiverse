@@ -20,6 +20,12 @@ from test_multiverse import BaseTest
 
 
 class AdapterContractTest(BaseTest):
+    def setUp(self):
+        super().setUp()
+        # Claude resumes only a session whose transcript exists; keep that storage out of the real one.
+        self.claude_storage = self.work / 'claude-config'
+        self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.claude_storage)}))
+
     def values(self):
         values = dict(name='literal', agent_id=str(uuid4()), session_id=str(uuid4()), bootstrap='Hello "quoted"',
                     bootstrap_json='"Hello"', task='--literal $(false) `false` {literal}',
@@ -31,6 +37,10 @@ class AdapterContractTest(BaseTest):
         return values
 
     def session(self, name, values):
+        if name == 'claude':
+            saved = self.claude_storage / 'projects' / '-workspace' / f"{values['session_id']}.jsonl"
+            saved.parent.mkdir(parents=True, exist_ok=True)
+            saved.write_text('{"type": "user"}\n')
         return SessionHandle(values['agent_id'], name, values['workspace'],
                              native_id=values['session_id'], session_file=values['session_file'])
 
