@@ -87,7 +87,7 @@ describe('/multiverse', () => {
     const result = await run($, 'inbox')
     expect(result.text).toContain('1 unread inbox-only message')
     expect(result.text).toContain('• user: ping')
-    expect(w.runs.map((r) => r.argv)).toEqual([['/mv2', 'inbox']])  // not --peek: that is the status line's count
+    expect(w.runs.map((r) => r.argv)).toEqual([['/mv2', 'inbox', '--json']])  // not --peek: that is the status line's count
   })
 
   test('send goes out as this agent, from the person’s own prompt', async ($, on) => {

@@ -82,7 +82,7 @@ describe('status line', () => {
     w.disk(`${AGENT}/properties.json`, properties('working'))
     await start($)
     await w.clock.settle()
-    expect(w.peeks).toEqual([['/mv2', 'inbox', '--peek']])  // the first look, before anything is unread
+    expect(w.peeks).toEqual([['/mv2', 'inbox', '--peek', '--json']])  // the first look, before anything is unread
     expect(w.lines.at(-1)).toBe('working')
     w.setUnread([{ text: 'a' }, { text: 'b' }])
     w.disk(`${AGENT}/inbox.jsonl`, '{"id":"1"}\n{"id":"2"}\n')

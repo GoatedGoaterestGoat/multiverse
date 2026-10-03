@@ -124,7 +124,7 @@ async function refreshStatus($: EngineInterface) {
     }
     if ((inboxChanged || cursorChanged) && cli) {
       try {
-        const result = await $.process.run([cli, "inbox", "--peek"], { timeoutMs: 10000 })
+        const result = await $.process.run([cli, "inbox", "--peek", "--json"], { timeoutMs: 10000 })
         const data: unknown = result.exitCode === 0 ? JSON.parse(result.stdout) : undefined
         const messages = typeof data === "object" && data !== null ? (data as { messages?: unknown }).messages : undefined
         if (Array.isArray(messages)) statusFacts.inbox = Math.min(messages.length, INBOX_LIMIT)

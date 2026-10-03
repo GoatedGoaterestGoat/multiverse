@@ -760,10 +760,11 @@ typeahead with an argument hint, and runnable while a turn is running):
   `MV2_AGENT_ID`, so the recipient reads `Message from <this agent>`. The person
   types it to speak as this agent; to message an agent as themselves they type to
   it directly or run `mv2 send` from a shell.
-- `/multiverse inbox` is a normal `mv2 inbox` read: it shows this agent's unread
-  inbox-only messages and marks them read. The output is ordinary command output,
-  so the model sees it on its next turn under Claude's "do not respond" caveat and
-  acts only if asked. (The status line's count uses `mv2 inbox --peek` instead,
+- `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
+  and formats it; the CLI's default output is readable text for people): it shows
+  this agent's unread inbox-only messages and marks them read. The output is
+  ordinary command output, so the model sees it on its next turn under Claude's
+  "do not respond" caveat and acts only if asked. (The status line's count uses `mv2 inbox --peek --json` instead,
   which marks nothing read.)
 
 `list`, `send` and `inbox` are reserved: a catalog entry with one of those names is
@@ -789,7 +790,7 @@ count (only when above zero, `50+` at the cap), and `compaction` the built trees
 all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),
 shown only for an agent launched with tree compaction enabled. A 2 s timer compares the size and time of four files (`properties.json`,
 the inbox and its cursor, `statusline.json`) with no subprocess, reads only what
-changed, and runs `mv2 inbox --peek` only when the inbox changed; the line also
+changed, and runs `mv2 inbox --peek --json` only when the inbox changed; the line also
 refreshes at session start and at each turn's start and end. A running `/compact`'s
 progress takes the slot while it lasts and the normal line returns after. Text
 reported by other agents is shown with control characters removed and a summary is

@@ -6,7 +6,7 @@ import type { EngineInterface, On } from 'claude-code'
 //                                    person's own prompt (what `mv2 command` prints)
 //   /multiverse send <agent> <text>  a message to another agent, sent as this agent
 //   /multiverse inbox                this agent's unread inbox-only messages, which
-//                                    this marks read (`mv2 inbox`)
+//                                    this marks read (`mv2 inbox --json`, parsed here)
 //
 // Everything but `list` acts with the person's authority at this terminal (it
 // sends as this agent, submits a prompt as the person's, or changes what the
@@ -100,7 +100,7 @@ export function registerMultiverse(on: On) {
 
     if (parsed.kind === "inbox") {
       // A normal read: it marks the messages read, and the person sees what the agent has now been shown.
-      const result = await mv2($, cli, ["inbox"])
+      const result = await mv2($, cli, ["inbox", "--json"])
       return { text: result.ok ? inbox(result.out) : `mv2 inbox failed: ${result.err}` }
     }
 
