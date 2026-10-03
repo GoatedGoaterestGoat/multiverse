@@ -51,7 +51,7 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_inbox_unknown_agent_does_not_create_state(self):
         before = list((self.root / "state" / "agents").iterdir())
         args = parser().parse_args(["-u", str(self.root), "inbox", "--agent", "missing"])
-        with self.assertRaisesRegex(ValueError, "Expected one agent"):
+        with self.assertRaisesRegex(ValueError, "No agent named missing here"):
             run(args)
         self.assertEqual(list((self.root / "state" / "agents").iterdir()), before)
 
@@ -202,16 +202,16 @@ class LaunchIsolationTest(unittest.TestCase):
                 agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
             failed = agents.directory(self.root, "same-name")
             self.assertEqual(agents.runtime(failed)["state"], "failed")
-            successful = agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+            with self.assertRaisesRegex(ValueError, "already has an agent named same-name"):
+                agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+            self.assertEqual(backend.create.call_count, 1)
+            successful = agents.start(self.root, "retry-name", "test", socket_path="/actual/tmux.sock")
         self.assertIn(failed.name, str(failure.exception))
         self.assertIn("unique name", str(failure.exception))
         self.assertEqual(agents.directory(self.root, failed.name), failed)
+        self.assertEqual(agents.directory(self.root, "same-name"), failed)
         self.assertEqual(agents.directory(self.root, successful["id"]).name, successful["id"])
-        with self.assertRaises(ValueError) as ambiguous:
-            agents.directory(self.root, "same-name")
-        self.assertIn(failed.name, str(ambiguous.exception))
-        self.assertIn(successful["id"], str(ambiguous.exception))
-        self.assertIn("full UUID", str(ambiguous.exception))
+        self.assertEqual(agents.directory(self.root, "retry-name").name, successful["id"])
 
     def test_stale_cli_callbacks_cannot_read_bind_or_change_current_launch(self):
         agent = self.root / "state/agents" / str(uuid4())

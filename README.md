@@ -45,7 +45,7 @@ Include reproduction steps for any failures.
 EOF
 ```
 
-`-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. Ambiguity is an error.
+`-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. New agents must have a unique name within their universe, including names of failed or dormant agents; use `mv2 resume NAME` to restart an existing agent. Older records with duplicate names remain reachable by UUID or an unambiguous UUID prefix. Ambiguity is an error.
 
 ## Individual tools
 

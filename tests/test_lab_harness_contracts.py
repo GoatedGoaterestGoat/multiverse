@@ -39,8 +39,8 @@ class LabHarnessContracts(unittest.TestCase):
         self.patches.enter_context(patch('multiverse.native.start_shared_service',
             side_effect=AssertionError('Offline lab must never prepare a native daemon')))
 
-    def start(self, **kwargs):
-        return agents.start(self.root, name='offline', task='literal $(false) `false`\nquoted',
+    def start(self, name='offline', **kwargs):
+        return agents.start(self.root, name=name, task='literal $(false) `false`\nquoted',
                             model='gpt-6-astra', socket_path=self.socket, **kwargs)
 
     def request(self, row):
@@ -72,7 +72,7 @@ class LabHarnessContracts(unittest.TestCase):
     def test_all_configured_adapters_exact_resume(self):
         for harness in ('codex', 'claude', 'pi'):
             with self.subTest(harness=harness):
-                row = self.start(harness=harness)
+                row = self.start(name=f'offline-{harness}', harness=harness)
                 directory = self.root / 'state/agents' / row['id']
                 native = row.get('native_session_id')
                 if harness == 'codex':
@@ -115,7 +115,7 @@ class LabHarnessContracts(unittest.TestCase):
     def test_unknown_agent_inbox_does_not_create_state(self):
         before = set((self.root / 'state/agents').iterdir())
         args = cli.parser().parse_args(['-u', str(self.root), 'inbox', '--agent', 'absent'])
-        with self.assertRaisesRegex(ValueError, 'found 0'):
+        with self.assertRaisesRegex(ValueError, 'No agent named absent here'):
             cli.run(args)
         self.assertEqual(set((self.root / 'state/agents').iterdir()), before)
 

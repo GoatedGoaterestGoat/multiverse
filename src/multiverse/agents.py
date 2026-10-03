@@ -21,11 +21,19 @@ def directory(root, reference):
         data = read(path)
         if reference in (data["id"], data["name"]) or data["id"].startswith(reference):
             matches.append(path.parent)
+    if not matches:
+        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents.")
     if len(matches) != 1:
-        detail = (". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
-                  if matches else ". Use `mv2 list --json` to find the agent UUID")
+        detail = ". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
         raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
     return matches[0]
+
+
+def _check_available_name(root, name):
+    for path in (root / "state" / "agents").glob("*/properties.json"):
+        if read(path).get("name") == name:
+            raise ValueError(f"This universe already has an agent named {name}; "
+                             f"pick another name or resume it with mv2 resume {name}")
 
 
 def runtime(agent_dir):
@@ -102,6 +110,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         harness, model = properties["harness"], model or properties.get("model")
     else:
         universe.slug(name)
+        _check_available_name(root, name)
         task = task or ""
         properties = {"id": uid(), "universe_id": read(root / "universe.json")["id"],
                       "name": name, "task": task, "summary": "", "phase": "starting",
@@ -182,7 +191,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env.update(command.shared_service.environment)
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
-        write(agent_dir / "properties.json", properties)
+        if resume:
+            write(agent_dir / "properties.json", properties)
+        else:
+            # Publish a name atomically across spawns, before starting any
+            # native service or terminal. Resume keeps its existing record.
+            with lock(root / "state" / ".agents.lock"):
+                _check_available_name(root, name)
+                write(agent_dir / "properties.json", properties)
         write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
                                            "started_at": now(), "native_mode": command.native_mode})
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
