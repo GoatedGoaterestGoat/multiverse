@@ -313,6 +313,19 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Error", status)
             self.assertNotIn("refused", status)
 
+    async def test_failed_turns_show_their_reasons_when_the_backend_gives_them(self):
+        self.backend.agent = {**self.backend.agent, "failed_turns": 2, "recent_errors": [{"message": "old noise"}],
+                              "failures": ["turn 7: the model refused this merge", "turn 9: unexpected error: boom"]}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            screen.query_one("#compaction-agents", DataTable).focus()
+            await pilot.press("enter")
+            await self.settle(pilot)
+            status = str(self.app.screen.query_one("#agent-status", Static).render())
+            self.assertIn("Error: turn 7: the model refused this merge", status)
+            self.assertIn("Error: turn 9: unexpected error: boom", status)
+            self.assertNotIn("old noise", status)
+
     async def test_screens_follow_the_build_while_open(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
             screen = await self.open(pilot)
