@@ -28,6 +28,7 @@ MISSING = object()
 GENERIC = config.describe(config.Settings())['builder']
 SCHEDULER_NAMES = tuple(config.SCHEDULERS)
 BOOL_OPTIONS = ((True, 'true'), (False, 'false'))
+REFRESH = 3.0  # seconds between refreshes of what the build process changes
 
 
 @dataclass
@@ -336,6 +337,7 @@ class CompactionScreen(FieldScreen):
         super().__init__(root, backend)
         self.scope_name = name or Path(root).name
         self.overview = None
+        self.reloading = False
 
     def compose(self):
         with Vertical(id="compaction-dialog"):
@@ -348,6 +350,12 @@ class CompactionScreen(FieldScreen):
     def on_mount(self):
         self.query_one("#compaction-problem").display = False
         self.load()
+        self.set_interval(REFRESH, self.tick)
+
+    def tick(self):
+        """Keep the agents table current while the screen is in front; edits in the fields stay."""
+        if self.overview is not None and not self.saving and not self.reloading and self.app.screen is self:
+            self.reload_agents()
 
     @work(group="compaction", exit_on_error=False)
     async def load(self):
@@ -385,10 +393,13 @@ class CompactionScreen(FieldScreen):
 
     def fill_agents(self):
         table = self.query_one("#compaction-agents", DataTable)
+        row = table.cursor_row
         table.clear()
         for agent in self.overview.get('agents', ()):
             table.add_row(clean(agent['name']), clean(agent['harness']), scheduler_summary(agent),
                           str(agent.get('trees_cached', 0)), agent_state(agent), key=agent['id'])
+        if table.row_count:
+            table.move_cursor(row=min(row, table.row_count - 1), animate=False)
 
     def on_data_table_row_selected(self, event):
         agent = next((a for a in (self.overview or {}).get('agents', ()) if a['id'] == str(event.row_key.value)), None)
@@ -402,11 +413,14 @@ class CompactionScreen(FieldScreen):
     @work(group="compaction-agents", exit_on_error=False)
     async def reload_agents(self):
         """Refresh the agents table after one changed; edits in the fields stay."""
+        self.reloading = True
         try:
             overview = await asyncio.to_thread(self.backend.compaction_overview, self.root)
         except Exception as error:
+            self.reloading = False
             self.error(str(error))
             return
+        self.reloading = False
         self.overview = {**self.overview, 'agents': overview.get('agents', [])}
         self.fill_agents()
 
@@ -443,9 +457,7 @@ def scheduler_summary(agent):
 def agent_state(agent):
     parts = [clean(agent.get('activity') or 'idle')]
     if agent.get('failed_turns'):
-        parts.append(f"{agent['failed_turns']} failed")
-    if agent.get('last_error'):
-        parts.append(clean(agent['last_error'])[:60])
+        parts.append(f"{agent['failed_turns']} failed turns")
     return " · ".join(parts)
 
 
@@ -469,19 +481,25 @@ class AgentScreen(FieldScreen):
     def compose(self):
         with Vertical(id="compaction-dialog"):
             yield Label(f"Compaction · {clean(self.agent['name'])} ({clean(self.agent['harness'])})", classes="detail-title", markup=False)
-            with VerticalScroll(id="compaction-body"):
+            with VerticalScroll(id="agent-top"):
                 yield Static("Reading…", id="agent-status", markup=False)
                 yield Static("", classes="csection", id="agent-scheduler-title", markup=False)
                 yield Static("", id="agent-follows", markup=False)
-                yield Static("PLAN", classes="csection", markup=False)
-                yield Static("", id="plan-summary", markup=False)
-                yield DataTable(id="plan", cursor_type="row", zebra_stripes=False)
+            yield Static("PLAN", classes="csection", markup=False)
+            yield Static("", id="plan-summary", markup=False)
+            yield DataTable(id="plan", cursor_type="row", zebra_stripes=False)
             yield Static("", classes="cerror", markup=False)
         yield Footer()
 
     def on_mount(self):
         self.query_one("#plan", DataTable).add_columns("#", "Prompt", "Leaves", "Tokens", "Share", "Kept", "Tree")
         self.load()
+        self.set_interval(REFRESH, self.tick)
+
+    def tick(self):
+        """Follow the build: trees, activity and the plan's built/missing marks, with the scheduler as currently edited."""
+        if self.detail is not None and not self.saving and self.app.screen is self:
+            self.start_preview()
 
     @work(group="compaction", exit_on_error=False)
     async def load(self):
@@ -497,17 +515,9 @@ class AgentScreen(FieldScreen):
         self.detail = detail
         scheduler = detail.get('scheduler') or {}
         default = detail.get('default') or {}
-        state = ['enabled' if detail.get('enabled') else 'off']
-        if detail.get('unavailable'):
-            state.append(clean(detail['unavailable']))
-        state += [f"{detail.get('trees_cached', 0)} trees", clean(detail.get('activity') or 'idle')]
-        if detail.get('failed_turns'):
-            state.append(f"{detail['failed_turns']} failed turns")
-        lines = [" · ".join(state)]
-        lines += ["Error: " + clean(item) for item in (detail.get('recent_errors') or [])[-3:]]
-        self.query_one("#agent-status", Static).update("\n".join(lines))
+        self.show_status(detail)
         self.query_one("#agent-scheduler-title", Static).update("SCHEDULER")
-        body = self.query_one("#compaction-body", VerticalScroll)
+        body = self.query_one("#agent-top", VerticalScroll)
         for row in list(self.rows.values()):
             await row.remove()
         self.fields, self.rows, self.widgets = [], {}, {}
@@ -520,6 +530,23 @@ class AgentScreen(FieldScreen):
         self.follows(default)
         self.refresh_rows()
         self.fill_plan(detail)
+
+    def show_status(self, detail):
+        """Status lines; an error shows only while a turn's build is still failed (a retry that worked clears it)."""
+        state = ['enabled' if detail.get('enabled') else 'off']
+        if detail.get('unavailable'):
+            state.append(clean(detail['unavailable']))
+        state += [f"{detail.get('trees_cached', 0)} trees", clean(detail.get('activity') or 'idle')]
+        failed = detail.get('failed_turns') or 0
+        if failed:
+            state.append(f"{failed} failed turns")
+        lines = [" · ".join(state)]
+        if failed:
+            reasons = [clean(item) for item in (detail.get('failures') or [])]
+            errors = reasons or [clean(item.get('message', item) if isinstance(item, dict) else item)
+                                 for item in (detail.get('recent_errors') or [])[-3:]]
+            lines += ["Error: " + item for item in errors[:3]]
+        self.query_one("#agent-status", Static).update("\n".join(lines))
 
     def follows(self, default):
         text = "Following harness settings: " + ", ".join(f"{key} {value}" for key, value in default.items())
@@ -571,6 +598,10 @@ class AgentScreen(FieldScreen):
                 self.error(str(failure))
             elif detail is not None:
                 self.error("")
+                self.detail = {**self.detail, **{k: detail[k] for k in ('trees_cached', 'activity', 'failed_turns',
+                                                                          'recent_errors', 'failures', 'enabled', 'unavailable')
+                                                 if k in detail}}
+                self.show_status(self.detail)
                 self.fill_plan(detail)
         if self.dirty:
             self.dirty = False

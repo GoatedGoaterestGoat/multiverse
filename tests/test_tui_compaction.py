@@ -39,6 +39,7 @@ class FakeBackend(DemoBackend):
         self.problem = None
         self.saved, self.previews, self.schedulers = [], [], []
         self.error = None
+        self.long_plan = 0
         self.agent = {"id": "a1", "name": "reviewer", "harness": "claude", "live": "alive",
                       "scheduler": {"scheduler": "last_k_raw", "budget": 0, "k": 2}, "scheduler_from": "universe",
                       "trees_cached": 3, "activity": "building", "failed_turns": 1, "last_error": "refused"}
@@ -62,13 +63,17 @@ class FakeBackend(DemoBackend):
             scheduler, own, source = self.agent["scheduler"], self.agent["scheduler"], self.agent["scheduler_from"]
         return {**self.agent, "enabled": True, "unavailable": None, "scheduler": own,
                 "scheduler_from": source, "default": {"scheduler": "last_k_raw", "budget": 0, "k": 2},
-                "recent_errors": ["refused"],
-                "plan": [{"turn": "5d1c3a4e-1111-4222-8333-444455556666", "prompt": "Fix the bug", "leaves": 12, "tokens": 82000, "omitted": 0, "share": 40000,
+                "recent_errors": self.agent.get("recent_errors", ["refused"]),
+                "plan": self.long() or [{"turn": "5d1c3a4e-1111-4222-8333-444455556666", "prompt": "Fix the bug", "leaves": 12, "tokens": 82000, "omitted": 0, "share": 40000,
                           "raw": False, "needs_tree": True, "has_tree": False, "prompt_images": 0},
                          {"turn": "9e2b7c1f-aaaa-4bbb-8ccc-ddddeeeeffff", "prompt": "Now ship it", "leaves": 3, "tokens": 900, "omitted": 0, "share": 900,
                           "raw": True, "needs_tree": False, "has_tree": False, "prompt_images": 0}],
                 "summary": {"turns": 2, "summarized": 1, "trees_missing": 1, "dropped_turns": 0, "tokens_before": 82900,
                             "tokens_after": 20000 + (scheduler or {}).get("budget", 0), "after_partial": True}}
+
+    def long(self):
+        return [{"turn": f"t{i}", "prompt": "p", "leaves": 1, "tokens": 10, "omitted": 0, "share": 5, "raw": True,
+                 "needs_tree": False, "has_tree": False, "prompt_images": 0} for i in range(self.long_plan)]
 
     def set_compaction_scheduler(self, root, agent_id, scheduler):
         if self.error:
@@ -284,6 +289,73 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertEqual(self.backend.schedulers, [{"scheduler": "last_k_raw", "budget": 5000, "k": 2}])
             self.assertIs(self.app.screen, screen)
+
+    async def test_errors_show_only_in_the_agent_screen_and_only_while_a_turn_is_failed(self):
+        self.backend.agent = {**self.backend.agent, "recent_errors": [{"message": "turn 3 refused"}]}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            row = screen.query_one("#compaction-agents", DataTable).get_row_at(0)
+            self.assertEqual(row[4], "building · 1 failed turns")
+            self.assertNotIn("refused", " ".join(str(cell) for cell in row))
+            screen.query_one("#compaction-agents", DataTable).focus()
+            await pilot.press("enter")
+            await self.settle(pilot)
+            agent = self.app.screen
+            status = str(agent.query_one("#agent-status", Static).render())
+            self.assertIn("1 failed turns", status)
+            self.assertIn("Error: ", status)
+            # The retry worked: nothing failed any more, so a stale error must not show.
+            self.backend.agent = {**self.backend.agent, "failed_turns": 0, "last_error": "turn 3 refused"}
+            agent.tick()
+            await pilot.pause(0.3)
+            await self.settle(pilot)
+            status = str(agent.query_one("#agent-status", Static).render())
+            self.assertNotIn("Error", status)
+            self.assertNotIn("refused", status)
+
+    async def test_screens_follow_the_build_while_open(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            self.backend.agent = {**self.backend.agent, "trees_cached": 56, "activity": None}
+            screen.tick()
+            await self.settle(pilot)
+            self.assertEqual(screen.query_one("#compaction-agents", DataTable).get_row_at(0)[3], "56")
+            screen.query_one("#compaction-agents", DataTable).focus()
+            await pilot.press("enter")
+            await self.settle(pilot)
+            agent = self.app.screen
+            self.backend.agent = {**self.backend.agent, "trees_cached": 57}
+            before = len(self.backend.previews)
+            agent.tick()
+            await pilot.pause(0.3)
+            await self.settle(pilot)
+            self.assertGreater(len(self.backend.previews), before)
+            self.assertIn("57 trees", str(agent.query_one("#agent-status", Static).render()))
+
+    async def test_plan_table_takes_the_space_left_in_the_screen(self):
+        self.backend.long_plan = 60
+        heights = []
+        for size in ((100, 30), (100, 50)):
+            app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
+            async with app.run_test(size=size) as pilot:
+                await pilot.pause(0.3)
+                await app.workers.wait_for_complete()
+                await pilot.press("c")
+                await pilot.pause(0.3)
+                await app.workers.wait_for_complete()
+                app.screen.query_one("#compaction-agents", DataTable).focus()
+                await pilot.press("enter")
+                await pilot.pause(0.3)
+                await app.workers.wait_for_complete()
+                await pilot.pause(0.2)
+                agent = app.screen
+                plan = agent.query_one("#plan", DataTable)
+                dialog = agent.query_one("#compaction-dialog").region
+                heights.append(plan.region.height)
+                self.assertGreaterEqual(plan.region.height, 4)
+                self.assertLessEqual(plan.region.bottom, dialog.bottom)
+                self.assertEqual(plan.row_count, 60)
+        self.assertGreater(heights[1], heights[0] + 10)
 
     async def test_agent_returns_to_the_default_and_bad_input_keeps_the_last_plan(self):
         self.backend.agent = {**self.backend.agent, "scheduler": {"scheduler": "uniform", "budget": 100}, "scheduler_from": "agent"}

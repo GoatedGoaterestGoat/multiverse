@@ -101,6 +101,7 @@ Form, Details, ArtifactPreview, CompactionScreen, AgentScreen { align: center mi
 .frow Choice { width: 1fr; height: 1; padding: 0 1; background: #313244; }
 .frow Choice:focus { background: #45475a; color: #94e2d5; }
 #compaction-agents { height: auto; max-height: 12; }
-#plan { height: auto; max-height: 14; }
+#agent-top { height: auto; max-height: 60%; scrollbar-size: 1 1; }
+#plan { height: 1fr; min-height: 4; }
 #plan-summary, #agent-follows, #agent-status { height: auto; color: #a6adc8; }
 #compaction-dialog .detail-title { height: 1; }
