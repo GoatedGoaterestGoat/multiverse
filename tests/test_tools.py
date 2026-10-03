@@ -125,7 +125,7 @@ class ToolsTest(unittest.TestCase):
         write(self.root / 'harnesses/legacy/harness.json', {'schema': 1, 'spawn': ['/bin/true'], 'resume': ['/bin/true']})
         properties.update(harness='legacy', workspace=str(self.work), native_session_id=str(uuid4()))
         write(self.directory / 'properties.json', properties)
-        result = json.loads(self.invoke('send', self.agent, '--text', 'saved on failure', code=1).stdout)
+        result = json.loads(self.invoke('send', self.agent, '--text', 'saved on failure', '--json', code=1).stdout)
         self.assertEqual(result['state'], 'unavailable')
         self.assertIn('cannot wake', result['native_delivery']['reason'])
         self.assertTrue(result['saved'])

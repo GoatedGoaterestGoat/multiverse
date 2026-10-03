@@ -90,6 +90,8 @@ Check the user's $workspace and `bootstrap.md` without changing them.
 EOF
 ```
 
+Messaging commands print short readable results by default; `--json` keeps full records for scripts. `send first,second,third` prints one result per recipient without echoing the message. `inbox` prints sender/content blocks; `inbox --all --last 20` or `--since 2h` shows recent history. `inbox --wait --timeout 30s` waits for an unread inbox-only message, without consuming anything on timeout. Use `deliver AGENT --check` before resending an uncertain message.
+
 Inside an agent, use `"$MV2_CLI"` in place of `mv2`. Piped or redirected stdin is read automatically when no `--text`, `--file` or `--stdin` option is supplied. Quoting `EOF` preserves quotes, apostrophes, dollar signs and backticks without escaping; choose a delimiter absent from the message's standalone lines. `--stdin` still explicitly reads stdin, `--file PATH` reads a file and `--text` accepts short messages. Empty input is an error; without a message option, terminal stdin reports an error instead of waiting for input.
 
 If the user asks to launch or coordinate agents, read the target's `skills/coordination/SKILL.md`. Spawn/resume use saved workspaces and exact native sessions. Sends may wake stopped agents; queued or accepted delivery is not an answer. Reported phase/summary and observed process/status are separate. Move/remove operations require stopped agents, including those in a moved subverse; removal goes to trash. Detaching a dashboard or terminal does not stop agent work.

@@ -74,6 +74,10 @@ class CodexPermissionTest(TerminalBase):
         self.addCleanup(server.shutdown)
         home = isolated_home(self.work / 'native-home', config=
             'model="gpt-6-sol"\nmodel_provider="offline"\n'
+            # Plugin catalog synchronization is unrelated to this offline
+            # permission probe. Its detached clone can outlive daemon stop and
+            # race removal of the temporary home during teardown.
+            '[features]\nplugins=false\n'
             '[model_providers.offline]\nname="Offline"\nwire_api="responses"\nrequires_openai_auth=false\n'
             f'base_url="http://127.0.0.1:{server.server_port}/v1"\n'
             f'[projects.{json.dumps(str(self.work))}]\ntrust_level="trusted"\n')

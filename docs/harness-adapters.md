@@ -344,6 +344,7 @@ never inferred from acceptance.
 
 ```sh
 mv2 inbox                         # show unread sender/content blocks and mark them read
+mv2 inbox --wait --timeout 30s     # wait for unread inbox-only messages
 mv2 inbox --all --last 20          # recent history, oldest first
 mv2 inbox --all --since 2h         # history from the last two hours
 mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
@@ -368,6 +369,15 @@ Python `inbox.run()` still returns and consumes the existing dictionary for
 callers such as the dashboard. CLI `--json` preserves that machine output
 (sender, text, time and delivery mode on ordinary reads).
 
+`inbox --wait` returns as soon as an unread inbox-only message arrives. It waits
+indefinitely unless `--timeout DURATION` is given (seconds, or units `s`, `m`,
+`h`, `d`, `w`). It polls file metadata between reads, releases the launch and
+inbox locks between checks, and still rejects outdated launches. Native-only
+messages do not satisfy the wait. Timeout exits 1 without advancing the read
+position: readable output says `Timed out waiting for unread messages.`; JSON
+adds `timed_out: true` and `ok: false`. It can combine with `--peek` and `--json`,
+but not history options.
+
 `inbox --peek` returns the same unread page (up to 50 messages) without changing the read position; it cannot be combined with `--all` or `--after`.
 
 `inbox --all` prints the full history, including native messages, without changing
@@ -386,6 +396,20 @@ there and later receiving it natively can produce a duplicate.
 never also appear in ordinary mailbox reads, including failed/pending submissions.
 They remain inspectable through `inbox --all`; no automatic switch to manual
 handling occurs. Native delivery presents only the core sender line and text.
+
+`send` and `deliver` print short readable outcomes by default, never the message
+body or receipt identifiers. Queued input is described as waiting for a turn;
+uncertain input tells the sender to check before resending. Confirmation means
+the receipt shows the message in the conversation, not that the agent answered.
+`--json` preserves the existing delivery records and exit codes.
+
+`send first,second,third` reads its message source once and processes recipients
+in order. Repeated names or aliases of one recipient send only once. An invalid
+recipient or definite delivery failure does not prevent later recipients from
+receiving the message. Batch JSON contains `recipients` (each original record
+plus the recipient name) and `ok`, false if any recipient failed; single-recipient
+JSON remains unchanged. An unsaved lookup failure is distinguished from a saved
+delivery failure. Empty comma-separated names are rejected before any send.
 
 Per-recipient sends serialize persistence and submission. Urgent messages may
 overtake native follow-ups. Existing schema-less logs retain manual semantics

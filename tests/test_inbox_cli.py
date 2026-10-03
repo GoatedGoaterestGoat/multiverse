@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -187,3 +188,77 @@ class InboxCliTest(BaseTest):
             inbox_tool.cli_run(self.root, agent=self.agent)
         self.assertEqual(output.getvalue(), '')
         self.assertFalse((self.directory / 'inbox.cursor').exists())
+
+    def test_wait_ignores_native_delivery_and_reads_only_after_inbox_changes(self):
+        scanned = threading.Event()
+        original = store.inbox
+        def scan(*args, **kwargs):
+            scanned.set()
+            return original(*args, **kwargs)
+        with patch.object(store, 'inbox', side_effect=scan) as calls, ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
+            self.assertTrue(scanned.wait(2))
+            self.message('native only', delivery='steer')
+            time.sleep(.35)
+            self.assertFalse(waiting.done())
+            # Unchanged polls use file stats, not reparsing the entire inbox.
+            self.assertLessEqual(calls.call_count, 2)
+            self.message('wake this read')
+            result = waiting.result(timeout=3)
+        self.assertEqual([message['text'] for message in result['messages']], ['wake this read'])
+        self.assertEqual(store.inbox(self.directory)['messages'], [])
+
+    def test_waiting_subprocess_flushes_and_consumes_when_a_message_arrives(self):
+        process = subprocess.Popen([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
+            'inbox', '--agent', self.agent, '--wait', '--timeout', '3s'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: process.wait(timeout=5))
+        self.addCleanup(lambda: process.terminate() if process.poll() is None else None)
+        self.message('arrived for waiting reader')
+        output, error = process.communicate(timeout=5)
+        self.assertEqual(process.returncode, 0, error)
+        self.assertEqual(output, 'Message from user:\narrived for waiting reader\n')
+        self.assertEqual(store.inbox(self.directory)['messages'], [])
+
+    def test_wait_timeout_is_plain_or_json_and_never_advances_cursor(self):
+        for machine in (False, True):
+            output = io.StringIO()
+            with self.subTest(json=machine), redirect_stdout(output), self.assertRaises(SystemExit) as ended:
+                inbox_tool.cli_run(self.root, agent=self.agent, wait=True, timeout='0', json=machine)
+            self.assertEqual(ended.exception.code, 1)
+            if machine:
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['messages'], [])
+                self.assertTrue(result['timed_out'])
+                self.assertFalse(result['ok'])
+            else:
+                self.assertEqual(output.getvalue(), 'Timed out waiting for unread messages.\n')
+            self.assertFalse((self.directory / 'inbox.cursor').exists())
+        for duration, seconds in (('30', 30), ('30s', 30), ('2m', 120), ('0.5h', 1800)):
+            self.assertEqual(inbox_tool.timeout_seconds(duration), seconds)
+
+    def test_wait_rejects_history_and_stale_launches_and_failed_output_stays_unread(self):
+        for options in ({'all_messages': True}, {'after': 0}, {'last': 2}, {'since': '2h'}, {'timeout': 'bad'}):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                inbox_tool.run(self.root, agent=self.agent, wait=True, **options)
+        with self.assertRaises(ValueError):
+            inbox_tool.run(self.root, agent=self.agent, timeout='1s')
+        scanned = threading.Event()
+        original = store.inbox
+        def scan(*args, **kwargs):
+            scanned.set()
+            return original(*args, **kwargs)
+        with patch.object(store, 'inbox', side_effect=scan), ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
+            self.assertTrue(scanned.wait(2))
+            store.write(self.directory / 'runtime.json', {'launch_id': 'replacement'})
+            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
+                waiting.result(timeout=3)
+        store.write(self.directory / 'runtime.json', {'launch_id': 'current'})
+        self.message('must survive wait output failure')
+        stream = io.StringIO()
+        with patch.object(stream, 'flush', side_effect=BrokenPipeError()), redirect_stdout(stream), \
+                self.assertRaises(BrokenPipeError):
+            inbox_tool.cli_run(self.root, agent=self.agent, wait=True, timeout='1s')
+        self.assertFalse((self.directory / 'inbox.cursor').exists())
+        self.assertIn('must survive', self.output())
