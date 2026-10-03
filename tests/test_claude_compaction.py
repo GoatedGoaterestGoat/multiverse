@@ -244,6 +244,51 @@ class TranscriptTest(Fixture):
                           ('/compactly is not a ', False)])
         self.assertEqual([leaf.content['text'] for leaf in turns[-1].leaves], ['after'])  # older command rows go
 
+    def test_multiverse_inbox_and_send_runs_are_turns_and_its_other_forms_are_left_out(self):
+        r = Rows()
+        r.user('Reply with just: ok', 'p1')
+        r.assistant('m1', {'type': 'text', 'text': 'ok'}, 5)
+
+        def run(args, output):  # as Claude Code 2.1.288 stores a mod command's run
+            r.add('system', subtype='local_command', content='<command-name>/multiverse</command-name>\n'
+                  f'            <command-message>multiverse</command-message>\n            <command-args>{args}</command-args>')
+            r.add('system', subtype='local_command', content=f'<local-command-stdout>multiverse: {output}</local-command-stdout>')
+        run('inbox', 'No unread inbox-only messages.')
+        run('send worker hello there', 'Sent to worker as you (accepted).')
+        run('list', 'commands/help: the catalog')
+        run('', 'commands/help: the catalog')
+        run('help', 'Running help.')
+        r.user('Explain this universe.', 'p2')  # the prompt /multiverse help submitted
+        r.assistant('m2', {'type': 'text', 'text': 'It has a help command.'}, 5)
+        turns = transcript.turns(r.rows, set())
+        self.assertEqual(len(turns), 4)
+        self.assertEqual([t.dropped for t in turns], [None] * 4)
+        inbox, send = turns[1], turns[2]
+        self.assertIn('<command-args>inbox</command-args>', inbox.prompt.content['text'])
+        self.assertEqual([leaf.content['text'] for leaf in inbox.leaves],
+                         ['<local-command-stdout>multiverse: No unread inbox-only messages.</local-command-stdout>'])
+        self.assertIn('<command-args>send worker hello there</command-args>', send.prompt.content['text'])
+        self.assertIn('Sent to worker as you', send.leaves[0].content['text'])
+        self.assertEqual(turns[3].prompt.content['text'], 'Explain this universe.')
+        everything = ' '.join(leaf.content.get('text', '') for t in turns for leaf in [t.prompt, *t.leaves])
+        self.assertNotIn('the catalog', everything)
+        self.assertNotIn('Running help.', everything)
+        # Delivered as recorded: the command, then its output, both from the person.
+        messages = render.render([inbox], {inbox.id: list(inbox.leaves)})['messages']
+        self.assertEqual([(m['role'], m['text']) for m in messages],
+                         [('user', inbox.prompt.content['text']), ('user', inbox.leaves[0].content['text'])])
+        # Claude 2.1.287 stored commands as user rows under a promptId: the same rule marks the turn.
+        old = Rows()
+        old.user('<command-name>/multiverse</command-name>\n<command-args>list</command-args>', 'q1')
+        old.user('<local-command-stdout>the catalog</local-command-stdout>', 'q1')
+        old.user('<command-name>/multiverse</command-name>\n<command-args>inbox</command-args>', 'q2')
+        old.user('<local-command-stdout>No unread inbox-only messages.</local-command-stdout>', 'q2')
+        old.user('/multiverse help', 'q3')
+        old.user('/compact', 'q4')
+        self.assertEqual([t.dropped for t in transcript.turns(old.rows, set())],
+                         ['the display-only command /multiverse list', None,
+                          'the display-only command /multiverse help', 'the display-only command /compact'])
+
     def test_parallel_tool_calls_are_read_although_claude_links_them_as_branches(self):
         r = Rows()
         r.user('Run three', 'p1')

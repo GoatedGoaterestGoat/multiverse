@@ -26,7 +26,12 @@ is the first harness that supports it.
   result. The prompt itself is always
   kept verbatim. A turn the harness marks as not conversation (for Claude, a
   display-only command such as `/compact`, `/context` or `/model`) is left out
-  entirely: never summarized, never kept.
+  entirely: never summarized, never kept. The Claude mod's `/multiverse inbox`
+  and `/multiverse send` runs are the exception: they carry the inbox it read
+  and the messages it sent, so each is a turn of its own, the command as its
+  prompt and its recorded output as its leaf. Bare `/multiverse`, `/multiverse
+  list` and `/multiverse <name>` are left out; the prompt `<name>` submits is an
+  ordinary turn.
 - **No thinking.** Unlike v1, thinking is no part of compaction: it is not a
   leaf, the merge model never sees it, and it is never delivered. The size of
   a conversation before compaction includes its thinking; afterwards there is
