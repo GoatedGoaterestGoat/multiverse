@@ -154,7 +154,8 @@ class WakeRunnerTest(TerminalBase):
         tracking = message_record(directory, saved['id'])[1]
         self.assertEqual(tracking['delivery_method'], 'resume_prompt')
         self.assertEqual(tracking['attempts'][-1]['state'], 'error')
-        self.assertIn('before starting', tracking['attempts'][-1]['reason'])
+        self.assertIn('No such file or directory', tracking['attempts'][-1]['reason'])
+        self.assertEqual(tracking['attempts'][-1]['reason'], agents.runtime(directory)['reason'])
         request = read(directory / 'launches' / tracking['wake_launch_id'] / 'request.json')
         self.assertEqual(request['argv'][-1], 'Message from user:\nPreserve this prompt')
         self.assertEqual(read(directory / 'properties.json')['task'], 'original task')

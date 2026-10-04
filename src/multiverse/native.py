@@ -248,7 +248,7 @@ def control(root, reference, operation_name):
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 
-def finish_wake(directory, launch_id, message_id, started, reason=''):
+def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False):
     """A CLI prompt has no native receipt ID; record process-start evidence only."""
     if not message_id:
         return
@@ -257,11 +257,13 @@ def finish_wake(directory, launch_id, message_id, started, reason=''):
         if (tracking.get('wake_launch_id') != launch_id or
                 tracking.get('submission_state') not in ('submitting', 'unknown')):
             return
-        receipt = {'state': 'ok' if started else 'error', 'ok': started, 'at': now(),
+        if uncertain:
+            reason += '\nStarting prompt consumption is unconfirmed; no automatic resend'
+        receipt = {'state': 'unknown' if uncertain else 'ok' if started else 'error', 'ok': started, 'at': now(),
                    'reason': ('Started the resumed session with this message as its interactive prompt; '
                               'consumption is unconfirmed') if started else reason,
                    'launch_id': launch_id, 'value': {'transcript_confirmed': None}}
-        update_message(directory, message_id, submission_state='accepted' if started else 'failed',
+        update_message(directory, message_id, submission_state='unknown' if uncertain else 'accepted' if started else 'failed',
                        attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'])
 
 
@@ -286,7 +288,7 @@ def send_or_wake(root, reference, message_id, retry=False):
         previous_socket = (executor.facts.get('tmux') or {}).get('socket')
         launched = agents.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
         _, tracking = message_record(directory, message_id)
-        if tracking.get('submission_state') in ('accepted', 'failed'):
+        if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
             return tracking['attempts'][-1]
         return {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
                 'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
@@ -356,13 +358,16 @@ def deliver(root, reference, message_id, retry=False, check=False):
         if tracking.get('submission_state') == 'cancelled':
             return {**tracking['last_receipt'], 'message_id': message_id, 'reused': True, 'ok': False}
         if check and tracking.get('delivery_method') == 'resume_prompt' and tracking.get('submission_state') != 'failed':
+            if tracking.get('submission_state') == 'unknown' and tracking.get('attempts'):
+                return {**tracking['attempts'][-1], 'ok': False}
             return {'state': 'unknown', 'ok': False, 'reason': 'Interactive resume prompt has no correlatable native receipt; no resend',
                     'value': {'transcript_confirmed': None}}
         deferred = tracking.get('deferred_launch_id')
         if deferred and tracking.get('submission_state') == 'pending':
             if (deferred != session.launch_id or observe(executor.properties, executor.facts)['live'] != 'alive'
                     or executor.facts.get('startup_delivery') == 'failed'):
-                end_startup_messages(directory, deferred, 'Launch ended before delivery; use deliver AGENT --retry')
+                reason = executor.facts.get('reason') if deferred == session.launch_id else None
+                end_startup_messages(directory, deferred, (reason or 'Launch ended before delivery') + '; use deliver AGENT --retry')
                 _, tracking = message_record(directory, message_id)
             elif check:
                 return {'state': 'pending', 'ok': True, 'reason': 'Saved for native delivery once this launch is ready'}

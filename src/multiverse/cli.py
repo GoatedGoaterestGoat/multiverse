@@ -36,7 +36,7 @@ def parser():
     return result
 
 
-def run(args):
+def run(args, *, cli=False):
     values = vars(args).copy()
     action = values.pop("action")
     if action is None:
@@ -48,12 +48,16 @@ def run(args):
                 cwd = Path.cwd()
                 values["root"] = universe.create(cwd / ".multiverse", cwd.name,
                                                 template=str(universe.TEMPLATES / "base"), workdir=cwd)
-    return tool(action).run(**values)
+    module = tool(action)
+    handler = getattr(module, 'cli_run', module.run) if cli else module.run
+    return handler(**values)
 
 
 def main():
     args = parser().parse_args()
-    output(lambda: run(args), render=getattr(tool(args.action or 'tui'), 'format_output', None))
+    module = tool(args.action or 'tui')
+    render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
+    output(lambda: run(args, cli=True), render=render)
 
 
 if __name__ == "__main__":

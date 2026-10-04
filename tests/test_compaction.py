@@ -506,21 +506,51 @@ class EntryPointTest(BaseTest):
         self.assertIn('already running', events.items[-1]['message'])
         held.release()
 
+    def test_status_counts_completed_turns_and_those_with_their_tree(self):
+        events = Events()
+        with self.patched(FakeSource([turn('t0', 3), turn('t1', 3), turn('t2', 3)])):
+            # No turn end recorded: the newest turn may still be running and does not count.
+            entry.status(entry._agent(str(self.directory)), events)
+            first = turn('t0', 3)
+            Store(self.directory).save_tree(first, Node(0, first.leaves, 'built', 2))
+            Store(self.directory).set_failure('t1', 'refused')
+            held = Store(self.directory).worker_lock()
+            entry.status(entry._agent(str(self.directory)), events, marker='all')  # every turn has ended
+            held.release()
+        self.assertEqual([{key: event[key] for key in ('enabled', 'trees', 'turns', 'missing', 'building', 'failed')}
+                          for event in events.of('status')],
+                         [{'enabled': True, 'trees': 0, 'turns': 2, 'missing': 2, 'building': False, 'failed': 0},
+                          {'enabled': True, 'trees': 1, 'turns': 3, 'missing': 1, 'building': True, 'failed': 1}])
+        # A turn of one leaf is its own tree, and one with none needs no tree.
+        single = Turn('s', leaf('s-prompt', 5, 'user_text'), [leaf('s-0')])
+        empty = Turn('e', leaf('e-prompt', 5, 'user_text'), [])
+        with self.patched(FakeSource([single, empty, turn('t9', 3)])):
+            entry.status(entry._agent(str(self.directory)), events, marker='all')
+        self.assertEqual((events.items[-1]['trees'], events.items[-1]['turns']), (2, 3))
+        with self.patched(FakeSource([turn('t0', 3)]), enabled=False):
+            entry.status(entry._agent(str(self.directory)), events)
+        self.assertEqual(events.items[-1], {'event': 'status', 'enabled': False, 'trees': 1, 'building': False, 'failed': 1})
+
     def test_background_stores_the_turn_end_and_starts_one_builder(self):
+        events = Events()
         with self.patched(FakeSource([turn('t0', 3)])), patch.object(entry.subprocess, 'Popen') as popen:
-            self.assertEqual(entry.background(str(self.directory), '1234'), 0)
+            self.assertEqual(entry.background(str(self.directory), '1234', events), 0)
+            self.assertTrue(events.of('status')[-1]['building'])
             self.assertEqual(Store(self.directory).turn_end(), '1234')
             self.assertEqual(popen.call_count, 1)
             self.assertIn('worker', popen.call_args.args[0])
             self.assertTrue(popen.call_args.kwargs['start_new_session'])
             held = Store(self.directory).worker_lock()
-            self.assertEqual(entry.background(str(self.directory), '5678'), 0)
+            self.assertEqual(entry.background(str(self.directory), '5678', events), 0)
             self.assertEqual(popen.call_count, 1)
             self.assertEqual(Store(self.directory).turn_end(), '5678')
             held.release()
         with self.patched(FakeSource([turn('t0', 3)]), background=False), patch.object(entry.subprocess, 'Popen') as popen:
-            entry.background(str(self.directory), '9')
+            entry.background(str(self.directory), '9', events)
             popen.assert_not_called()
+        # The turn end is still recorded, so the status counts that turn as completed.
+        self.assertEqual(Store(self.directory).turn_end(), '9')
+        self.assertFalse(events.items[-1]['building'])
 
     def test_the_worker_builds_every_turn_the_marker_says_has_ended(self):
         source = FakeSource([turn('t0', 3), turn('t1', 3)])

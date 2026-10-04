@@ -15,6 +15,12 @@ from test_multiverse import TerminalBase, until
 
 
 class KillTest(TerminalBase):
+    def retain_wrapper(self, launched, directory):
+        # Simulate an older/interrupted runner: compatibility paths must still
+        # handle dead panes even though normal native exits now remove them.
+        os.kill(agents.runtime(directory)['runner_pid'], signal.SIGTERM)
+        until(lambda: agents.listing(directory.parents[2])[0]['live'] == 'stopped')
+
     def test_native_exit_precedes_wrapper_teardown_including_older_panes(self):
         launched, directory = self.spawn()
         identifier = str(uuid4())
@@ -68,14 +74,14 @@ class KillTest(TerminalBase):
         self.assertEqual(resumed['native_session_id'], identifier)
         self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
 
-    def test_ctrl_c_retains_stopped_wrapper_and_resume_removes_only_that_wrapper(self):
+    def test_ctrl_c_removes_wrapper_and_resume_preserves_session(self):
         launched, directory = self.spawn()
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
         old_pane = launched['runtime']['tmux']['pane']
         self.backend.run('send-keys', '-t', old_pane, 'C-c')
-        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
-        self.assertIn(old_pane, self.backend.snapshot()[0])
+        until(lambda: agents.listing(self.root)[0]['live'] == 'dormant')
+        self.assertNotIn(old_pane, self.backend.snapshot()[0])
         self.assertEqual(agents.listing(self.root)[0]['status'], '-')
         resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket)
         self.assertEqual(resumed['native_session_id'], identifier)
@@ -87,8 +93,7 @@ class KillTest(TerminalBase):
     def test_kill_stopped_wrapper_does_not_signal_another_process(self):
         launched, directory = self.spawn()
         pane = launched['runtime']['tmux']['pane']
-        self.backend.run('send-keys', '-t', pane, 'C-c')
-        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
+        self.retain_wrapper(launched, directory)
         with patch.object(Tmux, 'signal_child') as signal_child:
             self.assertEqual(agents.kill(self.root, launched['id'])['state'], 'dormant')
         signal_child.assert_not_called()
@@ -124,8 +129,7 @@ class KillTest(TerminalBase):
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
         pane = launched['runtime']['tmux']['pane']
-        self.backend.run('send-keys', '-t', pane, 'C-c')
-        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
+        self.retain_wrapper(launched, directory)
         with patch.object(native, 'stop', side_effect=ConnectionRefusedError(61, 'Connection refused')), \
                 patch.object(Tmux, 'signal_child') as signal_child:
             result = agents.kill(self.root, launched['id'])
@@ -144,8 +148,7 @@ class KillTest(TerminalBase):
         destination = universe.create(self.root / 'subverses/review', 'review', workdir=self.work)
         shutil.copytree(self.root / 'harnesses/fake', destination / 'harnesses/fake')
         pane = launched['runtime']['tmux']['pane']
-        self.backend.run('send-keys', '-t', pane, 'C-c')
-        until(lambda: agents.listing(self.root)[0]['live'] == 'stopped')
+        self.retain_wrapper(launched, directory)
         relocate.move_agent(self.root, launched['id'], destination)
         self.assertNotIn(pane, self.backend.snapshot()[0])
         self.assertEqual(agents.listing(destination)[0]['live'], 'dormant')
@@ -154,8 +157,7 @@ class KillTest(TerminalBase):
         moved = agents.directory(destination, launched['id'])
         until(lambda: agents.runtime(moved).get('pid'))
         pane = resumed['runtime']['tmux']['pane']
-        self.backend.run('send-keys', '-t', pane, 'C-c')
-        until(lambda: agents.listing(destination)[0]['live'] == 'stopped')
+        self.retain_wrapper(resumed, moved)
         removed = relocate.remove_agent(destination, launched['id'])
         self.assertNotIn(pane, self.backend.snapshot()[0])
         self.assertEqual(read(Path(removed['trash']) / 'properties.json')['native_session_id'], identifier)

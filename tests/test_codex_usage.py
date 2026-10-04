@@ -4,17 +4,20 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 import test_codex_launch as launch_tests
-from multiverse import rpc
+from multiverse import agents, dashboard, rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
-from multiverse.harnesses.codex.usage import notification
+from multiverse.harnesses.codex.usage import last_measurement, notification
 from multiverse.harnesses.types import SessionHandle
 from multiverse.runner import UsagePublisher
 from multiverse.store import read, write
+from test_multiverse import TerminalBase
 
 
 def event(native_id='thread', tokens=17457, window=258400):
@@ -95,13 +98,19 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         self.publish(notification(event(), 'thread'))
         self.assertNotIn('usage', read(self.root / 'runtime.json'))
 
-    def test_readings_require_exact_launch_and_thread_and_plain_mode_is_unavailable(self):
+    def test_readings_require_exact_launch_and_thread_but_plain_can_show_last_known(self):
         self.publish(notification(event(), 'thread'))
         for session in (replace(self.session, launch_id='old'), replace(self.session, native_id='other'),
                         replace(self.session, native_id=None), replace(self.session, session_file=None)):
             self.assertEqual(self.adapter.get_usage(session).state, 'unavailable')
         plain = replace(self.session, native_mode={'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
-        self.assertEqual(CodexAdapter.configured('codex', {'inbox_bridge': False}).get_usage(plain).state, 'unavailable')
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        result = adapter.get_usage(plain)
+        self.assertTrue(result.value['context']['last_known'])
+        self.assertEqual(result.value['context']['tokens'], 17457)
+        self.assertEqual(adapter.capabilities(plain)['get_usage'].state, 'supported')
+        write(self.root / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
+        self.assertEqual(adapter.get_usage(plain).state, 'unavailable')
 
     def test_snapshot_survives_launch_stop_with_its_measurement_timestamp(self):
         self.publish(notification(event(tokens=0), 'thread'))
@@ -110,6 +119,88 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         result = self.adapter.get_usage(self.session)
         self.assertEqual(result.value['context']['tokens'], 0)
         self.assertEqual(result.value['context_reported_at'], facts['usage']['reported_at'])
+        self.assertTrue(result.value['context']['last_known'])
+
+    def test_retained_reading_survives_unavailability_and_new_sample_replaces_it(self):
+        self.publish(notification(event(tokens=180000), 'thread'))
+        saved = read(self.root / 'runtime.json')['usage']
+        for state in ('starting', 'running', 'stopped', 'dormant', 'failed'):
+            write(self.root / 'runtime.json', {'launch_id': 'new', 'state': state, 'last_usage': saved})
+            current = replace(self.session, launch_id='new')
+            result = self.adapter.get_usage(current)
+            self.assertEqual(result.value['context']['tokens'], 180000)
+            self.assertTrue(result.value['context']['last_known'])
+            self.assertEqual(result.value['context_reported_at'], saved['reported_at'])
+        write(self.root / 'runtime.json', {'launch_id': 'new', 'state': 'running', 'last_usage': saved})
+        # A stale publisher cannot replace the retained sample for the resumed launch.
+        self.publish(notification(event(tokens=99999), 'thread'))
+        self.assertEqual(self.adapter.get_usage(current).value['context']['tokens'], 180000)
+        UsagePublisher(self.root, 'new')(notification(event(tokens=20000), 'thread'))
+        refreshed = self.adapter.get_usage(current)
+        self.assertEqual(refreshed.value['context']['tokens'], 20000)
+        self.assertNotIn('last_known', refreshed.value['context'])
+        self.assertNotEqual(refreshed.value['context_reported_at'], saved['reported_at'])
+        facts = read(self.root / 'runtime.json')
+        write(self.root / 'runtime.json', {**facts, 'native_relay': {'state': 'lost'}})
+        self.assertTrue(self.adapter.get_usage(current).value['context']['last_known'])
+
+    def test_carry_forward_rejects_wrong_thread_source_or_malformed_counts(self):
+        valid = {**notification(event(tokens=0), 'thread'), 'reported_at': 'original'}
+        for invalid in (None, [], {}, {**valid, 'native_session_id': 'other'},
+                        {**valid, 'source': 'claude-mod'}, {**valid, 'context': {'tokens': -1}},
+                        {**valid, 'context': {'tokens': True}}):
+            self.assertIsNone(last_measurement({'usage': invalid}, 'thread'))
+            self.assertIsNone(last_measurement({'last_usage': invalid}, 'thread'))
+            self.assertEqual(last_measurement({'usage': invalid, 'last_usage': valid}, 'thread'), valid)
+        self.assertIsNone(last_measurement({'usage': valid}, None))
+
+
+class CodexUsageLifecycleTest(TerminalBase):
+    def test_dashboard_keeps_context_through_stop_repeated_resumes_and_refresh(self):
+        worker = self.work / 'codex-stand-in'
+        worker.write_text(f'#!{sys.executable}\nimport time\nprint("READY", flush=True)\ntime.sleep(120)\n')
+        worker.chmod(0o700)
+        write(self.root / 'harnesses/custom-codex/harness.json', {'schema': 2, 'adapter': 'codex',
+              'settings': {'executable': str(worker), 'inbox_bridge': False}})
+        started = agents.start(self.root, 'context', harness='custom-codex', socket_path=self.socket,
+                               wait=True, wait_timeout=5)
+        self.assertTrue(started['ready'], started)
+        directory = agents.directory(self.root, started['id'])
+        native_id = str(uuid4())
+        agents.bind_session(self.root, started['id'], native_id)
+        launch = started['runtime']['launch_id']
+        agents.update_runtime(directory, launch, native_mode={'policy': 'auto', 'mode': 'bridge'})
+        UsagePublisher(directory, launch)(notification(event(native_id, tokens=180000), native_id))
+        original = read(directory / 'runtime.json')['usage']
+
+        def row():
+            return dashboard.with_usage(agents.listing(self.root)[0])
+
+        self.assertEqual(row()['context'], '180k/258k')
+        for _ in range(2):
+            agents.kill(self.root, started['id'])
+            self.assertEqual(row()['live'], 'dormant')
+            self.assertEqual(row()['context'], '180k/258k')
+            self.assertTrue(row()['usage']['value']['context']['last_known'])
+            resumed = agents.start(self.root, resume=started['id'], socket_path=self.socket,
+                                   wait=True, wait_timeout=5)
+            self.assertTrue(resumed['ready'], resumed)
+            self.assertEqual(row()['context'], '180k/258k')
+            self.assertEqual(row()['usage']['value']['context_reported_at'], original['reported_at'])
+            self.assertEqual(read(directory / 'runtime.json')['last_usage'], original)
+        launch = resumed['runtime']['launch_id']
+        agents.update_runtime(directory, launch, native_mode={'policy': 'auto', 'mode': 'bridge'})
+        UsagePublisher(directory, launch)(notification(event(native_id, tokens=20000), native_id))
+        self.assertEqual(row()['context'], '20k/258k')
+        self.assertNotIn('last_known', row()['usage']['value']['context'])
+        agents.kill(self.root, started['id'])
+        self.assertEqual(row()['context'], '20k/258k')
+        with patch('multiverse.agents.Tmux.create', side_effect=RuntimeError('Cannot create wrapper')):
+            with self.assertRaisesRegex(RuntimeError, 'Cannot create wrapper'):
+                agents.start(self.root, resume=started['id'], socket_path=self.socket)
+        self.assertEqual(row()['runtime']['state'], 'failed')
+        self.assertEqual(row()['context'], '20k/258k')
+        self.assertTrue(row()['usage']['value']['context']['last_known'])
 
 
 class CodexUsageRelayTest(unittest.IsolatedAsyncioTestCase):

@@ -22,6 +22,11 @@ reason. It also shows the CLI and daemon versions recorded at launch preparation
 highlighting differences without blocking the bridge. Opening the inspector does
 not retry bridge startup, poll versions or change the mode.
 
+For early or nonzero native exits, the inspector shows the saved launch error
+and terminal tail (at most 40 lines / 8 KiB), including after the tmux wrapper
+has gone. It labels this as saved launch output, not a live capture. The same
+diagnostic is available through `list`, `inspect` and `doctor`.
+
 A lost Codex terminal relay shows `STATUS disconnected` in red while `LIVE`
 still describes the process. The inspector shows the connection failure and
 recovery guidance: kill the launch, then resume its saved conversation. New
@@ -46,7 +51,10 @@ During kill, `STATUS` immediately becomes `-` and `LIVE` becomes `ending` while
 native work and the agent process are terminated. Once the native process exits,
 `LIVE` is `stopped` while its tmux wrapper remains; after wrapper removal it is
 `dormant`. The stopped stage can be brief during automatic teardown. A native
-exit or Ctrl+C retains the stopped wrapper until kill, resume, move or removal.
+session exit automatically detaches clients viewing the agent pane, then removes
+the wrapper and becomes dormant. Ctrl+C that only interrupts native work leaves
+the session attached. Startup failures and older runners can retain stopped
+wrappers; kill, resume, move and removal still clean them up.
 If native cancellation fails after the child has exited, `K`/`s` still removes
 the owned wrapper. The status line reports that the terminal closed but native
 cancellation is unconfirmed; retry stop when the native service is reachable.
@@ -108,15 +116,16 @@ error with the default hierarchy columns. Missing configuration uses defaults.
 `c` opens the tree-compaction settings of the selected scope: the `compaction.json` at
 its root, and the scope's agents. One screen edits the shared settings (`enabled`, the
 default scheduler with its budget, image mode and parameters) and a section per
-harness (its own `enabled`, default scheduler, and tree builder settings). A blank
+harness (`enabled` and its default scheduler either follow the universe settings or
+override them, plus its tree builder settings). A blank
 field means "use the default", which each field shows as its placeholder. A save
 writes the file as it was with only the edited fields changed; clearing a field deletes
 its key. Ctrl+Enter saves, Escape closes and discards, and a rejected value is shown on
 the screen's error line without closing it. If `compaction.json` cannot be used, the
 reason shows at the top.
 
-Enter on an agent in the table opens its screen: status, whether it follows the default
-scheduler or has its own, and a per-turn plan preview (share, raw or summarized, tree
+Enter on an agent in the table opens its screen: status, whether it follows the harness's
+settings or overrides them with its own scheduler, and a per-turn plan preview (share, raw or summarized, tree
 built or missing) that follows the fields as they are edited, without saving. Ctrl+Enter
 saves the scheduler or returns the agent to the default. See [compaction.md](compaction.md)
 for what the settings mean. The key is not in the footer, which is full.

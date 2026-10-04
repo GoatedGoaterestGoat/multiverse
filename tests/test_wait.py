@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -98,6 +99,34 @@ class WaitTest(BaseTest):
         with self.assertRaisesRegex(ValueError, 'refusing to follow a replacement'):
             self.wait()
 
+    def test_exit_observation_waits_for_runner_to_publish_its_failure(self):
+        def exited(*args):
+            # The pane snapshot can finish after the runner's final write,
+            # while wait_ready still holds its earlier runtime snapshot.
+            agents.update_runtime(self.directory, self.launch, state='failed',
+                                  reason='Native startup failed: No such file or directory')
+            return {'live': 'stopped'}
+        agents.update_runtime(self.directory, self.launch, state='running')
+        with patch.object(agents, 'observe', side_effect=exited):
+            result = self.wait()
+        self.assertFalse(result['ready'])
+        self.assertEqual(result['runtime']['state'], 'failed')
+        self.assertEqual(result['error'], 'Native startup failed: No such file or directory')
+
+    def test_exit_without_runner_finalization_is_bounded_and_preserves_generation_checks(self):
+        started = time.monotonic()
+        with patch.object(agents, 'observe', return_value={'live': 'dormant'}):
+            result = self.wait(timeout=2)
+        self.assertFalse(result['ready'])
+        self.assertIn('ended before becoming ready', result['error'])
+        self.assertLess(time.monotonic() - started, 1, 'A dead runner must not consume the full readiness timeout')
+        # A replacement during the finalization grace is never followed.
+        def replaced(*args):
+            write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
+            return {'live': 'stopped'}
+        with patch.object(agents, 'observe', side_effect=replaced), self.assertRaisesRegex(ValueError, 'replacement'):
+            self.wait()
+
     def test_invalid_timeout_is_rejected_before_creating_an_agent(self):
         before = list((self.root / 'state/agents').iterdir())
         for timeout in (0, -1, float('nan'), float('inf')):
@@ -127,7 +156,7 @@ class WaitTerminalTest(TerminalBase):
         executable.chmod(0o755)
         write(self.root / 'harnesses/fake/harness.json', {'schema': 1, 'spawn': [str(executable)]})
         completed = subprocess.run([sys.executable, '-m', 'multiverse.cli', '-u', str(self.root),
-            'spawn', '--name', 'failed', '--harness', 'fake', '--wait', '--wait-timeout', '5'],
+            'spawn', '--name', 'failed', '--harness', 'fake', '--wait', '--wait-timeout', '5', '--json'],
             env={**os.environ, 'MV2_TMUX_SOCKET': self.socket}, capture_output=True, text=True, timeout=10)
         self.assertEqual(completed.returncode, 1, completed.stderr)
         result = json.loads(completed.stdout)
@@ -135,3 +164,10 @@ class WaitTerminalTest(TerminalBase):
         self.assertFalse(result['ready'])
         self.assertEqual(result['runtime']['state'], 'failed')
         self.assertIn('No such file', result['error'])
+        # Without --json the failure is one plain sentence on stderr and nothing on stdout.
+        plain = subprocess.run([sys.executable, '-m', 'multiverse.cli', '-u', str(self.root),
+            'spawn', '--name', 'failed-text', '--harness', 'fake', '--wait', '--wait-timeout', '5'],
+            env={**os.environ, 'MV2_TMUX_SOCKET': self.socket}, capture_output=True, text=True, timeout=10)
+        self.assertEqual((plain.returncode, plain.stdout), (1, ''), plain.stderr)
+        self.assertRegex(plain.stderr, r'^mv2: failed-text did not start: .*No such file')
+        self.assertNotRegex(plain.stderr, r'[0-9a-f]{8}-[0-9a-f]{4}-')  # no record ID

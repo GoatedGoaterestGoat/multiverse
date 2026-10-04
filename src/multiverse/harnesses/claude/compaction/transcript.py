@@ -22,6 +22,12 @@ for mv2:
   the rows, so compaction leaves them out wherever it looks. `/compact` and a
   few more display commands join v1's `/context`, `/model` and `/effort`, and
   the plain "/compact" prompt row Claude 2.1 also stores is recognized.
+- The mod's `/multiverse inbox` and `/multiverse send` runs are conversation
+  (the inbox they read, the messages they sent): each is a turn of its own,
+  its command row the prompt and its recorded output the leaf. Bare
+  `/multiverse`, `/multiverse list` and `/multiverse <name>` only display the
+  catalog or confirm a prompt they submit, which is a turn of its own anyway:
+  they are left out like the other display-only commands.
 - A response with several thinking blocks shares its thinking estimate among
   them by signature length; v1 charged each block the whole estimate.
 - v1 folded Multiverse v1's inter-agent messages into prompts; mv2 delivers
@@ -40,6 +46,11 @@ SKIP_TYPES = frozenset({'custom-title', 'agent-name', 'permission-mode', 'file-h
 # Command turns that only display something: they are dropped from compaction.
 SKIP_COMMANDS = frozenset({'/context', '/model', '/effort', '/compact', '/cost', '/usage', '/status', '/statusline'})
 COMMAND_NAME = re.compile(r'<command-name>(/[\w:-]+)</command-name>')
+COMMAND_ARGS = re.compile(r'<command-args>(.*?)</command-args>', re.DOTALL)
+COMMAND_OUTPUT = '<local-command-stdout>'
+# Commands whose runs are conversation, by subcommand: what /multiverse read from
+# the inbox and the messages it sent. Its other forms only display something.
+CONVERSATION = {'/multiverse': frozenset({'inbox', 'send'})}
 # Claude also stores the command as typed, a prompt of its own: "/compact" or "/compact keep the plan".
 TYPED_COMMAND = re.compile(r'\s*(/[\w:-]+)(?:\s|$)')
 # Tools whose results Claude itself may evict under pressure: an unpaired result
@@ -129,11 +140,37 @@ def _text_blob(row) -> str:
     return '\n'.join(parts)
 
 
+def _invocation(text: str) -> tuple[str, str] | None:
+    """The command a row records and its arguments: from its command-name tag, or as typed."""
+    named = COMMAND_NAME.search(text)
+    if named:
+        found = COMMAND_ARGS.search(text)
+        return named.group(1), found.group(1).strip() if found else ''
+    typed = TYPED_COMMAND.match(text)
+    return (typed.group(1), text[typed.end():].strip()) if typed else None
+
+
+def conversation_command(name: str, args: str) -> bool:
+    """Whether a command's run is conversation: /multiverse inbox and /multiverse send."""
+    words = args.split()
+    return bool(words) and words[0] in CONVERSATION.get(name, ())
+
+
+def display_only(name: str, args: str) -> bool:
+    return name in SKIP_COMMANDS or (name in CONVERSATION and not conversation_command(name, args))
+
+
 def _command(row) -> str | None:
     """The display-only command a user row records, if any."""
     text = _text_blob(row)
-    match = COMMAND_NAME.search(text) or TYPED_COMMAND.match(text) if text else None
-    return match.group(1) if match and match.group(1) in SKIP_COMMANDS else None
+    found = _invocation(text) if text else None
+    if found is None or not display_only(*found):
+        return None
+    return found[0] if found[0] in SKIP_COMMANDS else ' '.join(part for part in found if part)
+
+
+def _command_leaf(row, text: str) -> Leaf:
+    return Leaf('user_text', (row['uuid'],), estimate_tokens(text), _preview(text, 'user'), {'text': text})
 
 
 def strip_command_rows(rows: list[dict]) -> list[dict]:
@@ -147,9 +184,9 @@ def strip_command_rows(rows: list[dict]) -> list[dict]:
     result, in_command = [], False
     for row in rows:
         if row.get('type') == 'system' and row.get('subtype') == 'local_command':
-            match = COMMAND_NAME.search(row.get('content') or '') if isinstance(row.get('content'), str) else None
-            if match:
-                in_command = match.group(1) in SKIP_COMMANDS
+            text = row.get('content') if isinstance(row.get('content'), str) else ''
+            if COMMAND_NAME.search(text):
+                in_command = display_only(*_invocation(text))
             if in_command:
                 continue
         elif in_command and row.get('type') == 'user' and row.get('isMeta'):
@@ -367,7 +404,24 @@ def turns(rows: list[dict], added: set[str]) -> list[Turn]:
             commands.setdefault(row['promptId'], command)
     result, current, orphans, last_prompt = [], None, [], None
     omitted = 0  # thinking before the first prompt
+    output = False  # the next command output belongs to the command turn just started
     for row in path:
+        if row.get('type') == 'system' and row.get('subtype') == 'local_command':
+            text = row.get('content') if isinstance(row.get('content'), str) else ''
+            found = _invocation(text) if COMMAND_NAME.search(text) else None
+            if found is not None and conversation_command(*found):
+                # A /multiverse run that is conversation: a turn of its own, its output the leaf.
+                if current is not None:
+                    result.append(current)
+                current = Turn(row['uuid'], _command_leaf(row, text), [*orphans], omitted=omitted)
+                orphans, omitted, output = [], 0, True
+            elif output and COMMAND_OUTPUT in text:
+                current.leaves.append(_command_leaf(row, text))
+                output = False
+            else:
+                output = False
+            continue
+        output = False
         leaf = classify(row)
         if row['uuid'] in estimates:
             if current is None:

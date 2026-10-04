@@ -1,0 +1,70 @@
+"""Human summaries of delivery evidence; internal receipts stay unchanged."""
+import re
+import json
+
+
+def failure_reason(reason, text=''):
+    reason = str(reason or 'the session could not accept the message')
+    if text:
+        reason = reason.replace(text, 'the message')
+        reason = reason.replace(json.dumps(text, ensure_ascii=False)[1:-1], 'the message')
+        for line in text.splitlines():
+            if line.strip():
+                reason = reason.replace(line, 'the message')
+    lower = reason.lower()
+    if 'cannot wake' in lower:
+        return 'this harness cannot resume with a message'
+    if 'different' in lower and ('session' in lower or 'thread' in lower):
+        return 'the saved conversation does not match the running session'
+    if 'not registered' in lower or 'inbox key' in lower:
+        return 'messaging is not connected for this session'
+    if 'not controllable' in lower or 'direct input' in lower:
+        return 'the conversation is not ready to receive messages'
+    if 'plain' in lower or 'bridge mode' in lower:
+        return 'this running session does not support messaging'
+    if 'binding' in lower or 'bound' in lower:
+        return 'the session is still starting'
+    # Identifiers in transport exceptions belong in --json, never the summary.
+    reason = re.sub(r'\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b', 'the session', reason, flags=re.I)
+    reason = re.sub(r'\b(?:thread|turn|msg|message|launch)[_-][a-zA-Z0-9_-]{6,}\b', 'the session', reason)
+    reason = reason.splitlines()[0].split(';')[0].strip().rstrip('.')
+    reason = ' '.join(reason.split())
+    for original, replacement in (('Pre-submission session check failed:', 'session check failed:'),
+                                   ('Native', 'Session'), ('native', 'session'),
+                                   ('RPC', 'connection'), ('transcript', 'conversation')):
+        reason = reason.replace(original, replacement)
+    return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
+
+
+def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text=''):
+    state = receipt.get('state')
+    value = receipt.get('value') or {}
+    reason = str(receipt.get('reason') or '')
+    if state in ('error', 'unavailable'):
+        why = failure_reason(reason, text)
+        if check:
+            return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."
+        return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry."
+    if state == 'unknown':
+        if accepted:
+            return f'{name}: message accepted; no confirmation yet. Do not resend.'
+        return f"{name}: cannot yet tell whether it received the message. Saved; run mv2 deliver {name} --check before sending again."
+    if wake or 'interactive starting prompt' in reason or 'interactive prompt' in reason:
+        return f'{name} was stopped; resuming it with your message.'
+    if state == 'pending':
+        return f'{name} is starting; your message will be delivered when ready.'
+    if value.get('transcript_confirmed') is True:
+        return f'{name}: message confirmed in its conversation.'
+    if check:
+        if 'queue' in reason.lower():
+            return f'{name}: message is queued for its next turn. Do not resend.'
+        return f'{name}: message accepted; no confirmation yet. Do not resend.'
+    if value.get('idle_start_error'):
+        return f'{name} has your message queued; its next turn has not started. Run mv2 deliver {name} --check; do not resend.'
+    if value.get('queued_submission_id') and not value.get('turn_id'):
+        return f'{name} has your message queued for its next turn.'
+    if 'idle queue' in reason:
+        return f'{name} started a turn with your message.'
+    if delivery == 'follow-up':
+        return f'{name} has your message for its next turn.'
+    return f'Sent to {name}; it reads this at its next pause.'

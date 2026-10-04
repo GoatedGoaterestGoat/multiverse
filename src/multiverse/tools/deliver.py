@@ -1,21 +1,24 @@
 """Check uncertain native deliveries or retry a recipient's definite failures."""
 from .. import agents, native, store, universe
 from ._common import delivery_summary
+from ._messaging import delivery_line
 
 
 def configure(parser):
     parser.add_argument('agent')
+    parser.add_argument('--json', action='store_true', help='Return the original delivery evidence as JSON')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
                       help='Reconcile pending or uncertain deliveries and record receipts for accepted ones, without submitting')
     mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
 
 
-def run(root=None, *, agent, retry=False, check=False):
+def run(root=None, *, agent, retry=False, check=False, json=False, _present=None):
     if retry == check:
         raise ValueError('Choose exactly one of --check or --retry')
     root = universe.resolve(root)
     directory = agents.directory(root, agent)
+    name = store.read(directory / 'properties.json')['name']
     launch_id = agents.runtime(directory).get('launch_id')
     results = []
     for message in store.inbox(directory, limit=None, all_messages=True)['messages']:
@@ -45,7 +48,21 @@ def run(root=None, *, agent, retry=False, check=False):
             # Missing evidence for an accepted message is not a failure.
             summary['ok'] = True
         results.append({**{key: message[key] for key in ('at', 'text', 'delivery') if key in message}, **summary})
+        if _present:
+            _, current = store.message_record(directory, message['id'])
+            _present(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
+                                  wake=current.get('delivery_method') == 'resume_prompt', text=message['text']))
+    if _present and not results:
+        _present(f'{name}: no messages to {"retry" if retry else "check"}.')
     return {'messages': results, 'ok': all(result.get('ok', True) for result in results)}
+
+
+def cli_run(root=None, *, json=False, **options):
+    result = run(root, **options, _present=None if json else lambda line: print(line, flush=True))
+    if json:
+        return result
+    if not result['ok']:
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

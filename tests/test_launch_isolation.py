@@ -51,9 +51,55 @@ class LaunchIsolationTest(unittest.TestCase):
     def test_inbox_unknown_agent_does_not_create_state(self):
         before = list((self.root / "state" / "agents").iterdir())
         args = parser().parse_args(["-u", str(self.root), "inbox", "--agent", "missing"])
-        with self.assertRaisesRegex(ValueError, "Expected one agent"):
+        with self.assertRaisesRegex(ValueError, "No agent named missing here"):
             run(args)
         self.assertEqual(list((self.root / "state" / "agents").iterdir()), before)
+
+    def test_inbox_peek_preserves_unread_pages_and_cli_shape(self):
+        agent = self.root / 'state/agents' / str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'peek'})
+        write(agent / 'runtime.json', {'launch_id': 'current'})
+        append_message(agent, 'native messages are not in the unread page', {}, delivery='steer')
+        messages = [append_message(agent, f'unread {index}', {}) for index in range(53)]
+        peeked = inbox(agent, peek=True)
+        self.assertEqual(peeked['messages'], messages[:50])
+        self.assertFalse((agent / 'inbox.cursor').exists())
+
+        def cli(*flags):
+            return run(parser().parse_args(['-u', str(self.root), 'inbox', '--agent', agent.name, *flags]))
+
+        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
+            first = cli('--peek')
+            self.assertEqual(set(first), {'messages', 'cursor'})
+            self.assertEqual(first['cursor'], peeked['cursor'])
+            self.assertEqual(first['messages'], [{key: message[key] for key in ('at', 'from', 'text', 'delivery')}
+                                                 for message in messages[:50]])
+            self.assertEqual(cli('--peek'), first)
+            self.assertFalse((agent / 'inbox.cursor').exists())
+            self.assertEqual(cli(), first)
+            position = (agent / 'inbox.cursor').read_bytes()
+            remaining = cli('--peek')
+            self.assertEqual([message['text'] for message in remaining['messages']],
+                             [message['text'] for message in messages[50:]])
+            self.assertEqual((agent / 'inbox.cursor').read_bytes(), position)
+            self.assertEqual(cli(), remaining)
+            self.assertEqual(cli('--peek')['messages'], [])
+
+    def test_inbox_peek_rejects_history_options_without_consuming_messages(self):
+        agent = self.root / 'state/agents' / str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'peek'})
+        write(agent / 'runtime.json', {'launch_id': 'current'})
+        message = append_message(agent, 'still unread', {})
+        for options, flags in (({'all_messages': True}, ['--all']), ({'after': 0}, ['--after', '0'])):
+            with self.subTest(options=options):
+                with self.assertRaisesRegex(ValueError, '--peek cannot be combined'):
+                    inbox(agent, peek=True, **options)
+                with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}):
+                    args = parser().parse_args(['-u', str(self.root), 'inbox', '--agent', agent.name, '--peek', *flags])
+                    with self.assertRaisesRegex(ValueError, '--peek cannot be combined'):
+                        run(args)
+        self.assertFalse((agent / 'inbox.cursor').exists())
+        self.assertEqual(inbox(agent)['messages'], [message])
 
     def test_inbox_pages_advance_without_skipping_or_repeating_unread_messages(self):
         agent = self.work / 'paged-agent'
@@ -156,16 +202,16 @@ class LaunchIsolationTest(unittest.TestCase):
                 agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
             failed = agents.directory(self.root, "same-name")
             self.assertEqual(agents.runtime(failed)["state"], "failed")
-            successful = agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+            with self.assertRaisesRegex(ValueError, "already has an agent named same-name"):
+                agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+            self.assertEqual(backend.create.call_count, 1)
+            successful = agents.start(self.root, "retry-name", "test", socket_path="/actual/tmux.sock")
         self.assertIn(failed.name, str(failure.exception))
         self.assertIn("unique name", str(failure.exception))
         self.assertEqual(agents.directory(self.root, failed.name), failed)
+        self.assertEqual(agents.directory(self.root, "same-name"), failed)
         self.assertEqual(agents.directory(self.root, successful["id"]).name, successful["id"])
-        with self.assertRaises(ValueError) as ambiguous:
-            agents.directory(self.root, "same-name")
-        self.assertIn(failed.name, str(ambiguous.exception))
-        self.assertIn(successful["id"], str(ambiguous.exception))
-        self.assertIn("full UUID", str(ambiguous.exception))
+        self.assertEqual(agents.directory(self.root, "retry-name").name, successful["id"])
 
     def test_stale_cli_callbacks_cannot_read_bind_or_change_current_launch(self):
         agent = self.root / "state/agents" / str(uuid4())
@@ -174,7 +220,7 @@ class LaunchIsolationTest(unittest.TestCase):
         write(agent / "properties.json", properties)
         write(agent / "runtime.json", runtime)
         message = append_message(agent, "for current launch", {})
-        actions = (["inbox"],
+        actions = (["inbox"], ["inbox", "--peek"],
                    ["report", "--phase", "done"], ["session-bind", "--session-id", str(uuid4())])
         for action in actions:
             with self.subTest(action=action[0]), patch.dict(os.environ, {"MV2_LAUNCH_ID": "old"}):

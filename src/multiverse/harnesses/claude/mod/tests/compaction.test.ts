@@ -4,10 +4,14 @@
 // builder it runs, and the status line, notices and toasts it shows.
 import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
+import { describeCompaction, parseStatus } from '../hooks/compaction'
 
 type Spawned = { argv: readonly string[]; input?: string }
 
-function world(on: On, events: object[], options: { enabled?: boolean; exit?: number | null } = {}) {
+type Options = { enabled?: boolean; exit?: number | null; statuses?: object[] }
+
+// `statuses` answer the status and background runs in turn, the last one repeating.
+function world(on: On, events: object[], options: Options = {}) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', ...(options.enabled === false ? {} : { MV2_COMPACTION: '1' }) })
   const clock = mock.clock(on)
   const spawned: Spawned[] = []
@@ -17,9 +21,13 @@ function world(on: On, events: object[], options: { enabled?: boolean; exit?: nu
     return { value: { code: options.exit === undefined ? 0 : options.exit, signal: null } }
   })
   const runs: (readonly string[])[] = []
+  const reports = [...(options.statuses ?? [{ enabled: true, trees: 0, missing: 0, building: false, failed: 0 }])]
   on('process.run', async ($, e) => {
     runs.push(e.argv)
-    return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    const asked = e.argv[3] === 'status' || e.argv[3] === 'background'
+    const status = asked ? (reports.length > 1 ? reports.shift() : reports[0]) : undefined
+    const stdout = status ? JSON.stringify({ event: 'status', ...status }) + '\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   // Claude's own compaction, beneath the mod.
   const core: string[] = []
@@ -28,6 +36,8 @@ function world(on: On, events: object[], options: { enabled?: boolean; exit?: nu
     return { messages: [{ role: 'user', text: 'Claude summary', toolUses: [] }] }
   })
   on('classic.Stop', async () => ({}))
+  on('classic.SessionStart', async () => ({}))
+  on('session.start', async ($, e) => ({ cwd: e.cwd }))
   const statuses: (string | undefined)[] = [], logs: string[] = [], toasts: string[] = []
   on('ui.status', async ($, e) => { statuses.push(e.text); return { value: undefined } })
   on('ui.log', async ($, e) => { logs.push(e.text); return { value: undefined } })
@@ -89,7 +99,7 @@ describe('session.compact', () => {
     test(`${name} skips with its reason`, async ($, on) => {
       const w = world(on, events, { exit })
       const result = await $.session.compact({ trigger: 'manual', messages: offered })
-      expect('skip' in result && result.skip.includes(reason)).toBe(true)
+      expect(result.skip?.includes(reason)).toBe(true)
       expect(w.core).toEqual([])
     })
   }
@@ -127,5 +137,82 @@ describe('turn end', () => {
     await $.classic.Stop({ stop_hook_active: false })
     await w.clock.settle()
     expect(w.runs.filter((run) => run.includes('background'))).toEqual([])
+  })
+})
+
+const statusRuns = (runs: (readonly string[])[]) => runs.filter((run) => run[3] === 'status')
+
+describe('status line', () => {
+  test('the compaction item shows built trees out of all turns', () => {
+    expect(describeCompaction(false, undefined, false)).toBeUndefined()
+    expect(describeCompaction(true, undefined, false)).toBe('compaction on')
+    expect(describeCompaction(true, { enabled: false, trees: 3 }, false)).toBeUndefined()
+    expect(describeCompaction(true, { enabled: true, trees: 76, turns: 76, missing: 0 }, false)).toBe('trees 76/76')
+    expect(describeCompaction(true, { enabled: true, trees: 70, turns: 76, missing: 2, building: true }, false))
+      .toBe('trees 70/76 · building')
+    expect(describeCompaction(true, { enabled: true, trees: 1, turns: 3, missing: 2, failed: 1 }, true))
+      .toBe('trees 1/3 · 1 failed · /compact failed')
+    expect(describeCompaction(true, { enabled: true, trees: 4 }, false)).toBe('trees 4')
+  })
+
+  test('a status is the last status line a process printed', () => {
+    expect(parseStatus('noise\n{"event":"status","trees":1}\n{"event":"status","trees":2}\n')).toEqual({ event: 'status', trees: 2 })
+    expect(parseStatus('{"event":"log"}\nnot json\n')).toBeUndefined()
+  })
+
+  test('the session start catches up as at a turn end: every turn so far has ended', async ($, on) => {
+    const w = world(on, [])
+    await $.classic.SessionStart({ source: 'resume' })
+    await w.clock.settle()
+    expect(w.runs).toEqual([['/python', '-m', 'multiverse.compaction', 'background', '--agent-dir', '/agent',
+                             '--turn-ended', String(w.clock.now())]])
+  })
+
+  test('a reload (session.start) reads the status again in an interactive session', async ($, on) => {
+    const w = world(on, [])
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    expect(statusRuns(w.runs)).toEqual([['/python', '-m', 'multiverse.compaction', 'status', '--agent-dir', '/agent']])
+    await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
+    await w.clock.settle()
+    expect(statusRuns(w.runs).length).toBe(1)
+  })
+
+  test('the turn end runs the builder call before the hook returns, so a reload cannot cancel it', async ($, on) => {
+    const w = world(on, [])
+    await $.classic.Stop({ stop_hook_active: false })
+    expect(w.runs.filter((run) => run[3] === 'background').length).toBe(1)
+  })
+
+  test('nothing is read when compaction is off', async ($, on) => {
+    const w = world(on, [], { enabled: false })
+    await $.classic.SessionStart({ source: 'startup' })
+    await $.classic.Stop({ stop_hook_active: false })
+    await w.clock.advance(60000)
+    expect(w.runs).toEqual([])
+  })
+
+  test('while a builder runs, the status is read every 15 s until it is done', async ($, on) => {
+    const w = world(on, [], { statuses: [
+      { enabled: true, trees: 1, missing: 2, building: true }, { enabled: true, trees: 2, missing: 1, building: true },
+      { enabled: true, trees: 3, missing: 0, building: false }] })
+    await $.classic.Stop({ stop_hook_active: false })
+    await w.clock.settle()
+    expect(statusRuns(w.runs).length).toBe(0)
+    await w.clock.advance(15000)
+    expect(statusRuns(w.runs).length).toBe(1)
+    await w.clock.advance(15000)
+    expect(statusRuns(w.runs).length).toBe(2)
+    await w.clock.advance(60000)
+    expect(statusRuns(w.runs).length).toBe(2)
+  })
+
+  test('a /compact reads the status again, and its progress shares the status slot', async ($, on) => {
+    const w = world(on, success)
+    await $.session.compact({ trigger: 'manual', messages: offered })
+    await w.clock.settle()
+    expect(statusRuns(w.runs).length).toBe(1)
+    expect(w.statuses[0]).toBe('compacting…')
+    expect(w.statuses.at(-1)).toBeUndefined()
   })
 })

@@ -18,6 +18,7 @@ to answer. `compaction(session)` returns the protocol implementation in
 `compaction/`.
 """
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -45,8 +46,21 @@ USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'c
 COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
-def claude_home():
-    return Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude')
+def claude_home(environment=None):
+    """Claude's storage root: `environment` as a launch sees it, else this process's."""
+    source = environment or os.environ
+    if source.get('CLAUDE_CONFIG_DIR'):
+        return Path(source['CLAUDE_CONFIG_DIR'])
+    return (Path(source['HOME']) if source.get('HOME') else Path.home()) / '.claude'
+
+
+def has_saved_conversation(native_id, environment=None):
+    """Whether Claude has written a transcript for this session.
+
+    Claude writes nothing until the first message, so a session that was never
+    used has none, and `--resume` refuses it.
+    """
+    return any((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
 
 
 def peer_token(socket_path):
@@ -107,20 +121,78 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_usage(native_id):
-    """Tokens in the latest main-thread request (input + cache written + cache read), or None.
+def context_reading(native_id):
+    """(tokens, timestamp) of the latest main-thread request, or None.
 
-    Subagent transcripts are excluded: they have their own context windows.
+    Tokens are input + cache written + cache read. Subagent transcripts are
+    excluded: they have their own context windows.
     """
     mains = sorted((claude_home() / 'projects').glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
     if not mains:
         return None
     with _transcripts_lock:
-        responses = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read().responses
+        transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
+        responses, stamp = transcript.responses, transcript.last
     if not responses:
         return None
     latest = list(responses.values())[-1]
-    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')), stamp
+
+
+def context_usage(native_id):
+    """Tokens in the latest main-thread request, or None."""
+    reading = context_reading(native_id)
+    return reading[0] if reading else None
+
+
+def moment(text):
+    """A timestamp as a datetime, or None."""
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+_compactions = {}
+
+
+def latest_compaction(agent_dir):
+    """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
+
+    The estimate is the compaction's own count of the conversation it left
+    (`stats.tokens_after`: prompts, summaries and raw leaves at about four
+    characters a token, so no system prompt or tools, and well under the real
+    count); read again only when the install log changes.
+    """
+    directory = Path(agent_dir) / 'compaction'
+    try:
+        log = directory / 'installed.jsonl'
+        status = log.stat()
+        key = (status.st_mtime_ns, status.st_size)
+        cached = _compactions.get(log)
+        if cached and cached[0] == key:
+            return cached[1]
+        record = None
+        for line in log.read_text().splitlines():
+            try:
+                found = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(found, dict) and re.fullmatch(r'[0-9a-f-]{36}', str(found.get('install', ''))) and found.get('at'):
+                record = found
+        result = None
+        if record:
+            # installed.jsonl's `at` is when the record was derived from the transcript, possibly much later;
+            # the install file is written just before the rows are handed to Claude.
+            payload = json.loads((directory / 'installs' / f"{record['install']}.json").read_text())
+            tokens, created = payload.get('stats', {}).get('tokens_after'), payload.get('created_at')
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 and created:
+                result = {'install': record['install'], 'at': created, 'tokens': tokens}
+        _compactions[log] = (key, result)
+        return result
+    except (OSError, ValueError, AttributeError):
+        return None
+
 
 
 def measured_usage(native_id):
@@ -141,6 +213,9 @@ def measured_usage(native_id):
     return Usage(native_id, inputs, outputs, inputs + outputs, 'claude-transcript', last, cached, written)
 
 
+FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
+
+
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
@@ -150,7 +225,34 @@ class ClaudeAdapter(ConfiguredAdapter):
         return self._with_bridge(super().spawn(context), context)
 
     def resume(self, session, context):
-        return self._with_bridge(super().resume(session, context), context)
+        command = super().resume(session, context)
+        fresh = None
+        if session.native_id and not has_saved_conversation(session.native_id, context.environment):
+            fresh = self._reserve_session(command, session.native_id)
+        command = self._with_bridge(fresh or command, context)
+        if fresh is None:
+            return command
+        # Say so in the agent's details: it now runs without any earlier context.
+        mode = dict(command.native_mode or {'policy': 'inbox_bridge' if self.settings.get('inbox_bridge') else 'default',
+                                            'mode': 'bridge' if self.settings.get('inbox_bridge') else 'plain'})
+        mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
+        return replace(command, native_mode=mode)
+
+    @staticmethod
+    def _reserve_session(command, native_id):
+        """The command starting this exact session fresh, or None if it does not resume it.
+
+        Claude never reserved the ID, so `--session-id` takes it over with every
+        other flag, and any wake prompt after `--`, unchanged. If a transcript does
+        exist, Claude refuses the ID as already in use, so this cannot overwrite one.
+        """
+        argv = list(command.argv)
+        options = argv.index('--') if '--' in argv else len(argv)
+        for index in range(options - 1):
+            if argv[index] == '--resume' and argv[index + 1] == native_id:
+                argv[index] = '--session-id'
+                return replace(command, argv=tuple(argv))
+        return None
 
     def _with_bridge(self, command, context):
         if not self.settings.get('inbox_bridge'):
@@ -267,11 +369,26 @@ class ClaudeAdapter(ConfiguredAdapter):
         except (OSError, ValueError, TypeError):
             pass
         usage = measured_usage(session.native_id)
-        # Before the mod reports (or without it) the request size comes from the transcript; the window is unknown.
-        if not isinstance(reported.get('context'), dict) or reported['context'].get('tokens') is None:
-            tokens = context_usage(session.native_id)
-            if tokens is not None:
-                reported['context'] = {**(reported.get('context') or {}), 'tokens': tokens}
+        reading = context_reading(session.native_id)
+        context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
+        responded = moment(reading[1]) if reading else None
+        reported_at = moment(reported.get('context_reported_at'))
+        try:
+            compaction = latest_compaction(Path(session.session_file).parent)
+        except TypeError:
+            compaction = None
+        installed_at = moment(compaction['at']) if compaction else None
+        if installed_at and not (responded and responded > installed_at):
+            # No response has come since our compaction: its count of the conversation stands in until one does.
+            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
+            context.update(tokens=compaction['tokens'], estimated=True, estimated_at=compaction['at'],
+                           estimated_from=compaction['install'])
+        elif reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
+            # No report from the mod yet, or a response newer than it: the transcript has the real request size.
+            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
+            context['tokens'] = reading[0]
+        if context:
+            reported['context'] = context
         if usage is None:
             if reported:
                 return NativeResult('ok', 'Reported by the multiverse mod', {'native_session_id': session.native_id, **reported})

@@ -21,11 +21,19 @@ def directory(root, reference):
         data = read(path)
         if reference in (data["id"], data["name"]) or data["id"].startswith(reference):
             matches.append(path.parent)
+    if not matches:
+        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents.")
     if len(matches) != 1:
-        detail = (". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
-                  if matches else ". Use `mv2 list --json` to find the agent UUID")
+        detail = ". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
         raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
     return matches[0]
+
+
+def _check_available_name(root, name):
+    for path in (root / "state" / "agents").glob("*/properties.json"):
+        if read(path).get("name") == name:
+            raise ValueError(f"This universe already has an agent named {name}; "
+                             f"pick another name or resume it with mv2 resume {name}")
 
 
 def runtime(agent_dir):
@@ -54,8 +62,10 @@ def listing(root, recursive=False):
                 from . import native, usage
                 measured = native.usage_snapshot(scope, properties, facts)
                 relay = facts.get('native_relay') or {}
+                launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
+                             "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
                              "connection_error": relay.get('reason') if relay.get('state') == 'lost' else None,
@@ -100,6 +110,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         harness, model = properties["harness"], model or properties.get("model")
     else:
         universe.slug(name)
+        _check_available_name(root, name)
         task = task or ""
         properties = {"id": uid(), "universe_id": read(root / "universe.json")["id"],
                       "name": name, "task": task, "summary": "", "phase": "starting",
@@ -180,9 +191,24 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env.update(command.shared_service.environment)
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
-        write(agent_dir / "properties.json", properties)
-        write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
-                                           "started_at": now(), "native_mode": command.native_mode})
+        if resume:
+            write(agent_dir / "properties.json", properties)
+        else:
+            # Publish a name atomically across spawns, before starting any
+            # native service or terminal. Resume keeps its existing record.
+            with lock(root / "state" / ".agents.lock"):
+                _check_available_name(root, name)
+                write(agent_dir / "properties.json", properties)
+        initial_runtime = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
+                           "started_at": now(), "native_mode": command.native_mode}
+        if resume and isinstance(adapter, harnesses.CodexAdapter):
+            from .harnesses.codex.usage import last_measurement
+            measured = last_measurement(previous, properties.get('native_session_id'))
+            if measured is not None:
+                # Keep the exact thread's sample and original timestamp until
+                # this launch reports again, without treating it as fresh usage.
+                initial_runtime['last_usage'] = measured
+        write(agent_dir / "runtime.json", initial_runtime)
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
         terminal = None
         service_directory_created = False
@@ -208,6 +234,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                       [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
+            family = next((name for name, cls in harnesses.BUILTINS.items() if isinstance(adapter, cls)), '')
+            backend.configure_status(terminal, root, properties, launch_id, family)
+            if isinstance(adapter, harnesses.CodexAdapter):
+                # Codex detects mouse support during TUI startup. Set only its
+                # wrapper session, before releasing the runner's ready gate.
+                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
@@ -285,16 +317,20 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
     deadline = time.monotonic() + timeout
+    exit_deadline = None
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
         native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
+        if facts.get('reason'):
+            return {**result, 'ok': False, 'ready': False, 'error': facts['reason']}
         if (facts.get('native_relay') or {}).get('state') == 'lost':
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
-        running = facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+        running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+                   and facts.get('startup_checked', True))
         session = SessionHandle.from_records(result, facts, agent_dir)
         ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
             adapter.capabilities(session)['send_steer'].state == 'supported')))
@@ -309,6 +345,17 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         elif include_delivery and facts.get('startup_delivery') == 'failed':
             error = facts.get('delivery_error') or 'Startup delivery failed; inspect the launch and saved messages'
         if error:
+            if facts.get('state') in ('starting', 'running') and live in ('stopped', 'dormant'):
+                # observe() can finish after the runner writes its exit record,
+                # leaving this iteration with stale runtime facts. Allow its
+                # diagnostic to settle, but never wait indefinitely for a dead
+                # runner or exceed the caller's readiness deadline.
+                if exit_deadline is None:
+                    exit_deadline = min(deadline, time.monotonic() + .5)
+                remaining = exit_deadline - time.monotonic()
+                if remaining > 0:
+                    time.sleep(min(.05, remaining))
+                    continue
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -336,7 +383,10 @@ def terminal_action(root, reference, action):
         return kill(root, reference)
     agent_dir = directory(root, reference)
     facts = runtime(agent_dir)
-    backend, pane = owned(read(agent_dir / "properties.json"), facts)
+    if action == 'inspect' and facts.get('reason'):
+        return facts['reason']
+    backend, pane = owned(read(agent_dir / "properties.json"), facts,
+                          states=('alive', 'stopped') if action == 'inspect' else ('alive',))
     if action == "inspect":
         return backend.run("capture-pane", "-p", "-S", "-100", "-t", pane)
     return backend, pane

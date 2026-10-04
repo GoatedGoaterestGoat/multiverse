@@ -155,9 +155,19 @@ class TerminalBase(BaseTest):
 
     def kill_server(self):
         # Runners finish receipt/queue cleanup after tmux tears down a pane.
-        # Await them before TemporaryDirectory removes their state underneath it.
+        # Detached wrapper cleanup can remove its pane before its last runtime
+        # write. Track all core processes in this fixture, not just live panes.
+        def core_processes():
+            output = subprocess.run(['ps', '-axo', 'pid=,args='], text=True,
+                                    capture_output=True, check=True, timeout=5).stdout
+            runner = str(ROOT / 'src/multiverse/runner.py') + ' '
+            workspace = ' ' + str(self.work) + '/'
+            return {int(fields[0]) for line in output.splitlines()
+                    if len(fields := line.strip().split(None, 1)) == 2
+                    and runner in fields[1] and workspace in fields[1]}
+
         panes, _ = self.backend.snapshot()
-        pids = [int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')]
+        pids = core_processes() | {int(pane['pane_pid']) for pane in panes.values() if pane.get('pane_pid')}
         try:
             self.backend.run("kill-server")
         except (OSError, RuntimeError):
@@ -169,6 +179,8 @@ class TerminalBase(BaseTest):
             except ProcessLookupError:
                 return True
         until(lambda: all(exited(pid) for pid in pids), seconds=15)
+        # A runner can spawn the detached helper while it is exiting above.
+        until(lambda: not core_processes(), seconds=15)
 
     def spawn(self):
         result = agents.start(self.root, "tester", "a task", "fake", socket_path=self.socket)

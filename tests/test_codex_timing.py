@@ -92,7 +92,9 @@ class CodexTimingTest(TerminalBase):
         self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=daemon_env,
                                                capture_output=True, timeout=20))
         with patch.dict(os.environ, test_env):
-            result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket)
+            result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket,
+                                  wait=True, wait_timeout=30)
+            self.assertTrue(result['ready'], result)
         self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
         directory = agents.directory(self.root, result['id'])
         endpoint = Path(until(lambda: agents.runtime(directory).get('control_endpoint'), seconds=30)['address'])

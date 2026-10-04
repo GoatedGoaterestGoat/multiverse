@@ -1,4 +1,5 @@
 import type { EngineInterface, On, SessionCompactResult, SessionMessage } from 'claude-code'
+import { currentLine, setProgress } from './statusline'
 
 // Multiverse tree compaction for this session, when its universe enables it
 // for the Claude harness (the launch sets MV2_COMPACTION=1).
@@ -16,16 +17,103 @@ import type { EngineInterface, On, SessionCompactResult, SessionMessage } from '
 //   at once. It returns at once when a builder is running (which takes the new
 //   marker up) or background building is off.
 //
+// - classic.SessionStart: every turn so far has ended, so the background builder
+//   is told the session's start as a turn end: it builds what a lost turn end
+//   left (a reload, a turn that ended in an error, a restart), when background
+//   building is on.
+//
+// The status line's compaction item is `compactionLine()`: pure, from what
+// these hooks last learned (`python -m multiverse.compaction status`, which
+// `background` also prints): completed turns with their tree out of all
+// completed turns (the turn in progress never counts), whether a builder runs,
+// and failures. They learn it when the session starts, when a turn ends, every
+// 15 s while a builder runs, and after each /compact. The progress of a
+// running /compact shares the plugin's one status slot (statusline.ts).
+//
 // The rows an install adds are found later from the transcript: they follow
 // the compaction's boundary, as many as the install returned.
 
 type Event = { event: string; [key: string]: unknown }
+// What `python -m multiverse.compaction status` reports.
+export type Status = { enabled?: boolean; trees?: number; turns?: number; missing?: number; building?: boolean; failed?: number }
+
+// What the status line's compaction item knows; its hooks keep it up to date.
+const known: { enabled: boolean; status?: Status; failed: boolean; following: boolean } =
+  { enabled: false, failed: false, following: false }
+const FOLLOW_MS = 15000, FOLLOW_ROUNDS = 40
+
+// The status line's compaction item, from what the hooks below last learned.
+export function compactionLine(): string | undefined {
+  return describeCompaction(known.enabled, known.status, known.failed)
+}
+
+// The item's text: undefined while compaction is off for this session.
+export function describeCompaction(enabled: boolean, status: Status | undefined, compactFailed: boolean): string | undefined {
+  if (!enabled || status?.enabled === false) return undefined
+  const parts: string[] = []
+  if (status?.trees === undefined) {
+    parts.push("compaction on")
+  } else {
+    parts.push(status.turns === undefined ? `trees ${status.trees}` : `trees ${status.trees}/${status.turns}`)
+    if (status.building) parts.push("building")
+    if (status.failed) parts.push(`${status.failed} failed`)
+  }
+  if (compactFailed) parts.push("/compact failed")
+  return parts.join(" · ")
+}
+
+// The last status a process printed, if it printed one.
+export function parseStatus(stdout: string): Status | undefined {
+  for (const line of stdout.split("\n").reverse()) {
+    try {
+      const event = JSON.parse(line) as Event
+      if (event.event === "status") return event as Status
+    } catch {
+      // not a status line
+    }
+  }
+  return undefined
+}
+
+function readStatus(stdout: string) {
+  known.status = parseStatus(stdout) ?? known.status
+}
+
+// Every status line write: a running /compact's progress wins the plugin's one slot.
+function showProgress($: EngineInterface, line: string | undefined) {
+  setProgress(line)
+  $.ui.status(currentLine())
+}
 type Message = { keep: string } | { role: 'user' | 'assistant'; text: string; toolUses: unknown[]; toolResults?: unknown[] }
 
 async function config($: EngineInterface) {
   const [enabled, python, directory] = await Promise.all(
     [$.env.get("MV2_COMPACTION"), $.env.get("MV2_PYTHON"), $.env.get("MV2_AGENT_DIR")])
+  known.enabled = enabled === "1"
   return { enabled: enabled === "1", python: python ?? "", directory: directory ?? "" }
+}
+
+async function refresh($: EngineInterface) {
+  const { enabled, python, directory } = await config($)
+  if (!enabled || !python || !directory) return
+  const result = await $.process.run([python, "-m", "multiverse.compaction", "status", "--agent-dir", directory],
+    { timeoutMs: 15000 })
+  if (result.exitCode === 0) readStatus(result.stdout)
+}
+
+// While a builder runs, look again every 15 s until it is done (at most 10 minutes per start).
+function follow($: EngineInterface) {
+  if (known.following || !known.status?.building) return
+  known.following = true
+  let rounds = 0
+  const look = () => {
+    refresh($).catch(() => undefined).finally(() => {
+      rounds += 1
+      if (known.status?.building && rounds < FOLLOW_ROUNDS) $.clock.after(FOLLOW_MS, look)
+      else known.following = false
+    })
+  }
+  $.clock.after(FOLLOW_MS, look)
 }
 
 function bar(done: number, total: number): string {
@@ -80,7 +168,7 @@ async function install($: EngineInterface, trigger: string, instructions: string
     trigger, instructions: instructions ?? null,
     offered: [...offered.values()].map((message) => ({ handle: message.handle, role: message.role })),
   })
-  $.ui.status("compacting…")
+  showProgress($, "compacting…")
   const child = $.process.spawn({
     argv: [python, "-m", "multiverse.compaction", "install", "--agent-dir", directory], input: request })
   const returned: Message[] = []
@@ -88,13 +176,13 @@ async function install($: EngineInterface, trigger: string, instructions: string
   const handle = (event: Event) => {
     if (event.event === "progress") {
       const line = progressLine(event)
-      if (line !== undefined) $.ui.status(line)
+      if (line !== undefined) showProgress($, line)
     } else if (event.event === "error") {
       const line = errorLine(event)
       $.ui.log(line)
       $.ui.toast(line, { timeoutMs: 8000 })
       if (event.retrying && event.wait) {
-        $.ui.status(`compacting · ${String(event.kind)} on turn ${turn(event.turn)}, retrying in ${Math.round(number(event.wait))}s`)
+        showProgress($, `compacting · ${String(event.kind)} on turn ${turn(event.turn)}, retrying in ${Math.round(number(event.wait))}s`)
       }
     } else if (event.event === "log") {
       $.ui.log(`mv2 compaction: ${String(event.message)}`)
@@ -161,7 +249,12 @@ async function background($: EngineInterface) {
   const result = await $.process.run(
     [python, "-m", "multiverse.compaction", "background", "--agent-dir", directory, "--turn-ended", String(ended)],
     { timeoutMs: 15000 })
-  if (result.exitCode !== 0) $.ui.log(`mv2 compaction: the background builder did not start: ${result.stderr.trim()}`)
+  if (result.exitCode !== 0) {
+    $.ui.log(`mv2 compaction: the background builder did not start: ${result.stderr.trim()}`)
+    return
+  }
+  readStatus(result.stdout)
+  follow($)
 }
 
 export function registerCompaction(on: On) {
@@ -169,24 +262,55 @@ export function registerCompaction(on: On) {
     const { enabled } = await config($)
     if (!enabled || e.agentId !== undefined) return next(e)
     if (e.trigger === "precompute") return { skip: "mv2 compaction builds the compacted conversation itself" }
+    let answer: SessionCompactResult
     try {
-      return await install($, e.trigger, e.instructions, e.messages)
+      answer = await install($, e.trigger, e.instructions, e.messages)
     } catch (error) {
-      return failed($, `unexpected error: ${error instanceof Error ? error.message : String(error)}`)
+      answer = failed($, `unexpected error: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
-      $.ui.status(undefined)
+      showProgress($, undefined)
     }
+    known.failed = "skip" in answer && answer.skip !== undefined
+    $.clock.after(0, () => { refresh($).catch(() => undefined) })
+    return answer
   }).catch(($, e, next) => {
     if (next.called) return undefined
     return { skip: `mv2 compaction: ${next.error.kind === "timeout" ? "the hook ran out of time" : next.error.message ?? "failed"}` }
   })
 
-  // The main conversation's turn has ended (a subagent's end is SubagentStop).
-  on("classic.Stop", async ($, e, next) => {
+  // A new or resumed session: every turn so far has ended, so catch up on any
+  // whose end was lost, as at a turn end.
+  on("classic.SessionStart", async ($, e, next) => {
     const result = await next(e)
+    known.status = undefined
+    known.failed = false
     $.clock.after(0, () => {
       background($).catch((error) => $.ui.log(`mv2 compaction: background build failed: ${String(error)}`))
     })
+    return result
+  })
+
+  // A hot reload (the mod's files changed) starts this module's variables over
+  // and cancels its timers: learn the status again. It also fires once at the
+  // session's start, beside classic.SessionStart. (index.ts holds the unmatched
+  // session.start hook; this one is matched.)
+  on("session.start", { isInteractive: true }, async ($, e, next) => {
+    const result = await next(e)
+    $.clock.after(0, () => {
+      refresh($).then(() => follow($)).catch(() => undefined)
+    })
+    return result
+  })
+
+  // The main conversation's turn has ended (a subagent's end is SubagentStop).
+  // Awaited, not left on a timer: a reload at the turn's end would cancel it.
+  on("classic.Stop", async ($, e, next) => {
+    const result = await next(e)
+    try {
+      await background($)
+    } catch (error) {
+      $.ui.log(`mv2 compaction: background build failed: ${String(error)}`)
+    }
     return result
   })
 }

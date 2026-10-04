@@ -92,6 +92,8 @@ class Inspector(Vertical):
                     state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
             versions = row.get('runtime', {}).get('native_versions')
             relay = row.get('runtime', {}).get('native_relay') or {}
+            if row.get('launch_error'):
+                state.append('\n' + clean(row['launch_error'].splitlines()[0]), style='bold #f38ba8')
             if relay.get('state') == 'lost':
                 state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style='bold #f38ba8')
                 state.append('\n' + clean(relay.get('detail', '')), style='#f9e2af')
@@ -104,7 +106,10 @@ class Inspector(Vertical):
                 message = ('Native work is ending.' if live == 'ending' else
                            'Native process stopped; tmux wrapper remains. Resume with r.' if live == 'stopped' else
                            'No tmux wrapper. Resume with r.' if live == 'dormant' else 'Terminal state is unknown.')
-                self.query_one("#preview", Static).update(clean(row.get("reason") or message))
+                if row.get('launch_error'):
+                    self.query_one('#pane-scroll').border_title = 'SAVED LAUNCH OUTPUT'
+                self.query_one("#preview", Static).update(Text('\n'.join(
+                    clean(line) for line in (row.get('reason') or message).splitlines())))
         self.query_one("#inspect-state", Static).update(state)
         self.capture_if_needed()
 

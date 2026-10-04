@@ -26,7 +26,12 @@ is the first harness that supports it.
   result. The prompt itself is always
   kept verbatim. A turn the harness marks as not conversation (for Claude, a
   display-only command such as `/compact`, `/context` or `/model`) is left out
-  entirely: never summarized, never kept.
+  entirely: never summarized, never kept. The Claude mod's `/multiverse inbox`
+  and `/multiverse send` runs are the exception: they carry the inbox it read
+  and the messages it sent, so each is a turn of its own, the command as its
+  prompt and its recorded output as its leaf. Bare `/multiverse`, `/multiverse
+  list` and `/multiverse <name>` are left out; the prompt `<name>` submits is an
+  ordinary turn.
 - **No thinking.** Unlike v1, thinking is no part of compaction: it is not a
   leaf, the merge model never sees it, and it is never delivered. The size of
   a conversation before compaction includes its thinking; afterwards there is
@@ -180,7 +185,21 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   restarted. The reason shows in the inspector (as the launch's
   fallback), in the `compaction` capability and in `mv2 doctor`.
 - **Background building.** The mod's `Stop` hook starts the builder with the time
-  the turn ended, so the turn that just finished gets its tree at once.
+  the turn ended, so the turn that just finished gets its tree at once. A turn
+  end can be lost (a turn that ends in an error runs no `Stop` hook; a restart
+  can interrupt one), so the session's start counts as a turn end too: every
+  turn so far has ended, and the builder catches up on any left unbuilt. Both
+  start a builder only while background building is on. A hot reload of the mod
+  (its files changed) starts its state over: the hook awaits its builder call so
+  a reload cannot cancel it, and reads the status again after one.
+- **Status line.** The mod's status line (`statusline.json`'s `compaction` item)
+  shows completed turns that have their tree out of all completed turns,
+  `trees 51/52` (a turn of one leaf is its own tree; the turn in progress never
+  counts), with `· building` while the background builder works, turns whose
+  build failed, and a failed `/compact`. It is read when the session starts,
+  when a turn ends, every 15 s while a builder runs and after each `/compact`
+  (`python -m multiverse.compaction status`). A running `/compact` shows its
+  progress in the same slot.
 - **Merges** are v1's privileged CLI merges, unchanged: `claude -p --resume
   <synthetic session>` with no tools, using your Claude login, v1's newest
   system prompt and instruction. The first step's session holds the turn's own

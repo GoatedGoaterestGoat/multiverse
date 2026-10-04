@@ -1,6 +1,11 @@
 """tmux identifies terminals, not agents. Tags bind a pane to one launch."""
 import os
+from pathlib import Path
+import shlex
 import subprocess
+import sys
+
+from . import statusline
 
 FIELDS = ("pane_id", "session_id", "pane_dead", "@mv2_agent_id", "@mv2_universe_id", "@mv2_launch_id", "pane_pid")
 
@@ -49,6 +54,25 @@ class Tmux:
         # Preserve the terminal after native exit, independent of the user's
         # tmux defaults. Core removes this wrapper explicitly on kill/resume.
         self.run("set-option", "-p", "-t", pane, "remain-on-exit", "on")
+
+    def configure_status(self, terminal, root, properties, launch_id, family):
+        """Configure only a newly created, tagged agent wrapper before native startup."""
+        session, pane = terminal['session'], terminal['pane']
+        self.run('set-option', '-w', '-t', pane, 'automatic-rename', 'off')
+        self.run('set-option', '-w', '-t', pane, 'allow-rename', 'off')
+        self.run('rename-window', '-t', pane, statusline.clean(properties['name']) or 'agent')
+        _, interval = statusline.config(statusline.read_object(root / 'statusline.json'), family)
+        argv = [sys.executable, '-S', str(Path(statusline.__file__).resolve()),
+                str(root), properties['id'], launch_id, family]
+        # Indirection keeps path text out of tmux format parsing: option values
+        # are inserted literally (without recursive expansion). Shell quoting
+        # still applies; the server's environment may be another agent's.
+        command = shlex.join(argv)
+        for name, value in (('@mv2_status_command', command), ('status', 'on'),
+                            ('status-position', 'bottom'), ('status-interval', str(interval)),
+                            ('status-left', ''), ('status-right', ''),
+                            ('status-format[0]', ' #(#{@mv2_status_command})')):
+            self.run('set-option', '-t', session, name, value)
 
     def signal_child(self, properties, runtime, signum):
         """Signal only the recorded child of this launch's currently owned runner."""

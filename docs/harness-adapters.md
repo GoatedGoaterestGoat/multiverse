@@ -21,7 +21,11 @@ maintain another copy of those records. Spawn/resume return `session` in their
 result. `list` reads current core identity, process state and reported status after
 asynchronous identity binding; these are not adapter operations.
 Native ID can be null while a reported session has not registered; operations
-must not guess a recent session. Claude receives an assigned UUID; Pi owns an
+must not guess a recent session. Claude receives an assigned UUID, and resumes it
+with `--resume` only once Claude has saved a transcript for it (it writes none before
+the first message); a session stopped before then restarts fresh under the same
+UUID with `--session-id`, without replaying its task, and says so in the agent's
+details. Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
@@ -66,9 +70,10 @@ UI, or fallback that invokes another model to forward a message.
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
-from observed liveness. The report CLI prints one line (`Reported working: <summary>`)
-without echoing task/properties data; its Python `run()` result remains the full
-record. `task` is a compatibility name for the optional initial
+from observed liveness. The report CLI prints one line (`Reported working.`, plus `You have N unread inbox
+messages.` when inbox-only messages wait, counted without marking them read)
+without echoing the summary or task/properties data; its Python `run()` result
+remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
 ## Lifecycle paths
@@ -96,7 +101,8 @@ authentication, session binding or the first model turn has finished.
 
 `spawn --wait` and `resume AGENT --wait` opt into a readiness wait after
 registration (`--wait-timeout SECONDS`, default 60). Core waits outside the launch
-lock so native binding can finish. Plain/legacy launches require a running child;
+lock so native binding can finish. Every child must first survive a two-second
+startup check (`runtime.startup_checked`); plain/legacy launches then require a running child;
 bridge launches also require the exact native ID and delivery readiness. For
 Codex, `running` means the relay validated the native reply and effective grants.
 Claude/Pi wait for their bridge registration capability. A changed generation is
@@ -104,6 +110,18 @@ refused. The usual result carries the latest runtime/session plus `ready` and
 `ok`; failures return `error` and CLI exit 1. Timeout also sets `timed_out`, keeps
 the launch intact and never retries it. This waits for launch readiness, not
 completion of the first model turn. The dashboard remains asynchronous.
+
+If a native child exits during that check or later exits nonzero, core captures
+its owned pane before publishing the end state. The child keeps its real TTY;
+stdout/stderr are not redirected. The saved tail contains at most 40 lines and
+8 KiB of UTF-8 text, with terminal controls removed. It lives in
+`launches/<uuid>/output-tail.txt`; `runtime.json` records `output_tail_file` and
+a `reason` containing the exit code and tail. A missing, inaccessible or replaced
+pane produces an explicit output-unavailable reason instead. `list` (including
+JSON), `inspect`, the dashboard inspector and `doctor` retain the diagnostic even
+after the wrapper disappears. `--wait` returns it as its error. Explicit shutdown
+and clean exits after the startup check do not create failure tails. Readiness
+cannot guarantee that a child will not fail later.
 
 `tools/kill.py` and its `stop` alias call the same core shutdown operation.
 Core verifies the pane's universe, agent and launch tags under the launch lock,
@@ -139,7 +157,18 @@ Once the child exits, `LIVE` is `stopped` while the tmux wrapper still exists.
 Core removes that owned wrapper with `kill-pane`, then records `dormant`. A
 shutdown error leaves diagnostic evidence and any remaining wrapper for retry.
 The stopped stage may be brief during automatic teardown. New launches always
-set `remain-on-exit`; Ctrl+C or a native exit therefore retains a stopped pane.
+set `remain-on-exit` while the runner closes its relay, status watcher and startup
+delivery. After a running native child exits, a short-lived core cleanup process
+outside the pane takes the launch lock, verifies the exact generation and pane
+ownership, detaches only clients viewing that pane, then removes it and records
+`dormant`. Detachment precedes removal so tmux cannot switch those clients into
+another agent. The runner lets the native CLI handle SIGINT: Ctrl+C that only
+interrupts a turn leaves the runner and wrapper alive. A startup exit before the
+two-second check retains its wrapper for diagnostics, except SIGINT/exit 130.
+Explicit kill retains its existing teardown path. Cleanup failures retain a
+retry diagnostic in `runtime.json.wrapper_cleanup` and `error`; use `kill` to
+retry. Conversations and saved native IDs survive teardown. This cleanup does
+not cancel work in a shared native daemon; use `stop`/`kill` if such work remains.
 Absent or foreign panes are dormant for the recorded launch and never authorize
 signals or pane control. Observation errors remain unknown.
 
@@ -223,13 +252,27 @@ without restarting the daemon.
 mv2 spawn --name worker --harness codex
 mv2 spawn --name reviewer --prompt 'Review the current diff.'
 mv2 resume worker
-mv2 send worker --text 'Consider this now' --delivery steer
-mv2 send worker --text 'Next, inspect the tests' --delivery follow-up
+mv2 send worker --delivery steer <<'EOF'
+Consider this now.
+Preserve the user's $variables and `backticks` literally.
+EOF
+mv2 send worker --delivery follow-up <<'EOF'
+Next, inspect the tests.
+Report any failures with reproduction steps.
+EOF
 mv2 ask worker --question 'What would this alternative cost?'
 mv2 get-usage worker
 mv2 list --json
 mv2 capabilities --agent worker --probe
 ```
+
+For multiline messages, use `mv2 send AGENT <<'EOF'` with a quoted delimiter.
+No escaping is needed for quotes, apostrophes, dollar signs or backticks in the
+body; use a delimiter that does not appear alone on a message line. Piped or
+redirected stdin is read automatically when no `--text`, `--file` or `--stdin`
+option is supplied. `--stdin` explicitly reads stdin, `--file PATH` reads a file
+and `--text` remains available for short messages. Empty messages are rejected;
+terminal stdin without a message option fails clearly instead of waiting.
 
 The corresponding Python modules have `run(...)` functions and standalone entry
 points, e.g. `python -m multiverse.tools.ask`. They do not import Textual.
@@ -261,10 +304,12 @@ these adapters in both plain and bridge modes; legacy manifests have no verified
 resume-prompt recipe. Dashboard `m` uses the same send path. Inbox-only never
 wakes, and a live plain session still reports native delivery unavailable.
 
-Core records the wake attempt before releasing the runner. Successful process
-startup becomes `accepted` with `delivery_method: resume_prompt` and consumption
+Core records the wake attempt before releasing the runner. Surviving the startup
+check becomes `accepted` with `delivery_method: resume_prompt` and consumption
 unconfirmed. There is no bridge/mod delivery for this first prompt and no
 correlatable native receipt for it. Failure before process startup is retryable;
+an early exit after the child starts records the native diagnostic as `unknown`
+for `deliver AGENT --check`, because the prompt may already have been consumed;
 an interrupted/uncertain attempt is never replayed, including by receipt checks.
 The saved task is unchanged; each launch retains its own prompt in `task.md`.
 
@@ -299,23 +344,52 @@ map to failed. Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh
-mv2 inbox                         # show unread inbox-only messages and mark them read
-mv2 inbox --all                    # browse full raw history and delivery evidence
-mv2 send worker --text 'Later' --delivery inbox-only
+mv2 inbox                         # show unread sender/content blocks and mark them read
+mv2 inbox --wait --timeout 30s     # wait for unread inbox-only messages
+mv2 inbox --all --last 20          # recent history, oldest first
+mv2 inbox --all --since 2h         # history from the last two hours
+mv2 inbox --all --json --after 0   # raw history and delivery evidence, paged for scripts
+mv2 send worker --delivery inbox-only <<'EOF'
+Later, check the workspace configuration.
+EOF
 mv2 deliver worker --retry        # retry this recipient's definite failures
 mv2 deliver worker --check        # reconcile pending/uncertain deliveries, record accepted receipts
 ```
 
-Ordinary inbox reads return sender, text, time and delivery mode, without message
-identifiers. They advance the read position under the inbox lock, including
-across skipped native records, stopping at the last complete record in the page.
-Concurrent readers cannot consume the same manual message twice. Stale launch
-callbacks cannot read or advance the current launch's inbox. An interrupted
-caller can recover already-consumed text from history.
+The CLI prints one `Message from NAME:` block per unread inbox-only message,
+with its full text and no metadata. Names are resolved from the sender's agent
+record; people appear as `user`, and another universe keeps core's
+`(in universe NAME)` wording. An empty page prints `No unread messages.`
+Unread pages contain up to 50 messages. The CLI advances the read position only
+after output has been written and flushed successfully, while holding the
+launch and inbox locks. A failed write or flush leaves the page unread;
+concurrent consumers cannot overtake the output. Stale launch callbacks cannot
+read or advance the current launch's inbox. Cursor advancement includes skipped
+native records and stops at the last complete record in the page.
+Python `inbox.run()` still returns and consumes the existing dictionary for
+callers such as the dashboard. CLI `--json` preserves that machine output
+(sender, text, time and delivery mode on ordinary reads).
 
-`inbox --all` is a non-consuming raw view, including internal identifiers and
-native delivery evidence. Page through it with `--after CURSOR`; ordinary reads
-page forward automatically. Diagnostics and recovery use the non-consuming view.
+`inbox --wait` returns as soon as an unread inbox-only message arrives. It waits
+indefinitely unless `--timeout DURATION` is given (seconds, or units `s`, `m`,
+`h`, `d`, `w`). It polls file metadata between reads, releases the launch and
+inbox locks between checks, and still rejects outdated launches. Native-only
+messages do not satisfy the wait. Timeout exits 1 without advancing the read
+position: readable output says `Timed out waiting for unread messages.`; JSON
+adds `timed_out: true` and `ok: false`. It can combine with `--peek` and `--json`,
+but not history options.
+
+`inbox --peek` returns the same unread page (up to 50 messages) without changing the read position; it cannot be combined with `--all` or `--after`.
+
+`inbox --all` prints the full history, including native messages, without changing
+the ordinary read position. `--last N` selects the newest positive N messages,
+still printed oldest first; `--since TIME` filters by an ISO timestamp or a
+relative duration such as `30m` or `2h` (also `s`, `d` and `w`). Timestamps without
+a zone use UTC; undated legacy records do not match time filters. Time filtering
+precedes `--last`. Both options require `--all`, and `--last` cannot combine with
+cursor paging. `inbox --all --json` retains the raw view, including internal
+identifiers and delivery evidence, with 50-message pages; `--last` can select a
+larger batch. Page with `--after CURSOR`, which requires `--all --json`.
 Reading history does not cancel pending native delivery, so viewing a message
 there and later receiving it natively can produce a duplicate.
 
@@ -323,6 +397,20 @@ there and later receiving it natively can produce a duplicate.
 never also appear in ordinary mailbox reads, including failed/pending submissions.
 They remain inspectable through `inbox --all`; no automatic switch to manual
 handling occurs. Native delivery presents only the core sender line and text.
+
+`send` and `deliver` print short readable outcomes by default, never the message
+body or receipt identifiers. Queued input is described as waiting for a turn;
+uncertain input tells the sender to check before resending. Confirmation means
+the receipt shows the message in the conversation, not that the agent answered.
+`--json` preserves the existing delivery records and exit codes.
+
+`send first,second,third` reads its message source once and processes recipients
+in order. Repeated names or aliases of one recipient send only once. An invalid
+recipient or definite delivery failure does not prevent later recipients from
+receiving the message. Batch JSON contains `recipients` (each original record
+plus the recipient name) and `ok`, false if any recipient failed; single-recipient
+JSON remains unchanged. An unsaved lookup failure is distinguished from a saved
+delivery failure. Empty comma-separated names are rejected before any send.
 
 Per-recipient sends serialize persistence and submission. Urgent messages may
 overtake native follow-ups. Existing schema-less logs retain manual semantics
@@ -440,6 +528,17 @@ while mv2's launch argument suppresses it on promptless resume. Disabling the da
 prevents disposable tests from leaving scheduled helpers behind; daemon stop alone
 does not stop the updater. The TUI setting separately suppresses update checks and
 interactive update prompts in Codex 0.159.3 and 0.160.0.
+
+Before releasing the native child, core enables tmux's session-scoped `mouse`
+option for Codex adapter wrappers on every spawn and resume, including custom
+profiles and both plain and bridge modes. With Codex 0.160.0 this lets wheel
+events scroll the TUI transcript rather than recall composer history. Global
+tmux options, root key bindings, alternate-screen behavior and other sessions
+are unchanged; legacy schema-1 definitions keep their existing behavior.
+Already-running Codex terminals need a resume to pick up the setting. An
+isolated real-TUI test injects wheel events through an attached PTY and verifies
+native transcript scrolling, an unchanged composer, and no tmux copy mode on
+plain spawn and bridge spawn/resume.
 
 The Codex adapter adds `-c check_for_update_on_startup=false` before `--` on
 spawn and resume, including wake prompts, plain mode, bridge mode and plain
@@ -566,7 +665,8 @@ TUI's relay connection (or an upstream connection failure before binding) record
 agent then shows `STATUS disconnected` in list and the dashboard; the inspector
 shows recovery guidance. Secondary-client failures and optional naming errors do
 not mark a healthy primary connection lost. An ordinary terminal exit still
-produces `LIVE stopped` and `STATUS -`.
+briefly produces `LIVE stopped` and `STATUS -`, then automatically detaches
+its clients and removes the wrapper (`LIVE dormant`).
 
 Relay loss is sticky for that launch. New sends fail before submission and stay
 saved for explicit retry; `--wait` returns failure immediately. Already accepted
@@ -583,9 +683,14 @@ passes every frame to the TUI and publishes observations through the runner's
 existing runtime update path. No extra subscription or thread resume is performed.
 `runtime.json` stores `usage.context` (`tokens`, optional `window` and `percent`),
 the native session ID, source and `reported_at`. The adapter's `get_usage` exposes
-the reading only for that exact launch and session. The last reading remains
-available with its timestamp after disconnection or launch end; a new launch
-waits for its own native notification, including Codex's resume usage replay.
+the reading only for the current launch handle and its exact native thread.
+The last reading remains available with its original timestamp after
+disconnection or launch end. Resume carries that same thread's newest valid
+measurement into `runtime.json.last_usage`, including repeated resumes and
+fallback to plain mode. The dashboard keeps showing the count and labels it
+`(last known)` in the inspector until a fresh native notification replaces it,
+including Codex's resume usage replay. This is retained measurement, not an
+estimate. A changed thread ID never inherits another thread's count.
 
 Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
 cached input and reasoning output are already included and are not added again.
@@ -593,9 +698,10 @@ The window is native `modelContextWindow`; a missing window stays unknown.
 The percentage matches Codex 0.159.2's native TUI: subtract its 12,000-token
 baseline from the used count and window, clamp and round the remaining percentage,
 then report 100 minus that value as used. Thus the percentage can differ from
-raw tokens divided by window. Compaction may reduce the count. Until a measurement
-arrives, usage displays N/A; a measured zero is zero. Plain Codex, cumulative usage, cost and
-rate-limit reporting remain unavailable in this adapter.
+raw tokens divided by window. Compaction may reduce the count. Until this thread
+has a saved measurement, usage displays N/A; a measured zero is zero.
+Plain Codex can display a saved bridge reading but cannot refresh it.
+Cumulative usage, cost and rate-limit reporting remain unavailable in this adapter.
 
 Explicit `kill` (or `stop`) holds the recipient's launch lock during native cancellation, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background
@@ -690,6 +796,55 @@ to 120 s) and removes. Before the session's first response, or right after
 resolves the session under the launch lock but waits for the answer outside it,
 so sends and stop are not held.
 
+The mod registers a native `/multiverse` command at session start (listed in the
+typeahead with an argument hint, and runnable while a turn is running):
+
+- `/multiverse` or `/multiverse list` prints `mv2 catalog` as command output, with
+  no model turn.
+- `/multiverse <name> [args]` loads that command, workflow or skill with `mv2
+  command` and submits it as the person's own prompt.
+- `/multiverse send <agent> <text>` runs `mv2 send` with this session's own
+  `MV2_AGENT_ID`, so the recipient reads `Message from <this agent>`. The person
+  types it to speak as this agent; to message an agent as themselves they type to
+  it directly or run `mv2 send` from a shell. The result is `mv2 send`'s own text,
+  shown as printed: what was delivered, or what was saved and why it was not.
+- `/multiverse inbox` is a normal `mv2 inbox --json` read (the mod parses the JSON
+  and formats it; the CLI's default output is readable text for people): it shows
+  this agent's unread inbox-only messages and marks them read. The output is
+  ordinary command output, so the model sees it on its next turn under Claude's
+  "do not respond" caveat and acts only if asked. (The status line's count uses `mv2 inbox --peek --json` instead,
+  which marks nothing read.)
+
+`list`, `send` and `inbox` are reserved: a catalog entry with one of those names is
+shadowed. Everything but `list` acts with the person's authority at this terminal
+(it sends as this agent, submits a prompt as the person's, or changes what the
+agent has read), so it runs only for a prompt the person typed (the composer, or
+Remote Control); a plugin, the SDK or a peer can only list.
+
+The mod also keeps one status line under the prompt (Claude allows one per plugin;
+the person's own `statusLine` command is untouched). Its items come from
+`statusline.json` at the universe root, which every template ships and `mv2
+refresh` manages (a local edit is kept):
+
+```json
+{"schema": 1, "items": {"agent": false, "phase": true, "summary": false, "inbox": true, "compaction": true}}
+```
+
+The order of the keys is the order on screen; a missing key keeps the default shown,
+an unknown key is ignored, and an unreadable file means the defaults (logged once).
+`agent` is the agent's name, plus `(universe)` only for an agent in a subverse (the
+root universe is left out, the same rule as the tmux bar), `phase` and `summary` the agent's last `mv2 report`
+(shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
+count (only when above zero, `50+` at the cap), and `compaction` the built trees out of
+all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),
+shown only for an agent launched with tree compaction enabled. A 2 s timer compares the size and time of four files (`properties.json`,
+the inbox and its cursor, `statusline.json`) with no subprocess, reads only what
+changed, and runs `mv2 inbox --peek --json` only when the inbox changed; the line also
+refreshes at session start and at each turn's start and end. A running `/compact`'s
+progress takes the slot while it lasts and the normal line returns after. Text
+reported by other agents is shown with control characters removed and a summary is
+shortened.
+
 The mod also registers the `claude-mod-v1` bridge for its launch (steering is
 reported unavailable until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
@@ -723,11 +878,105 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.287; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.289; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude
 plugin validate` when Claude Code is installed.
+
+## Agent tmux status line
+
+Every new or resumed agent wrapper has one status row and a window named after
+the agent. Automatic window renaming and native terminal rename sequences are
+disabled for that window. All other options are session-local: mv2 does not
+change global tmux options or the user's tmux configuration. Existing wrappers
+pick up the setup on resume.
+
+| Harness | Default row (example) |
+| --- | --- |
+| Codex | `reader · codex · status waiting · phase working · inbox 2` |
+| Pi / custom legacy | `reader · pi · phase working · inbox 2` |
+| Claude | `reader · claude` |
+
+`agent` means the name, plus `(universe)` only in a subverse (a universe directory
+under `subverses/<name>`), matching the Claude mod. The harness segment is the
+configured profile name. Inbox is omitted at zero. Codex context is **off by
+default**; native status is omitted when unavailable, as in plain mode. When
+status and phase have the same value, only the phase segment appears. Claude's
+default avoids repeating the mod's phase, inbox and compaction line; a plain
+Claude profile can opt into those available tmux items.
+
+The existing universe-root `statusline.json` configures both displays. Keep
+`schema: 1` and the top-level Claude `items` unchanged; all three templates add
+this independent block after `items`:
+
+```json
+"tmux": {
+  "refresh_seconds": 2,
+  "items": {
+    "agent": true,
+    "harness": true,
+    "status": false,
+    "phase": true,
+    "summary": false,
+    "inbox": true,
+    "context": false
+  },
+  "harnesses": {
+    "codex": {"items": {"status": true}},
+    "claude": {"items": {"phase": false, "inbox": false}}
+  }
+}
+```
+
+`tmux.items` key order sets display order; missing items are appended in default
+order. Harness overrides apply by adapter family (`codex`, `claude`, `pi`), even
+for a renamed profile. Built-in family defaults apply after common items, then
+explicit family overrides apply. For example, turn off Codex status with
+`"codex": {"items": {"status": false}}`, or opt into its context with
+`"codex": {"items": {"context": true}}`. Unknown keys are ignored; missing,
+partial or invalid configuration falls back to the corresponding defaults.
+`refresh_seconds` rounds up and clamps to 1–60 seconds; non-numbers use 2.
+`mv2 refresh` manages the template files and preserves local edits. The code
+defaults also work with older files that have no `tmux` block.
+
+`phase` and `summary` share a segment, positioned at the first enabled one.
+Summary is optional and capped at 60 characters, cutting at a word where
+possible. Text has terminal control sequences removed and tmux formats escaped.
+`inbox` counts unread inbox-only messages without marking them read, capped at
+`50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
+steer/follow-up messages do not count. Optional `context` shows measured latest
+request tokens/window (for example `ctx 82k/200k`), only when available for the
+current running launch and, for Codex, its exact thread. No compaction item is
+provided in tmux; Claude's mod supplies that information.
+
+The row uses tmux's asynchronous `#()` pull mechanism at `status-interval`, only
+while attached. Each refresh starts one Python process with site loading
+disabled, reads four small JSON files plus a bounded unread inbox tail if
+enabled, and exits. It imports only the standard library, takes no locks,
+performs no writes, and contacts neither mv2 nor the native app-server. This
+avoids a push publisher in each lifecycle/report/inbox path and also picks up
+file edits. Item choices and state changes appear on the next refresh; the
+interval itself takes effect on spawn/resume.
+
+A local 40-refresh measurement took a median 49 ms wall time and mean 35 ms CPU
+per refresh while the test suite was running (about 1.7% of one CPU core for an
+attached agent at two seconds). Detached wrappers do not poll; increasing the
+interval reduces the attached cost.
+
+Codex 0.160.x can separately opt into its built-in native footer without editing
+`~/.codex/config.toml`. Add these two entries to the Codex harness's existing
+`settings.args` array (preserving its other arguments):
+
+```json
+"-c", "tui.status_line=[\"thread-name\",\"run-state\",\"context-remaining\"]"
+```
+
+This applies to plain and bridge (`--remote`) launches/resumes. The selected
+native values update live; the selection is a launch setting. `thread-name`
+appears when named, including mv2's bridge-assigned name. Codex's footer accepts
+its fixed item names, not arbitrary mv2 phase/inbox text or a shell renderer.
+mv2 leaves this native footer choice to the user.
 
 ## Implemented capabilities and verification limits
 
@@ -742,7 +991,7 @@ plugin validate` when Claude Code is installed.
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
-| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; otherwise unavailable |
+| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; Codex retains a saved bridge reading |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
 
