@@ -878,6 +878,100 @@ may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 delivery path, `ask` and older tags; the Python suite runs them and `claude
 plugin validate` when Claude Code is installed.
 
+## Agent tmux status line
+
+Every new or resumed agent wrapper has one status row and a window named after
+the agent. Automatic window renaming and native terminal rename sequences are
+disabled for that window. All other options are session-local: mv2 does not
+change global tmux options or the user's tmux configuration. Existing wrappers
+pick up the setup on resume.
+
+| Harness | Default row (example) |
+| --- | --- |
+| Codex | `reader · codex · status waiting · phase working · inbox 2` |
+| Pi / custom legacy | `reader · pi · phase working · inbox 2` |
+| Claude | `reader · claude` |
+
+`agent` means the name, plus `(universe)` only in a subverse (a universe directory
+under `subverses/<name>`), matching the Claude mod. The harness segment is the
+configured profile name. Inbox is omitted at zero. Codex context is **off by
+default**; native status is omitted when unavailable, as in plain mode. When
+status and phase have the same value, only the phase segment appears. Claude's
+default avoids repeating the mod's phase, inbox and compaction line; a plain
+Claude profile can opt into those available tmux items.
+
+The existing universe-root `statusline.json` configures both displays. Keep
+`schema: 1` and the top-level Claude `items` unchanged; all three templates add
+this independent block after `items`:
+
+```json
+"tmux": {
+  "refresh_seconds": 2,
+  "items": {
+    "agent": true,
+    "harness": true,
+    "status": false,
+    "phase": true,
+    "summary": false,
+    "inbox": true,
+    "context": false
+  },
+  "harnesses": {
+    "codex": {"items": {"status": true}},
+    "claude": {"items": {"phase": false, "inbox": false}}
+  }
+}
+```
+
+`tmux.items` key order sets display order; missing items are appended in default
+order. Harness overrides apply by adapter family (`codex`, `claude`, `pi`), even
+for a renamed profile. Built-in family defaults apply after common items, then
+explicit family overrides apply. For example, turn off Codex status with
+`"codex": {"items": {"status": false}}`, or opt into its context with
+`"codex": {"items": {"context": true}}`. Unknown keys are ignored; missing,
+partial or invalid configuration falls back to the corresponding defaults.
+`refresh_seconds` rounds up and clamps to 1–60 seconds; non-numbers use 2.
+`mv2 refresh` manages the template files and preserves local edits. The code
+defaults also work with older files that have no `tmux` block.
+
+`phase` and `summary` share a segment, positioned at the first enabled one.
+Summary is optional and capped at 60 characters, cutting at a word where
+possible. Text has terminal control sequences removed and tmux formats escaped.
+`inbox` counts unread inbox-only messages without marking them read, capped at
+`50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
+steer/follow-up messages do not count. Optional `context` shows measured latest
+request tokens/window (for example `ctx 82k/200k`), only when available for the
+current running launch and, for Codex, its exact thread. No compaction item is
+provided in tmux; Claude's mod supplies that information.
+
+The row uses tmux's asynchronous `#()` pull mechanism at `status-interval`, only
+while attached. Each refresh starts one Python process with site loading
+disabled, reads four small JSON files plus a bounded unread inbox tail if
+enabled, and exits. It imports only the standard library, takes no locks,
+performs no writes, and contacts neither mv2 nor the native app-server. This
+avoids a push publisher in each lifecycle/report/inbox path and also picks up
+file edits. Item choices and state changes appear on the next refresh; the
+interval itself takes effect on spawn/resume.
+
+A local 40-refresh measurement took a median 49 ms wall time and mean 35 ms CPU
+per refresh while the test suite was running (about 1.7% of one CPU core for an
+attached agent at two seconds). Detached wrappers do not poll; increasing the
+interval reduces the attached cost.
+
+Codex 0.160.x can separately opt into its built-in native footer without editing
+`~/.codex/config.toml`. Add these two entries to the Codex harness's existing
+`settings.args` array (preserving its other arguments):
+
+```json
+"-c", "tui.status_line=[\"thread-name\",\"run-state\",\"context-remaining\"]"
+```
+
+This applies to plain and bridge (`--remote`) launches/resumes. The selected
+native values update live; the selection is a launch setting. `thread-name`
+appears when named, including mv2's bridge-assigned name. Codex's footer accepts
+its fixed item names, not arbitrary mv2 phase/inbox text or a shell renderer.
+mv2 leaves this native footer choice to the user.
+
 ## Implemented capabilities and verification limits
 
 | Operation | Codex bridge | Claude | Pi bridge | Plain/legacy |

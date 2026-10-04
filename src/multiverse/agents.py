@@ -226,6 +226,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                       [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
+            family = next((name for name, cls in harnesses.BUILTINS.items() if isinstance(adapter, cls)), '')
+            backend.configure_status(terminal, root, properties, launch_id, family)
             if isinstance(adapter, harnesses.CodexAdapter):
                 # Codex detects mouse support during TUI startup. Set only its
                 # wrapper session, before releasing the runner's ready gate.
