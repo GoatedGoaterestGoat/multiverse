@@ -69,7 +69,8 @@ def context(result):
     percent = _number(found.get('percent'))
     if percent is None and window:
         percent = tokens * 100 / window
-    return {'tokens': tokens, 'window': window, 'percent': percent}
+    return {'tokens': tokens, 'window': window, 'percent': percent, 'estimated': found.get('estimated') is True,
+            'last_known': found.get('last_known') is True}
 
 
 def context_display(result):
@@ -77,7 +78,7 @@ def context_display(result):
     found = context(result)
     if found is None:
         return 'N/A'
-    return count(found['tokens']) + (f"/{count(found['window'])}" if found['window'] else '')
+    return ('~' if found['estimated'] else '') + count(found['tokens']) + (f"/{count(found['window'])}" if found['window'] else '')
 
 
 def context_level(result):
@@ -97,7 +98,11 @@ def context_line(result):
     found = context(result)
     line = 'Context: ' + context_display(result)
     if found and found['percent'] is not None:
-        line += f" ({found['percent']:.0f}%)"
+        line += f" ({found['percent']:.0f}%" + (', estimated after compaction)' if found['estimated'] else ')')
+    elif found and found['estimated']:
+        line += ' (estimated after compaction)'
+    if found and found['last_known']:
+        line += ' (last known)'
     cost = cost_display(result)
     return line + (f' · Cost: {cost}' if cost != '—' else '')
 

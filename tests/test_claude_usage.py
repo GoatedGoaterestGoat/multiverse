@@ -111,3 +111,71 @@ class ClaudeUsageTest(BaseTest):
                              {'window': 200000, 'tokens': 6})
             runtime_update.run(self.root, agent=agent, usage_json=json.dumps(REPORT))
         self.assertEqual(harnesses.load(self.root, 'claude').get_usage(session).value['context'], REPORT['context'])
+
+    def stamped(self, id, stamp, input_tokens=1, read=0, written=0):
+        usage = {'input_tokens': input_tokens, 'output_tokens': 7, 'cache_read_input_tokens': read,
+                 'cache_creation_input_tokens': written}
+        return json.dumps({'type': 'assistant', 'timestamp': stamp,
+                           'message': {'id': id, 'usage': usage, 'content': [{'type': 'text'}]}}) + '\n'
+
+    def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000):
+        agent, directory = self.agent()
+        native_id = str(uuid4())
+        project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0))
+        install = str(uuid4())
+        write(directory / 'compaction' / 'installs' / f'{install}.json', {'stats': {'tokens_after': estimate}, 'install_id': install})
+        if recorded:
+            (directory / 'compaction' / 'installed.jsonl').write_text(json.dumps({'install': install, 'rows': [], 'at': installed_at}) + '\n')
+        self.report(directory, {'tokens': 150010, 'window': 200000, 'percent': 75}, '2026-10-04T00:05:00+00:00')
+        session = SessionHandle(agent, 'claude', str(self.work), launch_id='current', native_id=native_id,
+                                session_file=str(directory / 'session.jsonl'))
+        return harnesses.load(self.root, 'claude'), session, project, native_id, install
+
+    def report(self, directory, context, at):
+        facts = read(directory / 'runtime.json')
+        write(directory / 'runtime.json', {**facts, 'usage': {'context': context, 'rate_limits': [], 'reported_at': at}})
+
+    def context(self, adapter, session):
+        return adapter.get_usage(session).value['context']
+
+    def test_after_our_compaction_the_estimate_stands_in_until_a_real_response_arrives(self):
+        adapter, session, project, native_id, install = self.compacted()
+        context = self.context(adapter, session)
+        self.assertEqual((context['tokens'], context['window'], context['estimated'], context['estimated_from']),
+                         (22000, 200000, True, install))
+        self.assertNotIn('percent', context)
+        value = adapter.get_usage(session).value
+        self.assertEqual(usage_module.context_display({'state': 'ok', 'value': value}), '~22k/200k')
+        self.assertIn('11%, estimated after compaction', usage_module.context_line({'state': 'ok', 'value': value}))
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+        context = self.context(adapter, session)
+        # The mod's report predates the new response, so the transcript has the real request size.
+        self.assertEqual(context['tokens'], 32005)
+        self.assertNotIn('estimated', context)
+        self.assertEqual(usage_module.context_display({'state': 'ok', 'value': adapter.get_usage(session).value}), '32k/200k')
+
+    def test_the_mods_newer_report_wins_once_it_follows_the_response(self):
+        adapter, session, project, native_id, install = self.compacted()
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+        self.report(self.root / 'state/agents' / session.agent_id, {'tokens': 32005, 'window': 200000, 'percent': 16},
+                    '2026-10-04T00:12:00+00:00')
+        context = self.context(adapter, session)
+        self.assertEqual((context['tokens'], context['percent']), (32005, 16))
+        self.assertNotIn('estimated', context)
+
+    def test_a_compaction_that_was_never_installed_or_has_no_estimate_changes_nothing(self):
+        adapter, session, *_ = self.compacted(recorded=False)
+        self.assertEqual(self.context(adapter, session)['tokens'], 150010)
+        self.assertNotIn('estimated', self.context(adapter, session))
+        adapter, session, *_ = self.compacted(installed_at='not a time')
+        self.assertNotIn('estimated', self.context(adapter, session))
+
+    def test_without_the_mod_the_estimate_still_replaces_the_stale_transcript_reading(self):
+        adapter, session, project, native_id, install = self.compacted()
+        stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,
+                              session_file=session.session_file)
+        context = self.context(adapter, stale)
+        self.assertEqual((context['tokens'], context['estimated']), (22000, True))
+        self.assertNotIn('window', context)

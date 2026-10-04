@@ -41,6 +41,20 @@ class UsageDisplayTests(unittest.TestCase):
         self.assertEqual(usage.context_line(reading(82000)), "Context: 82k")
         self.assertEqual(usage.cost_display(reading(1, 2)), "—")
 
+    def test_estimates_are_marked_and_last_known_readings_are_labelled_but_not_estimated(self):
+        estimate = reading(22000, 200000)
+        estimate["value"]["context"]["estimated"] = True
+        self.assertEqual(usage.context_display(estimate), "~22k/200k")
+        self.assertEqual(usage.context_line(estimate), "Context: ~22k/200k (11%, estimated after compaction)")
+        self.assertEqual(usage.context_line({"state": "ok", "value": {"context": {"tokens": 5000, "estimated": True}}}),
+                         "Context: ~5.0k (estimated after compaction)")
+        known = reading(82000, 200000, 41)
+        known["value"]["context"]["last_known"] = True
+        self.assertEqual(usage.context_display(known), "82k/200k")
+        self.assertEqual(usage.context_line(known), "Context: 82k/200k (41%) (last known)")
+        self.assertIn("(last known)", usage.details(known))
+        self.assertEqual(usage.context_level(estimate), None)
+
     def test_details_keep_cumulative_totals_out_of_the_lead(self):
         text = usage.details(reading(82000, 200000, 41, 1.2, [{"window": "five_hour", "percent_used": 34.5}]))
         self.assertTrue(text.startswith("Context: 82k/200k (41%)"))

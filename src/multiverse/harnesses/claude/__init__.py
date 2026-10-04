@@ -18,6 +18,7 @@ to answer. `compaction(session)` returns the protocol implementation in
 `compaction/`.
 """
 from dataclasses import asdict, replace
+from datetime import datetime
 import hashlib
 import json
 import os
@@ -120,20 +121,73 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_usage(native_id):
-    """Tokens in the latest main-thread request (input + cache written + cache read), or None.
+def context_reading(native_id):
+    """(tokens, timestamp) of the latest main-thread request, or None.
 
-    Subagent transcripts are excluded: they have their own context windows.
+    Tokens are input + cache written + cache read. Subagent transcripts are
+    excluded: they have their own context windows.
     """
     mains = sorted((claude_home() / 'projects').glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
     if not mains:
         return None
     with _transcripts_lock:
-        responses = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read().responses
+        transcript = _transcripts.setdefault(mains[-1], Transcript(mains[-1])).read()
+        responses, stamp = transcript.responses, transcript.last
     if not responses:
         return None
     latest = list(responses.values())[-1]
-    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'))
+    return sum(counted(latest, key) for key in ('input_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')), stamp
+
+
+def context_usage(native_id):
+    """Tokens in the latest main-thread request, or None."""
+    reading = context_reading(native_id)
+    return reading[0] if reading else None
+
+
+def moment(text):
+    """A timestamp as a datetime, or None."""
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+_compactions = {}
+
+
+def latest_compaction(agent_dir):
+    """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
+
+    The estimate is the compaction's own count of the conversation it left
+    (`stats.tokens_after`); read again only when the install log changes.
+    """
+    directory = Path(agent_dir) / 'compaction'
+    try:
+        log = directory / 'installed.jsonl'
+        status = log.stat()
+        key = (status.st_mtime_ns, status.st_size)
+        cached = _compactions.get(log)
+        if cached and cached[0] == key:
+            return cached[1]
+        record = None
+        for line in log.read_text().splitlines():
+            try:
+                found = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(found, dict) and re.fullmatch(r'[0-9a-f-]{36}', str(found.get('install', ''))) and found.get('at'):
+                record = found
+        result = None
+        if record:
+            tokens = json.loads((directory / 'installs' / f"{record['install']}.json").read_text()).get('stats', {}).get('tokens_after')
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
+                result = {'install': record['install'], 'at': record['at'], 'tokens': tokens}
+        _compactions[log] = (key, result)
+        return result
+    except (OSError, ValueError, AttributeError):
+        return None
+
 
 
 def measured_usage(native_id):
@@ -310,11 +364,26 @@ class ClaudeAdapter(ConfiguredAdapter):
         except (OSError, ValueError, TypeError):
             pass
         usage = measured_usage(session.native_id)
-        # Before the mod reports (or without it) the request size comes from the transcript; the window is unknown.
-        if not isinstance(reported.get('context'), dict) or reported['context'].get('tokens') is None:
-            tokens = context_usage(session.native_id)
-            if tokens is not None:
-                reported['context'] = {**(reported.get('context') or {}), 'tokens': tokens}
+        reading = context_reading(session.native_id)
+        context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
+        responded = moment(reading[1]) if reading else None
+        reported_at = moment(reported.get('context_reported_at'))
+        try:
+            compaction = latest_compaction(Path(session.session_file).parent)
+        except TypeError:
+            compaction = None
+        installed_at = moment(compaction['at']) if compaction else None
+        if installed_at and not (responded and responded > installed_at):
+            # No response has come since our compaction: its count of the conversation stands in until one does.
+            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
+            context.update(tokens=compaction['tokens'], estimated=True, estimated_at=compaction['at'],
+                           estimated_from=compaction['install'])
+        elif reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
+            # No report from the mod yet, or a response newer than it: the transcript has the real request size.
+            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
+            context['tokens'] = reading[0]
+        if context:
+            reported['context'] = context
         if usage is None:
             if reported:
                 return NativeResult('ok', 'Reported by the multiverse mod', {'native_session_id': session.native_id, **reported})
