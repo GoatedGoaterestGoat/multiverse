@@ -25,6 +25,23 @@ describe('statusline config', () => {
     expect(config.order).toEqual(['phase', 'agent', 'summary', 'inbox', 'compaction'])  // only known keys, listed first
   })
 
+  test('a tmux block for the tmux status bar is ignored, whatever it holds', async () => {
+    const tmux = '{"refresh_seconds": 2, "items": {"agent": true, "harness": true, "status": false, "phase": true, "summary": false, ' +
+      '"inbox": true, "context": false}, "harnesses": {"codex": {"items": {"status": true, "context": true}}, ' +
+      '"claude": {"items": {"phase": false, "inbox": false}}}}'
+    const claude = '"items": {"agent": false, "phase": true, "summary": false, "inbox": true, "compaction": true}'
+    const parsed = parseConfig(`{"schema": 1, ${claude}, "tmux": ${tmux}}`)
+    expect(parsed.problem).toBeUndefined()
+    expect(parsed.config).toEqual(defaultConfig())  // the tmux items never reach the Claude line
+    // Nor can a broken or odd block of another consumer change or spoil it.
+    for (const odd of ['"x"', 'null', '[]', '{"items": 5, "harnesses": []}', '{"refresh_seconds": "soon"}']) {
+      expect(parseConfig(`{"schema": 1, ${claude}, "tmux": ${odd}}`)).toEqual({ config: defaultConfig() })
+    }
+    // Only Claude's own items decide Claude's line, even when tmux uses the same names differently.
+    const own = parseConfig('{"items": {"agent": true}, "tmux": {"items": {"agent": false, "phase": false}}}')
+    expect(own.config.on).toEqual({ ...DEFAULTS, agent: true })
+  })
+
   test('anything unusable falls back to the defaults and says why', async () => {
     for (const [text, problem] of [
       ['{unfinished', 'not valid JSON'], ['[]', 'must be an object'], ['{"schema": 2}', 'unsupported schema'],
