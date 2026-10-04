@@ -6,7 +6,7 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.cli import parser, run
-from multiverse.store import read, write
+from multiverse.store import append_message, inbox, read, write
 from multiverse.tools import report
 from test_multiverse import BaseTest
 
@@ -31,23 +31,64 @@ class ReportOutputTest(BaseTest):
         self.assertEqual(dispatched['phase'], 'done')
         self.assertEqual(dispatched, read(self.directory / 'properties.json'))
 
+    def report(self, *arguments, **environment):
+        return subprocess.run([sys.executable, '-m', 'multiverse.cli', 'report', *arguments], env={**self.env, **environment},
+                              capture_output=True, text=True, timeout=10)
+
+    def mail(self, delivery, count=1):
+        for number in range(count):
+            append_message(self.directory, f'{delivery} {number}', {'agent_id': None, 'name': 'user'}, delivery)
+
     def test_all_cli_entrypoints_print_one_line_without_task_or_properties(self):
         for command in (['multiverse.cli', 'report'], ['multiverse.cli', 'status'], ['multiverse.tools.report']):
             with self.subTest(command=command):
                 result = subprocess.run([sys.executable, '-m', *command, '--phase', 'working',
                     '--summary', 'Checking launch\npermissions'], env=self.env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, 'Reported working: Checking launch permissions\n')
+                self.assertEqual(result.stdout, 'Reported working.\n')  # the summary is saved, never echoed
                 self.assertNotIn('PRIVATE FULL TASK', result.stdout)
                 self.assertEqual(read(self.directory / 'properties.json')['summary'], 'Checking launch\npermissions')
 
-    def test_empty_summary_omits_colon_and_stale_launch_still_fails(self):
-        result = subprocess.run([sys.executable, '-m', 'multiverse.cli', 'report', '--phase', 'done'],
-            env=self.env, capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.stdout, 'Reported done\n')
+    def test_a_report_without_a_summary_and_a_stale_launch(self):
+        result = self.report('--phase', 'done')
+        self.assertEqual(result.stdout, 'Reported done.\n')
         failed = subprocess.run([sys.executable, '-m', 'multiverse.tools.report', '--phase', 'working'],
             env={**self.env, 'MV2_LAUNCH_ID': 'old'}, capture_output=True, text=True, timeout=10)
         self.assertEqual(failed.returncode, 1)
         self.assertEqual(failed.stdout, '')
         self.assertIn('Outdated launch', failed.stderr)
         self.assertEqual(read(self.directory / 'properties.json')['phase'], 'done')
+
+    def test_unread_inbox_only_messages_are_counted_and_nothing_is_marked_read(self):
+        self.assertEqual(self.report('--phase', 'working').stdout, 'Reported working.\n')  # nothing unread: only that
+        self.mail('inbox-only')
+        self.assertEqual(self.report('--phase', 'done').stdout, 'Reported done. You have 1 unread inbox message.\n')
+        self.mail('inbox-only', 2)
+        self.mail('steer')      # delivered natively, so not an unread inbox message
+        self.mail('follow-up')
+        for command in (['multiverse.cli', 'report'], ['multiverse.cli', 'status'], ['multiverse.tools.report']):
+            result = subprocess.run([sys.executable, '-m', *command, '--phase', 'blocked'], env=self.env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.stdout, 'Reported blocked. You have 3 unread inbox messages.\n')
+        # Reporting is not reading: the same three are still unread, and a real read still gets them all.
+        self.assertFalse((self.directory / 'inbox.cursor').exists())
+        self.assertEqual(len(inbox(self.directory, peek=True)['messages']), 3)
+        self.assertEqual(len(inbox(self.directory)['messages']), 3)
+        self.assertEqual(self.report('--phase', 'done').stdout, 'Reported done.\n')
+
+    def test_the_count_is_taken_in_process_and_never_fails_the_report(self):
+        self.mail('inbox-only', 2)
+        with patch.dict(os.environ, self.env), patch('subprocess.Popen') as spawned, patch('subprocess.run') as ran:
+            self.assertEqual(report.cli_run(agent=self.agent, phase='working', summary='x'),
+                             'Reported working. You have 2 unread inbox messages.')
+        spawned.assert_not_called()
+        ran.assert_not_called()
+        # A cursor past the end of the log makes the inbox unreadable: the report still succeeds, without a count.
+        (self.directory / 'inbox.cursor').write_text('999999')
+        result = self.report('--phase', 'done')
+        self.assertEqual((result.returncode, result.stdout), (0, 'Reported done.\n'))
+        self.assertEqual(read(self.directory / 'properties.json')['phase'], 'done')
+
+    def test_a_summary_only_report_names_the_current_phase(self):
+        self.assertEqual(self.report('--summary', 'Still reading').stdout, 'Reported starting.\n')
+        self.assertEqual(read(self.directory / 'properties.json')['summary'], 'Still reading')

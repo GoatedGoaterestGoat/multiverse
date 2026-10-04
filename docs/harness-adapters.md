@@ -70,9 +70,10 @@ UI, or fallback that invokes another model to forward a message.
 Core owns universes, agent IDs, launch generations, environment scrubbing,
 workspace preservation, processes and tmux. `attach`, `inspect` and process
 `kill`/`stop` remain core operations; stop first calls the adapter to cancel work hosted outside the terminal. Reported phase/summary are separate
-from observed liveness. The report CLI prints one line (`Reported working: <summary>`)
-without echoing task/properties data; its Python `run()` result remains the full
-record. `task` is a compatibility name for the optional initial
+from observed liveness. The report CLI prints one line (`Reported working.`, plus `You have N unread inbox
+messages.` when inbox-only messages wait, counted without marking them read)
+without echoing the summary or task/properties data; its Python `run()` result
+remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
 ## Lifecycle paths
