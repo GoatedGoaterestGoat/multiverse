@@ -199,8 +199,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             with lock(root / "state" / ".agents.lock"):
                 _check_available_name(root, name)
                 write(agent_dir / "properties.json", properties)
-        write(agent_dir / "runtime.json", {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
-                                           "started_at": now(), "native_mode": command.native_mode})
+        initial_runtime = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
+                           "started_at": now(), "native_mode": command.native_mode}
+        if resume and isinstance(adapter, harnesses.CodexAdapter):
+            from .harnesses.codex.usage import last_measurement
+            measured = last_measurement(previous, properties.get('native_session_id'))
+            if measured is not None:
+                # Keep the exact thread's sample and original timestamp until
+                # this launch reports again, without treating it as fresh usage.
+                initial_runtime['last_usage'] = measured
+        write(agent_dir / "runtime.json", initial_runtime)
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
         terminal = None
         service_directory_created = False

@@ -39,20 +39,37 @@ def notification(value, native_id):
     return {'native_session_id': native_id, 'context': context, 'source': 'codex-app-server'}
 
 
-def measured(session):
+def last_measurement(facts, native_id):
+    """Newest saved measurement for this exact thread, including across resumes."""
+    if not native_id or not isinstance(facts, dict):
+        return None
+    for key in ('usage', 'last_usage'):
+        usage = facts.get(key)
+        if (isinstance(usage, dict) and usage.get('native_session_id') == native_id
+                and usage.get('source') == 'codex-app-server'
+                and isinstance(usage.get('context'), dict)
+                and counter(usage['context'].get('tokens')) is not None):
+            return usage
+    return None
+
+
+def measured(session, *, bridge=True):
     if not session.native_id or not session.launch_id or not session.session_file:
         return NativeResult('unavailable', 'No bound Codex launch for context usage')
     try:
         facts = read(Path(session.session_file).parent / 'runtime.json')
-        usage = facts.get('usage')
-        if (facts.get('launch_id') == session.launch_id and isinstance(usage, dict)
-                and usage.get('native_session_id') == session.native_id
-                and usage.get('source') == 'codex-app-server'
-                and isinstance(usage.get('context'), dict)
-                and counter(usage['context'].get('tokens')) is not None):
-            return NativeResult('ok', 'Last measured context reported by Codex app-server', {
-                'context': usage['context'], 'context_source': usage['source'],
+        usage = last_measurement(facts, session.native_id)
+        if usage is not None and facts.get('launch_id') == session.launch_id:
+            relay = facts.get('native_relay')
+            last_known = (usage is not facts.get('usage') or not bridge
+                          or facts.get('state') != 'running' or 'exit_code' in facts
+                          or bool(facts.get('ending_at'))
+                          or isinstance(relay, dict) and relay.get('state') == 'lost')
+            return NativeResult('ok', 'Last known context reported by Codex app-server' if last_known
+                                else 'Last measured context reported by Codex app-server', {
+                'context': {**usage['context'], **({'last_known': True} if last_known else {})},
+                'context_source': usage['source'],
                 'context_reported_at': usage.get('reported_at')})
     except (OSError, ValueError, TypeError):
         pass
-    return NativeResult('unavailable', 'Codex has not reported context usage for this launch yet')
+    return NativeResult('unavailable', 'Codex has no saved context usage for this thread yet')

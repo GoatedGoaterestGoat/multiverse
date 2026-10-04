@@ -683,9 +683,14 @@ passes every frame to the TUI and publishes observations through the runner's
 existing runtime update path. No extra subscription or thread resume is performed.
 `runtime.json` stores `usage.context` (`tokens`, optional `window` and `percent`),
 the native session ID, source and `reported_at`. The adapter's `get_usage` exposes
-the reading only for that exact launch and session. The last reading remains
-available with its timestamp after disconnection or launch end; a new launch
-waits for its own native notification, including Codex's resume usage replay.
+the reading only for the current launch handle and its exact native thread.
+The last reading remains available with its original timestamp after
+disconnection or launch end. Resume carries that same thread's newest valid
+measurement into `runtime.json.last_usage`, including repeated resumes and
+fallback to plain mode. The dashboard keeps showing the count and labels it
+`(last known)` in the inspector until a fresh native notification replaces it,
+including Codex's resume usage replay. This is retained measurement, not an
+estimate. A changed thread ID never inherits another thread's count.
 
 Context tokens are `tokenUsage.last.totalTokens`, not the cumulative `total`:
 cached input and reasoning output are already included and are not added again.
@@ -693,9 +698,10 @@ The window is native `modelContextWindow`; a missing window stays unknown.
 The percentage matches Codex 0.159.2's native TUI: subtract its 12,000-token
 baseline from the used count and window, clamp and round the remaining percentage,
 then report 100 minus that value as used. Thus the percentage can differ from
-raw tokens divided by window. Compaction may reduce the count. Until a measurement
-arrives, usage displays N/A; a measured zero is zero. Plain Codex, cumulative usage, cost and
-rate-limit reporting remain unavailable in this adapter.
+raw tokens divided by window. Compaction may reduce the count. Until this thread
+has a saved measurement, usage displays N/A; a measured zero is zero.
+Plain Codex can display a saved bridge reading but cannot refresh it.
+Cumulative usage, cost and rate-limit reporting remain unavailable in this adapter.
 
 Explicit `kill` (or `stop`) holds the recipient's launch lock during native cancellation, deletes its pending native
 queue entries, interrupts its exact active turn and cleans its native background
@@ -985,7 +991,7 @@ mv2 leaves this native footer choice to the user.
 | Observe launch / terminal | Yes | Yes | Yes | Yes |
 | Receipt reconciliation | Bounded queue/history lookup | Bridge: mod receipt when the row is stored | Exact transcript/current acceptance | Unavailable |
 | Native status | Bridge: working / waiting / idle from app-server | Bridge: working / waiting / idle from the mod | Lifecycle events | Unknown |
-| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; otherwise unavailable |
+| Latest context usage | Native latest-request tokens, window and percentage | Transcript tokens; bridge adds native window and percentage | Unavailable | Claude transcript tokens; Codex retains a saved bridge reading |
 | Measured cumulative usage | Unavailable | Session transcript (with or without the bridge) | Unavailable | Unavailable |
 | Isolated ask | Unavailable | Bridge: `$.model.fork` over the transcript | Unavailable | Unavailable |
 

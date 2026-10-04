@@ -183,13 +183,18 @@ class CodexAdapter(ConfiguredAdapter):
                 'unavailable', session.native_relay['reason'], required=True)
         if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
+        elif self.get_usage(session).state == 'ok':
+            result['get_usage'] = Capability('supported', 'Last known context from an earlier bridge reading',
+                                             mechanism='codex-app-server-context')
         return result
 
     def get_usage(self, session, executor=None):
-        if not self._uses_bridge(session):
-            return NativeResult('unavailable', 'Codex context reporting requires inbox_bridge')
         from .usage import measured
-        return measured(session)
+        bridge = self._uses_bridge(session)
+        result = measured(session, bridge=bridge)
+        if result.state != 'ok' and not bridge:
+            return NativeResult('unavailable', 'Codex context reporting requires inbox_bridge; no saved reading')
+        return result
 
     def _uses_bridge(self, session):
         if session.native_mode:
