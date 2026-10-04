@@ -98,9 +98,9 @@ def context_line(result):
     found = context(result)
     line = 'Context: ' + context_display(result)
     if found and found['percent'] is not None:
-        line += f" ({found['percent']:.0f}%" + (', estimated after compaction)' if found['estimated'] else ')')
+        line += f" ({found['percent']:.0f}%" + (', estimated after compaction: conversation only)' if found['estimated'] else ')')
     elif found and found['estimated']:
-        line += ' (estimated after compaction)'
+        line += ' (estimated after compaction: conversation only)'
     if found and found['last_known']:
         line += ' (last known)'
     cost = cost_display(result)

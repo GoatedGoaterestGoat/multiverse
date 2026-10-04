@@ -160,7 +160,9 @@ def latest_compaction(agent_dir):
     """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
 
     The estimate is the compaction's own count of the conversation it left
-    (`stats.tokens_after`); read again only when the install log changes.
+    (`stats.tokens_after`: prompts, summaries and raw leaves at about four
+    characters a token, so no system prompt or tools, and well under the real
+    count); read again only when the install log changes.
     """
     directory = Path(agent_dir) / 'compaction'
     try:
@@ -180,9 +182,12 @@ def latest_compaction(agent_dir):
                 record = found
         result = None
         if record:
-            tokens = json.loads((directory / 'installs' / f"{record['install']}.json").read_text()).get('stats', {}).get('tokens_after')
-            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0:
-                result = {'install': record['install'], 'at': record['at'], 'tokens': tokens}
+            # installed.jsonl's `at` is when the record was derived from the transcript, possibly much later;
+            # the install file is written just before the rows are handed to Claude.
+            payload = json.loads((directory / 'installs' / f"{record['install']}.json").read_text())
+            tokens, created = payload.get('stats', {}).get('tokens_after'), payload.get('created_at')
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 and created:
+                result = {'install': record['install'], 'at': created, 'tokens': tokens}
         _compactions[log] = (key, result)
         return result
     except (OSError, ValueError, AttributeError):

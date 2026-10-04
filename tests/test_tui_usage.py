@@ -45,9 +45,9 @@ class UsageDisplayTests(unittest.TestCase):
         estimate = reading(22000, 200000)
         estimate["value"]["context"]["estimated"] = True
         self.assertEqual(usage.context_display(estimate), "~22k/200k")
-        self.assertEqual(usage.context_line(estimate), "Context: ~22k/200k (11%, estimated after compaction)")
+        self.assertEqual(usage.context_line(estimate), "Context: ~22k/200k (11%, estimated after compaction: conversation only)")
         self.assertEqual(usage.context_line({"state": "ok", "value": {"context": {"tokens": 5000, "estimated": True}}}),
-                         "Context: ~5.0k (estimated after compaction)")
+                         "Context: ~5.0k (estimated after compaction: conversation only)")
         known = reading(82000, 200000, 41)
         known["value"]["context"]["last_known"] = True
         self.assertEqual(usage.context_display(known), "82k/200k")

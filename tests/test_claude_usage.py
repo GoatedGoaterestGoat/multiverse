@@ -118,14 +118,15 @@ class ClaudeUsageTest(BaseTest):
         return json.dumps({'type': 'assistant', 'timestamp': stamp,
                            'message': {'id': id, 'usage': usage, 'content': [{'type': 'text'}]}}) + '\n'
 
-    def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000):
+    def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000, derived_at='2026-10-04T05:00:00+00:00'):
         agent, directory = self.agent()
         native_id = str(uuid4())
         project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0))
         install = str(uuid4())
-        write(directory / 'compaction' / 'installs' / f'{install}.json', {'stats': {'tokens_after': estimate}, 'install_id': install})
+        write(directory / 'compaction' / 'installs' / f'{install}.json',
+              {'stats': {'tokens_after': estimate}, 'install_id': install, 'created_at': installed_at})
         if recorded:
-            (directory / 'compaction' / 'installed.jsonl').write_text(json.dumps({'install': install, 'rows': [], 'at': installed_at}) + '\n')
+            (directory / 'compaction' / 'installed.jsonl').write_text(json.dumps({'install': install, 'rows': [], 'at': derived_at}) + '\n')
         self.report(directory, {'tokens': 150010, 'window': 200000, 'percent': 75}, '2026-10-04T00:05:00+00:00')
         session = SessionHandle(agent, 'claude', str(self.work), launch_id='current', native_id=native_id,
                                 session_file=str(directory / 'session.jsonl'))
@@ -146,7 +147,7 @@ class ClaudeUsageTest(BaseTest):
         self.assertNotIn('percent', context)
         value = adapter.get_usage(session).value
         self.assertEqual(usage_module.context_display({'state': 'ok', 'value': value}), '~22k/200k')
-        self.assertIn('11%, estimated after compaction', usage_module.context_line({'state': 'ok', 'value': value}))
+        self.assertIn('11%, estimated after compaction: conversation only', usage_module.context_line({'state': 'ok', 'value': value}))
         with (project / f'{native_id}.jsonl').open('a') as handle:
             handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
         context = self.context(adapter, session)
