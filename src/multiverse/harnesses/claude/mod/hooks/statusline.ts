@@ -36,6 +36,12 @@ const SEPARATOR = " · "
 const SUMMARY_LENGTH = 60
 export const INBOX_LIMIT = 50
 
+// A subverse is a universe at `.../subverses/<name>`; a root universe (the project's own `.multiverse`) is not.
+export function isSubverse(universePath: string): boolean {
+  const parts = universePath.split("/").filter((part) => part !== "")
+  return parts.length >= 2 && parts[parts.length - 2] === "subverses"
+}
+
 export function defaultConfig(): Config {
   return { order: [...ITEMS], on: { ...DEFAULTS } }
 }
@@ -93,6 +99,7 @@ export function render(config: Config, facts: Facts): string | undefined {
   for (const item of config.order) {
     if (!config.on[item]) continue
     if (item === "agent") {
+      // The name, plus the universe only for an agent in a subverse (the caller leaves `universe` out otherwise).
       const name = clean(facts.agent ?? "")
       const universe = clean(facts.universe ?? "")
       if (name) parts.push(universe ? `${name} (${universe})` : name)

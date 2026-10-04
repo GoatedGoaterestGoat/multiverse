@@ -826,7 +826,8 @@ refresh` manages (a local edit is kept):
 
 The order of the keys is the order on screen; a missing key keeps the default shown,
 an unknown key is ignored, and an unreadable file means the defaults (logged once).
-`agent` is the name and universe, `phase` and `summary` the agent's last `mv2 report`
+`agent` is the agent's name, plus `(universe)` only for an agent in a subverse (the
+root universe is left out, the same rule as the tmux bar), `phase` and `summary` the agent's last `mv2 report`
 (shown as one segment, `working: reading the diff`), `inbox` the unread inbox-only
 count (only when above zero, `50+` at the cap), and `compaction` the built trees out of
 all turns (`trees 70/76`, then ` · building` while a builder runs and any failure notes),

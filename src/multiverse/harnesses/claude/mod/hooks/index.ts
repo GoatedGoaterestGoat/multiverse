@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
 import { compactionLine, registerCompaction } from './compaction'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
-import { INBOX_LIMIT, currentLine, defaultConfig, parseConfig, render, setBase } from './statusline'
+import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, render, setBase } from './statusline'
 import type { Config, Facts } from './statusline'
 import { registerUsage } from './usage'
 
@@ -118,9 +118,13 @@ async function refreshStatus($: EngineInterface) {
       } catch { /* mid-write: the next change reads it */ }
     }
     if (statusFacts.universe === undefined) {
-      try {
-        statusFacts.universe = field(JSON.parse((await readFile($, `${universe}/universe.json`)) ?? ""), "name") ?? ""
-      } catch { /* the name shows once universe.json reads */ }
+      if (!isSubverse(universe)) {
+        statusFacts.universe = ""  // a root universe is left out of the agent item
+      } else {
+        try {
+          statusFacts.universe = field(JSON.parse((await readFile($, `${universe}/universe.json`)) ?? ""), "name") ?? ""
+        } catch { /* the name shows once universe.json reads */ }
+      }
     }
     if ((inboxChanged || cursorChanged) && cli) {
       try {

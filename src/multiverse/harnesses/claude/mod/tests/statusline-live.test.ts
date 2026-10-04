@@ -107,7 +107,8 @@ describe('status line', () => {
     w.disk(`${UNIVERSE}/statusline.json`, '{"schema": 1, "items": {"agent": true, "summary": true, "inbox": false}}')
     await start($)
     await w.clock.settle()
-    expect(w.lines).toEqual(['reviewer (pr-review) · working: reading the diff'])
+    // A root universe is left out of the agent item: the name alone.
+    expect(w.lines).toEqual(['reviewer · working: reading the diff'])
     w.disk(`${UNIVERSE}/statusline.json`, '{"schema": 1, "items": {"phase": false, "summary": false}}')
     await w.clock.advance(2000)
     expect(w.lines.at(-1)).toBeUndefined()  // nothing left to show: the status is cleared
@@ -115,6 +116,20 @@ describe('status line', () => {
     await w.clock.advance(2000)
     expect(w.lines.at(-1)).toBe('working')  // an unusable file means the defaults
     expect(w.logs.some((line) => line.includes('not valid JSON'))).toBe(true)
+  })
+
+  test('an agent in a subverse shows the subverse beside its name, read once from universe.json', async ($, on) => {
+    const SUB = '/project/.multiverse/subverses/pr-review'
+    const w = session(on, { MV2_AGENT_DIR: `${SUB}/state/agents/a1`, MV2_UNIVERSE: SUB, MV2_CLI: '/mv2' })
+    w.disk(`${SUB}/state/agents/a1/properties.json`, properties('working'))
+    w.disk(`${SUB}/universe.json`, JSON.stringify({ name: 'PR review' }))
+    w.disk(`${SUB}/statusline.json`, '{"schema": 1, "items": {"agent": true, "inbox": false}}')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual(['reviewer (PR review) · working'])
+    w.disk(`${SUB}/state/agents/a1/properties.json`, properties('done'))
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('reviewer (PR review) · done')
   })
 
   test('a running /compact’s progress keeps the slot while the timer ticks, and the normal line returns after', async ($, on) => {

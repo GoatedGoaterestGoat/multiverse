@@ -1,6 +1,6 @@
 // The status line's pure logic: config parsing, rendering and the shared slot.
 import { describe, expect, test } from 'claude-code/testing'
-import { DEFAULTS, clean, currentLine, defaultConfig, parseConfig, render, setBase, setProgress } from '../hooks/statusline'
+import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, render, setBase, setProgress } from '../hooks/statusline'
 
 const FACTS = { agent: 'reviewer', universe: 'pr-review', phase: 'working', summary: 'reading the diff', inbox: 2, compaction: 'trees 3 · prepared' }
 
@@ -97,6 +97,18 @@ describe('statusline render', () => {
     expect(line.length).toBe(60)
     expect(line.endsWith('…')).toBe(true)
     expect(render(defaultConfig(), { ...FACTS, phase: 'work\u001b]0;pwned\u0007ing' })).not.toContain('\u001b')
+  })
+})
+
+describe('which universes name themselves in the agent item', () => {
+  test('a subverse does, a root universe does not', async () => {
+    for (const path of ['/p/.multiverse/subverses/pr-review', '/p/.multiverse/subverses/pr-review/', '/subverses/x',
+                        '/p/.multiverse/subverses/a/subverses/b']) {
+      expect(isSubverse(path)).toBe(true)
+    }
+    for (const path of ['/p/.multiverse', '/p/.multiverse/', '/subverses', '/p/subverses/a/b', '/p/.multiverse/state', '', '/']) {
+      expect(isSubverse(path)).toBe(false)
+    }
   })
 })
 
