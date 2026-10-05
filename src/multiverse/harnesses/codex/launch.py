@@ -4,7 +4,7 @@ from functools import partial
 from pathlib import Path
 import tomllib
 
-from ..types import NativeResult, RpcRequest, RpcSpec, normalize_session_id
+from ..types import NativeResult, RpcRequest, RpcNotification, RpcSpec, normalize_session_id
 from .protocol import result, object_field
 
 
@@ -107,7 +107,7 @@ def launch_settings(workspace):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('config/read', {'cwd': workspace, 'includeLayers': False})))
@@ -125,7 +125,7 @@ def launch_settings(workspace):
 def name_session(native_id, name):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'version': '1'},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     named = result((yield RpcRequest('thread/name/set', {'threadId': native_id, 'name': name})))

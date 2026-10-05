@@ -31,6 +31,53 @@ class NativeEndpoint:
 
 
 @dataclass(frozen=True)
+class ServiceIdentity:
+    """Provider-selected account/storage scope, independent of a socket name."""
+    provider: str
+    scope: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class NativeServiceHandle:
+    """An existing externally owned service. Core has no stop/restart authority."""
+    identity: ServiceIdentity
+    endpoint: NativeEndpoint
+    lifetime: Literal['external'] = 'external'
+
+    @classmethod
+    def from_record(cls, value):
+        return cls(ServiceIdentity(**value['identity']), NativeEndpoint(**value['endpoint']),
+                   value.get('lifetime', 'external')) if value else None
+
+
+@dataclass(frozen=True)
+class AttachmentSpec:
+    """Terminal policy; a relay alone does not declare independent native work.
+
+    Binding readiness means the adapter validated native identity, workspace and
+    effective permissions before its launch protocol reports a binding.
+    """
+    work_owner: Literal['terminal', 'service', 'unknown'] = 'terminal'
+    readiness: Literal['process', 'binding', 'legacy-binding'] = 'process'
+    recovery: Literal['unavailable', 'idle-existing-service'] = 'unavailable'
+    observe_status: bool = False
+    mouse: bool = False
+
+
+@dataclass(frozen=True)
+class NativeActivity:
+    """Normalized exact-session safety inventory. Unknown fields fail closed."""
+    native_id: str
+    workspace: str
+    service: NativeServiceHandle
+    status: Literal['idle', 'working', 'waiting', 'unknown'] = 'unknown'
+    active_work: bool | None = None
+    waiting: bool | None = None
+    queued_input: bool | None = None
+    background_work: bool | None = None
+
+
+@dataclass(frozen=True)
 class SharedServiceSpec:
     """Idempotent native startup command returning a JSON Unix socket address.
 
@@ -43,14 +90,21 @@ class SharedServiceSpec:
     required_cli_flags: tuple[str, ...] = ()
     cwd: str | None = None
     require_matching_versions: bool = True
+    identity: ServiceIdentity | None = None
+    lifetime: Literal['external'] = 'external'
 
 
 @dataclass(frozen=True)
 class RpcProxySpec:
-    """Launch-local relay; adapter settings describe pure protocol transforms."""
+    """Launch-local relay; adapter settings describe pure protocol transforms.
+
+    binds_session promises incoming() returns an ID only after validating the
+    exact native binding, workspace and effective requested permissions.
+    """
     socket_path: str
     upstream_path: str
     settings: Mapping[str, Any]
+    binds_session: bool = False
 
 
 @dataclass(frozen=True)
@@ -64,12 +118,21 @@ class CommandSpec:
     rpc_proxy: 'RpcProxySpec | None' = None
     native_mode: Mapping[str, Any] | None = None
     fallback: 'CommandSpec | None' = None
+    attachment: AttachmentSpec | None = None
+
+
+@dataclass(frozen=True)
+class RpcNotification:
+    method: str
+    params: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
 class RpcRequest:
+    """One request, with provider notifications after any successful response."""
     method: str
     params: Mapping[str, Any]
+    on_success: tuple[RpcNotification, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +190,8 @@ class SessionHandle:
     native_mode: Mapping[str, Any] | None = None
     native_versions: Mapping[str, str] | None = None
     native_relay: Mapping[str, Any] | None = None
+    service: NativeServiceHandle | None = None
+    attachment: AttachmentSpec | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -136,7 +201,9 @@ class SessionHandle:
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
                    NativeEndpoint(**endpoint) if endpoint else None,
                    runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
-                   runtime.get('native_versions'), runtime.get('native_relay'))
+                   runtime.get('native_versions'), runtime.get('native_relay'),
+                   NativeServiceHandle.from_record(runtime.get('native_service')),
+                   AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None)
 
 @dataclass(frozen=True)
 class Message:
@@ -172,3 +239,14 @@ class HarnessAdapter(Protocol):
     def get_delivery(self, session: SessionHandle, message_id: str, executor: Executor) -> NativeResult: ...
     def ask(self, session: SessionHandle, question: str, executor: Executor) -> NativeResult: ...
     def get_usage(self, session: SessionHandle, executor: Executor | None = None) -> NativeResult: ...
+
+
+class AttachmentProvider(Protocol):
+    """Optional adapter extension; the original HarnessAdapter stays sufficient.
+
+    Plans and retained observations only: no tmux or runtime mutations. Core
+    executes recovery plans against the saved endpoint without service startup.
+    """
+    def attachment_recovery(self, session: SessionHandle) -> RpcSpec | None: ...
+    def attachment_ready(self, session: SessionHandle) -> bool: ...
+    def retained_usage(self, session: SessionHandle, runtime: Mapping[str, Any]) -> Mapping[str, Any] | None: ...

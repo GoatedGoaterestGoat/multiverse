@@ -76,6 +76,65 @@ without echoing the summary or task/properties data; its Python `run()` result
 remains the full record. `task` is a compatibility name for the optional initial
 prompt, not a scheduler object. It is no longer copied into the status summary.
 
+### Native service, session and terminal attachment
+
+These are separate identities. `SessionHandle` still identifies the exact
+conversation and workspace. Its optional `service` is a `NativeServiceHandle`
+with a provider-selected `ServiceIdentity` (provider plus canonical storage or
+account scope), an existing endpoint and `lifetime="external"`. Its optional
+`attachment` is the current `AttachmentSpec`: where work executes (`terminal`
+or `service`), readiness (`process` or validated `binding`), recovery policy,
+passive status observation and the session-local mouse preference. Claude, Pi
+and legacy adapters keep terminal execution and their existing registration
+readiness; their service and attachment fields default to `None`.
+
+`SharedServiceSpec` describes only idempotent explicit start/reuse. Core has no
+service stop or restart operation. Its optional identity is persisted separately
+from launch-local sockets and compared on resume; a changed scope is rejected.
+Identity excludes daemon PIDs, so a legitimate restart at the same endpoint and
+storage scope does not change it. Old specifications without scope still work
+but cannot authorize automatic recovery. Codex supplies canonical `CODEX_HOME`
+and any selected `CODEX_SQLITE_HOME`; core never guesses a provider's home.
+
+`RpcProxySpec.binds_session=True` declares a validating launch protocol.
+`launch_proxy(settings).incoming(reply)` must return a native ID only after
+checking exact identity, workspace and effective requested permissions. A
+binding-ready attachment stays `starting` until that callback succeeds. Merely
+having an RPC proxy does not authorize readiness or recovery. The usual child
+startup check and startup-input acceptance still gate readiness. Each fallback
+carries its own attachment policy; automatic recovery has no fallback. Core
+applies the final prepared mouse preference before runner startup. A late relay
+fallback applies its selected preference under the launch lock after checking
+the exact owned pane; clearing an earlier mv2 mouse override restores the
+inherited option. Global options and other wrappers are untouched.
+
+The optional `AttachmentProvider` extension leaves the original adapter protocol
+sufficient. `attachment_recovery(session)` defaults to `None`; opted-in providers
+return a bounded, read-only `RpcSpec` targeting the saved service endpoint. Its
+successful result contains `NativeActivity`, binding the native ID, workspace
+and service to explicit status, active-work, wait, queue and background-work
+observations. Every work flag must be exactly `False` and status must be `idle`;
+unknown, malformed, unsupported or mismatched results fail closed. Core owns the
+recent proof, activity invalidation, message and child-process checks, locks,
+backoff and pane replacement. Neither a service nor a relay alone opts in.
+Adapters never mutate runtime files or tmux. Optional `retained_usage` returns an
+existing exact-session measurement; core preserves its timestamp on resume.
+
+Older providers returning an RPC proxy without an attachment declaration are
+adapted to `legacy-binding`: work ownership is `unknown`, readiness keeps the
+original native-ID/callback gate, and recovery is `unavailable`. Saved requests
+missing the new fields retain the same behavior. Startup-input acceptance is
+still required. This compatibility policy does not claim effective permission
+validation or independent service work. To opt into recovery, a provider must
+supply the scoped external service, an explicit service-owned binding attachment,
+`RpcProxySpec.binds_session=True`, and the read-only typed activity plan. No
+legacy relay inference can authorize automatic recovery.
+
+Native RPC method and handshake names also belong to the provider. A request's
+`on_success` tuple contains `RpcNotification` objects for core to send after a
+successful response. Codex declares its `initialized` notification there; core
+has no implicit handshake and never answers unsolicited native requests.
+
 ## Lifecycle paths
 
 `tools/spawn.py` and `tools/resume.py` call `agents.start()`. Spawn creates a new
@@ -684,7 +743,7 @@ On primary relay loss, a qualified launch schedules a detached worker. It makes 
 
 When qualified, the worker terminates only the owned idle TUI, waits for its runner to exit, and respawns the same dead, tagged pane with a new launch generation. Attached viewers remain in that pane; the TUI redraws its saved conversation, but unsent composer drafts are not recoverable. Normal resume checks the saved workspace, exact native identity and effective requested permissions before accepting new input; automatic recovery cannot downgrade to plain mode. The wrapper status bar is refreshed and the original timestamp of last-known context is retained. A concurrent manual stop or resume cancels the old worker.
 
-`runtime.json.auto_recovery` records checking, restarting, resuming, reconnected, skipped, failed or cancelled, with a reason and attempt count. `automatic_restarts` keeps the last five restart events and their original/new launch identities; no more than two automatic restarts are allowed in five minutes. Failure stops with a visible diagnostic instead of a restart loop. Successful recovery appears as a note in `mv2 list`, `inspect` and `doctor`; doctor reports failures/disconnections as problems and successful recovery separately in `notes`. Receipts remain unchanged. Existing terminals need an explicit resume to acquire this runner.
+`runtime.json.auto_recovery` records checking, restarting, resuming, reconnected, skipped, failed or cancelled, with a reason and attempt count. `automatic_restarts` keeps the last five restart events and their original/new launch identities; no more than two automatic restarts are allowed in five minutes. Failure stops with a visible diagnostic instead of a restart loop. Successful recovery appears as a note in `mv2 list`, `inspect` and `doctor`; doctor reports failures/disconnections as problems and successful recovery separately in `notes`. Receipts remain unchanged. Existing launches without `attachment` and `native_service` runtime records remain ineligible; an explicit resume acquires this runner and its declarations.
 
 Codex bridge context usage comes from the TUI connection's native
 `thread/tokenUsage/updated` notifications. The adapter interprets only the exact

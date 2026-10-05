@@ -136,13 +136,19 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     if not workdir.is_dir():
         raise ValueError(f"Workspace does not exist: {workdir}")
     properties["workspace"] = str(workdir)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    with lock(agent_dir / ".launch.lock"):
+    if _recovery:
+        from .recovery import existing_lock
+        launch_lock = existing_lock
+    else:
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        launch_lock = lock
+    with launch_lock(agent_dir / ".launch.lock"):
         previous = runtime(agent_dir)
         if _recovery and (previous.get('launch_id') != _recovery['launch_id']
                           or (previous.get('auto_recovery') or {}).get('state') != 'restarting'
                           or previous.get('tmux') != _recovery['terminal']
-                          or not isinstance(adapter, harnesses.CodexAdapter)):
+                          or properties.get('native_session_id') != _recovery['native_id']
+                          or previous.get('native_service') != _recovery['service']):
             raise ValueError('Automatic recovery cancelled or superseded')
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
@@ -175,9 +181,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
                                 resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
+        from .native import service_handle, validate_recovery_command, launch_attachment
+        if command.shared_service and command.shared_service.identity:
+            identity = asdict(command.shared_service.identity)
+            if resume and properties.get('native_service_identity') not in (None, identity):
+                raise ValueError('Native service storage/account scope differs from the saved session; '
+                                 'resume with the original native storage settings or spawn a new agent')
+            properties['native_service_identity'] = identity
         if _recovery:
-            if not command.shared_service:
-                raise ValueError('Automatic recovery requires the native bridge; plain fallback is disabled')
+            validate_recovery_command(command, session)
             command = replace(command, fallback=None)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
@@ -223,9 +235,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                    auto_recovery={**(previous.get('auto_recovery') or {}),
                                                   'state': 'resuming', 'previous_launch_id': previous['launch_id'],
                                                   'reason': 'Automatically resuming the idle native thread'})
-        if resume and isinstance(adapter, harnesses.CodexAdapter):
-            from .harnesses.codex.usage import last_measurement
-            measured = last_measurement(previous, properties.get('native_session_id'))
+        if resume and getattr(adapter, 'retained_usage', None):
+            measured = adapter.retained_usage(session, previous)
             if measured is not None:
                 # Keep the exact thread's sample and original timestamp until
                 # this launch reports again, without treating it as fresh usage.
@@ -239,8 +250,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.shared_service:
                 from .native import start_shared_service
                 if _recovery:
-                    from .harnesses.types import NativeEndpoint
-                    shared_endpoint = NativeEndpoint(**_recovery['endpoint'])
+                    shared_endpoint = session.service.endpoint
                 else:
                     try:
                         shared_endpoint = start_shared_service(command.shared_service, workdir,
@@ -266,10 +276,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             backend.tag(terminal["pane"], properties, launch_id)
             family = next((name for name, cls in harnesses.BUILTINS.items() if isinstance(adapter, cls)), '')
             backend.configure_status(terminal, root, properties, launch_id, family)
-            if isinstance(adapter, harnesses.CodexAdapter):
-                # Codex detects mouse support during TUI startup. Set only its
-                # wrapper session, before releasing the runner's ready gate.
-                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
@@ -284,8 +290,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 try:
                     command = adapter.resume(session, context) if resume else adapter.spawn(context)
                     if _recovery:
-                        if not command.shared_service:
-                            raise ValueError('Automatic recovery cannot fall back to plain mode')
+                        validate_recovery_command(command, session)
                         command = replace(command, fallback=None)
                 except BridgeUnavailable as error:
                     command = plain_fallback(command, error)
@@ -294,16 +299,32 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
+            service = service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
+            if service and asdict(service.identity) != properties.get('native_service_identity'):
+                raise ValueError('Native service scope changed during launch preparation')
+            if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
+                raise ValueError('Native relay targets a different service endpoint')
+            command = replace(command, attachment=launch_attachment(command))
+            if command.attachment and command.attachment.readiness == 'binding':
+                if not command.rpc_proxy or not command.rpc_proxy.binds_session:
+                    raise ValueError('Attachment requires an adapter protocol that validates binding')
+            mouse = bool(command.attachment and command.attachment.mouse)
+            if mouse:
+                # Apply the final resolved policy before releasing the runner.
+                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode,
+                           native_service=asdict(service) if service else None,
+                           attachment=asdict(command.attachment) if command.attachment else None,
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
                                            "shared_service": bool(command.shared_service),
+                                           "attachment": asdict(command.attachment) if command.attachment else None,
                                            "native_mode": command.native_mode,
                                            "fallback": asdict(command.fallback) if command.fallback else None,
                                            "resume_message_id": resume_message_id,
@@ -359,7 +380,6 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
-        native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
         if facts.get('reason'):
@@ -370,8 +390,11 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                    and facts.get('startup_checked', True))
         session = SessionHandle.from_records(result, facts, agent_dir)
-        ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
-            adapter.capabilities(session)['send_steer'].state == 'supported')))
+        from .native import attachment_ready, legacy_attachment
+        if ('attachment' not in facts and 'attachment' not in request
+                and request.get('rpc_proxy') and session.endpoint):
+            session = replace(session, attachment=legacy_attachment(request.get('shared_service')))
+        ready = running and attachment_ready(adapter, session)
         ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
         if ready:
             return {**result, 'ok': True, 'ready': True}

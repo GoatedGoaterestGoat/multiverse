@@ -7,9 +7,10 @@ from ..base import ConfiguredAdapter
 from functools import partial
 from dataclasses import replace
 
-from ..types import SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint
+from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
+                     RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
 from .launch import launch_settings, tui_arguments
-from .protocol import check_connection, send_message, get_delivery, stop_session
+from .protocol import check_connection, send_message, get_delivery, stop_session, recovery_check
 from ..types import BridgeUnavailable
 
 
@@ -27,7 +28,7 @@ class CodexAdapter(ConfiguredAdapter):
 
     def _launch_command(self, context):
         command = super()._launch_command(context)
-        command = replace(command, argv=tuple(tui_arguments(command.argv)))
+        command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
@@ -103,7 +104,11 @@ class CodexAdapter(ConfiguredAdapter):
             if key.startswith('MV2_') or key == 'PATH':
                 options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
         argv[position:position] = options
+        storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
+        if context.environment.get('CODEX_SQLITE_HOME'):
+            storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
         return CommandSpec(tuple(argv), command.unset_env,
+                           attachment=AttachmentSpec('service', 'binding', 'idle-existing-service', True, True),
                            control_endpoint=NativeEndpoint('unix-websocket', context.values['control_socket']),
                            rpc_proxy=RpcProxySpec(context.values['control_socket'],
                                context.endpoint.address if context.endpoint else '',
@@ -111,16 +116,30 @@ class CodexAdapter(ConfiguredAdapter):
                                 'workspace': context.values['workspace'],
                                 'name': context.values['name'],
                                 'resume_permissions': permissions,
-                                'native_id': context.values.get('session_id') if context.mode == 'resume' else None}),
+                                'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
+                               binds_session=True),
                            shared_service=SharedServiceSpec(
                                (self.spec['spawn'][0], 'app-server', 'daemon', 'start'), 'socketPath', ('cliVersion', 'appServerVersion'),
-                               {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())},
+                               storage,
                                required_cli_flags=('--remote',), cwd=str(Path.home().resolve()),
-                               require_matching_versions=False))
+                               require_matching_versions=False,
+                               identity=ServiceIdentity('codex', storage)))
 
     def launch_proxy(self, settings):
         from .launch import LaunchProtocol
         return LaunchProtocol(settings)
+
+    def attachment_recovery(self, session):
+        if (not session.attachment or session.attachment.recovery != 'idle-existing-service'
+                or not session.service or session.service.identity.provider != 'codex'
+                or session.endpoint != session.service.endpoint
+                or session.endpoint.transport != 'unix-websocket' or not session.native_id):
+            return None
+        return RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=6)
+
+    def retained_usage(self, session, runtime):
+        from .usage import last_measurement
+        return last_measurement(runtime, session.native_id)
 
     def spawn(self, context):
         return super().spawn(context)

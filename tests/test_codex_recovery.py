@@ -1,5 +1,6 @@
 """Exact-thread recovery safety, bounded outages and real idle TUI recovery."""
 from copy import deepcopy
+from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -16,7 +17,7 @@ from uuid import uuid4
 
 from multiverse import agents, recovery
 from multiverse.harnesses.codex.protocol import recovery_check
-from multiverse.harnesses.types import NativeEndpoint, NativeResult, SessionHandle
+from multiverse.harnesses.types import NativeEndpoint, NativeResult, SessionHandle, NativeServiceHandle, ServiceIdentity, AttachmentSpec
 from multiverse.runner import RelayPublisher, StatusWatcher
 from multiverse.store import append_message, now, read, update_message, write
 from multiverse.tmux import Tmux
@@ -103,6 +104,11 @@ class RecoveryWorkerTest(unittest.TestCase):
                       'tmux': {'socket': '/fake/tmux.sock', 'session': '$1', 'pane': '%1'},
                       'recovery_snapshot': {'safe': True, 'at': now(), 'native_id': self.native_id,
                                             'status_version': 0}}
+        self.facts['native_service'] = asdict(NativeServiceHandle(
+            ServiceIdentity('codex', {'CODEX_HOME': '/isolated'}), NativeEndpoint(**self.facts['control_endpoint'])))
+        self.facts['attachment'] = asdict(AttachmentSpec('service', 'binding', 'idle-existing-service', True, True))
+        self.facts['recovery_snapshot']['service'] = self.facts['native_service']
+        self.facts['recovery_snapshot']['workspace'] = self.properties['workspace']
         write(self.directory / 'properties.json', self.properties)
         write(self.directory / 'runtime.json', self.facts)
         (self.directory / '.launch.lock').touch()

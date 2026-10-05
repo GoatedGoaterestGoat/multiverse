@@ -1,4 +1,4 @@
-"""Bounded, read-only qualification for an idle Codex terminal restart.
+"""Bounded, read-only qualification for an idle native terminal attachment.
 
 The detached worker outlives the old pane runner. It never starts a daemon,
 submits a prompt, cancels native work or modifies message receipts.
@@ -6,7 +6,6 @@ submits a prompt, cancels native work or modifies message receipts.
 from datetime import datetime, timezone
 from contextlib import contextmanager
 import fcntl
-from functools import partial
 from pathlib import Path
 import signal
 import subprocess
@@ -14,9 +13,9 @@ import sys
 import threading
 import time
 
-from . import agents, rpc
-from .harnesses.codex.protocol import recovery_check
-from .harnesses.types import RpcSpec, SessionHandle
+from . import agents, harnesses, rpc
+from .harnesses.types import NativeActivity, NativeResult, RpcSpec, SessionHandle
+from .native import recovery_unavailable
 from .store import inbox, now, read, write
 from .tmux import owned, matches
 
@@ -71,14 +70,19 @@ def in_flight(directory, facts, native_id, since=None):
 
 def eligibility(properties, facts):
     proof = facts.get('recovery_snapshot') or {}
+    session = SessionHandle.from_records(properties, facts, Path('.'))
+    if reason := recovery_unavailable(session):
+        return reason
     if (facts.get('ending_at') or facts.get('state') != 'running'
             or not properties.get('native_session_id')):
         return 'Launch is ending, unbound or not running'
     if (facts.get('native_relay') or {}).get('detail', '').startswith('terminal connection closed'):
         return 'Native terminal exited; manual exits are not automatically resumed'
-    if not proof.get('safe'):
+    if proof.get('safe') is not True:
         return proof.get('reason') or 'No recent proof of an idle thread without background processes'
     if (proof.get('native_id') != properties['native_session_id']
+            or proof.get('service') != facts.get('native_service')
+            or proof.get('workspace') != properties.get('workspace')
             or proof.get('status_version') != facts.get('native_status_version', 0)):
         return 'Native activity or session identity changed since the idle reading'
     if not 0 <= age(proof.get('at')) <= PROOF_AGE:
@@ -86,15 +90,33 @@ def eligibility(properties, facts):
     recent = [entry for entry in facts.get('automatic_restarts', [])
               if 0 <= age(entry.get('at')) < RESTART_WINDOW]
     if len(recent) >= RESTART_LIMIT:
-        return 'Automatic restart limit reached; check the daemon and resume manually'
+        return 'Automatic restart limit reached; check the native service and resume manually'
     return None
 
 
 def check(properties, facts, directory):
     session = SessionHandle.from_records(properties, facts, directory)
-    if not session.endpoint or session.endpoint.transport != 'unix-websocket':
-        raise ValueError('No saved native endpoint for recovery')
-    return rpc.execute(RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=6), timeout=3)
+    if reason := recovery_unavailable(session):
+        return NativeResult('unavailable', reason)
+    adapter = harnesses.load(directory.parents[2], properties['harness'])
+    describe = getattr(adapter, 'attachment_recovery', None)
+    specification = describe(session) if describe else None
+    if specification is None:
+        return NativeResult('unavailable', 'Adapter provides no attachment safety observation')
+    if (not isinstance(specification, RpcSpec) or session.service.endpoint.transport != 'unix-websocket'
+            or specification.socket_path != session.service.endpoint.address):
+        return NativeResult('unavailable', 'Attachment observation targets a different or unsupported service')
+    result = rpc.execute(specification, timeout=3)
+    observed = result.value
+    if result.state != 'ok':
+        return result
+    if (not isinstance(observed, NativeActivity) or observed.native_id != session.native_id
+            or observed.workspace != session.workspace or observed.service != session.service):
+        return NativeResult('unavailable', 'Native activity has no exact service/session/workspace binding')
+    if (observed.status != 'idle' or any(value is not False for value in (
+            observed.active_work, observed.waiting, observed.queued_input, observed.background_work))):
+        return NativeResult('unavailable', 'Native activity is busy, waiting or unknown')
+    return result
 
 
 class RecoveryMonitor:
@@ -126,6 +148,8 @@ class RecoveryMonitor:
                     if facts.get('state') != 'running' or facts.get('status') != 'idle':
                         continue
                     properties = read(self.directory / 'properties.json')
+                    if recovery_unavailable(SessionHandle.from_records(properties, facts, self.directory)):
+                        return
                     if not properties.get('native_session_id') or not facts.get('startup_checked'):
                         continue
                     version = facts.get('native_status_version', 0)
@@ -138,11 +162,14 @@ class RecoveryMonitor:
                     if (current.get('launch_id') != self.launch_id or current.get('state') != 'running'
                             or current.get('status') != 'idle' or current.get('ending_at')
                             or (current.get('native_relay') or {}).get('state') == 'lost'
+                            or current.get('native_service') != facts.get('native_service')
+                            or read(self.directory / 'properties.json').get('native_session_id') != properties['native_session_id']
                             or current.get('native_status_version', 0) != version):
                         continue
                     pending = in_flight(self.directory, current, properties['native_session_id'], since=started_at)
                     agents.update_runtime(self.directory, self.launch_id, recovery_snapshot={
                         'safe': result.state == 'ok' and not pending, 'reason': pending or result.reason,
+                        'service': facts.get('native_service'), 'workspace': properties['workspace'],
                         'native_id': properties['native_session_id'], 'status_version': version, 'at': started_at})
                 self.stopped.wait(3)
             except (OSError, ValueError, RuntimeError, KeyError, TypeError):
@@ -209,7 +236,12 @@ def run(directory, launch_id):
                 or (facts.get('auto_recovery') or {}).get('state') != 'checking'):
             raise ValueError('Automatic reconnect cancelled or superseded')
         proof = facts.get('recovery_snapshot') or {}
-        if not proof.get('safe') or proof.get('status_version') != facts.get('native_status_version', 0):
+        properties = read(directory / 'properties.json')
+        if (proof.get('safe') is not True or proof.get('workspace') != properties.get('workspace')
+                or proof.get('native_id') != properties.get('native_session_id')
+                or proof.get('service') != facts.get('native_service')
+                or recovery_unavailable(SessionHandle.from_records(properties, facts, directory))
+                or proof.get('status_version') != facts.get('native_status_version', 0)):
             raise ValueError('Native activity invalidated the idle proof')
         return facts
     try:
@@ -266,7 +298,8 @@ def run(directory, launch_id):
                 raise TimeoutError('Idle terminal did not exit; wrapper retained for manual recovery')
             result = agents.start(root, resume=directory.name, wait=True, wait_timeout=30,
                                   _recovery={'launch_id': launch_id, 'terminal': facts['tmux'],
-                                             'endpoint': facts['control_endpoint']})
+                                             'service': facts['native_service'],
+                                             'native_id': properties['native_session_id']})
             if not result['ready']:
                 latest = agents.runtime(directory)
                 if ((latest.get('auto_recovery') or {}).get('previous_launch_id') == launch_id

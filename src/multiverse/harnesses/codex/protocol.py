@@ -5,7 +5,7 @@ completion is not permission to submit the message to a different turn.
 """
 from pathlib import Path
 
-from ..types import NativeResult, RpcRequest
+from ..types import NativeResult, RpcRequest, RpcNotification, NativeActivity
 
 
 def object_field(value, name):
@@ -40,7 +40,7 @@ def _thread(session, *, allow_unloaded=False):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
@@ -108,7 +108,9 @@ def recovery_check(session):
             or object_field(final, 'status').get('type') != 'idle'
             or final.get('canAcceptDirectInput') is False):
         return NativeResult('unavailable', 'Native thread changed during the recovery check')
-    return NativeResult('ok', 'Exact native thread is idle, with no queued messages or background processes')
+    return NativeResult('ok', 'Exact native thread is idle, with no queued messages or background processes',
+                        NativeActivity(session.native_id, session.workspace, session.service,
+                                       'idle', False, False, False, False))
 
 
 def _start_idle_submission(session, item, receipt):
@@ -211,7 +213,7 @@ def environment_exclusions(workspace):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('config/read', {'cwd': workspace, 'includeLayers': False})))

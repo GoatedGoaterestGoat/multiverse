@@ -13,7 +13,8 @@ import time
 import re
 
 from . import agents, harnesses
-from .harnesses.types import NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint, BridgeUnavailable
+from .harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
+                             BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from .store import lock, now, read, message_record, update_message, inbox
 from .tmux import owned, observe
 
@@ -37,6 +38,8 @@ def start_shared_service(specification, workspace, log_path, unset_env, observe_
 
 
 def _start_shared_service(specification, workspace, log_path, unset_env, observe_versions):
+    if specification.lifetime != 'external':
+        raise ValueError('Shared native services must remain externally owned')
     command = CommandSpec(specification.argv, unset_env)
     env = {**environment(command), **specification.environment}
     # Shared services outlive worktrees and temporary universes. Their adapter
@@ -72,6 +75,70 @@ def _start_shared_service(specification, workspace, log_path, unset_env, observe
         if help_result.returncode or missing:
             raise ValueError('Native CLI does not advertise required bridge flags: ' + ', '.join(missing or specification.required_cli_flags))
     return NativeEndpoint('unix-websocket', address)
+
+
+def service_handle(specification, endpoint):
+    """Persist explicit provider scope without inferring it from a relay."""
+    if specification.lifetime != 'external':
+        raise ValueError('Shared native services must remain externally owned')
+    identity = specification.identity
+    if identity is None:
+        return None  # Compatibility: old service specs do not authorize recovery.
+    if (not isinstance(identity, ServiceIdentity) or not identity.provider or not identity.scope
+            or any(not isinstance(k, str) or not k or not isinstance(v, str) or not v
+                   for k, v in identity.scope.items())):
+        raise ValueError('Native service requires an exact provider and storage/account scope')
+    return NativeServiceHandle(identity, endpoint)
+
+
+def recovery_unavailable(session):
+    attachment, service = session.attachment, session.service
+    if (attachment is None or attachment.recovery != 'idle-existing-service'
+            or attachment.work_owner != 'service' or attachment.readiness != 'binding'):
+        return 'This adapter has not declared safe native attachment recovery'
+    if (service is None or service.lifetime != 'external' or not service.identity.provider
+            or not service.identity.scope or session.endpoint != service.endpoint or not session.native_id):
+        return 'No exact externally owned native service and session binding for recovery'
+    return None
+
+
+def validate_recovery_command(command, session):
+    reason = recovery_unavailable(session)
+    if reason:
+        raise ValueError(reason)
+    if (command.shared_service is None or command.attachment != session.attachment
+            or service_handle(command.shared_service, session.service.endpoint) != session.service
+            or command.rpc_proxy is None or not command.rpc_proxy.binds_session
+            or command.rpc_proxy.upstream_path not in ('', session.service.endpoint.address)):
+        raise ValueError('Automatic recovery requires the same service scope and validated attachment; plain fallback is disabled')
+
+
+def attachment_ready(adapter, session):
+    if session.attachment:
+        if session.attachment.readiness == 'binding':
+            return bool(session.native_id and (session.native_relay or {}).get('state') == 'ready')
+        if session.attachment.readiness == 'process':
+            return True
+        if session.attachment.readiness == 'legacy-binding':
+            return bool(session.native_id and session.state == 'running')
+        return False
+    describe = getattr(adapter, 'attachment_ready', None)
+    if describe is not None:
+        return describe(session)
+    # Compatibility for independent providers implementing the original protocol.
+    return (not session.endpoint or bool(session.native_id and
+            adapter.capabilities(session)['send_steer'].state == 'supported'))
+
+
+def legacy_attachment(shared_service=False):
+    """Compatibility for pre-contract relays; never declares safe recovery."""
+    return AttachmentSpec(work_owner='unknown', readiness='legacy-binding', observe_status=bool(shared_service))
+
+
+def launch_attachment(command):
+    if command.attachment is None and command.rpc_proxy is not None:
+        return legacy_attachment(command.shared_service)
+    return command.attachment
 
 
 def execute_rpc(spec, workspace, timeout=10):

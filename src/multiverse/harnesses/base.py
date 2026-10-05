@@ -154,3 +154,15 @@ class ConfiguredAdapter:
 
     def get_usage(self, session: SessionHandle, executor: Executor | None = None) -> NativeResult:
         return NativeResult('unavailable', 'No measured native session usage collector')
+
+    def attachment_recovery(self, session):
+        """Unsupported unless a provider supplies a read-only safety plan."""
+        return None
+
+    def attachment_ready(self, session):
+        # Existing terminal integrations declare readiness by bridge registration.
+        return (not session.endpoint or bool(session.native_id and
+                self.capabilities(session)['send_steer'].state == 'supported'))
+
+    def retained_usage(self, session, runtime):
+        return None
