@@ -656,7 +656,7 @@ launch; unrelated TUI requests, native notifications and approvals retain their
 own connection. Existing saved launch requests without a name remain usable.
 Switching or forking into a different thread requires a separate
 Multiverse launch. The relay closes with the launch and never restarts the shared
-daemon or reconnects automatically. Plain launches have no relay. The development
+daemon. Relay loss stays sticky for that launch; the qualified idle-recovery worker described below can create a fresh launch. Plain launches have no relay. The development
 template, like base and testing, uses auto; existing unset profiles also try the bridge on their next launch.
 
 The runner records `native_relay.state=ready` after binding. Loss of the bound
@@ -675,6 +675,16 @@ cancellation remain available independently of the relay. Kill the launch, then
 resume its saved conversation; if the launch never bound a thread, kill it and
 spawn again. Native work may survive a disconnected TUI. The relay never restarts
 the daemon or reconnects to conceal a broken terminal session.
+
+### Automatic recovery of idle Codex terminals
+
+While a bound bridge is running and idle, the runner keeps a read-only proof for the exact thread and saved workspace, including its latest turn, native queue and background-terminal inventory. Observed activity invalidates it; a proof older than 15 seconds cannot authorize recovery. Startup messages and uncertain submissions prevent recovery. A normal terminal exit never triggers recovery.
+
+On primary relay loss, a qualified launch schedules a detached worker. It makes at most five read-only checks against the existing endpoint with delays of 0, 1, 2, 4 and 8 seconds. The same thread must still be idle with no active turn, approval/input wait, queue entries, background terminals or local frontend child processes. Unsupported, malformed or unsafe observations fail closed. The worker never invokes daemon start, stop, restart or update and never submits, cancels or replays a message. Busy or uncertain sessions retain sticky disconnection and manual recovery guidance.
+
+When qualified, the worker terminates only the owned idle TUI, waits for its runner to exit, and respawns the same dead, tagged pane with a new launch generation. Attached viewers remain in that pane; the TUI redraws its saved conversation, but unsent composer drafts are not recoverable. Normal resume checks the saved workspace, exact native identity and effective requested permissions before accepting new input; automatic recovery cannot downgrade to plain mode. The wrapper status bar is refreshed and the original timestamp of last-known context is retained. A concurrent manual stop or resume cancels the old worker.
+
+`runtime.json.auto_recovery` records checking, restarting, resuming, reconnected, skipped, failed or cancelled, with a reason and attempt count. `automatic_restarts` keeps the last five restart events and their original/new launch identities; no more than two automatic restarts are allowed in five minutes. Failure stops with a visible diagnostic instead of a restart loop. Successful recovery appears as a note in `mv2 list`, `inspect` and `doctor`; doctor reports failures/disconnections as problems and successful recovery separately in `notes`. Receipts remain unchanged. Existing terminals need an explicit resume to acquire this runner.
 
 Codex bridge context usage comes from the TUI connection's native
 `thread/tokenUsage/updated` notifications. The adapter interprets only the exact
@@ -733,7 +743,7 @@ daemon or reconnects automatically. Existing running launches need an explicit
 stop/resume to acquire the new runner; status is detected, never agent-reported.
 
 A daemon crash can interrupt every thread it hosts. Status reads and sends to a
-live agent never restart it. Explicit resume, including message-triggered wake
+live agent never restart it. Qualified idle-terminal recovery reuses only the existing endpoint as described above. Explicit resume, including message-triggered wake
 of a stopped/dormant agent, may start the daemon and reloads saved history, not
 old live processes/PTYs. One shared
 daemon also shares resource pressure and a version upgrade's impact. SSH use is

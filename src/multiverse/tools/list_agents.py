@@ -70,6 +70,8 @@ def run(root=None, *, recursive=False, json=False, wide=False):
         error = row.get("connection_error") or row.get("launch_error")
         if error:
             lines.append("  ! " + (" | ".join(line.strip() for line in error.splitlines() if line.strip()) if wide else error_text(error)))
+        if row.get('recovery_note'):
+            lines.append('  Note: Reconnected automatically.')
     return "\n".join(lines)
 
 

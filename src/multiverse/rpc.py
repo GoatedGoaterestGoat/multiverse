@@ -283,5 +283,6 @@ class LaunchProxy:
             normal_exit = ended and ended[0] == 'terminal' and ended[1] in (1000, 1001)
             if (self.owner is client or self.owner is None) and not normal_exit:
                 if failure or ended:
-                    reason = failure or f'{ended[0]} connection closed (code {ended[1]}): {ended[2] or "no reason supplied"}'
+                    reason = (f'{ended[0]} connection closed (code {ended[1]}): '
+                              f'{failure or ended[2] or "no reason supplied"}' if ended else failure)
                     self._lost(reason)

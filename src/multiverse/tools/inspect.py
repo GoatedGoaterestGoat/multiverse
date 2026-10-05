@@ -45,12 +45,17 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     note = None if live else (answer or note or row.get("reason") or "it is not running")  # kept for --json
     error = row.get("connection_error") or row.get("launch_error")
     if json:
-        return {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
+        result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
                 "status": row.get("status"), "phase": row.get("phase"), "summary": row.get("summary", ""),
                 "error": error, "terminal": capture if capture else None, "note": note}
+        if row.get('runtime', {}).get('auto_recovery'):
+            result['recovery'] = row['runtime']['auto_recovery']
+        return result
     head = f'{row["name"]} · {label(row)} · {state(row)}'
     reported = " — ".join(part for part in (row.get("phase"), " ".join(row.get("summary", "").split())) if part)
     out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error_text(error, tail=5)}"] if error else [])
+    if row.get('recovery_note'):
+        out.append('Note: Reconnected automatically.')
     shown = tail(capture, lines)
     if shown:
         out += ["", f"Terminal (last {len(shown)} lines):", *shown]

@@ -1,0 +1,292 @@
+"""Bounded, read-only qualification for an idle Codex terminal restart.
+
+The detached worker outlives the old pane runner. It never starts a daemon,
+submits a prompt, cancels native work or modifies message receipts.
+"""
+from datetime import datetime, timezone
+from contextlib import contextmanager
+import fcntl
+from functools import partial
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import threading
+import time
+
+from . import agents, rpc
+from .harnesses.codex.protocol import recovery_check
+from .harnesses.types import RpcSpec, SessionHandle
+from .store import inbox, now, read, write
+from .tmux import owned, matches
+
+PROOF_AGE = 15
+BACKOFF = (0, 1, 2, 4, 8)
+RESTART_WINDOW = 300
+RESTART_LIMIT = 2
+
+
+@contextmanager
+def existing_lock(path):
+    """A late worker must never recreate an agent that was removed."""
+    with path.open('r+') as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def age(stamp):
+    try:
+        return (datetime.now(timezone.utc) - datetime.fromisoformat(stamp)).total_seconds()
+    except (TypeError, ValueError):
+        return float('inf')
+
+
+def in_flight(directory, facts, native_id, since=None):
+    if facts.get('startup_delivery') not in (None, 'ready') or not facts.get('startup_checked'):
+        return 'Launch input is still binding or being delivered'
+    for message in inbox(directory, all_messages=True, limit=None)['messages']:
+        if message.get('delivery') == 'inbox-only':
+            continue
+        tracking = message['tracking']
+        if tracking.get('target_session') not in (None, native_id):
+            continue
+        if tracking.get('submission_state') in ('pending', 'submitting', 'unknown'):
+            return 'A message is still in flight or its submission is uncertain; check delivery before resuming'
+        if tracking.get('submission_state') == 'accepted':
+            attempts = tracking.get('attempts') or []
+            cutoff = since or (facts.get('recovery_snapshot') or {}).get('at')
+            try:
+                accepted = datetime.fromisoformat(attempts[-1]['at'])
+                checked = datetime.fromisoformat(cutoff)
+                if accepted < checked:
+                    continue
+            except (IndexError, KeyError, TypeError, ValueError):
+                pass
+            return 'A message was accepted after the idle check; waiting for a fresh idle reading'
+    return None
+
+
+def eligibility(properties, facts):
+    proof = facts.get('recovery_snapshot') or {}
+    if (facts.get('ending_at') or facts.get('state') != 'running'
+            or not properties.get('native_session_id')):
+        return 'Launch is ending, unbound or not running'
+    if (facts.get('native_relay') or {}).get('detail', '').startswith('terminal connection closed'):
+        return 'Native terminal exited; manual exits are not automatically resumed'
+    if not proof.get('safe'):
+        return proof.get('reason') or 'No recent proof of an idle thread without background processes'
+    if (proof.get('native_id') != properties['native_session_id']
+            or proof.get('status_version') != facts.get('native_status_version', 0)):
+        return 'Native activity or session identity changed since the idle reading'
+    if not 0 <= age(proof.get('at')) <= PROOF_AGE:
+        return 'The last idle reading expired; safe recovery cannot be confirmed'
+    recent = [entry for entry in facts.get('automatic_restarts', [])
+              if 0 <= age(entry.get('at')) < RESTART_WINDOW]
+    if len(recent) >= RESTART_LIMIT:
+        return 'Automatic restart limit reached; check the daemon and resume manually'
+    return None
+
+
+def check(properties, facts, directory):
+    session = SessionHandle.from_records(properties, facts, directory)
+    if not session.endpoint or session.endpoint.transport != 'unix-websocket':
+        raise ValueError('No saved native endpoint for recovery')
+    return rpc.execute(RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=6), timeout=3)
+
+
+class RecoveryMonitor:
+    """Keep a recent pre-disconnect proof; native activity invalidates it."""
+    def __init__(self, directory, launch_id, root):
+        self.directory, self.launch_id, self.root = directory, launch_id, root
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='native-recovery-proof', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join()
+
+    def _run(self):
+        while not self.stopped.wait(1):
+            try:
+                # Sends hold launch.lock through submission. Take the cutoff
+                # under that lock before reading native state so an acceptance
+                # racing this RPC cannot leave an apparently idle proof.
+                with existing_lock(self.directory / '.launch.lock'):
+                    facts = agents.runtime(self.directory)
+                    if facts.get('launch_id') != self.launch_id or facts.get('ending_at'):
+                        return
+                    if (facts.get('native_relay') or {}).get('state') == 'lost':
+                        return
+                    if facts.get('state') != 'running' or facts.get('status') != 'idle':
+                        continue
+                    properties = read(self.directory / 'properties.json')
+                    if not properties.get('native_session_id') or not facts.get('startup_checked'):
+                        continue
+                    version = facts.get('native_status_version', 0)
+                    started_at = now()
+                    if in_flight(self.directory, facts, properties['native_session_id'], since=started_at):
+                        continue
+                result = check(properties, facts, self.directory)
+                with existing_lock(self.directory / '.launch.lock'):
+                    current = agents.runtime(self.directory)
+                    if (current.get('launch_id') != self.launch_id or current.get('state') != 'running'
+                            or current.get('status') != 'idle' or current.get('ending_at')
+                            or (current.get('native_relay') or {}).get('state') == 'lost'
+                            or current.get('native_status_version', 0) != version):
+                        continue
+                    pending = in_flight(self.directory, current, properties['native_session_id'], since=started_at)
+                    agents.update_runtime(self.directory, self.launch_id, recovery_snapshot={
+                        'safe': result.state == 'ok' and not pending, 'reason': pending or result.reason,
+                        'native_id': properties['native_session_id'], 'status_version': version, 'at': started_at})
+                self.stopped.wait(3)
+            except (OSError, ValueError, RuntimeError, KeyError, TypeError):
+                # Failed observations cannot create proof; any old proof expires.
+                self.stopped.wait(3)
+
+
+def record(directory, launch_id, state, reason, **extra):
+    with existing_lock(directory / '.runtime.lock'):
+        facts = agents.runtime(directory)
+        if facts.get('launch_id') != launch_id:
+            return
+        previous = facts.get('auto_recovery') or {}
+        if previous.get('state') == 'cancelled':
+            return
+        facts.update(auto_recovery={**previous, **extra, 'state': state, 'reason': reason, 'updated_at': now()},
+                     observed_at=now())
+        relay = facts.get('native_relay') or {}
+        if relay.get('state') == 'lost':
+            facts['native_relay'] = {**relay, 'reason': 'Native relay lost. ' + reason +
+                                     ' Kill then resume manually if needed; no native messages were replayed.'}
+        write(directory / 'runtime.json', facts)
+
+
+def schedule(directory, launch_id):
+    """Called only on primary relay loss; do not spawn workers for unsafe rows."""
+    facts = agents.runtime(directory)
+    if facts.get('launch_id') != launch_id or facts.get('ending_at'):
+        return
+    reason = eligibility(read(directory / 'properties.json'), facts)
+    if reason:
+        record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + reason)
+        return
+    with existing_lock(directory / '.launch.lock'):
+        facts = agents.runtime(directory)
+        if facts.get('launch_id') != launch_id or facts.get('ending_at'):
+            return
+        if (facts.get('auto_recovery') or {}).get('state') in ('checking', 'restarting', 'resuming'):
+            return
+        properties = read(directory / 'properties.json')
+        reason = eligibility(properties, facts) or in_flight(directory, facts, properties.get('native_session_id'))
+        if reason:
+            record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + reason)
+            return
+        record(directory, launch_id, 'checking', 'Checking for safe automatic reconnect', attempts=0)
+        try:
+            subprocess.Popen([sys.executable, '-m', 'multiverse.recovery', str(directory), launch_id],
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True)
+        except OSError as error:
+            record(directory, launch_id, 'failed', f'Could not start automatic reconnect: {error}')
+
+
+def frontend_children(pid):
+    result = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True, timeout=3, check=True)
+    return any(len(fields := line.split()) == 2 and fields[1] == str(pid) for line in result.stdout.splitlines())
+
+
+def run(directory, launch_id):
+    root = directory.parents[2]
+    def current():
+        facts = agents.runtime(directory)
+        if (facts.get('launch_id') != launch_id or facts.get('ending_at')
+                or (facts.get('auto_recovery') or {}).get('state') != 'checking'):
+            raise ValueError('Automatic reconnect cancelled or superseded')
+        proof = facts.get('recovery_snapshot') or {}
+        if not proof.get('safe') or proof.get('status_version') != facts.get('native_status_version', 0):
+            raise ValueError('Native activity invalidated the idle proof')
+        return facts
+    try:
+        for attempt, delay in enumerate(BACKOFF, 1):
+            if delay:
+                time.sleep(delay)
+            with existing_lock(directory / '.launch.lock'):
+                facts = current()
+                properties = read(directory / 'properties.json')
+                pending = in_flight(directory, facts, properties.get('native_session_id'))
+                if pending:
+                    record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + pending)
+                    return
+                record(directory, launch_id, 'checking', 'Waiting for the existing native endpoint', attempts=attempt)
+            try:
+                observed = check(properties, facts, directory)
+            except (OSError, RuntimeError, TimeoutError) as error:
+                if attempt == len(BACKOFF):
+                    record(directory, launch_id, 'failed', f'Automatic reconnect timed out: {error}', attempts=attempt)
+                continue
+            if observed.state != 'ok':
+                record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + observed.reason)
+                return
+            with existing_lock(directory / '.launch.lock'):
+                facts = current()
+                properties = read(directory / 'properties.json')
+                pending = in_flight(directory, facts, properties.get('native_session_id'))
+                if pending:
+                    record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + pending)
+                    return
+                backend, pane = owned(properties, facts)
+                if frontend_children(facts.get('pid')):
+                    record(directory, launch_id, 'skipped', 'Automatic reconnect skipped: terminal child processes are running')
+                    return
+                record(directory, launch_id, 'restarting', 'Restarting the idle terminal after native relay loss')
+                agents.update_runtime(directory, launch_id, state='ending', ending_at=now())
+                backend.signal_child(properties, agents.runtime(directory), signal.SIGTERM)
+            # Never wait under launch.lock: the old runner needs it to finish.
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                latest = agents.runtime(directory)
+                if latest.get('launch_id') != launch_id or (latest.get('auto_recovery') or {}).get('state') != 'restarting':
+                    return
+                panes, error = backend.snapshot()
+                if error:
+                    raise RuntimeError(error)
+                actual = panes.get(pane)
+                if not matches(actual, properties, latest):
+                    raise ValueError('Terminal ownership changed during automatic reconnect')
+                if actual['pane_dead'] == '1':
+                    break
+                time.sleep(.1)
+            else:
+                raise TimeoutError('Idle terminal did not exit; wrapper retained for manual recovery')
+            result = agents.start(root, resume=directory.name, wait=True, wait_timeout=30,
+                                  _recovery={'launch_id': launch_id, 'terminal': facts['tmux'],
+                                             'endpoint': facts['control_endpoint']})
+            if not result['ready']:
+                latest = agents.runtime(directory)
+                if ((latest.get('auto_recovery') or {}).get('previous_launch_id') == launch_id
+                        and latest.get('launch_id') == result['runtime']['launch_id']):
+                    record(directory, latest['launch_id'], 'failed',
+                           'Automatic reconnect failed: ' + result.get('error', 'native launch did not become ready'))
+            return
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError) as error:
+        # A concurrent manual stop/resume owns the replacement and its errors.
+        facts = agents.runtime(directory)
+        if (facts.get('launch_id') == launch_id
+                and (facts.get('auto_recovery') or {}).get('state') in ('checking', 'restarting')):
+            record(directory, launch_id, 'failed', 'Automatic reconnect failed: ' + str(error))
+
+
+def reconnected(directory, launch_id):
+    facts = agents.runtime(directory)
+    if (facts.get('auto_recovery') or {}).get('state') == 'resuming':
+        record(directory, launch_id, 'reconnected', 'Reconnected automatically after native relay loss')
+
+
+if __name__ == '__main__':
+    run(Path(sys.argv[1]), sys.argv[2])

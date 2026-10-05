@@ -149,6 +149,8 @@ class RelayPublisher:
         reason = 'Native relay lost. ' + recovery
         update_runtime(self.agent_dir, self.launch_id, status='unknown', native_relay={
             'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()})
+        from multiverse.recovery import schedule
+        schedule(self.agent_dir, self.launch_id)
 
 
 class StatusWatcher:
@@ -179,7 +181,11 @@ class StatusWatcher:
             facts = read(self.agent_dir / 'runtime.json')
             if (facts.get('launch_id') == self.launch_id and facts.get('state') == 'running'
                     and facts.get('status') != status):
-                update_runtime(self.agent_dir, self.launch_id, status=status)
+                changes = {}
+                if status != 'unknown':
+                    changes = {'recovery_snapshot': None,
+                               'native_status_version': facts.get('native_status_version', 0) + 1}
+                update_runtime(self.agent_dir, self.launch_id, status=status, **changes)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -288,6 +294,7 @@ def main():
     watcher = None
     proxy = None
     startup = None
+    recovery_monitor = None
     startup_checked = False
     remove_wrapper = False
     request = {}
@@ -324,6 +331,8 @@ def main():
             def bound(native_id):
                 bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
                 update_runtime(agent_dir, launch.name, state='running', native_relay={'state': 'ready'})
+                from multiverse.recovery import reconnected
+                reconnected(agent_dir, launch.name)
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
@@ -366,6 +375,10 @@ def main():
         if request.get('shared_service'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             watcher.start()
+            if request.get('rpc_proxy'):
+                from multiverse.recovery import RecoveryMonitor
+                recovery_monitor = RecoveryMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+                recovery_monitor.start()
         try:
             code = process.wait(timeout=STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
@@ -407,6 +420,8 @@ def main():
             proxy.close()
         if watcher is not None:
             watcher.close()
+        if recovery_monitor is not None:
+            recovery_monitor.close()
         if process is not None and process.poll() is None:
             process.terminate()
             try:
