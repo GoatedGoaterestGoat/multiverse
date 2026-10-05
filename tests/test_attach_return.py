@@ -187,6 +187,7 @@ class AttachReturnTest(TerminalBase):
         for name, master in clients:
             os.write(master, b'\x02d')
             self.read_until(master, b'tester')
+            until(lambda: name + '|' in self.clients().splitlines())
             self.assertIn(name + '|', self.clients().splitlines())
         self.assert_agent_alive()
 
