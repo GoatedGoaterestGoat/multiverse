@@ -279,5 +279,17 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   e.g. to wake a dormant one). Durable tasks, kept in
   `.claude/scheduled_tasks.json`, are unaffected. Fixing it needs Claude Code
   to write the row for hook-supplied compactions too.
+- **Skills reserved for the user, after a mid-turn compaction.** Claude lets
+  the model run a skill marked `disable-model-invocation` only when a user
+  message of the current turn contains its `/name`. Claude 2.1.292 skips its
+  own summary rows (`isCompactSummary`) in that check; the rows tree
+  compaction installs cannot carry that flag and look like typed prompts. So
+  if a compaction lands inside a turn and an earlier prompt contained
+  `/name`, the model could start that skill unasked. A manual `/compact` runs
+  between turns, so its rows are never checked; only Claude's automatic or
+  prompt-too-long compaction runs mid-turn (automatic compaction is off by
+  default here). Not confirmed live that the check covers the installed rows
+  then. Fixing it needs Claude Code to let a hook mark its rows as compaction
+  output.
 - Claude Code's mod API is early access; this was built and tested on Claude
   Code 2.1.287.
