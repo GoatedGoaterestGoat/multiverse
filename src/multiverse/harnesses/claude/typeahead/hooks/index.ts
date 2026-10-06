@@ -9,7 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 // Claude refuses a module that hooks it. The Claude adapter loads this plugin only for 2.1.292 or
 // newer, so the multiverse mod itself keeps working everywhere.
 //
-// The catalog and the agent list are read with mv2 in the background and kept a few seconds. Typing
+// The catalog (`mv2 catalog --json`) and the agent list (`mv2 list --json`) are read in the background and kept a few seconds. Typing
 // never waits on them: a hook answers from what is kept, and reading starts after it returns, first
 // while `/mu...` is still being typed. A failed read leaves no rows.
 
@@ -31,16 +31,16 @@ export const SUBCOMMANDS: readonly Suggestion[] = [
   { text: "inbox", description: "this agent's unread inbox-only messages (marks them read)" },
 ]
 
-// `mv2 catalog` prints one `kind/name: description` line per entry, its path indented below.
-// Only what `mv2 command` runs is kept: commands, workflows and skills.
-export function parseCatalog(output: string): CatalogEntry[] {
-  const entries: CatalogEntry[] = []
-  for (const line of output.split("\n")) {
-    const found = /^([a-z]+)\/([^\s:]+):[ \t]?(.*)$/.exec(line)
-    const [, kind = "", name = "", description = ""] = found ?? []
-    if (found && kind in RUNNABLE) entries.push({ kind, name, description: description.trim() })
-  }
-  return entries
+type Cataloged = { kind?: unknown; name?: unknown; description?: unknown }
+
+// What `mv2 catalog --json` lists that `mv2 command` runs: commands, workflows and skills.
+export function catalogEntries(listed: unknown): CatalogEntry[] {
+  if (!Array.isArray(listed)) return []
+  return (listed as Cataloged[]).flatMap((entry) => {
+    const { kind, name, description } = entry ?? {}
+    if (typeof kind !== "string" || !(kind in RUNNABLE) || typeof name !== "string" || !/^[^\s:]+$/.test(name)) return []
+    return [{ kind, name, description: typeof description === "string" ? description.trim() : "" }]
+  })
 }
 
 // A row writes the bare name when `mv2 command` takes it as it is: unique among what it runs, and
@@ -99,10 +99,10 @@ const kept: Record<"catalog" | "agents", Kept> = {
 async function load($: EngineInterface, which: "catalog" | "agents", cli: string) {
   const entry = kept[which]
   try {
-    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog"] : ["list", "--json"])],
+    const result = await $.process.run([cli, ...(which === "catalog" ? ["catalog", "--json"] : ["list", "--json"])],
                                        { timeoutMs: LOAD_TIMEOUT_MS })
     if (result.exitCode !== 0) entry.rows = []
-    else if (which === "catalog") entry.rows = catalogRows(parseCatalog(result.stdout))
+    else if (which === "catalog") entry.rows = catalogRows(catalogEntries(JSON.parse(result.stdout)))
     else entry.rows = agentRows(JSON.parse(result.stdout), await $.env.get("MV2_AGENT_ID"), await $.env.get("MV2_UNIVERSE"))
   } catch {
     entry.rows = []

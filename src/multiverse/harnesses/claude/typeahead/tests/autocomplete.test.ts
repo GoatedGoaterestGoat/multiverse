@@ -3,19 +3,17 @@
 // The test's hooks stand in for the host: `mv2` runs and the engine's own rows.
 import type { On, PromptAutocompleteInput, PromptAutocompleteResult } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { agentRows, catalogRows, parseCatalog, suggest } from '../hooks/index'
+import { agentRows, catalogEntries, catalogRows, suggest } from '../hooks/index'
 
-const CATALOG = `skills/coordination: Spawn, inspect and communicate with agents.
-  /u/skills/coordination
-skills/mv2-help: Explain mv2 capabilities.
-  /u/skills/mv2-help
-commands/help: Explain the current universe.
-  /u/commands/help
-workflows/review: Review a change.
-  /u/workflows/review
-harnesses/claude: Claude Code.
-  /u/harnesses/claude
-`
+// What `mv2 catalog --json` prints.
+const CATALOG = JSON.stringify([
+  { kind: 'skills', name: 'coordination', description: 'Spawn, inspect and communicate with agents.', path: '/u/skills/coordination' },
+  { kind: 'skills', name: 'mv2-help', description: 'Explain mv2 capabilities.', path: '/u/skills/mv2-help' },
+  { kind: 'commands', name: 'help', description: 'Explain the current universe.', path: '/u/commands/help' },
+  { kind: 'workflows', name: 'review', description: 'Review a change.', path: '/u/workflows/review' },
+  { kind: 'harnesses', name: 'claude', description: 'Claude Code.', path: '/u/harnesses/claude' },
+])
+const entries = (...list: [string, string, string?][]) => list.map(([kind, name, description]) => ({ kind, name, description }))
 const UNIVERSE = '/u'
 const AGENTS = [
   { id: 'self-id', name: 'claude-support', universe: UNIVERSE, live: 'alive', status: 'working', phase: 'working' },
@@ -24,13 +22,17 @@ const AGENTS = [
   { id: 'a3', name: 'compaction', universe: UNIVERSE, live: 'alive', status: 'waiting', phase: '' },
   { id: 'a4', name: 'reviewer', universe: '/u/subverses/pr', live: 'alive', status: 'idle', phase: 'working' },
 ]
-const KNOWN = { catalog: catalogRows(parseCatalog(CATALOG)), agents: agentRows(AGENTS, 'self-id', UNIVERSE) }
+const KNOWN = { catalog: catalogRows(catalogEntries(JSON.parse(CATALOG))), agents: agentRows(AGENTS, 'self-id', UNIVERSE) }
 const texts = (rows: readonly { text: string }[]) => rows.map((row) => row.text)
 
 describe('reading the catalog and the agents', () => {
   test('only what mv2 command runs is offered, by its bare name, described by its kind', async () => {
-    expect(parseCatalog(CATALOG).map((e) => `${e.kind}/${e.name}`))
+    expect(catalogEntries(JSON.parse(CATALOG)).map((e) => `${e.kind}/${e.name}`))
       .toEqual(['skills/coordination', 'skills/mv2-help', 'commands/help', 'workflows/review'])
+    // Anything else in the list is left out: other kinds, names that are not one word, missing fields.
+    expect(catalogEntries([{ kind: 'commands', name: 'a b' }, { kind: 'commands' }, { name: 'x' }, null, 'commands/x',
+                           { kind: 'commands', name: 'ok' }])).toEqual([{ kind: 'commands', name: 'ok', description: '' }])
+    expect(catalogEntries({ entries: [] })).toEqual([])
     expect(KNOWN.catalog).toEqual([
       { text: 'coordination', description: 'skill · Spawn, inspect and communicate with agents.' },
       { text: 'mv2-help', description: 'skill · Explain mv2 capabilities.' },
@@ -40,7 +42,7 @@ describe('reading the catalog and the agents', () => {
   })
 
   test('a name two kinds share, or one a subcommand would shadow, is written kind/name', async () => {
-    const rows = catalogRows(parseCatalog('commands/review: A.\nworkflows/review: B.\ncommands/send: C.\nskills/inbox:\n'))
+    const rows = catalogRows(catalogEntries(entries(['commands', 'review', 'A.'], ['workflows', 'review', 'B.'], ['commands', 'send', 'C.'], ['skills', 'inbox'])))
     expect(texts(rows)).toEqual(['commands/review', 'workflows/review', 'commands/send', 'skills/inbox'])
     expect(rows[3]?.description).toBe('skill')
   })
@@ -65,7 +67,7 @@ describe('which rows each position offers', () => {
     expect(texts(suggest('/multiverse  \t', 'i', KNOWN))).toEqual(['inbox'])
     expect(texts(suggest('/multiverse ', 'mv', KNOWN))).toEqual(['mv2-help'])
     // A kind/name row also matches by its name.
-    const shared = { catalog: catalogRows(parseCatalog('commands/review: A.\nworkflows/review: B.\n')), agents: [] }
+    const shared = { catalog: catalogRows(catalogEntries(entries(['commands', 'review', 'A.'], ['workflows', 'review', 'B.']))), agents: [] }
     expect(texts(suggest('/multiverse ', 're', shared))).toEqual(['commands/review', 'workflows/review'])
   })
 
@@ -109,6 +111,8 @@ function world(on: On, reply: (argv: readonly string[]) => Reply, env: Record<st
 
 const healthy = (argv: readonly string[]): Reply =>
   argv[1] === 'catalog' ? { stdout: CATALOG } : { stdout: JSON.stringify(AGENTS) }
+// mv2 is asked for JSON both times.
+const ASKED = ['catalog --json', 'list --json']
 
 type Autocomplete = (input: PromptAutocompleteInput) => Promise<PromptAutocompleteResult>
 
@@ -126,7 +130,7 @@ describe('reading in the background', () => {
     const w = world(on, healthy)
     expect(await ask($, '/mu')).toEqual(['engine-row'])
     await w.clock.settle()
-    expect(w.runs.sort()).toEqual(['catalog', 'list --json'])
+    expect(w.runs.sort()).toEqual(ASKED)
     expect(await ask($, '/multiverse h')).toEqual(['engine-row', 'help'])
     expect(await ask($, '/multiverse send m')).toEqual(['engine-row', 'mv2-lead '])
   })
