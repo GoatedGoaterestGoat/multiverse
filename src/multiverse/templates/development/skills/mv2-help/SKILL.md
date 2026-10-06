@@ -66,6 +66,10 @@ For simple view customization, use values such as `{"title": "Testing", "accent"
 
 For compaction requests, inspect the installed `compaction.json`, `compaction --help` and the target harness's capabilities. The dashboard's `c` edits scope settings; an agent's scheduler can override the scope default. Do not assume every harness supports mv2 compaction or copy provider settings to another adapter.
 
+## Update mv2 itself
+
+`mv2 update --check` fetches the running package's source checkout and previews changes without merging or syncing. `mv2 update` fast-forwards the current branch from its upstream and runs `uv sync --locked` when `uv` and `uv.lock` are present, reporting when sync is skipped or fails. It refuses tracked, uncommitted changes, no upstream, and branches ahead of or diverged from upstream; untracked files are left alone. It never switches branches, rebases, resets or stashes, and cannot update a package installation without a Git source checkout. It uses the package's repository, regardless of the current directory or `-u`; both modes support `--json`. Running agents and the dashboard keep their old code until relaunched. Use `refresh --apply` separately to update a universe's installed definitions.
+
 ## Update templates and existing universes
 
 Installed definitions belong to their universe. Editing a bundled or personal template affects future installs; it does not silently change existing universes. Preview existing-scope updates with:
