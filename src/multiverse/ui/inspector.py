@@ -70,39 +70,10 @@ class Inspector(Vertical):
         if group:
             state = f'{row["alive"]}/{row["total"]} live · {row["waiting"]} waiting · {row["blocked"]} blocked'
             members = [a for a in self.app.snapshot["agents"] if within(a, Path(row["path"]))]
-            members.sort(key=lambda a: (a.get("status") != "waiting", a.get("phase") != "blocked"))
-            work = Text("ACTIVE WORK\n", style=theme.OVERLAY1)
-            for agent in members[:4]:
-                work.append("\n" + clean(agent["name"]) + "\n", style=accent)
-                work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
-            if not members:
-                work.append("\nNo agents yet. Select this group and press n.")
-            self.query_one("#inspect-group", Static).update(work)
+            self.query_one("#inspect-group", Static).update(active_work(members, accent))
         else:
-            state = Text(clean(row.get("harness", "unknown")), style=theme.SUBTEXT0)
-            if row.get("model"):
-                state.append(" / " + clean(row["model"]))
+            state = agent_state(row)
             live = row.get("live", "unknown")
-            state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
-            state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
-            state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
-            state.append("\n" + clean(row.get("context_line", "Context: N/A")), style=theme.SUBTEXT0)
-            selection = row.get('runtime', {}).get('native_mode')
-            if selection:
-                state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style=theme.SUBTEXT0)
-                if selection.get('fallback_reason'):
-                    state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
-            versions = row.get('runtime', {}).get('native_versions')
-            relay = row.get('runtime', {}).get('native_relay') or {}
-            if row.get('launch_error'):
-                state.append('\n' + clean(row['launch_error'].splitlines()[0]), style=f'bold {theme.RED}')
-            if relay.get('state') == 'lost':
-                state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style=f'bold {theme.RED}')
-                state.append('\n' + clean(relay.get('detail', '')), style=theme.YELLOW)
-            if versions:
-                mismatch = versions['cli'] != versions['daemon']
-                state.append(f'\nVersions: CLI {clean(versions["cli"])} / daemon {clean(versions["daemon"])}'
-                             + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 message = ('Native work is ending.' if live == 'ending' else
@@ -147,3 +118,73 @@ class Inspector(Vertical):
                 scroll.call_after_refresh(scroll.scroll_end, animate=False)
         elif self.row:
             self.capture_if_needed()
+
+
+def active_work(members, accent):
+    """A group's agents that need attention first: waiting, then blocked; at most four."""
+    members = sorted(members, key=lambda a: (a.get("status") != "waiting", a.get("phase") != "blocked"))
+    work = Text("ACTIVE WORK\n", style=theme.OVERLAY1)
+    for agent in members[:4]:
+        work.append("\n" + clean(agent["name"]) + "\n", style=accent)
+        work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
+    if not members:
+        work.append("\nNo agents yet. Select this group and press n.")
+    return work
+
+
+# The agent state block is these facts, in order. Each appends its lines to the
+# block, whose base style colors any text appended without one.
+
+def identity(state, row):
+    state.append(clean(row.get("harness", "unknown")))
+    if row.get("model"):
+        state.append(" / " + clean(row["model"]))
+    live = row.get("live", "unknown")
+    state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
+
+
+def progress(state, row):
+    state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
+    state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
+
+
+def context(state, row):
+    state.append("\n" + clean(row.get("context_line", "Context: N/A")), style=theme.SUBTEXT0)
+
+
+def native_mode(state, row):
+    selection = row.get('runtime', {}).get('native_mode')
+    if selection:
+        state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style=theme.SUBTEXT0)
+        if selection.get('fallback_reason'):
+            state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
+
+
+def launch_error(state, row):
+    if row.get('launch_error'):
+        state.append('\n' + clean(row['launch_error'].splitlines()[0]), style=f'bold {theme.RED}')
+
+
+def relay_loss(state, row):
+    relay = row.get('runtime', {}).get('native_relay') or {}
+    if relay.get('state') == 'lost':
+        state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style=f'bold {theme.RED}')
+        state.append('\n' + clean(relay.get('detail', '')), style=theme.YELLOW)
+
+
+def versions(state, row):
+    found = row.get('runtime', {}).get('native_versions')
+    if found:
+        mismatch = found['cli'] != found['daemon']
+        state.append(f'\nVersions: CLI {clean(found["cli"])} / daemon {clean(found["daemon"])}'
+                     + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
+
+
+AGENT_FACTS = (identity, progress, context, native_mode, launch_error, relay_loss, versions)
+
+
+def agent_state(row):
+    state = Text(style=theme.SUBTEXT0)
+    for fact in AGENT_FACTS:
+        fact(state, row)
+    return state
