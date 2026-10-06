@@ -51,3 +51,10 @@ Three top-level files are stubs for agents launched before this layout:
 `python -m multiverse.recovery`). Each forwards to its new module. Remove them
 once no agent launched before the change is still running or stopped with its
 wrapper; a resume relaunches with the new paths.
+
+Stubs cover only the paths that start fresh processes. A runner that was already
+running keeps the old modules it loaded, and some of its later imports
+(automatic reconnect, wake bookkeeping, startup message delivery) would load the
+new code into that process, which cannot work with the old `store` and
+`universe` already in memory. After pulling this change, kill and resume each
+running agent once. Its conversation and records are kept.
