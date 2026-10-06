@@ -12,7 +12,7 @@ def one_line(text):
     return " | ".join(line.strip() for line in str(text).splitlines() if line.strip()).rstrip(".")
 
 
-def check(root):
+def check(root, notes=None):
     """Each problem twice: as recorded (what --json and callers get) and as a sentence."""
     found = []
     for scope in universe.tree(root):
@@ -23,10 +23,16 @@ def check(root):
             for item in agents.listing(scope):
                 runtime = item.get("runtime", {})
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
-                if item["live"] == "unknown" or failed:
-                    reason = item.get("reason") or runtime.get("error", "Launch failed")
+                recovery = runtime.get('auto_recovery') or {}
+                connection_error = item.get('connection_error')
+                if item["live"] == "unknown" or failed or connection_error or recovery.get('state') in ('failed', 'skipped'):
+                    reason = connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
                     found.append((f'{item["name"]}: {reason}', f"{item['name']}'s " +
-                                  ("last launch failed: " if failed else "state is unknown: ") + one_line(reason) + "."))
+                                  ("last launch failed: " if failed else "connection was lost: " if connection_error
+                                   else "automatic reconnect failed: " if recovery.get('state') in ('failed', 'skipped')
+                                   else "state is unknown: ") + one_line(reason) + "."))
+                elif item.get('recovery_note') and notes is not None:
+                    notes.append(f"{item['name']} reconnected automatically.")
                 inbox(scope / "state" / "agents" / item["id"], all_messages=True)
             found.extend((problem, problem) for problem in _compaction(scope))
         except (OSError, ValueError, KeyError) as error:
@@ -36,8 +42,9 @@ def check(root):
 
 def run(root=None, json=False):  # `json`: presentation only
     root = universe.resolve(root)
-    problems = [recorded for recorded, _ in check(root)]
-    return {"ok": not problems, "problems": problems, "scope": str(root)}
+    notes = []
+    problems = [recorded for recorded, _ in check(root, notes)]
+    return {"ok": not problems, "problems": problems, "scope": str(root), **({'notes': notes} if notes else {})}
 
 
 def sentences(found):
@@ -53,8 +60,11 @@ def sentences(found):
 def cli_run(root=None, *, json=False):
     if json:
         return run(root)
-    found = check(universe.resolve(root))
+    notes = []
+    found = check(universe.resolve(root), notes)
     print(sentences(found))
+    for note in notes:
+        print('Note: ' + note)
     if found:
         sys.exit(1)
 

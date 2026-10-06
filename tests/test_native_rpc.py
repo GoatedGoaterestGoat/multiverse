@@ -9,7 +9,7 @@ import unittest
 
 from websockets.sync.server import unix_serve
 
-from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
+from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec, RpcNotification
 from multiverse.rpc import execute
 from multiverse import native
 from multiverse.harnesses.codex.protocol import check_connection
@@ -33,7 +33,8 @@ class RpcTransportTest(unittest.TestCase):
 
     @staticmethod
     def plan():
-        response = yield RpcRequest('initialize', {'clientInfo': {'name': 'test', 'version': '1'}})
+        response = yield RpcRequest('initialize', {'clientInfo': {'name': 'test', 'version': '1'}},
+                                    on_success=(RpcNotification('initialized', {}),))
         return NativeResult('ok', value=response['result'])
 
     def test_response_id_mismatch_is_not_accepted(self):

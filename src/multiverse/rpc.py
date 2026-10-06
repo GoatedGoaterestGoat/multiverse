@@ -42,8 +42,9 @@ async def _execute(spec, timeout):
                         if value.get('id') != identifier:
                             raise ValueError('Native RPC response ID mismatch')
                         break
-                    if request.method == 'initialize' and 'result' in value:
-                        await send({'jsonrpc': '2.0', 'method': 'initialized', 'params': {}})
+                    if 'result' in value and 'error' not in value:
+                        for notification in request.on_success:
+                            await send({'jsonrpc': '2.0', 'method': notification.method, 'params': notification.params})
                     try:
                         request = plan.send(value)
                     except StopIteration as done:
@@ -103,8 +104,12 @@ async def watch(spec, interpret, publish, timeout=5):
                         if value.get('id') != identifier:
                             raise ValueError('Native RPC response ID mismatch')
                         break
-                    if request.method == 'initialize' and 'result' in value:
-                        await connection.send(json.dumps({'jsonrpc': '2.0', 'method': 'initialized', 'params': {}}))
+                    if 'result' in value and 'error' not in value:
+                        for notification in request.on_success:
+                            payload = json.dumps({'jsonrpc': '2.0', 'method': notification.method, 'params': notification.params})
+                            if len(payload.encode()) > 1024 * 1024:
+                                raise ValueError('Native RPC notification exceeds 1 MiB')
+                            await connection.send(payload)
                     try:
                         request = plan.send(value)
                     except StopIteration as done:
@@ -283,5 +288,6 @@ class LaunchProxy:
             normal_exit = ended and ended[0] == 'terminal' and ended[1] in (1000, 1001)
             if (self.owner is client or self.owner is None) and not normal_exit:
                 if failure or ended:
-                    reason = failure or f'{ended[0]} connection closed (code {ended[1]}): {ended[2] or "no reason supplied"}'
+                    reason = (f'{ended[0]} connection closed (code {ended[1]}): '
+                              f'{failure or ended[2] or "no reason supplied"}' if ended else failure)
                     self._lost(reason)

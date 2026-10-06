@@ -542,7 +542,7 @@ class AdapterTest(Fixture):
         self.assertEqual((capability.state, 'restart' in capability.reason), ('error', True))
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': False}}})
         self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'unavailable')
-        write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {}})
+        write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': False}})
         capability = harnesses.load(self.root, 'claude').capabilities(session)['compaction']
         self.assertEqual(capability.state, 'unavailable')
         self.assertIn('inbox_bridge', capability.reason)
@@ -566,7 +566,7 @@ class AdapterTest(Fixture):
 
     def test_compaction_needs_the_bridge(self):
         self.assertIsNone(self.source().unavailable())
-        write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {}})
+        write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': False}})
         self.adapter = harnesses.load(self.root, 'claude')
         self.assertIn('inbox_bridge', self.source().unavailable())
         session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id)

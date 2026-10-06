@@ -5,7 +5,7 @@ completion is not permission to submit the message to a different turn.
 """
 from pathlib import Path
 
-from ..types import NativeResult, RpcRequest
+from ..types import NativeResult, RpcRequest, RpcNotification, NativeActivity
 
 
 def object_field(value, name):
@@ -40,7 +40,7 @@ def _thread(session, *, allow_unloaded=False):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
@@ -76,6 +76,41 @@ def check_connection(session):
             return observed
         records(observed)
     return NativeResult('ok', 'Exact loaded thread and native queue observed')
+
+
+def recovery_check(session):
+    """Read-only proof that restarting this exact thread's TUI is safe."""
+    thread = yield from _thread(session)
+    if isinstance(thread, NativeResult):
+        return thread
+    if thread['status']['type'] != 'idle':
+        return NativeResult('unavailable', 'Native thread is active or waiting for approval/input')
+    for method, params, reason in (
+        ('thread/turns/list', {'limit': 1, 'sortDirection': 'desc', 'itemsView': 'notLoaded'},
+         'Native turn is still running or its state is unknown'),
+        ('thread/queue/list', {'limit': 1}, 'Native messages are queued'),
+        ('thread/backgroundTerminals/list', {'limit': 1}, 'Native background processes are running'),
+    ):
+        observed = result((yield RpcRequest(method, {'threadId': session.native_id, **params})))
+        if isinstance(observed, NativeResult):
+            return observed
+        data = records(observed)
+        blocked = (any(turn.get('status') not in ('completed', 'interrupted', 'failed') for turn in data)
+                   if method == 'thread/turns/list' else bool(data) or bool(observed.get('nextCursor')))
+        if blocked:
+            return NativeResult('unavailable', reason)
+    # Recheck after the inventory: activity racing the earlier read is unsafe.
+    observed = result((yield RpcRequest('thread/read', {'threadId': session.native_id, 'includeTurns': False})))
+    if isinstance(observed, NativeResult):
+        return observed
+    final = object_field(observed, 'thread')
+    if (final.get('id') != session.native_id or final.get('cwd') != thread['cwd']
+            or object_field(final, 'status').get('type') != 'idle'
+            or final.get('canAcceptDirectInput') is False):
+        return NativeResult('unavailable', 'Native thread changed during the recovery check')
+    return NativeResult('ok', 'Exact native thread is idle, with no queued messages or background processes',
+                        NativeActivity(session.native_id, session.workspace, session.service,
+                                       'idle', False, False, False, False))
 
 
 def _start_idle_submission(session, item, receipt):
@@ -178,7 +213,7 @@ def environment_exclusions(workspace):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('config/read', {'cwd': workspace, 'includeLayers': False})))

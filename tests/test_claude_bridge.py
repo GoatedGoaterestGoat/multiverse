@@ -53,6 +53,9 @@ class ClaudeBridgeTest(BaseTest):
         self.socket = str(self.work / 'inbox.sock')
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}))
+        from multiverse.harnesses import claude as claude_module
+        self.real_claude_version = claude_module.claude_version
+        self.enterContext(patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 289)))
 
     def bridge(self, enabled=True):
         path = self.root / 'harnesses/claude/harness.json'
@@ -95,6 +98,101 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(adapter.spawn(LaunchContext('spawn', values)).argv[-1], values['task'])
         self.assertTrue((MOD / '.claude-plugin/plugin.json').is_file())
         self.assertTrue((MOD / 'hooks/index.ts').is_file())
+
+    def launch(self, setting, version, mode='spawn'):
+        """A Claude launch under this `inbox_bridge` setting (None leaves it out) and installed version."""
+        path = self.root / 'harnesses/claude/harness.json'
+        config = read(path)
+        config['settings'].pop('inbox_bridge', None)
+        if setting is not None:
+            config['settings']['inbox_bridge'] = setting
+        write(path, config)
+        values = self.values()
+        adapter = harnesses.load(self.root, 'claude')
+        with patch('multiverse.harnesses.claude.claude_version', return_value=version) as probe:
+            if mode == 'spawn':
+                command = adapter.spawn(LaunchContext('spawn', values))
+            else:
+                session = SessionHandle(values['agent_id'], 'claude', str(self.work), native_id=values['session_id'])
+                command = adapter.resume(session, LaunchContext('resume', values))
+        return command, probe
+
+    def test_unset_is_auto_and_uses_the_bridge_unless_this_claude_cannot_run_it(self):
+        command, _ = self.launch(None, (2, 1, 289))
+        self.assertEqual(list(command.argv[1:3]), ['--plugin-dir', str(MOD)])
+        self.assertEqual(command.control_endpoint, NativeEndpoint('unix-lines', self.socket))
+        self.assertEqual(command.native_mode, {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
+        for mode in ('spawn', 'resume'):
+            with self.subTest(mode=mode):
+                old, _ = self.launch(None, (2, 1, 270), mode)
+                self.assertNotIn('--plugin-dir', old.argv)
+                self.assertIsNone(old.control_endpoint)
+                self.assertNotIn('CLAUDE_CODE_ENABLE_FUNCTION_HOOKS', old.environment)
+                self.assertEqual((old.native_mode['policy'], old.native_mode['mode']), ('auto', 'plain'))
+                self.assertIn('Claude Code 2.1.270 is older than 2.1.280', old.native_mode['fallback_reason'])
+        # A version that cannot be read is no reason to give up the bridge: the launch shows whether the mod loads.
+        unknown, _ = self.launch(None, None)
+        self.assertEqual(unknown.native_mode['mode'], 'bridge')
+
+    def test_true_requires_the_bridge_and_false_never_loads_it(self):
+        required, _ = self.launch(True, (2, 1, 289))
+        self.assertEqual(required.native_mode, {'policy': 'required', 'mode': 'bridge', 'fallback_reason': None})
+        with self.assertRaisesRegex(ValueError, 'older than 2.1.280'):
+            self.launch(True, (2, 1, 270))
+        for version in ((2, 1, 289), (2, 1, 270)):
+            plain, probe = self.launch(False, version)
+            self.assertNotIn('--plugin-dir', plain.argv)
+            self.assertIsNone(plain.control_endpoint)
+            self.assertEqual(plain.native_mode, {'policy': 'plain', 'mode': 'plain', 'fallback_reason': None})
+            probe.assert_not_called()  # plain never asks which version is installed
+        path = self.root / 'harnesses/claude/harness.json'
+        config = read(path)
+        config['settings']['inbox_bridge'] = 'yes'  # still strictly validated
+        write(path, config)
+        with self.assertRaises(ValueError):
+            harnesses.load(self.root, 'claude')
+
+    def test_a_launch_that_fell_back_to_plain_says_so_in_its_capabilities(self):
+        adapter = self.bridge(None)
+        running = dict(state='running', native_id=str(uuid4()), bridge='claude-mod-v1',
+                       endpoint=NativeEndpoint('unix-lines', self.socket), session_file=str(self.work / 'agent' / 'session.jsonl'))
+        session = SessionHandle('agent', 'claude', str(self.work), native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}, **running)
+        capabilities = adapter.capabilities(session)
+        self.assertEqual((capabilities['send_steer'].state, capabilities['get_delivery'].state, capabilities['ask'].state),
+                         ('supported', 'supported', 'supported'))
+        reason = 'Claude Code 2.1.270 is older than 2.1.280, which the multiverse mod needs'
+        fell_back = SessionHandle('agent', 'claude', str(self.work),
+                                  native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason},
+                                  **{**running, 'endpoint': None, 'bridge': None})
+        capabilities = adapter.capabilities(fell_back)
+        for name in ('send_steer', 'send_follow_up'):
+            self.assertEqual(capabilities[name].state, 'unavailable')
+            self.assertEqual(capabilities[name].reason, 'Launched without the bridge: ' + reason)
+        self.assertNotEqual(capabilities['get_delivery'].state, 'supported')
+        self.assertNotEqual(capabilities['ask'].state, 'supported')
+
+    def test_what_reads_the_setting_sees_the_effective_value(self):
+        # auto and true both mean the bridge is on for code that asks adapter.settings (compaction does).
+        for setting, expected in ((None, True), (True, True), (False, False)):
+            self.launch(setting, (2, 1, 289))
+            self.assertEqual(harnesses.load(self.root, 'claude').settings['inbox_bridge'], expected, setting)
+
+    def test_the_installed_version_is_read_once_per_binary_and_is_never_fatal(self):
+        from multiverse.harnesses import claude as module
+        fake = self.work / 'bin' / 'claude-fake'
+        fake.parent.mkdir()
+        fake.write_text('#!/bin/sh\necho "2.1.289 (Claude Code)"\n')
+        fake.chmod(0o755)
+        with patch('multiverse.harnesses.claude.claude_version', self.real_claude_version):
+            module._versions.clear()
+            self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))
+            fake.write_text('#!/bin/sh\necho "something else"\n')
+            self.assertEqual(module.claude_version(str(fake)), (2, 1, 289))  # cached by the binary's real path
+            module._versions.clear()
+            self.assertIsNone(module.claude_version(str(fake)))               # no version in the output
+            self.assertIsNone(module.claude_version(str(self.work / 'nothing-here')))  # not installed
+            self.assertIsNone(module.bridge_problem(str(self.work / 'nothing-here')))
+            module._versions.clear()
 
     def test_steer_writes_one_tagged_frame_for_the_exact_session(self):
         adapter = self.bridge()

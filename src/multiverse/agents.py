@@ -62,6 +62,7 @@ def listing(root, recursive=False):
                 from . import native, usage
                 measured = native.usage_snapshot(scope, properties, facts)
                 relay = facts.get('native_relay') or {}
+                recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
                 rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
                              "usage_detail": usage.details(measured), "universe": str(scope), **observation,
@@ -69,6 +70,7 @@ def listing(root, recursive=False):
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
                              "connection_error": relay.get('reason') if relay.get('state') == 'lost' else None,
+                             "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
@@ -99,11 +101,13 @@ def plain_fallback(command, error):
 
 
 def start(root, name=None, task=None, harness="codex", model=None, resume=None, socket_path=None,
-          wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None):
+          wait=False, wait_timeout=60, resume_prompt=None, resume_message_id=None, _recovery=None):
     if not math.isfinite(wait_timeout) or wait_timeout <= 0:
         raise ValueError('wait timeout must be a finite positive number of seconds')
     if (resume_prompt is not None or resume_message_id is not None) and not resume:
         raise ValueError('A resume prompt requires an exact saved agent')
+    if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
+        raise ValueError('Automatic recovery requires an exact resume without a prompt')
     if resume:
         agent_dir = directory(root, resume)
         properties = read(agent_dir / "properties.json")
@@ -132,9 +136,20 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     if not workdir.is_dir():
         raise ValueError(f"Workspace does not exist: {workdir}")
     properties["workspace"] = str(workdir)
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    with lock(agent_dir / ".launch.lock"):
+    if _recovery:
+        from .recovery import existing_lock
+        launch_lock = existing_lock
+    else:
+        agent_dir.mkdir(parents=True, exist_ok=True)
+        launch_lock = lock
+    with launch_lock(agent_dir / ".launch.lock"):
         previous = runtime(agent_dir)
+        if _recovery and (previous.get('launch_id') != _recovery['launch_id']
+                          or (previous.get('auto_recovery') or {}).get('state') != 'restarting'
+                          or previous.get('tmux') != _recovery['terminal']
+                          or properties.get('native_session_id') != _recovery['native_id']
+                          or previous.get('native_service') != _recovery['service']):
+            raise ValueError('Automatic recovery cancelled or superseded')
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         if resume_message_id is not None:
@@ -166,10 +181,20 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
                                 resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
+        from .native import service_handle, validate_recovery_command, launch_attachment
+        if command.shared_service and command.shared_service.identity:
+            identity = asdict(command.shared_service.identity)
+            if resume and properties.get('native_service_identity') not in (None, identity):
+                raise ValueError('Native service storage/account scope differs from the saved session; '
+                                 'resume with the original native storage settings or spawn a new agent')
+            properties['native_service_identity'] = identity
+        if _recovery:
+            validate_recovery_command(command, session)
+            command = replace(command, fallback=None)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
             raise ValueError(f'Harness executable not found: {argv[0]}')
-        if previous and observe(properties, previous)['live'] == 'stopped':
+        if previous and not _recovery and observe(properties, previous)['live'] == 'stopped':
             # Resume creates a fresh pane; remove only the old owned wrapper.
             old_backend, old_pane = owned(properties, previous, states=('stopped',))
             old_backend.run('kill-pane', '-t', old_pane)
@@ -201,9 +226,17 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 write(agent_dir / "properties.json", properties)
         initial_runtime = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
                            "started_at": now(), "native_mode": command.native_mode}
-        if resume and isinstance(adapter, harnesses.CodexAdapter):
-            from .harnesses.codex.usage import last_measurement
-            measured = last_measurement(previous, properties.get('native_session_id'))
+        if resume and previous.get('automatic_restarts'):
+            initial_runtime['automatic_restarts'] = previous['automatic_restarts'][-5:]
+        if _recovery:
+            event = {'at': now(), 'from_launch_id': previous['launch_id'], 'launch_id': launch_id,
+                     'reason': 'Native relay disconnected while the exact thread was idle'}
+            initial_runtime.update(automatic_restarts=[*previous.get('automatic_restarts', [])[-4:], event],
+                                   auto_recovery={**(previous.get('auto_recovery') or {}),
+                                                  'state': 'resuming', 'previous_launch_id': previous['launch_id'],
+                                                  'reason': 'Automatically resuming the idle native thread'})
+        if resume and getattr(adapter, 'retained_usage', None):
+            measured = adapter.retained_usage(session, previous)
             if measured is not None:
                 # Keep the exact thread's sample and original timestamp until
                 # this launch reports again, without treating it as fresh usage.
@@ -216,12 +249,15 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             shared_endpoint = None
             if command.shared_service:
                 from .native import start_shared_service
-                try:
-                    shared_endpoint = start_shared_service(command.shared_service, workdir,
-                        launch / 'native-service.log', command.unset_env,
-                        observe_versions=lambda versions: update_runtime(agent_dir, launch_id, native_versions=versions))
-                except BridgeUnavailable as error:
-                    command = plain_fallback(command, error)
+                if _recovery:
+                    shared_endpoint = session.service.endpoint
+                else:
+                    try:
+                        shared_endpoint = start_shared_service(command.shared_service, workdir,
+                            launch / 'native-service.log', command.unset_env,
+                            observe_versions=lambda versions: update_runtime(agent_dir, launch_id, native_versions=versions))
+                    except BridgeUnavailable as error:
+                        command = plain_fallback(command, error)
             if command.control_endpoint:
                 try:
                     service_dir.mkdir(mode=0o700)
@@ -230,16 +266,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     command = plain_fallback(command, BridgeUnavailable(f'Native relay directory unavailable: {error}'))
                     shared_endpoint = None
             runner = Path(__file__).with_name("runner.py")
-            terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
-                                      [sys.executable, str(runner), str(launch)])
+            if _recovery:
+                backend = Tmux(_recovery['terminal']['socket'])
+                terminal = backend.respawn(properties, previous, workdir, [sys.executable, str(runner), str(launch)])
+            else:
+                terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
+                                          [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
             family = next((name for name, cls in harnesses.BUILTINS.items() if isinstance(adapter, cls)), '')
             backend.configure_status(terminal, root, properties, launch_id, family)
-            if isinstance(adapter, harnesses.CodexAdapter):
-                # Codex detects mouse support during TUI startup. Set only its
-                # wrapper session, before releasing the runner's ready gate.
-                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
@@ -253,6 +289,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.shared_service:
                 try:
                     command = adapter.resume(session, context) if resume else adapter.spawn(context)
+                    if _recovery:
+                        validate_recovery_command(command, session)
+                        command = replace(command, fallback=None)
                 except BridgeUnavailable as error:
                     command = plain_fallback(command, error)
                 if not command.shared_service:
@@ -260,16 +299,32 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
+            service = service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
+            if service and asdict(service.identity) != properties.get('native_service_identity'):
+                raise ValueError('Native service scope changed during launch preparation')
+            if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
+                raise ValueError('Native relay targets a different service endpoint')
+            command = replace(command, attachment=launch_attachment(command))
+            if command.attachment and command.attachment.readiness == 'binding':
+                if not command.rpc_proxy or not command.rpc_proxy.binds_session:
+                    raise ValueError('Attachment requires an adapter protocol that validates binding')
+            mouse = bool(command.attachment and command.attachment.mouse)
+            if mouse:
+                # Apply the final resolved policy before releasing the runner.
+                backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode,
+                           native_service=asdict(service) if service else None,
+                           attachment=asdict(command.attachment) if command.attachment else None,
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {"argv": argv, "env": env, "unset_env": list(command.unset_env),
                                            "control_endpoint": endpoint,
                                            "shared_service": bool(command.shared_service),
+                                           "attachment": asdict(command.attachment) if command.attachment else None,
                                            "native_mode": command.native_mode,
                                            "fallback": asdict(command.fallback) if command.fallback else None,
                                            "resume_message_id": resume_message_id,
@@ -293,10 +348,14 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 shutil.rmtree(service_dir)
             if terminal:
                 try:
-                    backend.run("kill-session", "-t", terminal["session"])
+                    if not _recovery:
+                        backend.run("kill-session", "-t", terminal["session"])
                 except Exception:
                     pass
             update_runtime(agent_dir, launch_id, state="failed", error=str(error))
+            if _recovery:
+                from .recovery import record
+                record(agent_dir, launch_id, 'failed', 'Automatic reconnect failed: ' + str(error))
             recovery = (f"Resume this agent by its full UUID: {properties['id']}"
                         if resume
                         else "The native session has not started; retry spawn with a unique name")
@@ -321,7 +380,6 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
-        native = bool(facts.get('control_endpoint'))
         if facts.get('launch_id') != launch_id:
             raise ValueError('Launch changed while waiting; refusing to follow a replacement')
         if facts.get('reason'):
@@ -332,8 +390,11 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                    and facts.get('startup_checked', True))
         session = SessionHandle.from_records(result, facts, agent_dir)
-        ready = running and (not native or (session.native_id and (request.get('rpc_proxy') or
-            adapter.capabilities(session)['send_steer'].state == 'supported')))
+        from .native import attachment_ready, legacy_attachment
+        if ('attachment' not in facts and 'attachment' not in request
+                and request.get('rpc_proxy') and session.endpoint):
+            session = replace(session, attachment=legacy_attachment(request.get('shared_service')))
+        ready = running and attachment_ready(adapter, session)
         ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
         if ready:
             return {**result, 'ok': True, 'ready': True}
@@ -404,6 +465,9 @@ def kill(root, reference):
         else:
             backend, pane = owned(properties, facts, states=('alive', 'ending', 'stopped'))
         launch_id = facts['launch_id']
+        if (facts.get('auto_recovery') or {}).get('state') in ('checking', 'restarting', 'resuming'):
+            update_runtime(agent_dir, launch_id, auto_recovery={**facts['auto_recovery'],
+                           'state': 'cancelled', 'reason': 'Automatic reconnect cancelled by explicit stop'})
         # Older launches may have inherited remain-on-exit=off.
         if backend is not None:
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')

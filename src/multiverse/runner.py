@@ -149,6 +149,8 @@ class RelayPublisher:
         reason = 'Native relay lost. ' + recovery
         update_runtime(self.agent_dir, self.launch_id, status='unknown', native_relay={
             'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()})
+        from multiverse.recovery import schedule
+        schedule(self.agent_dir, self.launch_id)
 
 
 class StatusWatcher:
@@ -179,7 +181,11 @@ class StatusWatcher:
             facts = read(self.agent_dir / 'runtime.json')
             if (facts.get('launch_id') == self.launch_id and facts.get('state') == 'running'
                     and facts.get('status') != status):
-                update_runtime(self.agent_dir, self.launch_id, status=status)
+                changes = {}
+                if status != 'unknown':
+                    changes = {'recovery_snapshot': None,
+                               'native_status_version': facts.get('native_status_version', 0) + 1}
+                update_runtime(self.agent_dir, self.launch_id, status=status, **changes)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -288,6 +294,7 @@ def main():
     watcher = None
     proxy = None
     startup = None
+    recovery_monitor = None
     startup_checked = False
     remove_wrapper = False
     request = {}
@@ -315,15 +322,25 @@ def main():
             service_dir = endpoint.parent
         # A bridge resume already has a saved ID, but it must validate the new
         # native reply (including requested grants) before accepting more input.
-        update_runtime(agent_dir, launch.name, state="starting" if request.get('rpc_proxy') else "running", status="unknown",
-                       runner_pid=os.getpid(), startup_checked=False)
+        attachment = request.get('attachment') or {}
+        if 'attachment' not in request and request.get('rpc_proxy'):
+            # Old saved requests keep binding readiness but gain no recovery.
+            from dataclasses import asdict
+            from multiverse.native import legacy_attachment
+            attachment = asdict(legacy_attachment(request.get('shared_service')))
+        update_runtime(agent_dir, launch.name, state="starting" if attachment.get('readiness') in ('binding', 'legacy-binding') else "running", status="unknown",
+                       runner_pid=os.getpid(), startup_checked=False, attachment=attachment or None)
         if request.get('rpc_proxy'):
             from multiverse import harnesses, rpc
             properties = read(agent_dir / 'properties.json')
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             def bound(native_id):
+                if not request['rpc_proxy'].get('binds_session') and attachment.get('readiness') != 'legacy-binding':
+                    raise ValueError('Relay did not declare validated session binding')
                 bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
                 update_runtime(agent_dir, launch.name, state='running', native_relay={'state': 'ready'})
+                from multiverse.recovery import reconnected
+                reconnected(agent_dir, launch.name)
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
@@ -340,15 +357,28 @@ def main():
                 request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
                            'env': {**fallback.get('environment', {}), **request['env']},
                            'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
-                           'native_mode': selection, 'fallback': None}
+                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment')}
                 write(launch / 'request.json', request)
                 env = launch_environment(request)
                 # A sender may have queued input while relay startup was still
                 # pending. Plain mode cannot deliver it; retain a retryable failure
                 # atomically with disabling the startup queue for future senders.
                 with lock(agent_dir / '.launch.lock'):
+                    facts = runtime(agent_dir)
+                    if facts.get('launch_id') != launch.name or facts.get('ending_at'):
+                        raise ValueError('Launch changed or ended before terminal fallback')
+                    from multiverse.tmux import owned
+                    backend, pane = owned(properties, facts)
+                    selected_mouse = bool((fallback.get('attachment') or {}).get('mouse'))
+                    if selected_mouse != bool(attachment.get('mouse')):
+                        if selected_mouse:
+                            backend.run('set-option', '-t', pane, 'mouse', 'on')
+                        else:
+                            # Restore inherited behavior after our launch override.
+                            backend.run('set-option', '-u', '-t', pane, 'mouse')
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
-                                   startup_delivery=None, native_mode=selection, native_relay=None, error=None)
+                                   startup_delivery=None, native_mode=selection, native_relay=None, error=None,
+                                   native_service=None, attachment=fallback.get('attachment'))
                     from multiverse.native import end_startup_messages
                     end_startup_messages(agent_dir, launch.name,
                         'Launch selected plain mode before delivery; message saved. '
@@ -356,6 +386,7 @@ def main():
                 if service_dir:
                     shutil.rmtree(service_dir, ignore_errors=True)
                     service_dir = None
+                attachment = fallback.get('attachment') or {}
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid)
         from multiverse.native import finish_wake
@@ -363,9 +394,13 @@ def main():
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
                                       proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
             startup.start()
-        if request.get('shared_service'):
+        if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
             watcher.start()
+        if attachment.get('recovery') == 'idle-existing-service':
+            from multiverse.recovery import RecoveryMonitor
+            recovery_monitor = RecoveryMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            recovery_monitor.start()
         try:
             code = process.wait(timeout=STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
@@ -407,6 +442,8 @@ def main():
             proxy.close()
         if watcher is not None:
             watcher.close()
+        if recovery_monitor is not None:
+            recovery_monitor.close()
         if process is not None and process.poll() is None:
             process.terminate()
             try:

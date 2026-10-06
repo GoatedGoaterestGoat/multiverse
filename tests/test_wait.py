@@ -33,6 +33,7 @@ class WaitTest(BaseTest):
         return agents.wait_ready(self.root, self.directory, self.launch, self.adapter, timeout)
 
     def test_wait_allows_binding_but_requires_validation_before_ready(self):
+        agents.update_runtime(self.directory, self.launch, attachment={'work_owner': 'service', 'readiness': 'binding'})
         with ThreadPoolExecutor() as pool:
             waiting = pool.submit(self.wait, 2)
             bound = threading.Event()
@@ -43,7 +44,7 @@ class WaitTest(BaseTest):
             self.assertTrue(bound.wait(1), 'Wait must not hold the launch lock')
             binding.result()
             self.assertFalse(waiting.done(), 'A bound ID with state=starting is not validated')
-            agents.update_runtime(self.directory, self.launch, state='running')
+            agents.update_runtime(self.directory, self.launch, state='running', native_relay={'state': 'ready'})
             result = waiting.result(timeout=1)
         self.assertTrue(result['ready'])
         self.assertEqual(result['session']['native_id'], self.native)

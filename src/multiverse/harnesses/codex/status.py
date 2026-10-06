@@ -5,7 +5,7 @@ require thread/resume. Filter it locally rather than resuming for observation.
 """
 from pathlib import Path
 
-from ..types import NativeResult, RpcRequest
+from ..types import NativeResult, RpcRequest, RpcNotification
 from .protocol import object_field, result
 
 
@@ -29,7 +29,7 @@ def snapshot(session):
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse-status', 'title': 'Multiverse status', 'version': '1'},
         'capabilities': {'experimentalApi': True},
-    })))
+    }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
     observed = result((yield RpcRequest('thread/read', {'threadId': session.native_id, 'includeTurns': False})))

@@ -55,6 +55,15 @@ class Tmux:
         # tmux defaults. Core removes this wrapper explicitly on kill/resume.
         self.run("set-option", "-p", "-t", pane, "remain-on-exit", "on")
 
+    def respawn(self, properties, runtime, cwd, argv):
+        """Replace only a dead owned runner, preserving its attached clients."""
+        panes, error = self.snapshot()
+        pane = panes.get(runtime['tmux']['pane'])
+        if error or not matches(pane, properties, runtime) or pane['pane_dead'] != '1':
+            raise ValueError(error or 'Automatic reconnect requires the dead owned pane')
+        self.run('respawn-pane', '-t', pane['pane_id'], '-c', str(cwd), *argv)
+        return runtime['tmux']
+
     def configure_status(self, terminal, root, properties, launch_id, family):
         """Configure only a newly created, tagged agent wrapper before native startup."""
         session, pane = terminal['session'], terminal['pane']

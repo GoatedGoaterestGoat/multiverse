@@ -244,7 +244,8 @@ class RunnerLifetimeTest(unittest.TestCase):
             write(directory / 'properties.json', {'id': agent_id, 'name': 'worker', 'harness': 'codex', 'native_session_id': native_id})
             write(directory / 'runtime.json', {'launch_id': launch_id, 'state': 'starting'})
             write(launch / 'request.json', {'argv': ['fake-codex'],
-                  'rpc_proxy': {'socket_path': '/tmp/mv2-native-' + launch_id + '/rpc.sock', 'settings': {}},
+                  'attachment': {'readiness': 'binding'},
+                  'rpc_proxy': {'socket_path': '/tmp/mv2-native-' + launch_id + '/rpc.sock', 'settings': {}, 'binds_session': True},
                   'env': {'MV2_CLI': str(root / 'bin/mv2'), 'MV2_UNIVERSE': str(root)}})
             (launch / 'ready').touch()
             process = Mock(pid=123)
@@ -270,6 +271,7 @@ class RunnerLifetimeTest(unittest.TestCase):
                 launch.mkdir(parents=True)
                 write(directory / 'runtime.json', {'launch_id': 'launch', 'state': 'starting'})
                 write(launch / 'request.json', {'argv': ['fake-codex'], 'shared_service': bridge,
+                      'attachment': {'observe_status': bridge},
                       'env': {'MV2_CLI': str(root / 'bin/mv2'), 'MV2_UNIVERSE': str(root)}})
                 (launch / 'ready').touch()
                 process = Mock(pid=123)

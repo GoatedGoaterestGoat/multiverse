@@ -96,6 +96,14 @@ class ListTest(BaseTest):
         with patch.object(agents, 'listing', return_value=[]):
             self.assertEqual(list_agents.run(self.root), 'No agents.')
 
+    def test_automatic_reconnect_is_a_note_not_an_error(self):
+        with self.listing(row('worker', recovery_note='Reconnected automatically after native relay loss')):
+            text = list_agents.run(self.root)
+            original = list_agents.run(self.root, json=True)
+        self.assertEqual(text.splitlines()[-1], '  Note: Reconnected automatically.')
+        self.assertNotIn('  ! ', text)
+        self.assertTrue(original[0]['recovery_note'])
+
 
 class InspectTest(BaseTest):
     CAPTURE = 'line one\n' + '─' * 200 + ' title ─\n❯ prompt\n\n\n\n'
@@ -122,6 +130,15 @@ class InspectTest(BaseTest):
         self.assertIn('Last error: Launch failed | because of this', text)
         self.assertNotIn('Last error', self.inspect(row('w')))
 
+    def test_a_launch_that_fell_back_to_plain_says_why(self):
+        reason = 'Claude Code 2.0.5 is older than 2.1.280, which the multiverse mod needs'
+        item = row('w', runtime={'native_mode': {'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason}})
+        self.assertIn('Note: ' + reason, self.inspect(item).splitlines())
+        self.assertEqual(self.inspect(item, json=True)['fallback'], reason)
+        plain = self.inspect(row('w', runtime={'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}}))
+        self.assertNotIn('Note:', plain)
+        self.assertIsNone(self.inspect(row('w'), json=True)['fallback'])
+
     def test_an_agent_without_a_live_terminal_says_why_not_with_the_reason_text_of_the_pane(self):
         for live, words in (('dormant', 'it is dormant.'), ('stopped', 'it is stopped.'), ('unknown', 'its state is unknown.')):
             with self.subTest(live=live):
@@ -142,6 +159,14 @@ class InspectTest(BaseTest):
         with patch.object(agents, 'terminal_action', return_value='raw') as action:
             self.assertEqual(inspect.run(self.root, agent='w'), 'raw')
         self.assertEqual(action.call_args.args[1:], ('w', 'inspect'))
+
+    def test_reconnect_note_and_additive_json_metadata(self):
+        meta = {'state': 'reconnected', 'reason': 'Reconnected automatically'}
+        item = row('worker', recovery_note=meta['reason'], runtime={'auto_recovery': meta})
+        text = self.inspect(item)
+        self.assertIn('Note: Reconnected automatically.', text)
+        self.assertNotIn('Last error:', text)
+        self.assertEqual(self.inspect(item, json=True)['recovery'], meta)
 
 
 class DoctorTest(BaseTest):
@@ -178,6 +203,30 @@ class DoctorTest(BaseTest):
         self.assertEqual(stopped.exception.code, 1)
         self.assertTrue(out.getvalue().startswith("1 problem: worker's last launch failed"))
         self.assertEqual(doctor.cli_run(self.root, json=True)['ok'], False)
+
+    def test_successful_reconnect_notes_do_not_fail_doctor(self):
+        item = row('worker', recovery_note='Reconnected automatically',
+                   runtime={'auto_recovery': {'state': 'reconnected'}})
+        output = io.StringIO()
+        with patch.object(agents, 'listing', return_value=[item]), contextlib.redirect_stdout(output):
+            result = doctor.run(self.root)
+            doctor.cli_run(self.root)
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['problems'], [])
+        self.assertEqual(result['notes'], ['worker reconnected automatically.'])
+        self.assertEqual(output.getvalue(), 'No problems.\nNote: worker reconnected automatically.\n')
+
+    def test_disconnected_and_failed_or_skipped_reconnect_are_problems(self):
+        for state in ('failed', 'skipped'):
+            reason = 'Automatic reconnect ' + state + ': native background processes are running'
+            item = row('worker', status='disconnected', connection_error=reason,
+                       runtime={'auto_recovery': {'state': state, 'reason': reason}})
+            with self.subTest(state=state), patch.object(agents, 'listing', return_value=[item]):
+                self.assertFalse(doctor.run(self.root)['ok'])
+                self.assertIn(reason, doctor.run(self.root)['problems'][0])
+                with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+                    doctor.cli_run(self.root)
+                self.assertEqual(exit.exception.code, 1)
 
 
 class LaunchTextTest(BaseTest):

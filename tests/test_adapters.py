@@ -50,6 +50,8 @@ class AdapterContractTest(BaseTest):
                 adapter = harnesses.load(self.root, name)
                 if name == 'codex':
                     adapter = harnesses.CodexAdapter.configured('codex', {'inbox_bridge': False})
+                if name == 'claude':  # the legacy recipe is the plain launch: no bridge flags
+                    adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
                 legacy = harnesses.LegacyAdapter(name, read(harnesses.PACKAGES / name / 'defaults.json'))
                 for mode in ('spawn', 'resume'):
                     context = LaunchContext(mode, self.values(), 'chosen')
