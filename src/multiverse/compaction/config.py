@@ -28,6 +28,7 @@ harness's default as it is now.
 from dataclasses import dataclass, field, replace
 import json
 from pathlib import Path
+import re
 
 from ..store import write
 
@@ -172,6 +173,87 @@ def parse_schedule(value, where='scheduler settings') -> Schedule:
             raise ValueError(f'image_mode must be one of {", ".join(IMAGE_MODES)}')
         schedule = replace(schedule, image_mode=value['image_mode'])
     return schedule
+
+
+def override(schedule: Schedule, changes: dict) -> Schedule:
+    """`schedule` with `changes` (scheduler fields) applied, checked as a whole.
+
+    A different scheduler keeps the budget and image_mode and takes its own
+    defaults for the rest; a field the resulting scheduler does not take is an
+    error.
+    """
+    name = changes.get('scheduler') or schedule.scheduler
+    values = schedule.settings() if name == schedule.scheduler else {'scheduler': name, 'budget': schedule.budget}
+    if schedule.image_mode != 'budget_fit':
+        values['image_mode'] = schedule.image_mode
+    values.update({key: value for key, value in changes.items() if value is not None})
+    return parse_schedule(values)
+
+
+ARGUMENTS = ('scheduler', 'budget', 'k', 'recency_ratio', 'recency_half_life', 'image_mode')
+ARGUMENTS_HELP = ('a scheduler name (' + ', '.join(SCHEDULERS) + '), a budget (60000 or 60k), and key=value for '
+                  + ', '.join(ARGUMENTS) + ', e.g. "proportional 60k" or "budget=20k k=4"')
+_BUDGET = re.compile(r'(\d+(?:\.\d+)?)([km]?)', re.IGNORECASE)
+
+
+def _budget(text: str) -> int:
+    match = _BUDGET.fullmatch(text.replace('_', ''))
+    if not match:
+        raise ValueError(f'budget must be a whole number of tokens, like 60000 or 60k, not {text!r}')
+    value = float(match.group(1)) * {'': 1, 'k': 1_000, 'm': 1_000_000}[match.group(2).lower()]
+    if value != int(value):
+        raise ValueError(f'budget must be a whole number of tokens, not {text!r}')
+    return int(value)
+
+
+def _argument(key: str, text: str):
+    if key == 'budget':
+        return _budget(text)
+    if key == 'k':
+        if not text.isdigit():
+            raise ValueError(f'k must be a whole number, not {text!r}')
+        return int(text)
+    if key in ('recency_ratio', 'recency_half_life'):
+        try:
+            return float(text)
+        except ValueError:
+            raise ValueError(f'{key} must be a number, not {text!r}') from None
+    return text
+
+
+def parse_arguments(text: str | None) -> dict:
+    """One-off scheduler settings from a compaction command's arguments: `proportional 60k`, `budget=20k k=4`.
+
+    Accepts a scheduler name, a bare budget and key=value pairs (keys may use
+    - for _), each setting at most once. Raises ValueError, naming what it
+    accepts, on anything else.
+    """
+    changes: dict = {}
+
+    def put(key, value, word):
+        if key in changes:
+            raise ValueError(f'{key} is given twice ({word!r})')
+        changes[key] = value
+
+    for word in (text or '').split():
+        key, separator, value = word.partition('=')
+        key = key.lower().replace('-', '_')
+        try:
+            if separator:
+                if key not in ARGUMENTS:
+                    raise ValueError(f'unknown setting {key!r}')
+                if not value:
+                    raise ValueError(f'{key} has no value')
+                put(key, _argument(key, value), word)
+            elif key in SCHEDULERS:
+                put('scheduler', key, word)
+            elif word[:1].isdigit():
+                put('budget', _budget(word), word)
+            else:
+                raise ValueError(f'unknown argument {word!r}')
+        except ValueError as error:
+            raise ValueError(f'{error}. It accepts {ARGUMENTS_HELP}') from None
+    return changes
 
 
 def _name(value, where):

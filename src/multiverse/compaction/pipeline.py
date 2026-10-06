@@ -29,9 +29,15 @@ class Agent:
     def store(self) -> Store:
         return Store(self.directory)
 
-    def schedule(self) -> tuple[Schedule, str]:
-        """The agent's scheduler in effect and where it came from (`agent` or `universe`)."""
+    def schedule(self, changes: dict | None = None) -> tuple[Schedule, str]:
+        """The agent's scheduler in effect and where it came from (`agent` or `universe`).
+
+        `changes` are one-off scheduler settings (a compaction command's
+        arguments) applied on top; the origin is then `arguments`.
+        """
         schedule, origin = settings_file.schedule_for(self.directory, self.settings)
+        if changes:
+            schedule, origin = settings_file.override(schedule, changes), 'arguments'
         return self.effective(schedule), origin
 
     def effective(self, schedule: Schedule) -> Schedule:
@@ -76,13 +82,15 @@ def plan(turns: list[Turn], schedule: Schedule, store: Store | None = None) -> l
     return rows
 
 
-def compact(agent: Agent, offered, reporter: Reporter, cancel: threading.Event | None = None):
+def compact(agent: Agent, offered, reporter: Reporter, cancel: threading.Event | None = None,
+            changes: dict | None = None):
     """The installable payload of the agent's conversation compacted by its scheduler.
 
-    Raises CompactionError when it cannot be made in full: nothing partial is
-    ever returned for installing.
+    `changes` are one-off scheduler settings for this compaction only. Raises
+    CompactionError when it cannot be made in full: nothing partial is ever
+    returned for installing.
     """
-    schedule, _ = agent.schedule()
+    schedule, origin = agent.schedule(changes)
     every = agent.source.turns()
     turns = conversation(every)
     if not turns:
@@ -106,5 +114,5 @@ def compact(agent: Agent, offered, reporter: Reporter, cancel: threading.Event |
              'dropped_turns': len(every) - len(turns),
              'tokens_before': prompts + sum(turn.tokens + turn.omitted for turn in turns),
              'tokens_after': prompts - dropped_images + sum(frontier_tokens(frontier) for frontier in frontiers.values()),
-             'scheduler': schedule.settings()}
+             'scheduler': schedule.settings(), 'scheduler_from': origin}
     return payload, stats

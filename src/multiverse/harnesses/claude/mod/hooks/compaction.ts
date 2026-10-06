@@ -151,6 +151,16 @@ export function errorLine(event: Event): string {
   return `mv2 compaction: ${where}: ${String(event.kind)}: ${String(event.message)}${retry}`
 }
 
+// " (this time: proportional, budget 60000)" when the command's arguments set the scheduler.
+// Image mode is left out: Claude always drops prompt images.
+export function oneOff(stats: Record<string, unknown>): string {
+  if (stats.scheduler_from !== "arguments" || typeof stats.scheduler !== "object" || stats.scheduler === null) return ""
+  const settings = Object.entries(stats.scheduler as Record<string, unknown>)
+    .filter(([key]) => key !== "image_mode")
+    .map(([key, value]) => key === "scheduler" ? String(value) : `${key} ${String(value)}`)
+  return ` (this time: ${settings.join(", ")})`
+}
+
 function failed($: EngineInterface, reason: string): SessionCompactResult {
   const text = reason.startsWith("mv2 compaction") ? reason : `mv2 compaction: ${reason}`
   $.ui.log(text)
@@ -238,7 +248,7 @@ async function install($: EngineInterface, trigger: string, instructions: string
   }
   const stats = (result.stats ?? {}) as Record<string, unknown>
   $.ui.log(`mv2 compaction: ${number(stats.turns)} turns, ${number(stats.summarized)} summarized, ` +
-    `about ${number(stats.tokens_before)} → ${number(stats.tokens_after)} tokens`)
+    `about ${number(stats.tokens_before)} → ${number(stats.tokens_after)} tokens${oneOff(stats)}`)
   return { messages: answer }
 }
 

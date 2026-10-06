@@ -149,6 +149,43 @@ If anything fails (a turn whose tree cannot be built, a crash, a mismatch with
 the session), the compaction is abandoned with the reason and the conversation
 stays as it was. It never falls back to the harness's own compaction.
 
+### One-off scheduler settings
+
+The compaction command's arguments set the scheduler for that compaction only;
+the agent's saved scheduler (or the universe default) stays as it is. In Claude
+Code that is the text after `/compact`. Arguments start from the scheduler in
+effect and change only what they name:
+
+| Argument | Meaning |
+| --- | --- |
+| `last_k_raw`, `proportional`, `uniform`, `recency_boosted` | The scheduler. A different one keeps the budget and `image_mode` and takes its own defaults for the rest. |
+| a number: `60000`, `60k`, `1.5m` | The budget, in tokens. |
+| `scheduler=NAME` | The scheduler, as above. |
+| `budget=N` | The budget, as above (`k` and `m` suffixes allowed). |
+| `k=N` | `last_k_raw`: how many recent turns stay whole. |
+| `recency_ratio=X`, `recency_half_life=N` | `recency_boosted`: weight of the newest turn, and turns until it halves. |
+| `image_mode=MODE` | `budget_fit`, `keep_all` or `drop_all` (Claude always drops prompt images). |
+
+Keys may be written with `-` for `_`, in any order, each at most once. For
+example:
+
+```text
+/compact                         the agent's scheduler, unchanged
+/compact 60k                     the agent's scheduler with a budget of 60000
+/compact proportional 60k        proportional, budget 60000
+/compact k=4                     last_k_raw keeping the last 4 turns whole
+/compact recency_boosted budget=40k recency_ratio=4
+```
+
+Anything else (free-text instructions, an unknown setting, a value out of
+range, a setting the chosen scheduler does not take, such as `k` with
+`proportional`) refuses the compaction with a message listing what is
+accepted, before any work; the conversation stays as it was. Tree compaction
+cannot follow free-text instructions: its summaries are written ahead of time,
+per turn. The result line names the settings used, e.g. `(this time:
+proportional, budget 60000)`; image mode is left out of it. To change an agent's scheduler for good, use `mv2
+compaction AGENT --scheduler ...` or the dashboard's `c` screen.
+
 ## Claude Code
 
 Compaction needs the `multiverse` mod (`"inbox_bridge": true`). An enabled launch
@@ -163,7 +200,9 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   "(result summarized)" for a missing result, a `summarized_tool` call for a
   missing call. Claude writes a boundary, those
   rows and the `/compact` command's own rows, and re-announces its tool, agent,
-  MCP and skill listings on the next turn. While it runs, the status line shows
+  MCP and skill listings on the next turn. Its arguments are one-off scheduler
+  settings (see [One-off scheduler settings](#one-off-scheduler-settings)).
+  While it runs, the status line shows
   a progress bar, and every error and retry also appears as a transcript
   notice and a toast.
 - **Nothing is kept by reference.** The hook could hand back a row Claude
@@ -230,5 +269,15 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   last result stored continues the conversation, so the transcript reader takes
   every block of a response and every result answering its calls (v1's reader
   missed these).
+- **Session-only scheduled tasks do not survive a resume.** Since Claude Code
+  2.1.290, Claude's own compaction writes a `session_cron_carry` row listing
+  the session's live, non-durable scheduled tasks (`CronCreate`, `/loop` with
+  an interval, reminders) so that resuming the session restores them. When a
+  hook supplies the compaction, Claude writes no such row, and a hook cannot
+  return one (only messages). So after tree compaction those tasks keep firing
+  in the running session but are gone once it is resumed (mv2 resumes agents,
+  e.g. to wake a dormant one). Durable tasks, kept in
+  `.claude/scheduled_tasks.json`, are unaffected. Fixing it needs Claude Code
+  to write the row for hook-supplied compactions too.
 - Claude Code's mod API is early access; this was built and tested on Claude
   Code 2.1.287.

@@ -34,15 +34,8 @@ def configure(parser):
 
 def _changed_schedule(agent, scheduler, budget, k, recency_ratio, recency_half_life, image_mode):
     current, _ = settings_file.schedule_for(agent.directory, agent.settings)
-    name = scheduler or current.scheduler
-    values = current.settings() if name == current.scheduler else {'scheduler': name, 'budget': current.budget}
-    if current.image_mode != 'budget_fit':
-        values['image_mode'] = current.image_mode
-    for key, value in (('budget', budget), ('k', k), ('recency_ratio', recency_ratio),
-                       ('recency_half_life', recency_half_life), ('image_mode', image_mode)):
-        if value is not None:
-            values[key] = value
-    return settings_file.parse_schedule(values)
+    return settings_file.override(current, {'scheduler': scheduler, 'budget': budget, 'k': k, 'recency_ratio': recency_ratio,
+                                            'recency_half_life': recency_half_life, 'image_mode': image_mode})
 
 
 def _stderr(event):
