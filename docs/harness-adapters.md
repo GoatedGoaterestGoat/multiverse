@@ -146,7 +146,7 @@ liveness also blocks a duplicate launch.
 
 The adapter first validates and describes its command. Core then records a fresh
 launch ID, bootstrap, prompt and request; starts/reuses a shared native service
-when required; creates a detached tmux session running `runner.py`; and tags the
+when required; creates a detached tmux session running `runtime/runner.py`; and tags the
 pane with universe, agent and launch IDs. The runner waits up to 15 seconds for
 core's `ready` file, scrubs inherited identities, opens any relay, launches the
 native child, and owns the relay/status watcher until that child exits. A clean
