@@ -16,7 +16,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents, native, rpc, universe
+from multiverse import agents, native, rpc
+from multiverse.universe import templates
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
 from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
@@ -125,7 +126,7 @@ class CodexDaemonTest(TerminalBase):
                 thread = yield from _thread(session)
                 return thread if isinstance(thread, NativeResult) else NativeResult('ok', value=thread.get('name'))
             return rpc.execute(RpcSpec(endpoint, plan)).value
-        roots = [universe.create(work / '.multiverse', 'project', workdir=work) for work in workspaces]
+        roots = [templates.create(work / '.multiverse', 'project', workdir=work) for work in workspaces]
         for root in roots:
             path = root / 'harnesses/codex/harness.json'
             spec = read(path)

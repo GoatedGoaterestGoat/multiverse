@@ -14,7 +14,7 @@ from textual import events
 from multiverse.dashboard import LocalBackend, group_key, agent_key
 from tui_demo import DemoBackend
 from multiverse.tui import MultiverseApp
-from multiverse.universe import create
+from multiverse.universe.templates import create
 
 
 class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):

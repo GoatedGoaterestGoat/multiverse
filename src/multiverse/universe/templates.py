@@ -1,44 +1,18 @@
+"""Template installs and refresh: copying definitions in, and taking template updates later."""
 import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 import tempfile
 
-from .store import now, read, uid, write
-
-TEMPLATES = Path(__file__).parent / "templates"
-KINDS = ("skills", "commands", "workflows", "harnesses")
+from ..store import now, read, uid, write
+from . import trash
+TEMPLATES = Path(__file__).resolve().parents[1] / "templates"
 # What each definition file looked like when it was installed or last refreshed,
 # so a refresh can tell local edits from template updates.
 MANIFEST = "template-files.json"
 # Universe-owned entries that a template refresh never reads or writes.
 UNMANAGED = {"universe.json", MANIFEST, "state", "trash", "subverses"}
-
-
-def slug(name):
-    if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", name):
-        raise ValueError("Use 1–64 letters, numbers, underscores or hyphens for names")
-    return name
-
-
-class UniverseNotFoundError(ValueError):
-    """No universe exists at the selected path or its ancestors."""
-
-
-def resolve(path=None):
-    path = Path(path or os.environ.get("MV2_UNIVERSE", Path.cwd())).resolve()
-    for directory in (path, *path.parents):
-        for candidate in (directory, directory / ".multiverse"):
-            if (candidate / "universe.json").is_file():
-                if read(candidate / "universe.json").get("schema") != 1:
-                    raise ValueError(f"Unsupported universe schema: {candidate}")
-                return candidate
-    raise UniverseNotFoundError(f"No universe found at or above {path}; run mv2 init")
-
-
-def workspace(root):
-    return (root / read(root / "universe.json")["workspace"]).resolve()
 
 
 def template_source(template):
@@ -166,7 +140,6 @@ def refresh_plan(root, template=None, take=()):
 
 def refresh_apply(root, plan):
     """Write a plan's adds and updates; replaced files go to trash/<stamp>-refresh."""
-    from .relocate import RECORD, _entry
     root, source = Path(root), Path(plan["source"])
     writes = [c for c in plan["changes"] if c["action"] in ("add", "update")]
     backup = None
@@ -174,7 +147,7 @@ def refresh_apply(root, plan):
         target, origin = root / change["path"], source / change["path"]
         if target.exists():
             if backup is None:
-                backup = _entry(root, "refresh")
+                backup = trash.entry(root, "refresh")
             saved = backup / change["path"]
             saved.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(target, saved)
@@ -188,7 +161,7 @@ def refresh_apply(root, plan):
             if os.path.exists(temp):
                 os.unlink(temp)
     if backup is not None:
-        write(backup / RECORD, {"kind": "refresh", "name": "refresh", "origin": str(root),
+        write(backup / trash.RECORD, {"kind": "refresh", "name": "refresh", "origin": str(root),
                                 "files": [c["path"] for c in writes if (backup / c["path"]).exists()],
                                 "removed_at": now()})
     # Files kept as they are count as local edits of the current template from
@@ -209,49 +182,3 @@ def refresh_apply(root, plan):
     write(root / MANIFEST, {"schema": 1, "template": plan["template"],
                             "source": "" if relative == "." else Path(relative).as_posix(), "files": files})
     return {"written": [c["path"] for c in writes], "trash": str(backup) if backup else None}
-
-
-def children(root):
-    return sorted(p.parent for p in (root / "subverses").glob("*/universe.json"))
-
-
-def tree(root):
-    yield root
-    for child in children(root):
-        yield from tree(child)
-
-
-def parent(root):
-    candidate = root.parent.parent
-    return candidate if root.parent.name == "subverses" and (candidate / "universe.json").is_file() else None
-
-
-def catalog(root):
-    result = []
-    for kind in KINDS:
-        filename = "harness.json" if kind == "harnesses" else "entry.json"
-        for path in sorted((root / kind).glob(f"*/{filename}")):
-            meta = read(path)
-            result.append({"kind": kind, "name": path.parent.name,
-                           "description": meta.get("description", ""), "path": str(path.parent)})
-    return result
-
-
-def command(root, query, arguments=""):
-    candidates = [e for e in catalog(root) if e["kind"] in ("commands", "workflows", "skills")
-                  and query in (e["name"], f'{e["kind"]}/{e["name"]}')]
-    if len(candidates) != 1:
-        raise ValueError(f"Expected one exact match for {query!r}; found {len(candidates)}. Use mv2 catalog.")
-    entry = candidates[0]
-    filename = "SKILL.md" if entry["kind"] == "skills" else "prompt.md"
-    return Path(entry["path"], filename).read_text() + (f"\nUser arguments:\n{arguments}\n" if arguments else "")
-
-
-def bootstrap(root, properties):
-    # Only the short bootstrap and identity are automatic. Catalog bodies stay on disk.
-    return (root / "bootstrap.md").read_text().strip() + "\n\n" + "\n".join([
-        f'Universe: {read(root / "universe.json")["name"]} ({properties["universe_id"]})',
-        f'Agent: {properties["name"]} ({properties["id"]})',
-        f"Universe files: {root}",
-        f'Your state: {root / "state" / "agents" / properties["id"]}',
-    ]) + "\n"

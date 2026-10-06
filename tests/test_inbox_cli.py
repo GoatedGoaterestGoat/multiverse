@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from test_multiverse import BaseTest, ROOT
 from multiverse import cli, store, universe
+from multiverse.universe import templates
 from multiverse.tools import inbox as inbox_tool
 
 
@@ -39,7 +40,7 @@ class InboxCliTest(BaseTest):
     def test_sender_blocks_resolve_native_agent_name_and_cross_universe_and_user(self):
         sender = str(uuid4())
         store.write(self.root / 'state/agents' / sender / 'properties.json', {'id': sender, 'name': 'renamed-worker'})
-        other = universe.create(self.work / 'other', 'Other universe', workdir=self.work)
+        other = templates.create(self.work / 'other', 'Other universe', workdir=self.work)
         foreign = str(uuid4())
         store.write(other / 'state/agents' / foreign / 'properties.json', {'id': foreign, 'name': 'reviewer'})
         long_text = '第一行\n' + 'full text ' * 1500 + '\nfinal line'

@@ -2,6 +2,7 @@
 import sys
 
 from .. import agents, harnesses, universe
+from ..universe import catalog
 from ..store import inbox
 
 def configure(parser):
@@ -19,7 +20,7 @@ def check(root, notes=None):
         try:
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
-            universe.catalog(scope)
+            catalog.catalog(scope)
             for item in agents.listing(scope):
                 runtime = item.get("runtime", {})
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"

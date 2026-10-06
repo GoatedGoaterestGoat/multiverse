@@ -6,7 +6,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import universe
+from multiverse.universe import templates
 from multiverse.store import read, write
 
 # The mod's defaults (hooks/statusline.ts DEFAULTS, asserted there too), in display order.
@@ -23,10 +23,10 @@ class StatusLineFileTest(unittest.TestCase):
         self.work = Path(self.temporary.name)
 
     def install(self, template):
-        return universe.create(self.work / template / '.multiverse', 'demo', template, self.work)
+        return templates.create(self.work / template / '.multiverse', 'demo', template, self.work)
 
     def changes(self, root):
-        return [(change['action'], change['reason']) for change in universe.refresh_plan(root, None, ())['changes']
+        return [(change['action'], change['reason']) for change in templates.refresh_plan(root, None, ())['changes']
                 if change['path'] == 'statusline.json']
 
     def test_every_template_ships_the_agreed_defaults_in_display_order(self):
@@ -66,13 +66,13 @@ class StatusLineFileTest(unittest.TestCase):
 
     def test_refresh_adds_the_file_to_a_universe_installed_before_it_existed(self):
         root = self.install('base')
-        manifest = read(root / universe.MANIFEST)
+        manifest = read(root / templates.MANIFEST)
         manifest['files'].pop('statusline.json')
-        write(root / universe.MANIFEST, manifest)
+        write(root / templates.MANIFEST, manifest)
         (root / 'statusline.json').unlink()
-        plan = universe.refresh_plan(root, None, ())
+        plan = templates.refresh_plan(root, None, ())
         self.assertEqual(self.changes(root), [('add', 'new in the template')])
-        universe.refresh_apply(root, plan)
+        templates.refresh_apply(root, plan)
         self.assertEqual(json.loads((root / 'statusline.json').read_text())['items'], DEFAULT_ITEMS)
         self.assertEqual(self.changes(root), [])
 
@@ -81,7 +81,7 @@ class StatusLineFileTest(unittest.TestCase):
         mine = {'schema': 1, 'items': {'agent': True, 'inbox': False}}
         write(root / 'statusline.json', mine)
         self.assertEqual(self.changes(root), [('local', 'edited locally; template unchanged')])
-        universe.refresh_apply(root, universe.refresh_plan(root, None, ()))
+        templates.refresh_apply(root, templates.refresh_plan(root, None, ()))
         self.assertEqual(json.loads((root / 'statusline.json').read_text()), mine)
         (root / 'statusline.json').unlink()
         self.assertEqual(self.changes(root), [('deleted', 'deleted locally; kept deleted')])

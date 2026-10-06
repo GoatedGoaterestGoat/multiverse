@@ -14,6 +14,7 @@ from uuid import uuid4
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 from multiverse import cli, universe
+from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import send
 
@@ -31,7 +32,7 @@ class SendStdinTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.root = universe.create(self.work / 'universe', 'stdin-tests', workdir=self.work)
+        self.root = templates.create(self.work / 'universe', 'stdin-tests', workdir=self.work)
         self.agent = str(uuid4())
         self.directory = self.root / 'state/agents' / self.agent
         write(self.directory / 'properties.json', {

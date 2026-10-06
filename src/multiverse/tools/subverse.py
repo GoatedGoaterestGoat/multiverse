@@ -1,5 +1,6 @@
 """Create a nested, independent universe."""
 from .. import universe
+from ..universe import templates
 from ..store import read
 
 def configure(parser):
@@ -11,7 +12,7 @@ def configure(parser):
 def run(root=None, *, name, template="base", workspace=None):
     root = universe.resolve(root)
     universe.slug(name)
-    child = universe.create(root / "subverses" / name, name, template, workspace or universe.workspace(root))
+    child = templates.create(root / "subverses" / name, name, template, workspace or universe.workspace(root))
     return {"universe": str(child), **read(child / "universe.json")}
 
 

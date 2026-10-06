@@ -13,6 +13,7 @@ install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import agents, runner, universe, harnesses
+from multiverse.universe import templates
 import json
 from multiverse.cli import parser, run
 from multiverse.store import append_message, inbox, read, write, lock
@@ -24,7 +25,7 @@ class LaunchIsolationTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name).resolve()
-        self.root = universe.create(self.work / "universe", "test", workdir=self.work)
+        self.root = templates.create(self.work / "universe", "test", workdir=self.work)
         path = self.root / 'harnesses/codex/harness.json'
         definition = read(path)
         definition['settings']['inbox_bridge'] = False
@@ -270,8 +271,8 @@ class LaunchIsolationTest(unittest.TestCase):
         self.assertEqual(inbox(agent)['messages'], [message])
 
     def test_all_bundled_adapters_clear_cross_harness_native_markers(self):
-        for manifest in sorted(universe.TEMPLATES.glob("*/harnesses/*/harness.json")):
-            with self.subTest(manifest=manifest.relative_to(universe.TEMPLATES)):
+        for manifest in sorted(templates.TEMPLATES.glob("*/harnesses/*/harness.json")):
+            with self.subTest(manifest=manifest.relative_to(templates.TEMPLATES)):
                 spec = harnesses.load(manifest.parents[2], manifest.parent.name).spec
                 launch = self.work / "marker-test" / "launches" / "launch"
                 identity = {"MV2_CLI": "/child/bin/mv2", "MV2_AGENT_ID": "child",

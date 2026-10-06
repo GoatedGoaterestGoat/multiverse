@@ -10,6 +10,7 @@ import sys
 import time
 
 from . import universe, harnesses
+from .universe import catalog
 from .harnesses.types import LaunchContext, SessionHandle, NativeResult, normalize_session_id, BridgeUnavailable
 from .store import lock, now, read, uid, write, message_record, update_message
 from .terminal.tmux import Tmux, observe, owned
@@ -164,7 +165,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
         launch = agent_dir / "launches" / launch_id
-        bootstrap = universe.bootstrap(root, properties)
+        bootstrap = catalog.bootstrap(root, properties)
         if adapter.bootstrap:
             bootstrap += "\n" + adapter.bootstrap.strip() + "\n"
         values = {"name": properties["name"], "agent_id": properties["id"],

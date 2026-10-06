@@ -15,6 +15,7 @@ import unittest
 from uuid import uuid4
 
 from multiverse import agents, universe
+from multiverse.universe import templates
 from multiverse.terminal import statusline
 from multiverse.store import append_message, inbox, read, write
 from test_multiverse import BaseTest, TerminalBase
@@ -45,7 +46,7 @@ class StatusRendererTest(BaseTest):
 
     def test_template_and_code_defaults_match_including_key_order(self):
         for name in ('base', 'development', 'testing'):
-            data = read(universe.TEMPLATES / name / 'statusline.json')['tmux']
+            data = read(templates.TEMPLATES / name / 'statusline.json')['tmux']
             self.assertEqual(data, statusline.DEFAULTS)
             self.assertEqual(list(data['items']), list(statusline.DEFAULTS['items']))
         self.assertNotIn('ctx', self.render())
@@ -83,7 +84,7 @@ class StatusRendererTest(BaseTest):
         self.assertEqual(self.render(), 'ctx 82k/200k · worker · codex')
 
     def test_subverse_identity_and_control_and_format_escaping(self):
-        child = universe.create(self.root / 'subverses/review', 'review', workdir=self.work)
+        child = templates.create(self.root / 'subverses/review', 'review', workdir=self.work)
         self.root = child
         self.directory = child / 'state/agents' / self.agent
         self.properties.update(universe_id=read(child / 'universe.json')['id'],
@@ -252,7 +253,7 @@ class StatusWrapperTest(TerminalBase):
         self.assertEqual(len(inbox(directory, peek=True)['messages']), 1)
 
     def test_shell_and_tmux_characters_in_root_paths_are_literal(self):
-        root = universe.create(self.work / "odd ' ) #(touch BAD) #{pane_id}" / '.multiverse', 'odd', workdir=self.work)
+        root = templates.create(self.work / "odd ' ) #(touch BAD) #{pane_id}" / '.multiverse', 'odd', workdir=self.work)
         # Use the existing fixture's stand-in harness without creating another native process type.
         import shutil
         shutil.copytree(self.root / 'harnesses/fake', root / 'harnesses/fake')

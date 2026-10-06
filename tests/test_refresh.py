@@ -6,6 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import cli, universe
+from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import refresh
 
@@ -22,7 +23,7 @@ class RefreshTest(unittest.TestCase):
         self.put("harnesses/codex/harness.json", '{"schema": 2, "adapter": "codex", "settings": {}}\n')
         write(self.template / "subverses" / "child" / "universe.json", {"schema": 1, "name": "child", "workspace": ".."})
         self.put("subverses/child/bootstrap.md", "Child v1\n")
-        self.root = universe.create(self.work / "project" / ".multiverse", "project", str(self.template), self.work / "project")
+        self.root = templates.create(self.work / "project" / ".multiverse", "project", str(self.template), self.work / "project")
 
     def put(self, path, text, base=None):
         target = (base or self.template) / path
@@ -36,20 +37,20 @@ class RefreshTest(unittest.TestCase):
         return {change["path"]: change["action"] for change in self.plan(**options)["changes"]}
 
     def test_install_records_definition_files_but_never_identity_or_state(self):
-        manifest = read(self.root / universe.MANIFEST)
+        manifest = read(self.root / templates.MANIFEST)
         self.assertEqual(manifest["template"], str(self.template))
         self.assertEqual(sorted(manifest["files"]), ["bootstrap.md", "harnesses/codex/harness.json",
                                                      "skills/coordination/SKILL.md"])
-        child = read(self.root / "subverses" / "child" / universe.MANIFEST)
+        child = read(self.root / "subverses" / "child" / templates.MANIFEST)
         self.assertEqual((child["source"], sorted(child["files"])), ("subverses/child", ["bootstrap.md"]))
         self.assertEqual(self.plan()["changes"], [])
 
     def test_dry_run_writes_nothing(self):
         self.put("bootstrap.md", "Bootstrap v2\n")
-        before = (self.root / universe.MANIFEST).read_text()
+        before = (self.root / templates.MANIFEST).read_text()
         self.assertEqual(self.actions(), {"bootstrap.md": "update"})
         self.assertEqual((self.root / "bootstrap.md").read_text(), "Bootstrap v1\n")
-        self.assertEqual((self.root / universe.MANIFEST).read_text(), before)
+        self.assertEqual((self.root / templates.MANIFEST).read_text(), before)
         self.assertFalse((self.root / "trash").exists())
 
     def test_apply_updates_unedited_files_and_saves_the_replaced_copy(self):
@@ -84,7 +85,7 @@ class RefreshTest(unittest.TestCase):
         self.assertTrue((self.root / "harnesses/codex/harness.json").exists())
 
     def test_without_a_manifest_differences_are_unknown_until_taken(self):
-        (self.root / universe.MANIFEST).unlink()
+        (self.root / templates.MANIFEST).unlink()
         self.put("harnesses/codex/harness.json", '{"schema": 2, "adapter": "codex", "settings": {"inbox_bridge": true}}\n', self.root)
         self.put("bootstrap.md", "Bootstrap v2\n")
         self.assertEqual(self.actions(apply=True), {"bootstrap.md": "unknown", "harnesses/codex/harness.json": "unknown"})

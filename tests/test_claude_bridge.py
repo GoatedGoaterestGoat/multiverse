@@ -15,6 +15,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses, native, universe
+from multiverse.universe import templates
 from multiverse.harnesses.claude import MOD, measured_usage, TYPEAHEAD, TYPEAHEAD_VERSION
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
@@ -377,7 +378,7 @@ class ClaudeBridgeTest(BaseTest):
             self.assertEqual(executor.write_lines(self.session(), ['{}']).state, 'error')  # nothing listening
 
     def test_core_names_the_sender_and_a_different_universe(self):
-        other = universe.create(self.work / 'other' / '.multiverse', 'pr-review', workdir=self.work)
+        other = templates.create(self.work / 'other' / '.multiverse', 'pr-review', workdir=self.work)
         lead, local = str(uuid4()), str(uuid4())
         write(other / 'state/agents' / lead / 'properties.json', {'id': lead, 'name': 'lead'})
         write(self.root / 'state/agents' / local / 'properties.json', {'id': local, 'name': 'reviewer'})

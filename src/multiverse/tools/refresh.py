@@ -3,6 +3,7 @@ import difflib
 from pathlib import Path
 
 from .. import universe
+from ..universe import templates
 from ..store import lock
 
 LABELS = {"update": "update", "add": "add", "local": "keep", "conflict": "conflict", "unknown": "unknown",
@@ -33,14 +34,14 @@ def run(root=None, *, apply=False, diff=False, take=(), template=None, recursive
     for scope in scopes:
         relative = {Path(path).as_posix() for path in take}
         with lock(scope / ".refresh.lock"):
-            plan = universe.refresh_plan(scope, template, relative if scope == root else ())
+            plan = templates.refresh_plan(scope, template, relative if scope == root else ())
             if diff:
                 for change in plan["changes"]:
                     if change["action"] in ("update", "conflict", "unknown", "local"):
                         change["diff"] = _diff(scope, plan["source"], change["path"])
             plan["applied"] = None
             if apply:
-                plan["applied"] = universe.refresh_apply(scope, plan)
+                plan["applied"] = templates.refresh_apply(scope, plan)
         results.append(plan)
     return {"universes": results, "apply": apply, "json": json, "ok": True}
 

@@ -7,6 +7,7 @@ import unittest
 from unittest.mock import patch
 
 from multiverse import cli, universe
+from multiverse.universe import templates
 from multiverse.store import read, write
 
 
@@ -31,7 +32,7 @@ class DefaultDashboardTest(unittest.TestCase):
         self.assertEqual(list((root / "state/agents").iterdir()), [])
 
     def test_no_command_reuses_parent_universe_without_rewriting_it(self):
-        root = universe.create(self.work / ".multiverse", "existing", workdir=self.work)
+        root = templates.create(self.work / ".multiverse", "existing", workdir=self.work)
         before = (root / "universe.json").read_bytes()
         child = self.work / "src"
         child.mkdir()
@@ -42,8 +43,8 @@ class DefaultDashboardTest(unittest.TestCase):
         self.assertFalse((child / ".multiverse").exists())
 
     def test_explicit_and_environment_selections_are_respected(self):
-        selected = universe.create(self.work / "selected", "selected", workdir=self.work)
-        other = universe.create(self.work / "other", "other", workdir=self.work)
+        selected = templates.create(self.work / "selected", "selected", workdir=self.work)
+        other = templates.create(self.work / "other", "other", workdir=self.work)
         with patch.dict(os.environ, {"MV2_UNIVERSE": str(other)}):
             self.launch("-u", str(selected))
             self.tui.assert_called_with(selected)

@@ -14,6 +14,7 @@ install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import agents, cli, universe
+from multiverse.universe import templates
 from multiverse.store import append_message, inbox, read, write
 
 
@@ -22,7 +23,7 @@ class LabHarnessContracts(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix='mv2-offline-')
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.root = universe.create(self.work / 'universe', 'offline', workdir=self.work)
+        self.root = templates.create(self.work / 'universe', 'offline', workdir=self.work)
         # These are argv/state contracts, not native daemon integration tests.
         path = self.root / 'harnesses/codex/harness.json'
         definition = read(path)
@@ -121,7 +122,7 @@ class LabHarnessContracts(unittest.TestCase):
 
     def test_agent_facing_templates_describe_current_messaging(self):
         for template in ('base', 'development', 'testing'):
-            root = universe.TEMPLATES / template
+            root = templates.TEMPLATES / template
             for path in root.rglob('*.md'):
                 with self.subTest(path=path):
                     text = path.read_text()

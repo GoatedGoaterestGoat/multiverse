@@ -8,7 +8,9 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse import agents, native, relocate, universe
+from multiverse import agents, native
+from multiverse.universe import templates
+from multiverse.universe import relocate
 from multiverse.store import read
 from multiverse.terminal.tmux import Tmux
 from test_multiverse import TerminalBase, until
@@ -145,7 +147,7 @@ class KillTest(TerminalBase):
         launched, directory = self.spawn()
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
-        destination = universe.create(self.root / 'subverses/review', 'review', workdir=self.work)
+        destination = templates.create(self.root / 'subverses/review', 'review', workdir=self.work)
         shutil.copytree(self.root / 'harnesses/fake', destination / 'harnesses/fake')
         pane = launched['runtime']['tmux']['pane']
         self.retain_wrapper(launched, directory)

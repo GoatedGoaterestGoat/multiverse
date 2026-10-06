@@ -9,6 +9,7 @@ from uuid import uuid4
 
 from test_multiverse import BaseTest, ROOT
 from multiverse import agents, harnesses, universe
+from multiverse.universe import templates
 from multiverse.store import read, write
 
 
@@ -72,7 +73,7 @@ class AgentNamesTest(BaseTest):
 
     def test_same_name_in_a_subverse_is_allowed_and_resume_reuses_the_original_record(self):
         first = agents.start(self.root, 'worker', harness='fake')
-        child = universe.create(self.root / 'subverses/child', 'child', workdir=self.work)
+        child = templates.create(self.root / 'subverses/child', 'child', workdir=self.work)
         write(child / 'harnesses/fake/harness.json', self.recipe)
         second = agents.start(child, 'worker', harness='fake')
         self.assertNotEqual(first['id'], second['id'])

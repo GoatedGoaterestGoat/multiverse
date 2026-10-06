@@ -7,38 +7,13 @@ system prompt, runner and tmux tags. Removal is a move into the containing
 universe's trash directory, so it can be undone by moving the entry back.
 """
 from contextlib import ExitStack
-from datetime import datetime, timezone
 import os
-from pathlib import Path
-import shutil
 
-from . import universe
-from .agents import directory, runtime, update_runtime
-from .store import lock, now, read, write
-from .terminal.tmux import observe, owned
+from . import exact, parent, trash, tree, workspace
+from ..agents import directory, runtime, update_runtime
+from ..store import lock, now, read, write
+from ..terminal.tmux import observe, owned
 
-TRASH = "trash"
-RECORD = ".removed.json"
-
-
-def exact(value, root=None):
-    """A universe directory named exactly, never an ancestor found by searching.
-
-    Accepts a universe directory, a workspace containing `.multiverse`, or,
-    when `root` is given, a subverse path such as `cad-lab/verification`
-    relative to it. Operations below take exact paths; callers resolve names.
-    """
-    path = Path(value).expanduser()
-    for candidate in (path, path / ".multiverse"):
-        if (candidate / "universe.json").is_file():
-            return candidate.resolve()
-    if root is not None and not path.is_absolute():
-        nested = Path(root)
-        for part in path.parts:
-            nested = nested / "subverses" / universe.slug(part)
-        if (nested / "universe.json").is_file():
-            return nested.resolve()
-    raise ValueError(f"Not a universe or subverse: {value}")
 
 
 def _stopped(agent_dir):
@@ -58,7 +33,7 @@ def _stopped(agent_dir):
 
 
 def _agents(scope):
-    return sorted(p.parent for root in universe.tree(scope)
+    return sorted(p.parent for root in tree(scope)
                   for p in (root / "state" / "agents").glob("*/properties.json"))
 
 
@@ -71,33 +46,24 @@ def _hold(stack, agent_dirs):
 
 def _pin_workspaces(scope):
     """Record absolute workspaces, valid wherever the directory ends up."""
-    for root in universe.tree(scope):
+    for root in tree(scope):
         meta = read(root / "universe.json")
-        meta["workspace"] = str(universe.workspace(root))
+        meta["workspace"] = str(workspace(root))
         write(root / "universe.json", meta)
 
 
 def _relative_workspaces(scope):
-    for root in universe.tree(scope):
+    for root in tree(scope):
         meta = read(root / "universe.json")
-        meta["workspace"] = os.path.relpath(universe.workspace(root), root)
+        meta["workspace"] = os.path.relpath(workspace(root), root)
         write(root / "universe.json", meta)
 
 
 def _subverse(path):
     path = exact(path)
-    if universe.parent(path) is None:
+    if parent(path) is None:
         raise ValueError("A top-level universe cannot be moved or removed; only its subverses")
     return path
-
-
-def _entry(container, name):
-    base = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S-") + name
-    entry, number = container / TRASH / base, 2
-    while entry.exists():
-        entry, number = container / TRASH / f"{base}-{number}", number + 1
-    entry.parent.mkdir(exist_ok=True)
-    return entry
 
 
 def move_agent(root, reference, destination):
@@ -128,7 +94,7 @@ def move_subverse(path, destination):
     destination = exact(destination)
     if destination == path or destination.is_relative_to(path):
         raise ValueError("A subverse cannot be moved into itself")
-    if destination == universe.parent(path):
+    if destination == parent(path):
         raise ValueError(f"{path.name} is already in that universe")
     target = destination / "subverses" / path.name
     if target.exists():
@@ -148,11 +114,11 @@ def remove_agent(root, reference):
     properties = read(agent_dir / "properties.json")
     with ExitStack() as stack:
         _hold(stack, [agent_dir])
-        entry = _entry(root, f'{properties["name"]}-{agent_dir.name[:8]}')
+        entry = trash.entry(root, f'{properties["name"]}-{agent_dir.name[:8]}')
         agent_dir.rename(entry)
     record = {"kind": "agent", "name": properties["name"], "id": agent_dir.name,
               "origin": str(agent_dir), "removed_at": now()}
-    write(entry / RECORD, record)
+    write(entry / trash.RECORD, record)
     return {**record, "trash": str(entry)}
 
 
@@ -164,21 +130,9 @@ def remove_subverse(path):
         _hold(stack, agent_dirs)
         # Absolute workspaces keep the entry valid if it is moved back.
         _pin_workspaces(path)
-        entry = _entry(universe.parent(path), path.name)
+        entry = trash.entry(parent(path), path.name)
         path.rename(entry)
     record = {"kind": "subverse", "name": meta["name"], "id": meta["id"], "origin": str(path),
               "agents": len(agent_dirs), "removed_at": now()}
-    write(entry / RECORD, record)
+    write(entry / trash.RECORD, record)
     return {**record, "trash": str(entry)}
-
-
-def trash(root, empty=False):
-    """List, or permanently delete, removed entries across this universe tree."""
-    entries = []
-    for scope in universe.tree(exact(root)):
-        for entry in sorted((scope / TRASH).glob("*/" + RECORD)):
-            entries.append({**read(entry), "trash": str(entry.parent)})
-    if empty:
-        for entry in entries:
-            shutil.rmtree(entry["trash"])
-    return {"entries": entries, "emptied": empty}

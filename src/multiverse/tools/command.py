@@ -1,6 +1,7 @@
 """Print an exact matching prompt; never execute it."""
 import argparse
 from .. import universe
+from ..universe import catalog
 
 def configure(parser):
     parser.add_argument("name")
@@ -8,7 +9,7 @@ def configure(parser):
 
 
 def run(root=None, *, name, arguments=()):
-    return universe.command(universe.resolve(root), name, " ".join(arguments))
+    return catalog.command(universe.resolve(root), name, " ".join(arguments))
 
 
 if __name__ == "__main__":

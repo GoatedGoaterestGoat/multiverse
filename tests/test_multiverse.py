@@ -19,6 +19,8 @@ install_native_safety()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe
+from multiverse.universe import catalog
+from multiverse.universe import templates
 from multiverse.tools import send
 from multiverse.store import append_message, inbox, read, write
 from multiverse.terminal.tmux import Tmux, observe
@@ -46,15 +48,15 @@ class BaseTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="mv2-test-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name).resolve()
-        self.root = universe.create(self.work / ".multiverse", "test", workdir=self.work)
+        self.root = templates.create(self.work / ".multiverse", "test", workdir=self.work)
 
 
 class FilesTest(BaseTest):
     def test_clean_recursive_install(self):
-        child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
-        universe.create(child / "subverses" / "verify", "verify", workdir=self.work)
+        child = templates.create(self.root / "subverses" / "review", "review", workdir=self.work)
+        templates.create(child / "subverses" / "verify", "verify", workdir=self.work)
         (child / "state" / "secret").write_text("never clone live state")
-        clone = universe.create(self.work / "copy", "copy", str(self.root), self.work)
+        clone = templates.create(self.work / "copy", "copy", str(self.root), self.work)
         old = list(universe.tree(self.root))
         new = list(universe.tree(clone))
         self.assertEqual(len(new), 3)
@@ -65,24 +67,24 @@ class FilesTest(BaseTest):
         self.assertEqual(universe.resolve(child), child)
         self.assertEqual(universe.parent(child), self.root)
         with self.assertRaises(ValueError):
-            universe.create(self.root, "overwrite")
+            templates.create(self.root, "overwrite")
 
     def test_catalog_loads_only_exact_unique_entry(self):
-        self.assertIn("Review the requested change", universe.command(self.root, "review"))
+        self.assertIn("Review the requested change", catalog.command(self.root, "review"))
         duplicate = self.root / "commands" / "review"
         duplicate.mkdir()
         write(duplicate / "entry.json", {"description": "ambiguous"})
         (duplicate / "prompt.md").write_text("DO NOT EXECUTE")
         with self.assertRaises(ValueError):
-            universe.command(self.root, "review")
+            catalog.command(self.root, "review")
         with self.assertRaises(ValueError):
-            universe.command(self.root, "rev")
-        self.assertEqual(universe.command(self.root, "commands/review"), "DO NOT EXECUTE")
+            catalog.command(self.root, "rev")
+        self.assertEqual(catalog.command(self.root, "commands/review"), "DO NOT EXECUTE")
 
     def test_bootstrap_does_not_load_skill_bodies(self):
         skill = self.root / "skills" / "coordination" / "SKILL.md"
         skill.write_text("SENTINEL_LONG_CAPABILITY\n" * 1000)
-        prompt = universe.bootstrap(self.root, {"id": "worker-id", "name": "worker", "universe_id": "u"})
+        prompt = catalog.bootstrap(self.root, {"id": "worker-id", "name": "worker", "universe_id": "u"})
         self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
         self.assertLess(len(prompt.split()), 260)
 
@@ -122,11 +124,11 @@ class FilesTest(BaseTest):
         self.assertEqual(result["live"], "dormant")
 
     def test_subverse_view_is_local_and_parent_shows_summary(self):
-        child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
+        child = templates.create(self.root / "subverses" / "review", "review", workdir=self.work)
         write(child / "views" / "default.json", {"columns": ["name", "phase", "harness"]})
         self.assertEqual(columns(child), ["name", "phase", "harness"])
         self.assertNotEqual(columns(child), columns(self.root))
-        nested = universe.create(child / "subverses" / "verify", "verify", workdir=self.work)
+        nested = templates.create(child / "subverses" / "verify", "verify", workdir=self.work)
         data = LocalBackend().snapshot(self.root)
         self.assertEqual([row["path"] for row in hierarchy(data)], [str(self.root), str(child), str(nested)])
         self.assertEqual(data["groups"][-1]["parent"], str(child))

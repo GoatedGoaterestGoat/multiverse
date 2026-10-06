@@ -81,9 +81,9 @@ class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
 
     def test_view_file_with_tokens_key_loads(self):
         import tempfile, json
-        from multiverse import universe
+        from multiverse.universe import templates
         with tempfile.TemporaryDirectory() as temp:
-            root = universe.create(Path(temp) / ".multiverse", "top", workdir=Path(temp))
+            root = templates.create(Path(temp) / ".multiverse", "top", workdir=Path(temp))
             (root / "views").mkdir(exist_ok=True)
             (root / "views" / "default.json").write_text(json.dumps({"columns": ["name", "tokens", "activity", "cost"]}))
             self.assertEqual(view(root)["columns"], ["name", "context", "status", "cost"])

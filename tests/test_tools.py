@@ -12,6 +12,7 @@ from uuid import uuid4
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 from multiverse import cli, universe
+from multiverse.universe import templates
 from multiverse.dashboard import LocalBackend
 from multiverse.store import read, write
 from multiverse.tools import spawn
@@ -22,7 +23,7 @@ class ToolsTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.root = universe.create(self.work / "universe", "tools", workdir=self.work)
+        self.root = templates.create(self.work / "universe", "tools", workdir=self.work)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("MV2_")}
         self.env["PYTHONPATH"] = str(PROJECT / "src")
         self.agent = str(uuid4())

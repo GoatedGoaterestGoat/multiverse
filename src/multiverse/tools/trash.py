@@ -1,5 +1,6 @@
 """List removed agents and subverses and replaced refresh files, or delete them permanently with --empty."""
-from .. import relocate, universe
+from ..universe import trash
+from .. import universe
 
 
 def configure(parser):
@@ -7,7 +8,7 @@ def configure(parser):
 
 
 def run(root=None, *, empty=False):
-    return relocate.trash(universe.resolve(root), empty)
+    return trash.contents(universe.resolve(root), empty)
 
 
 if __name__ == "__main__":
