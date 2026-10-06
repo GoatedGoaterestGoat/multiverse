@@ -27,7 +27,9 @@ from multiverse.tools import send
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write
 from multiverse.terminal.tmux import Tmux, observe
-from multiverse.dashboard import LocalBackend, columns, hierarchy
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.views import columns
+from multiverse.ui.tree import hierarchy
 
 
 def append_many(args):

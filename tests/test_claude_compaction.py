@@ -586,7 +586,7 @@ class AdapterTest(Fixture):
 
 class DashboardBackendTest(Fixture):
     def test_the_dashboard_reads_and_saves_compaction_through_the_tool(self):
-        from multiverse.dashboard import LocalBackend
+        from multiverse.ui.backend import LocalBackend
         backend, agent = LocalBackend(), self.agent_dir.name
         r = Rows()
         for index in range(4):

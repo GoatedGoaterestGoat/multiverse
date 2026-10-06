@@ -12,7 +12,7 @@ from uuid import uuid4
 import test_codex_launch as launch_tests
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
-from multiverse import dashboard
+from multiverse.ui import tree
 from multiverse.runtime import rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
@@ -177,7 +177,7 @@ class CodexUsageLifecycleTest(TerminalBase):
         original = read(directory / 'runtime.json')['usage']
 
         def row():
-            return dashboard.with_usage(lifecycle.listing(self.root)[0])
+            return tree.with_usage(lifecycle.listing(self.root)[0])
 
         self.assertEqual(row()['context'], '180k/258k')
         for _ in range(2):

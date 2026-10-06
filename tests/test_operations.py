@@ -9,7 +9,7 @@ from multiverse.runtime import lifecycle
 from multiverse import harnesses
 from multiverse.runtime import native
 from multiverse.cli import parser
-from multiverse.dashboard import LocalBackend
+from multiverse.ui.backend import LocalBackend
 from multiverse.harnesses.types import CAPABILITIES, Capability, CommandSpec, NativeResult, SessionHandle
 from multiverse.universe.mailbox import inbox
 from multiverse.store import read, write

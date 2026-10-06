@@ -10,9 +10,10 @@ from textual.widgets import DataTable, Static
 from multiverse import universe
 from multiverse.runtime import lifecycle
 from multiverse.universe import relocate, templates, trash
-from multiverse.dashboard import LocalBackend, agent_key, group_key
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.tree import agent_key, group_key
 from multiverse.store import read, write
-from multiverse.tui import Form, MultiverseApp
+from multiverse.ui.app import Form, MultiverseApp
 
 
 class TreeEditingTests(unittest.IsolatedAsyncioTestCase):

@@ -9,9 +9,9 @@ from pathlib import Path
 
 from rich.text import Text
 
-from .dashboard import agent_key, group_key
-from .display import clean
-from .universe import slug
+from ..display import clean
+from ..universe import slug
+from .tree import agent_key, group_key
 
 HINT = "#7f849c"
 # A dot-prefixed name can never be a real subverse, so the draft row cannot collide.

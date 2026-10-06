@@ -19,6 +19,6 @@ mv2 = "multiverse.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-multiverse = ["templates/**/*", "templates/**/.gitignore", "*.tcss", "harnesses/**/*.json", "harnesses/**/*.ts",
+multiverse = ["templates/**/*", "templates/**/.gitignore", "ui/*.tcss", "harnesses/**/*.json", "harnesses/**/*.ts",
               "harnesses/claude/mod/.claude-plugin/plugin.json",
               "harnesses/claude/typeahead/.claude-plugin/plugin.json"]

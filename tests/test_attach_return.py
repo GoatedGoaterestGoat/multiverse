@@ -271,7 +271,7 @@ class AttachReturnTest(TerminalBase):
         code = (
             'import sys; from pathlib import Path; '
             f'sys.path.insert(0, {str(ROOT / "src")!r}); '
-            'from multiverse.tui import MultiverseApp; '
+            'from multiverse.ui.app import MultiverseApp; '
             f'MultiverseApp(Path({str(self.root)!r}), refresh_interval=.05).run()'
         )
         master, process = self.client([sys.executable, '-c', code])

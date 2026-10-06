@@ -10,13 +10,15 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static, TextArea
 
-from .dashboard import COLUMNS, LocalBackend, agent_key, group_key, hierarchy, rate_limits
-from .display import clean
-from .draft import AgentDraft, SubverseDraft
-from .compaction_screens import CompactionScreen
+from ..display import clean
+from ..universe import slug
+from .backend import LocalBackend
+from .compaction import CompactionScreen
+from .drafts import AgentDraft, SubverseDraft
 from .inspector import Inspector
-from .universe import slug
-from .views import LocalView
+from .panels import LocalView
+from .tree import agent_key, group_key, hierarchy, rate_limits
+from .views import COLUMNS
 
 KEYS = """NAVIGATION
 ↑ / k, ↓ / j   Select a row
@@ -197,7 +199,7 @@ class Breadcrumb(Static):
 
 
 class MultiverseApp(App):
-    CSS_PATH = "tui.tcss"
+    CSS_PATH = "app.tcss"
     TITLE = "Multiverse"
     BINDINGS = [
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),

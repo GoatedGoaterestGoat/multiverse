@@ -13,7 +13,7 @@ from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse import harnesses as adapters
 from multiverse.cli import parser
-from multiverse.dashboard import harnesses
+from multiverse.ui.backend import harnesses
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase, until
 

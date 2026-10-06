@@ -13,7 +13,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import display, harnesses, universe
 from multiverse.runtime import native
-from multiverse.dashboard import LocalBackend, harnesses as discover
+from multiverse.ui.backend import LocalBackend, harnesses as discover
 from multiverse.harnesses.types import CAPABILITIES, SessionHandle, Capability, CommandSpec, LaunchContext, NativeEndpoint, NativeResult
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write

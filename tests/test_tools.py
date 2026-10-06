@@ -13,7 +13,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 from multiverse import cli
 from multiverse.universe import templates
-from multiverse.dashboard import LocalBackend
+from multiverse.ui.backend import LocalBackend
 from multiverse.store import read, write
 from multiverse.tools import spawn
 

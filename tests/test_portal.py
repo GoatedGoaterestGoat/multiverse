@@ -10,9 +10,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import Button, DataTable, Input, Markdown, Static
-from multiverse.dashboard import LocalBackend, group_key, view
-from multiverse.tui import MultiverseApp
-from multiverse.views import ArtifactPreview, artifact_path
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.tree import group_key
+from multiverse.ui.views import view
+from multiverse.ui.app import MultiverseApp
+from multiverse.ui.panels import ArtifactPreview, artifact_path
 
 
 class PortalTests(unittest.IsolatedAsyncioTestCase):

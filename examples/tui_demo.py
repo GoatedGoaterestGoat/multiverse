@@ -3,7 +3,8 @@ from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 
-from multiverse.dashboard import COLORS, DEFAULT_COLUMNS, counts, within
+from multiverse.ui.views import COLORS, DEFAULT_COLUMNS
+from multiverse.ui.tree import counts, within
 from multiverse.store import uid
 from multiverse.universe import slug
 
@@ -119,7 +120,7 @@ class DemoBackend:
 
 
 if __name__ == "__main__":
-    from multiverse.tui import start
+    from multiverse.ui.app import start
 
     backend = DemoBackend()
     start(backend.root, backend)

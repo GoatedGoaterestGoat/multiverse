@@ -20,8 +20,8 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static
 
-from .compaction import config
-from .display import clean, tokens
+from ..compaction import config
+from ..display import clean, tokens
 
 MISSING = object()
 GENERIC = config.describe(config.Settings())['builder']

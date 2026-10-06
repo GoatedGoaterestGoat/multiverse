@@ -8,9 +8,9 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
-from multiverse.compaction_screens import AgentScreen, Choice, CompactionScreen, Field, apply_changes, sections
-from multiverse.dashboard import group_key
-from multiverse.tui import KEYS, MultiverseApp
+from multiverse.ui.compaction import AgentScreen, Choice, CompactionScreen, Field, apply_changes, sections
+from multiverse.ui.tree import group_key
+from multiverse.ui.app import KEYS, MultiverseApp
 from tui_demo import DemoBackend
 
 FILE = {"schema": 1, "enabled": False,

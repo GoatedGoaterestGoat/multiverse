@@ -7,9 +7,11 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import Static
-from multiverse import dashboard, display
-from multiverse.dashboard import COLUMNS, agent_key, view
-from multiverse.tui import MultiverseApp
+from multiverse.ui import views
+from multiverse import display
+from multiverse.ui.views import COLUMNS, view
+from multiverse.ui.tree import agent_key
+from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
 
 
@@ -73,11 +75,11 @@ class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
 
     def test_views_with_the_old_tokens_key_still_show_the_context_column(self):
-        self.assertEqual(dashboard.COLUMN_ALIASES["tokens"], "context")
+        self.assertEqual(views.COLUMN_ALIASES["tokens"], "context")
         self.assertNotIn("tokens", COLUMNS)
-        self.assertIn("context", dashboard.DEFAULT_COLUMNS)
+        self.assertIn("context", views.DEFAULT_COLUMNS)
         self.assertIn("cost", COLUMNS)
-        self.assertNotIn("cost", dashboard.DEFAULT_COLUMNS)
+        self.assertNotIn("cost", views.DEFAULT_COLUMNS)
 
     def test_view_file_with_tokens_key_loads(self):
         import tempfile, json

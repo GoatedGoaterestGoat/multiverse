@@ -11,11 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import Button, DataTable, Footer, Input, OptionList, Static, TextArea
 from textual import events
-from multiverse.dashboard import agent_key, group_key
+from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
-from multiverse.draft import SubverseDraft
-from multiverse.tui import Details, Form, KEYS, MultiverseApp
-from multiverse.dashboard import COLUMNS
+from multiverse.ui.drafts import SubverseDraft
+from multiverse.ui.app import Details, Form, KEYS, MultiverseApp
+from multiverse.ui.views import COLUMNS
 
 
 class RecordingBackend(DemoBackend):
@@ -389,7 +389,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.app.selected['live'], 'dormant')
 
     async def test_retained_stopped_agent_can_resume_and_ending_counts_as_live(self):
-        from multiverse.dashboard import counts
+        from multiverse.ui.tree import counts
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
             stopped = next(a for a in self.backend.agents if a['live'] == 'stopped')

@@ -18,7 +18,7 @@ class DefaultDashboardTest(unittest.TestCase):
         self.work = Path(temporary.name).resolve()
         self.enterContext(chdir(self.work))
         self.enterContext(patch.dict(os.environ, {"MV2_UNIVERSE": ""}))
-        self.tui = self.enterContext(patch("multiverse.tui.start"))
+        self.tui = self.enterContext(patch("multiverse.ui.app.start"))
 
     def launch(self, *args):
         cli.run(cli.parser().parse_args(args))

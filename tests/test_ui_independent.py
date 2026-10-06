@@ -11,9 +11,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Static
 from textual import events
-from multiverse.dashboard import LocalBackend, group_key, agent_key
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.tree import group_key, agent_key
 from tui_demo import DemoBackend
-from multiverse.tui import MultiverseApp
+from multiverse.ui.app import MultiverseApp
 from multiverse.universe.templates import create
 
 
