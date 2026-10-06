@@ -8,7 +8,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
-from multiverse.ui.compaction import AgentScreen, Choice, CompactionScreen, Field, apply_changes, sections
+from multiverse.ui.compaction import AgentScreen, CompactionScreen, apply_changes, sections
+from multiverse.ui.settings import Choice, Field
 from multiverse.ui.tree import group_key
 from multiverse.ui.screens import KEYS
 from multiverse.ui.app import MultiverseApp
