@@ -6,6 +6,7 @@ from ..harnesses import load as load_harness
 from ..store import read
 from ..tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse)
+from . import theme
 from .tree import counts, within
 from .views import view
 
@@ -40,7 +41,7 @@ class LocalBackend:
                                "description": data.get("description", ""), "accent": style["accent"]})
             except (OSError, ValueError, KeyError) as error:
                 groups.append({**group, "name": scope.name, "description": str(error),
-                               "accent": "#f38ba8", "error": True})
+                               "accent": theme.RED, "error": True})
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),

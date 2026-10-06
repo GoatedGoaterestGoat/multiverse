@@ -9,6 +9,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
 from ..display import clean
+from . import theme
 from .tree import within
 
 
@@ -70,38 +71,38 @@ class Inspector(Vertical):
             state = f'{row["alive"]}/{row["total"]} live · {row["waiting"]} waiting · {row["blocked"]} blocked'
             members = [a for a in self.app.snapshot["agents"] if within(a, Path(row["path"]))]
             members.sort(key=lambda a: (a.get("status") != "waiting", a.get("phase") != "blocked"))
-            work = Text("ACTIVE WORK\n", style="#7f849c")
+            work = Text("ACTIVE WORK\n", style=theme.OVERLAY1)
             for agent in members[:4]:
                 work.append("\n" + clean(agent["name"]) + "\n", style=accent)
-                work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style="#a6adc8")
+                work.append(clean(agent.get("summary") or agent.get("task", "—")) + "\n", style=theme.SUBTEXT0)
             if not members:
                 work.append("\nNo agents yet. Select this group and press n.")
             self.query_one("#inspect-group", Static).update(work)
         else:
-            state = Text(clean(row.get("harness", "unknown")), style="#a6adc8")
+            state = Text(clean(row.get("harness", "unknown")), style=theme.SUBTEXT0)
             if row.get("model"):
                 state.append(" / " + clean(row["model"]))
             live = row.get("live", "unknown")
-            state.append(f" · {live}", style="#a6e3a1" if live == "alive" else "#f9e2af")
-            state.append("\nStatus: " + clean(row.get("status", "unknown")), style="#a6adc8")
-            state.append(" · Reported: " + clean(row.get("phase", "unknown")), style="#a6adc8")
-            state.append("\n" + clean(row.get("context_line", "Context: N/A")), style="#a6adc8")
+            state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
+            state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
+            state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
+            state.append("\n" + clean(row.get("context_line", "Context: N/A")), style=theme.SUBTEXT0)
             selection = row.get('runtime', {}).get('native_mode')
             if selection:
-                state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style='#a6adc8')
+                state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style=theme.SUBTEXT0)
                 if selection.get('fallback_reason'):
-                    state.append('\nFallback: ' + clean(selection['fallback_reason']), style='#f9e2af')
+                    state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
             versions = row.get('runtime', {}).get('native_versions')
             relay = row.get('runtime', {}).get('native_relay') or {}
             if row.get('launch_error'):
-                state.append('\n' + clean(row['launch_error'].splitlines()[0]), style='bold #f38ba8')
+                state.append('\n' + clean(row['launch_error'].splitlines()[0]), style=f'bold {theme.RED}')
             if relay.get('state') == 'lost':
-                state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style='bold #f38ba8')
-                state.append('\n' + clean(relay.get('detail', '')), style='#f9e2af')
+                state.append('\n' + clean(relay.get('reason', 'Native relay lost')), style=f'bold {theme.RED}')
+                state.append('\n' + clean(relay.get('detail', '')), style=theme.YELLOW)
             if versions:
                 mismatch = versions['cli'] != versions['daemon']
                 state.append(f'\nVersions: CLI {clean(versions["cli"])} / daemon {clean(versions["daemon"])}'
-                             + (' (different)' if mismatch else ''), style='#f9e2af' if mismatch else '#a6adc8')
+                             + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
             if live != "alive":
                 self.query_one("#pane-scroll").border_title = "TERMINAL · " + live.upper()
                 message = ('Native work is ending.' if live == 'ending' else

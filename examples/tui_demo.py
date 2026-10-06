@@ -3,7 +3,8 @@ from copy import deepcopy
 from pathlib import Path
 from threading import RLock
 
-from multiverse.ui.views import COLORS, DEFAULT_COLUMNS
+from multiverse.ui import theme
+from multiverse.ui.views import DEFAULT_COLUMNS
 from multiverse.ui.tree import counts, within
 from multiverse.store import uid
 from multiverse.universe import slug
@@ -19,10 +20,10 @@ class DemoBackend:
         review, cad = self.root / "subverses/pr-review", self.root / "subverses/cad-lab"
         verify = cad / "subverses/verification"
         for path, title, description, color in (
-            (self.root, "Fastvideo", "Video generation · kernels, training and delivery", COLORS[0]),
-            (review, "PR Review", "Changes, evidence and a clean handoff", COLORS[1]),
-            (cad, "CAD Lab", "Design trials and harness evaluation", COLORS[2]),
-            (verify, "Verification", "Reproduce results before promoting a harness", COLORS[3]),
+            (self.root, "Fastvideo", "Video generation · kernels, training and delivery", theme.ACCENTS[0]),
+            (review, "PR Review", "Changes, evidence and a clean handoff", theme.ACCENTS[1]),
+            (cad, "CAD Lab", "Design trials and harness evaluation", theme.ACCENTS[2]),
+            (verify, "Verification", "Reproduce results before promoting a harness", theme.ACCENTS[3]),
         ):
             self.scopes[path] = {"name": title, "description": description, "accent": color, "harnesses": ["codex", "claude", "pi"]}
         samples = [
@@ -114,7 +115,7 @@ class DemoBackend:
             path = root / "subverses" / name
             if path in self.scopes:
                 raise ValueError("That subverse already exists")
-            self.scopes[path] = {"name": name, "description": "A new demo universe", "accent": COLORS[len(self.scopes) % len(COLORS)],
+            self.scopes[path] = {"name": name, "description": "A new demo universe", "accent": theme.ACCENTS[len(self.scopes) % len(theme.ACCENTS)],
                                  "harnesses": ["codex", "claude", "pi"]}
             return path
 

@@ -12,6 +12,7 @@ from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static,
 
 from ..display import clean
 from ..universe import slug
+from . import theme
 from .backend import LocalBackend
 from .compaction import CompactionScreen
 from .drafts import AgentDraft, SubverseDraft
@@ -256,6 +257,10 @@ class MultiverseApp(App):
         yield Footer()
         yield HarnessMenu(id="harness-menu")
 
+    def get_css_variables(self):
+        # app.tcss names colors as $mv-NAME; theme.py holds their values.
+        return {**super().get_css_variables(), **theme.css_variables()}
+
     def on_mount(self):
         self.apply_size(self.size.width, self.size.height)
         self.refresh_snapshot()
@@ -394,7 +399,7 @@ class MultiverseApp(App):
         if self.moving:
             for key, cells in rendered:
                 if key == self.moving["key"]:
-                    cells[0].append("  ⇢ moving", style="italic #f9e2af")
+                    cells[0].append("  ⇢ moving", style=f"italic {theme.YELLOW}")
         signature = (list(widths.items()), rendered)
         if signature != self._table_signature:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
@@ -417,7 +422,7 @@ class MultiverseApp(App):
     def draft_cell(self, row, field):
         if field == "name":
             label = self.cell(row, field)[:sum(len(guide) for guide, _color in row["guides"])]
-            label.append("+ ", style="#94e2d5")
+            label.append("+ ", style=theme.TEAL)
             label.append_text(self.draft.cell("name"))
             return label
         return self.draft.column_cell(field)
@@ -468,13 +473,13 @@ class MultiverseApp(App):
         color = row["accent"]
         if field == "name":
             group = row["kind"] == "group"
-            label = Text(style=f"bold {color} on #1e1e2e" if group else color)
+            label = Text(style=f"bold {color} on {theme.BASE}" if group else color)
             for guide, accent in row["guides"]:
                 label.append(guide, style=f"not bold {accent}")
             label.append(("▾ " if row["expanded"] else "▸ ") if group else "  ")
             label.append(clean(row["name"]))
             if not group and row.get("status") == "waiting":
-                label.append(" ●", style="bold #fab387")
+                label.append(" ●", style=f"bold {theme.PEACH}")
             return label
         if row["kind"] == "group":
             value = {"live": f'{row["alive"]}/{row["total"]}',
@@ -482,15 +487,15 @@ class MultiverseApp(App):
                      "summary": (f'{row["waiting"]} waiting · ' if row["waiting"] else "")
                                 + (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]),
                      "task": clean(row["description"])}.get(field, "")
-            return Text(value, style=f'{color} on #1e1e2e')
+            return Text(value, style=f'{color} on {theme.BASE}')
         value = clean(row.get(field, "—"))
-        color = {"alive": "#a6e3a1", "ending": "#fab387", "stopped": "#7f849c", "dormant": "#7f849c", "unknown": "#f9e2af",
-                 "blocked": "#f9e2af", "done": "#94e2d5", "working": "#89b4fa",
-                 "waiting": "#fab387", "disconnected": "bold #f38ba8"}.get(value, "#a6adc8")
+        color = {"alive": theme.GREEN, "ending": theme.PEACH, "stopped": theme.OVERLAY1, "dormant": theme.OVERLAY1, "unknown": theme.YELLOW,
+                 "blocked": theme.YELLOW, "done": theme.TEAL, "working": theme.BLUE,
+                 "waiting": theme.PEACH, "disconnected": f"bold {theme.RED}"}.get(value, theme.SUBTEXT0)
         if field == "context" and row.get("context_level"):
-            return Text(value, style={"warn": "#f9e2af", "high": "bold #f38ba8"}[row["context_level"]])
+            return Text(value, style={"warn": theme.YELLOW, "high": f"bold {theme.RED}"}[row["context_level"]])
         if field == "status" and value == "waiting":
-            return Text(value, style="bold reverse #fab387")
+            return Text(value, style=f"bold reverse {theme.PEACH}")
         return Text(value, style=color)
 
     def show_selection(self, key):
@@ -503,7 +508,7 @@ class MultiverseApp(App):
                 hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
                 self.query_one("#selection", Static).update(f"Harness: {value} ▾ · {hint}")
                 return
-            label = Text(f"{self.draft.label()}: ", style="#94e2d5")
+            label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
             value = self.draft.cell(self.draft.active)
             # Keep the insertion point visible while editing a long value.
             budget = max(8, self.size.width - len(label.plain) - 4)

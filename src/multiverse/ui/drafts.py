@@ -11,9 +11,10 @@ from rich.text import Text
 
 from ..display import clean
 from ..universe import slug
+from . import theme
 from .tree import agent_key, group_key
 
-HINT = "#7f849c"
+HINT = theme.OVERLAY1
 # A dot-prefixed name can never be a real subverse, so the draft row cannot collide.
 PENDING = ".draft"
 
@@ -86,12 +87,12 @@ class Draft:
             self.insert(event.character)
 
     def cell(self, name):
-        text = Text(clean(self.values[name]) or "default", style="#a6adc8")
+        text = Text(clean(self.values[name]) or "default", style=theme.SUBTEXT0)
         if name == self.active:
             if self.select_all:
                 text.stylize("reverse")
             else:
-                text = Text(clean(self.values[name]) + " ", style="#cdd6f4")
+                text = Text(clean(self.values[name]) + " ", style=theme.TEXT)
                 text.stylize("reverse", self.cursor, self.cursor + 1)
         return text
 
@@ -135,7 +136,7 @@ class AgentDraft(Draft):
 
     def cell(self, name):
         if name == "harness":
-            return Text(clean(self.values[name]) + " ▾", style="reverse" if name == self.active else "#a6adc8")
+            return Text(clean(self.values[name]) + " ▾", style="reverse" if name == self.active else theme.SUBTEXT0)
         return super().cell(name)
 
     def column_cell(self, column):
@@ -183,7 +184,7 @@ class SubverseDraft(Draft):
     def add_to(self, snapshot):
         parent = next((g for g in snapshot["groups"] if g["path"] == str(self.scope)), {})
         group = {"path": str(self.scope / "subverses" / PENDING), "parent": str(self.scope),
-                 "name": self.values["name"], "description": "", "accent": parent.get("accent", "#a6adc8"),
+                 "name": self.values["name"], "description": "", "accent": parent.get("accent", theme.SUBTEXT0),
                  "harnesses": [], "alive": 0, "blocked": 0, "waiting": 0, "total": 0}
         return {**snapshot, "groups": [*snapshot["groups"], group]}
 

@@ -4,8 +4,9 @@ import re
 
 from .. import universe
 from ..store import read
+from . import theme
 from .panels import normalize_widgets
-COLORS = ("#94e2d5", "#cba6f7", "#89b4fa", "#f9e2af", "#f5c2e7")
+
 COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
            "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 12), "phase": ("Phase", 10), "summary": ("Working on", 48),
            "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
@@ -28,10 +29,10 @@ def view(root):
     accent = config.get("accent", "auto")
     if accent == "auto":
         identity = read(root / "universe.json")["id"]
-        index = 1 + int(sha256(identity.encode()).hexdigest()[:8], 16) % (len(COLORS) - 1)
-        accent = COLORS[index] if universe.parent(root) else COLORS[0]
+        index = 1 + int(sha256(identity.encode()).hexdigest()[:8], 16) % (len(theme.ACCENTS) - 1)
+        accent = theme.ACCENTS[index] if universe.parent(root) else theme.ACCENTS[0]
     if not isinstance(accent, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", accent):
-        accent = COLORS[0]
+        accent = theme.ACCENTS[0]
     requested = config.get("columns", DEFAULT_COLUMNS)
     if not isinstance(requested, list):
         requested = DEFAULT_COLUMNS
