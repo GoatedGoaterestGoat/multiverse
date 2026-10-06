@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -87,6 +88,9 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(result["commits"], 0)
         self.assertEqual(result["environment"]["state"], "synced")
         self.assertIn("already up to date", update.format_output(result))
+        self.assertEqual(result["notes"], [])
+        self.assertNotIn("refresh --apply", update.format_output(result))
+        self.assertNotIn("relaunched", update.format_output(result))
         self.assertEqual(json.loads(self.log.read_text())["args"], ["sync", "--locked"])
 
     def test_fast_forward_ignores_untracked_and_universe_and_git_environment(self):
@@ -104,6 +108,8 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(log["environment"], str(self.checkout / ".venv"))
         self.assertIsNone(log["project"])
         self.assertIn(f"Updated mv2 from {self.before[:7]} to {after[:7]} (1 commit); environment synced.", update.format_output(result))
+        self.assertEqual(result["notes"], update.NOTES)
+        self.assertIn("refresh --apply", update.format_output(result))
 
     def test_check_fetches_but_does_not_merge_or_sync(self):
         after = self.advance()
@@ -115,6 +121,46 @@ class UpdateTest(unittest.TestCase):
         self.assertFalse(self.log.exists())
         self.assertIn("would update", update.format_output(result))
         self.assertIn("Check only", update.format_output(result))
+        self.assertEqual(result["notes"], [])
+        self.assertNotIn("relaunched", update.format_output(result))
+
+    def test_dirty_check_fetches_pending_count_but_refuses_update(self):
+        after = self.advance()
+        (self.checkout / "version.txt").write_text("local edit\n")
+        result = update.run(check=True)
+        self.assert_unchanged(result, "uncommitted changes to tracked files")
+        self.assertEqual(self.git(self.checkout, "rev-parse", "origin/main"), after)
+        self.assertEqual(result["commits"], 1)
+        self.assertEqual(result["available"], after)
+        self.assertEqual((self.checkout / "version.txt").read_text(), "local edit\n")
+        text = update.format_output(result)
+        self.assertTrue(text.startswith("An update would be refused: the mv2 checkout"), text)
+        self.assertIn("1 commit is waiting on origin/main.", text)
+        self.assertIn("Check only", text)
+        self.assertNotIn("was not fully updated", text)
+        self.assertEqual(result["notes"], [])
+
+    def test_dirty_check_without_upstream_reports_both_and_does_not_fetch(self):
+        self.git(self.checkout, "branch", "--unset-upstream")
+        (self.checkout / "version.txt").write_text("local edit\n")
+        with patch.object(update, "_git", wraps=update._git) as git:
+            result = update.run(check=True)
+        self.assert_unchanged(result, "uncommitted changes to tracked files")
+        self.assertIn("has no upstream", result["reason"])
+        self.assertFalse(any(call.args[1] == "fetch" for call in git.call_args_list))
+        self.assertNotIn("available", result)
+        self.assertNotIn("waiting on", update.format_output(result))
+        self.assertEqual(result["notes"], [])
+
+    def test_diverged_check_still_reports_pending_count(self):
+        self.local_commit()
+        after = self.advance()
+        result = update.run(check=True)
+        self.assert_unchanged(result, "has diverged")
+        self.assertEqual(result["commits"], 1)
+        self.assertEqual(result["available"], after)
+        self.assertIn("1 commit is waiting", update.format_output(result))
+        self.assertEqual(result["notes"], [])
 
     def test_tracked_dirty_files_refused_before_fetch(self):
         self.advance()
@@ -125,6 +171,7 @@ class UpdateTest(unittest.TestCase):
                     self.git(self.checkout, "add", "version.txt")
                 self.assert_unchanged(update.run(), "uncommitted changes to tracked files")
                 self.assertEqual(self.git(self.checkout, "rev-parse", "origin/main"), self.before)
+                self.assertEqual(update.run()["notes"], [])
 
     def test_no_upstream_refused(self):
         self.git(self.checkout, "branch", "--unset-upstream")
@@ -206,6 +253,7 @@ class UpdateTest(unittest.TestCase):
         self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), after)
         self.assertEqual(result["after"], after)
         self.assertEqual(result["environment"]["state"], "failed")
+        self.assertEqual(result["notes"], update.NOTES)
         self.assertIn("lockfile problem", result["reason"])
         self.assertIn("uv sync --locked", result["reason"])
 
@@ -245,6 +293,57 @@ class UpdateTest(unittest.TestCase):
                     self.assertFalse(json.loads(stream.getvalue())["ok"])
                 else:
                     self.assertIn("has no upstream", stream.getvalue())
+
+    def child_cli(self, *, standalone=False, check=False, json_mode=False):
+        # Run the actual dispatchers, but point source discovery at this temporary clone.
+        # The only possible uv command is our local stub, even in a successful update.
+        code = ("import sys\nfrom multiverse.tools import update\n"
+                "update.__file__ = sys.argv.pop(1)\nuv = sys.argv.pop(1)\n"
+                "which = update.shutil.which\n"
+                "update.shutil.which = lambda name: uv if name == 'uv' else which(name)\n")
+        args = [] if standalone else ["update"]
+        if check:
+            args.append("--check")
+        if json_mode:
+            args.append("--json")
+        code += ("from multiverse.tools._common import main\nmain(update.configure, update.run)\n" if standalone
+                 else "from multiverse.cli import main\nmain()\n")
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+        return subprocess.run([sys.executable, "-c", code,
+                               str(self.checkout / "src/multiverse/tools/update.py"), str(self.uv), *args],
+                              env=env, cwd=self.root, text=True, capture_output=True, timeout=30)
+
+    def test_actual_cli_and_standalone_exit_one_for_update_and_check_refusals(self):
+        self.git(self.checkout, "branch", "--unset-upstream")
+        for standalone in (False, True):
+            for check in (False, True):
+                for json_mode in (False, True):
+                    with self.subTest(standalone=standalone, check=check, json=json_mode):
+                        child = self.child_cli(standalone=standalone, check=check, json_mode=json_mode)
+                        self.assertEqual(child.returncode, 1, child.stdout + child.stderr)
+                        if json_mode:
+                            self.assertFalse(json.loads(child.stdout)["ok"])
+                        else:
+                            self.assertIn("An update would be refused" if check else "was not fully updated", child.stdout)
+
+    def test_actual_cli_exit_zero_and_notes_only_for_pulled_commits(self):
+        for standalone in (False, True):
+            with self.subTest(standalone=standalone):
+                child = self.child_cli(standalone=standalone)
+                self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+                self.assertIn("already up to date", child.stdout)
+                self.assertNotIn("refresh --apply", child.stdout)
+        after = self.advance()
+        child = self.child_cli(check=True)
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        self.assertIn("would update", child.stdout)
+        self.assertNotIn("refresh --apply", child.stdout)
+        child = self.child_cli()
+        self.assertEqual(child.returncode, 0, child.stdout + child.stderr)
+        self.assertIn("Updated mv2", child.stdout)
+        self.assertIn("refresh --apply", child.stdout)
+        self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), after)
 
 
 if __name__ == "__main__":

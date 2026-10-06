@@ -51,9 +51,9 @@ EOF
 
 `mv2 update --check` fetches the running package's Git checkout and reports available changes. `mv2 update` fast-forwards its current branch from its upstream, then runs `uv sync --locked` in that checkout when `uv` and `uv.lock` are available. Both commands support `--json` for scripts and work from any directory; `-u` does not select the repository to update.
 
-The command refuses tracked, uncommitted changes, a branch without an upstream, or a branch ahead of or diverged from it. Untracked files are left alone; Git refuses an update that would overwrite them. It never switches branches, rebases, resets or stashes. A package installation without a source checkout cannot use this command. Missing `uv` or `uv.lock` is reported as a skipped environment sync; a failed sync reports the error and can be retried with `uv sync --locked` in the mv2 checkout.
+The command refuses tracked, uncommitted changes, a branch without an upstream, or a branch ahead of or diverged from it. `--check` still fetches and counts pending commits when an upstream exists, even when tracked changes prevent updating. Refusals exit 1; successful checks and updates exit 0. Untracked files are left alone; Git refuses an update that would overwrite them. It never switches branches, rebases, resets or stashes. A package installation without a source checkout cannot use this command. Missing `uv` or `uv.lock` is reported as a skipped environment sync; a failed sync reports the error and can be retried with `uv sync --locked` in the mv2 checkout.
 
-Running agents and the dashboard keep their old code until relaunched. After updating mv2, use `mv2 refresh --apply` to bring a universe's installed template files up to date.
+Running agents and the dashboard keep their old code until relaunched. After updating mv2, use `mv2 refresh --apply` to bring a universe's installed template files up to date. The command prints these reminders only after pulling new commits.
 
 ## Individual tools
 

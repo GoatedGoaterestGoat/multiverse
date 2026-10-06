@@ -51,16 +51,20 @@ def source_checkout():
     return checkout
 
 
-def _clean(checkout):
+def _clean(checkout, *, allow_dirty=False):
     if _read(checkout, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"):
-        raise ValueError("The mv2 checkout has uncommitted changes to tracked files; commit them before updating.")
+        reason = "The mv2 checkout has uncommitted changes to tracked files; commit them before updating."
+        if allow_dirty:
+            return reason
+        raise ValueError(reason)
 
 
 def run(root=None, *, check=False, json=False):
     # root is deliberately unused: -u selects a universe, not mv2's source repository.
     result = {"ok": False, "check": check, "json": json, "checkout": None, "branch": None,
               "upstream": None, "before": None, "after": None, "commits": 0,
-              "environment": {"state": "not_run"}, "notes": list(NOTES)}
+              "environment": {"state": "not_run"}, "notes": []}
+    refusals = []
     try:
         if not shutil.which("git"):
             raise ValueError("Git is not available; install it before updating mv2.")
@@ -71,7 +75,9 @@ def run(root=None, *, check=False, json=False):
             raise ValueError("The mv2 checkout has no current branch (detached HEAD); select a branch manually before updating.")
         branch = branch_result.stdout.strip()
         result["branch"] = branch
-        _clean(checkout)
+        dirty = _clean(checkout, allow_dirty=check)
+        if dirty:
+            refusals.append(dirty)
         upstream = _git(checkout, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
         if upstream.returncode:
             raise ValueError(f"The mv2 branch {branch} has no upstream; configure one before updating.")
@@ -82,17 +88,19 @@ def run(root=None, *, check=False, json=False):
         fetched = _git(checkout, "fetch", "--no-recurse-submodules", "--", remote)
         if fetched.returncode:
             raise ValueError(f"Could not fetch mv2's upstream: {_detail(fetched)}")
-        _clean(checkout)
+        dirty = _clean(checkout, allow_dirty=check)
+        if dirty and dirty not in refusals:
+            refusals.append(dirty)
         if (_read(checkout, "symbolic-ref", "--quiet", "--short", "HEAD") != branch
                 or _read(checkout, "rev-parse", "HEAD") != before):
             raise ValueError("The mv2 branch changed during the check; try again after other Git operations finish.")
         ahead, behind = map(int, _read(checkout, "rev-list", "--left-right", "--count", "HEAD...@{u}").split())
+        result["commits"] = behind
+        result["available"] = _read(checkout, "rev-parse", "@{u}")
         if ahead and behind:
             raise ValueError(f"The mv2 branch {branch} has diverged from {result['upstream']}; resolve it manually before updating.")
         if ahead:
             raise ValueError(f"The mv2 branch {branch} is ahead of {result['upstream']}; publish or resolve its local commits before updating.")
-        result["commits"] = behind
-        result["available"] = _read(checkout, "rev-parse", "@{u}")
         uv = shutil.which("uv")
         has_lock = (not _git(checkout, "cat-file", "-e", "@{u}:uv.lock").returncode
                     if check else (checkout / "uv.lock").is_file())
@@ -103,11 +111,16 @@ def run(root=None, *, check=False, json=False):
         else:
             result["environment"] = {"state": "pending"}
         if check:
-            result["ok"] = True
+            if refusals:
+                result["reason"] = " ".join(refusals)
+            else:
+                result["ok"] = True
             return result
         if behind:
             merged = _git(checkout, "merge", "--ff-only", "@{u}")
             result["after"] = _read(checkout, "rev-parse", "HEAD")
+            if result["after"] != before:
+                result["notes"] = list(NOTES)
             if merged.returncode:
                 raise ValueError(f"Could not fast-forward mv2: {_detail(merged)}")
         # Recheck after merging: the new revision may add or remove uv.lock.
@@ -128,7 +141,7 @@ def run(root=None, *, check=False, json=False):
             result["environment"] = {"state": "synced"}
         result["ok"] = True
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        result["reason"] = str(error)
+        result["reason"] = " ".join(dict.fromkeys([*refusals, str(error)]))
     return result
 
 
@@ -136,7 +149,16 @@ def format_output(result):
     if result["json"]:
         return {key: value for key, value in result.items() if key != "json"}
     if not result["ok"]:
-        lines = [f"mv2 was not fully updated: {result['reason']}"]
+        if result["check"]:
+            reason = result["reason"]
+            if reason.startswith("The "):
+                reason = "the " + reason[4:]
+            lines = [f"An update would be refused: {reason}"]
+            if "available" in result:
+                count = result["commits"]
+                lines.append(f"{count} commit{'s are' if count != 1 else ' is'} waiting on {result['upstream']}.")
+        else:
+            lines = [f"mv2 was not fully updated: {result['reason']}"]
     elif result["commits"]:
         count = result["commits"]
         if result["check"]:
@@ -153,7 +175,7 @@ def format_output(result):
             lines.append(f"Environment sync skipped: {environment['reason']}.")
         elif result["check"]:
             lines.append("The environment would be synced with uv sync --locked.")
-    if result["check"] and result["ok"]:
+    if result["check"]:
         lines.append("Check only: code and environment unchanged.")
     lines.extend(result["notes"])
     return "\n".join(lines)
