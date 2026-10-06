@@ -477,6 +477,7 @@ class AgentScreen(FieldScreen):
         self.generation = 0
         self.previewing = self.dirty = False
         self.timer = None
+        self.preview_error = False  # the error line shows a preview's problem, which a later preview may clear
 
     def compose(self):
         with Vertical(id="compaction-dialog"):
@@ -579,7 +580,9 @@ class AgentScreen(FieldScreen):
         try:
             scheduler = self.requested()
         except ValueError as error:
-            self.error(str(error))
+            if not self.saving:
+                self.error(str(error))
+                self.preview_error = True
             return
         self.previewing = True
         self.preview(scheduler, self.generation)
@@ -593,11 +596,15 @@ class AgentScreen(FieldScreen):
         except Exception as error:
             detail, failure = None, error
         self.previewing = False
-        if generation == self.generation:
+        if generation == self.generation and not self.saving:
             if failure is not None:
                 self.error(str(failure))
+                self.preview_error = True
             elif detail is not None:
-                self.error("")
+                # Only a preview's own problem is cleared here; a save's error or "Saving…" stays.
+                if self.preview_error:
+                    self.error("")
+                    self.preview_error = False
                 self.detail = {**self.detail, **{k: detail[k] for k in ('trees_cached', 'activity', 'failed_turns',
                                                                           'recent_errors', 'failures', 'enabled', 'unavailable')
                                                  if k in detail}}
@@ -634,6 +641,7 @@ class AgentScreen(FieldScreen):
             self.error(str(error))
             return
         self.saving = True
+        self.preview_error = False
         self.error("Saving…")
         self.persist(scheduler)
 
