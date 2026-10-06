@@ -1,12 +1,18 @@
 """Claude native terminal lifecycle; steering through the session's peer inbox ("auto" by default).
 
+In the native-backends model (docs/harness-adapters.md, "Claude: a terminal-hosted bridge") Claude has no
+native service, an exact session (the assigned UUID), a terminal attachment (the `claude` process in the agent's
+pane, which does the work) and, optionally, a bridge: the multiverse mod and the inbox it hosts. The bridge is part
+of the Claude process and ends with it, so it carries delivery, receipts, `ask` and status without implying an
+external service: Claude declares no shared service, attachment recovery, status observer or retained usage.
+
 Like Codex, `inbox_bridge` unset is auto (the bridge unless this Claude Code cannot run it, with the reason
 shown), true requires it and false launches plain. With the bridge, each launch binds Claude's peer inbox at the core-assigned
 socket and loads the multiverse mod (`mod/`). `send` writes one steering
 message to that inbox at `next` priority, its text tagged for the mod. The mod
 shows the model the text alone: mid-turn it removes Claude's peer wrapper from
 the queued message; otherwise it types the text in as a prompt. The mod
-registers the `claude-mod-v1` bridge for its launch and reports the session's
+registers the bridge (`BRIDGE`) for its launch and reports the session's
 status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
@@ -18,7 +24,7 @@ a PreCompact hook that refuses Claude's own compaction should the mod ever fail
 to answer. `compaction(session)` returns the protocol implementation in
 `compaction/`.
 """
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime
 import hashlib
 import json
@@ -42,6 +48,9 @@ MOD = Path(__file__).parent / 'mod'
 CLOSE = '<</MV2>>'
 MODES = {'steer': 'steer', 'follow-up': 'follow-up'}
 ASK_TIMEOUT = 120
+# What the mod reports through `runtime-update --bridge` once it runs in a launch.
+BRIDGE = 'claude-mod-v1'
+NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
 # Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
@@ -254,6 +263,38 @@ def bridge_problem(executable):
 FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
 
 
+@dataclass(frozen=True)
+class Bridge:
+    """What one launch's terminal-hosted integration, the multiverse mod, can do now.
+
+    `launched`: this launch loaded the mod (not plain, not an auto fallback). `registered`: the mod
+    reported itself for this launch, so its inbox exists. `ready`: steering, `ask` and receipts can be used
+    now. `reason` says why not. None of this is a service or a reconnectable terminal.
+    """
+    launched: bool
+    registered: bool
+    ready: bool
+    reason: str | None
+
+
+def bridge_of(enabled, session):
+    """The `Bridge` of a launch: the harness setting says whether the mod is wanted, the launch's own record
+    whether it ran (an auto launch may have fallen back to plain), and the mod's report whether it is up."""
+    launch = session.native_mode or {}
+    plain = launch.get('mode') == 'plain'
+    launched = bool(enabled) and not plain
+    registered = bool(launched and session.native_id and session.endpoint
+                      and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
+    ready = registered and session.state == 'running'
+    if ready:
+        reason = None
+    elif plain and launch.get('fallback_reason'):
+        reason = f'Launched without the bridge: {launch["fallback_reason"]}'
+    else:
+        reason = NOT_REGISTERED
+    return Bridge(launched, registered, ready, reason)
+
+
 class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
@@ -375,24 +416,27 @@ class ClaudeAdapter(ConfiguredAdapter):
         from .compaction import ClaudeCompaction
         return ClaudeCompaction(self, session)
 
+    def _bridge(self, session):
+        return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
+
+    def attachment_ready(self, session):
+        """A launch with no inbox is ready once its process runs; a bridged one when the mod has registered.
+
+        Core asks this on every readiness poll, so it stays cheap and independent of the other capabilities.
+        """
+        return not session.endpoint or self._bridge(session).ready
+
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
         result['session_name'] = Capability('supported', mechanism='--name')
         # The launch's own record decides whether it used the bridge: an auto launch may have fallen back to plain.
-        launched = session.native_mode or {}
-        plain = launched.get('mode') == 'plain'
-        bridge = bool(getattr(self, 'settings', {}).get('inbox_bridge')) and not plain
-        connected = (bridge and session.state == 'running'
-                     and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines'
-                     and session.bridge == 'claude-mod-v1')
-        why = (f'Launched without the bridge: {launched["fallback_reason"]}' if plain and launched.get('fallback_reason')
-               else 'The multiverse mod has not registered for this launch')
+        bridge = self._bridge(session)
         for name in ('send_steer', 'send_follow_up'):
-            result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if connected
-                            else Capability('unavailable', why, required=True))
-        if bridge and session.session_file:
+            result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if bridge.ready
+                            else Capability('unavailable', bridge.reason, required=True))
+        if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
-        if connected and session.session_file:
+        if bridge.ready and session.session_file:
             result['ask'] = Capability('supported', mechanism='claude-model-fork')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
@@ -460,8 +504,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         mode = MODES.get(message.delivery)
         if mode is None:
             return NativeResult('unavailable', f'Unknown delivery mode: {message.delivery}')
-        if self.capabilities(session)['send_steer'].state != 'supported':
-            return NativeResult('unavailable', 'The multiverse mod has not registered for this launch')
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return NativeResult('unavailable', bridge.reason)
         token = peer_token(session.endpoint.address)
         if token is None:
             return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
@@ -484,8 +529,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         The question travels tagged `ask` over the peer inbox; the mod consumes it,
         so nothing enters the conversation, and writes claude-asks/<id>.json.
         """
-        if self.capabilities(session)['ask'].state != 'supported':
-            return NativeResult('unavailable', 'The multiverse mod has not registered for this launch')
+        bridge = self._bridge(session)
+        if not bridge.ready:
+            return NativeResult('unavailable', bridge.reason)
+        if not session.session_file:
+            return NativeResult('unavailable', 'No agent directory recorded')
         token = peer_token(session.endpoint.address)
         if token is None:
             return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')

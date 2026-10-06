@@ -828,6 +828,54 @@ Every provider sends `Message.framed` as the message content. Receipt identifier
 remain separate: Codex uses `clientUserMessageId`, Pi persists custom-message
 details, and the Claude mod removes its transport tag before presenting text.
 
+### Claude: a terminal-hosted bridge
+
+Claude fits the service, session and attachment model above with one piece
+missing on purpose: there is no service.
+
+| Part | Claude |
+| --- | --- |
+| Native service | None. Core never sees a `SharedServiceSpec`, `native_service` or `rpc_proxy` for Claude: nothing is started, reused or reconnected to. |
+| Exact session | The assigned UUID (`--session-id`, later `--resume`). A session never used has no saved conversation and restarts under the same ID. |
+| Terminal attachment | The `claude` process in the agent's tmux pane; it does the work (`work_owner` is `terminal`). Claude declares no `AttachmentSpec`, so core starts no recovery worker, status observer or mouse preference for it. |
+| Bridge | `--plugin-dir` (the `multiverse` mod), `--settings` and `--messaging-socket-path`: a `unix-lines` inbox hosted by the Claude process. It carries delivery, receipts, `ask`, status and usage reports, `/multiverse`, the status line and compaction. |
+
+The bridge is part of the Claude process, not a service beside it. When the
+process ends, the mod and its inbox end with it, so there is nothing external to
+reconnect a replacement terminal to, and Claude never takes part in automatic
+attachment recovery (`recovery_unavailable` reports that it declared none).
+Restarting the same conversation from its transcript, with `mv2 resume` or a
+message to a stopped agent, is an ordinary resume. This differs from Codex, whose
+shared app-server outlives its terminal. Neither is a general model: a bridge says
+what an integration can do, a service says where work lives.
+
+The pieces keep to their own side of the boundary:
+
+- **Adapter** (`harnesses/claude/__init__.py`): launch flags, the inbox socket,
+  the peer-token format, the `<<MV2>>` tag, the registered bridge id (`BRIDGE`,
+  `claude-mod-v1`), receipts, `ask`, capabilities and readiness. Everything about
+  a launch's bridge comes from one pure `Bridge` view (`launched`, `registered`,
+  `ready`, `reason`), so capabilities, `send`, `ask` and readiness cannot disagree.
+- **Mod** (`mod/`): hooks inside Claude. It reports itself once running
+  (`runtime_update --bridge`) and reports status; nothing in it touches tmux.
+- **Core**: `write_lines` transport, locks, runtime files, readiness polling and
+  tmux. It has no Claude-specific type or name checks; a bridge id is data the
+  integration reports.
+
+Readiness has no `AttachmentSpec`: the optional `attachment_ready` hook answers
+it. A launch with no inbox (plain, or an auto fallback) is ready once its process
+runs. A bridged launch is ready when the mod has registered exactly `BRIDGE` for
+this launch, so `spawn --wait` returns, and `send`, `ask` and receipts become
+available, only then. Registration compares the exact constant: a well-formed id
+reported for another integration (for example `pi-socket-v1`, or an unknown
+`other-bridge-v1`) never makes a Claude launch ready or deliverable. The hook
+reads only the session record, never the other capabilities (building them reads
+`compaction.json`), because core asks on every readiness poll.
+
+Status is whatever the mod reports and is never overwritten: core runs no
+observer for Claude and produces no `NativeActivity` for it. A launch that fell
+back to plain says so in its `native_mode`, its capabilities and `mv2 inspect`.
+
 Claude bridge mode steers through the session's own peer inbox. `inbox_bridge` unset is auto: the bridge is used unless the installed
 Claude Code is older than 2.1.280 (the oldest the mod was built on; a version that cannot be read does not count), in which case the
 launch is plain and `native_mode.fallback_reason` says why. `true` makes that case an error and `false` never loads the mod. Each launch
@@ -916,8 +964,9 @@ progress takes the slot while it lasts and the normal line returns after. Text
 reported by other agents is shown with control characters removed and a summary is
 shortened.
 
-The mod also registers the `claude-mod-v1` bridge for its launch (steering is
-reported unavailable until it has) and reports status through `python -m
+The mod also registers the bridge (`BRIDGE`, `claude-mod-v1`) for its launch
+(steering, `ask` and receipts are reported unavailable, and `--wait` does not
+return, until it has) and reports status through `python -m
 multiverse.tools.runtime_update --status`, which is not an `mv2` command: agents
 report their phase with `mv2 report` but never set their status: `working` while a main-loop turn runs; `waiting` while an
 `AskUserQuestion` or `ExitPlanMode` call, a permission prompt or an MCP
