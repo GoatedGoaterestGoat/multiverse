@@ -3,7 +3,7 @@ import os
 import shlex
 import subprocess
 from .. import agents, universe
-from ..tmux import Tmux
+from ..terminal.tmux import Tmux
 
 
 def configure(parser):

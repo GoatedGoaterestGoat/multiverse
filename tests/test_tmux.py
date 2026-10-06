@@ -2,7 +2,7 @@
 import unittest
 from unittest.mock import patch
 
-from multiverse.tmux import Tmux, observe, owned
+from multiverse.terminal.tmux import Tmux, observe, owned
 
 
 class HostOwnershipTest(unittest.TestCase):

@@ -205,7 +205,7 @@ class AutoRunnerTest(BaseTest):
                 process.wait.return_value = 0
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(runner.subprocess, 'Popen', return_value=process) as child, \
-                     patch('multiverse.tmux.owned', return_value=(Mock(**{'run.return_value': ''}), '%1')), \
+                     patch('multiverse.terminal.tmux.owned', return_value=(Mock(**{'run.return_value': ''}), '%1')), \
                      patch.object(harnesses, 'load'), patch('multiverse.rpc.LaunchProxy', return_value=proxy):
                     code = runner.main()
                 if auto and not bound:

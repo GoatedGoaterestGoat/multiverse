@@ -17,7 +17,7 @@ from . import agents, harnesses, rpc
 from .harnesses.types import NativeActivity, NativeResult, RpcSpec, SessionHandle
 from .native import recovery_unavailable
 from .store import inbox, now, read, write
-from .tmux import owned, matches
+from .terminal.tmux import owned, matches
 
 PROOF_AGE = 15
 BACKOFF = (0, 1, 2, 4, 8)

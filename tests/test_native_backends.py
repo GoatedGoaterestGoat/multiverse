@@ -258,7 +258,7 @@ class NativeBackendTest(BaseTest):
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
                      patch.object(runner.subprocess, 'Popen', side_effect=start) as child, \
-                     patch('multiverse.tmux.owned', return_value=(self.backend, '%1')), \
+                     patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
                      patch.object(runner, 'launch_diagnostic', return_value={}):
                     self.assertEqual(runner.main(), 0)
                 child.assert_called_once()
@@ -280,7 +280,7 @@ class NativeBackendTest(BaseTest):
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
                      patch.object(runner.subprocess, 'Popen') as child, \
-                     patch('multiverse.tmux.owned', side_effect=ValueError('Foreign pane')) as owned, \
+                     patch('multiverse.terminal.tmux.owned', side_effect=ValueError('Foreign pane')) as owned, \
                      patch.object(runner, 'launch_diagnostic', return_value={}), patch.object(native, 'flush_startup'):
                     if stale:
                         with self.assertRaisesRegex(ValueError, 'Outdated launch'):

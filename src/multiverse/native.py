@@ -16,7 +16,7 @@ from . import agents, harnesses
 from .harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                              BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from .store import lock, now, read, message_record, update_message, inbox
-from .tmux import owned, observe
+from .terminal.tmux import owned, observe
 
 
 def environment(command):

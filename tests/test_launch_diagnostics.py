@@ -155,8 +155,8 @@ class LaunchDiagnosticBoundTest(BaseTest):
         directory = self.root / 'state/agents/agent'
         write(directory / 'runtime.json', {'launch_id': 'old', 'tmux': {'socket': '/fake', 'pane': '%1'}})
         write(directory / 'properties.json', {'id': 'agent', 'universe_id': 'universe'})
-        with patch('multiverse.tmux.Tmux.snapshot', return_value=({'%1': {'@mv2_launch_id': 'replacement'}}, None)), \
-             patch('multiverse.tmux.Tmux.run', side_effect=AssertionError('Must not capture another launch')):
+        with patch('multiverse.terminal.tmux.Tmux.snapshot', return_value=({'%1': {'@mv2_launch_id': 'replacement'}}, None)), \
+             patch('multiverse.terminal.tmux.Tmux.run', side_effect=AssertionError('Must not capture another launch')):
             result = runner.launch_diagnostic(directory, 'old', 'Native process exited with code 1.')
         self.assertIn('output unavailable', result['reason'])
         self.assertEqual((directory / result['output_tail_file']).read_text(), '')
@@ -164,6 +164,6 @@ class LaunchDiagnosticBoundTest(BaseTest):
     def test_stale_runner_cannot_capture_or_publish_a_replacement_launch(self):
         directory = self.root / 'state/agents/agent'
         write(directory / 'runtime.json', {'launch_id': 'replacement'})
-        with patch('multiverse.tmux.owned', side_effect=AssertionError('Must not capture')):
+        with patch('multiverse.terminal.tmux.owned', side_effect=AssertionError('Must not capture')):
             self.assertEqual(runner.launch_diagnostic(directory, 'old', 'Exited'), {})
         self.assertFalse((directory / 'launches/old/output-tail.txt').exists())

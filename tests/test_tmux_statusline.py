@@ -14,7 +14,8 @@ import time
 import unittest
 from uuid import uuid4
 
-from multiverse import agents, statusline, universe
+from multiverse import agents, universe
+from multiverse.terminal import statusline
 from multiverse.store import append_message, inbox, read, write
 from test_multiverse import BaseTest, TerminalBase
 

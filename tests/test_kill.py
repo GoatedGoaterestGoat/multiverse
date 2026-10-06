@@ -10,7 +10,7 @@ from uuid import uuid4
 
 from multiverse import agents, native, relocate, universe
 from multiverse.store import read
-from multiverse.tmux import Tmux
+from multiverse.terminal.tmux import Tmux
 from test_multiverse import TerminalBase, until
 
 

@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from test_multiverse import ROOT, TerminalBase, until
 from multiverse import agents
-from multiverse.tmux import Tmux
+from multiverse.terminal.tmux import Tmux
 from multiverse.store import read
 
 

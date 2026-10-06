@@ -30,7 +30,7 @@ def bounded_output(text):
 
 def launch_diagnostic(agent_dir, launch_id, reason):
     """Snapshot only this launch's owned pane; never redirect the child's TTY."""
-    from multiverse.tmux import owned
+    from multiverse.terminal.tmux import owned
     facts = runtime(agent_dir)
     if facts.get('launch_id') != launch_id:
         return {}
@@ -56,7 +56,7 @@ def launch_diagnostic(agent_dir, launch_id, reason):
 
 def cleanup_wrapper(launch):
     """Run outside the pane so removing it cannot interrupt its own cleanup."""
-    from multiverse.tmux import owned, observe
+    from multiverse.terminal.tmux import owned, observe
     agent_dir = launch.parent.parent
     if not (agent_dir / 'properties.json').exists():
         return
@@ -367,7 +367,7 @@ def main():
                     facts = runtime(agent_dir)
                     if facts.get('launch_id') != launch.name or facts.get('ending_at'):
                         raise ValueError('Launch changed or ended before terminal fallback')
-                    from multiverse.tmux import owned
+                    from multiverse.terminal.tmux import owned
                     backend, pane = owned(properties, facts)
                     selected_mouse = bool((fallback.get('attachment') or {}).get('mouse'))
                     if selected_mouse != bool(attachment.get('mouse')):

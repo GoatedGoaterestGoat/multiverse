@@ -15,7 +15,7 @@ import shutil
 from . import universe
 from .agents import directory, runtime, update_runtime
 from .store import lock, now, read, write
-from .tmux import observe, owned
+from .terminal.tmux import observe, owned
 
 TRASH = "trash"
 RECORD = ".removed.json"

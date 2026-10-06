@@ -85,7 +85,7 @@ class AutoExitOwnershipTest(BaseTest):
     def test_old_cleanup_cannot_touch_replacement_launch(self):
         directory = self.root / 'state/agents/agent'
         write(directory / 'runtime.json', {'launch_id': 'replacement'})
-        with patch('multiverse.tmux.owned', side_effect=AssertionError('Must not control replacement')):
+        with patch('multiverse.terminal.tmux.owned', side_effect=AssertionError('Must not control replacement')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(read(directory / 'runtime.json'), {'launch_id': 'replacement'})
 
@@ -96,7 +96,7 @@ class AutoExitOwnershipTest(BaseTest):
                                           'tmux': {'socket': '/fake', 'pane': '%1'}})
         backend = Mock()
         backend.run.side_effect = ['own\t%1\nother\t%2', '', '']
-        with patch('multiverse.tmux.owned', return_value=(backend, '%1')):
+        with patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(backend.run.call_args_list[1].args, ('detach-client', '-t', 'own'))
         self.assertEqual(backend.run.call_args_list[2].args, ('kill-pane', '-t', '%1'))
@@ -106,7 +106,7 @@ class AutoExitOwnershipTest(BaseTest):
         directory = self.root / 'state/agents/agent'
         write(directory / 'properties.json', {'id': 'agent', 'universe_id': 'universe'})
         write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0})
-        with patch('multiverse.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
+        with patch('multiverse.terminal.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(agents.runtime(directory)['state'], 'stopped')
         self.assertIn('tmux unavailable', agents.runtime(directory)['error'])

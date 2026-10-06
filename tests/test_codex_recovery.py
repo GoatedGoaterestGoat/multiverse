@@ -20,7 +20,7 @@ from multiverse.harnesses.codex.protocol import recovery_check
 from multiverse.harnesses.types import NativeEndpoint, NativeResult, SessionHandle, NativeServiceHandle, ServiceIdentity, AttachmentSpec
 from multiverse.runner import RelayPublisher, StatusWatcher
 from multiverse.store import append_message, now, read, update_message, write
-from multiverse.tmux import Tmux
+from multiverse.terminal.tmux import Tmux
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 

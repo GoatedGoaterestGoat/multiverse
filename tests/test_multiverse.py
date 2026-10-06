@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from multiverse import agents, universe
 from multiverse.tools import send
 from multiverse.store import append_message, inbox, read, write
-from multiverse.tmux import Tmux, observe
+from multiverse.terminal.tmux import Tmux, observe
 from multiverse.dashboard import LocalBackend, columns, hierarchy
 
 

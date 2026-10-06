@@ -12,7 +12,7 @@ import time
 from . import universe, harnesses
 from .harnesses.types import LaunchContext, SessionHandle, NativeResult, normalize_session_id, BridgeUnavailable
 from .store import lock, now, read, uid, write, message_record, update_message
-from .tmux import Tmux, observe, owned
+from .terminal.tmux import Tmux, observe, owned
 
 
 def directory(root, reference):
