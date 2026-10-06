@@ -46,7 +46,7 @@ Each built-in has its own folder under `src/multiverse/harnesses/`:
 
 - `codex/`: launch/resume preferences and native app-server queue/steer protocol.
 - `pi/`: launch/resume preferences, interactive TypeScript extension, transcript receipts.
-- `claude/`: launch/resume preferences, opt-in peer-inbox steering and its Claude mod (`mod/`).
+- `claude/`: launch/resume preferences, peer-inbox steering (auto by default) and its Claude mod (`mod/`).
 - `legacy/`: lossless compatibility for existing schema-1 local definitions.
 
 `base.py` shares argument rendering and default unsupported operations. Built-ins
@@ -513,7 +513,7 @@ New universes retain references and preferences, not copied implementations:
 
 Codex defaults to automatic bridge selection when `settings.inbox_bridge` is
 absent. `true` requires the bridge; `false` always uses plain native argv. `null`
-is not an accepted setting. Claude and Pi retain their opt-in boolean behavior.
+is not an accepted setting. Pi retains its opt-in boolean behavior; Claude, like Codex, takes an unset `inbox_bridge` as auto, `true` as required and `false` as plain.
 All three bundled Codex templates leave the setting absent, including development.
 Existing explicit settings and live universe files are not rewritten.
 
@@ -828,7 +828,9 @@ Every provider sends `Message.framed` as the message content. Receipt identifier
 remain separate: Codex uses `clientUserMessageId`, Pi persists custom-message
 details, and the Claude mod removes its transport tag before presenting text.
 
-Claude bridge mode steers through the session's own peer inbox. Each launch
+Claude bridge mode steers through the session's own peer inbox. `inbox_bridge` unset is auto: the bridge is used unless the installed
+Claude Code is older than 2.1.280 (the oldest the mod was built on; a version that cannot be read does not count), in which case the
+launch is plain and `native_mode.fallback_reason` says why. `true` makes that case an error and `false` never loads the mod. Each launch
 passes `--messaging-socket-path` (the core-assigned private socket),
 `--plugin-dir` for the source-owned `multiverse` mod, `--settings` with
 `crossSessionInbound: accept` (Claude otherwise holds peer messages for approval

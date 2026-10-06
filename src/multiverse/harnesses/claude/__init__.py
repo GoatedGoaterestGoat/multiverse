@@ -1,6 +1,7 @@
-"""Claude native terminal lifecycle; opt-in steering through the session's peer inbox.
+"""Claude native terminal lifecycle; steering through the session's peer inbox ("auto" by default).
 
-With `inbox_bridge`, each launch binds Claude's peer inbox at the core-assigned
+Like Codex, `inbox_bridge` unset is auto (the bridge unless this Claude Code cannot run it, with the reason
+shown), true requires it and false launches plain. With the bridge, each launch binds Claude's peer inbox at the core-assigned
 socket and loads the multiverse mod (`mod/`). `send` writes one steering
 message to that inbox at `next` priority, its text tagged for the mod. The mod
 shows the model the text alone: mid-turn it removes Claude's peer wrapper from
@@ -24,6 +25,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
 import threading
 import time
 from uuid import uuid4
@@ -213,6 +216,41 @@ def measured_usage(native_id):
     return Usage(native_id, inputs, outputs, inputs + outputs, 'claude-transcript', last, cached, written)
 
 
+# The oldest Claude Code the mod and the peer inbox were built and tested on.
+MIN_BRIDGE_VERSION = (2, 1, 280)
+_versions = {}
+
+
+def claude_version(executable):
+    """The (major, minor, patch) of this Claude Code binary, or None when it cannot be told.
+
+    Asked once per binary (an upgrade installs a new binary path), never fatal.
+    """
+    path = shutil.which(executable)
+    if path is None:
+        return None
+    key = os.path.realpath(path)
+    if key not in _versions:
+        try:
+            output = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=10).stdout
+        except (OSError, subprocess.SubprocessError):
+            return None
+        found = re.search(r'(\d+)\.(\d+)\.(\d+)', output)
+        if not found:
+            return None
+        _versions[key] = tuple(int(part) for part in found.groups())
+    return _versions[key]
+
+
+def bridge_problem(executable):
+    """Why this Claude Code cannot run the bridge, or None. A version that cannot be read is not a reason."""
+    version = claude_version(executable)
+    if version is not None and version < MIN_BRIDGE_VERSION:
+        return (f'Claude Code {".".join(map(str, version))} is older than '
+                f'{".".join(map(str, MIN_BRIDGE_VERSION))}, which the multiverse mod needs')
+    return None
+
+
 FRESH_SESSION = 'No saved Claude conversation for this session; started it fresh under the same session ID'
 
 
@@ -220,6 +258,16 @@ class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
     supports_bridge = True
+    bridge_policy = 'auto'
+
+    @classmethod
+    def configured(cls, name, settings):
+        # Like Codex: unset is auto, true requires the bridge, false launches plain. `settings['inbox_bridge']`
+        # holds the effective on/off (auto is on) for everything that reads it; the policy is kept apart.
+        raw = settings.get('inbox_bridge')
+        adapter = super().configured(name, {**settings, 'inbox_bridge': True if raw is None else raw})
+        adapter.bridge_policy = 'auto' if raw is None else 'required' if raw is True else 'plain'
+        return adapter
 
     def spawn(self, context):
         return self._with_bridge(super().spawn(context), context)
@@ -233,8 +281,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         if fresh is None:
             return command
         # Say so in the agent's details: it now runs without any earlier context.
-        mode = dict(command.native_mode or {'policy': 'inbox_bridge' if self.settings.get('inbox_bridge') else 'default',
-                                            'mode': 'bridge' if self.settings.get('inbox_bridge') else 'plain'})
+        mode = dict(command.native_mode)
         mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
         return replace(command, native_mode=mode)
 
@@ -255,14 +302,23 @@ class ClaudeAdapter(ConfiguredAdapter):
         return None
 
     def _with_bridge(self, command, context):
-        if not self.settings.get('inbox_bridge'):
-            return command
+        # auto uses the bridge unless this Claude cannot run it (and says why), required raises instead of
+        # falling back, plain never loads the mod.
+        policy = self.bridge_policy
+        plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
+        if policy == 'plain':
+            return plain
+        problem = bridge_problem(command.argv[0])
+        if problem:
+            if policy == 'required':
+                raise ValueError(problem)
+            return replace(plain, native_mode={**plain.native_mode, 'fallback_reason': problem})
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
         settings = {'crossSessionInbound': 'accept'}
         environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
-        native_mode = command.native_mode
+        native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
         root = self._universe(context.values.get('agent_dir'))
         compaction, problem = self.compaction_state(root) if root else (None, None)
         if compaction is not None and compaction.enabled:
@@ -270,7 +326,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             environment['MV2_COMPACTION'] = '1'
         elif problem:
             # An unusable compaction.json never stops a launch: this one runs without compaction.
-            native_mode = {'policy': 'inbox_bridge', 'mode': 'bridge without compaction',
+            native_mode = {'policy': policy, 'mode': 'bridge without compaction',
                            'fallback_reason': f'Launched without compaction: {problem}'}
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
@@ -322,14 +378,19 @@ class ClaudeAdapter(ConfiguredAdapter):
     def capabilities(self, session, executor=None):
         result = super().capabilities(session, executor)
         result['session_name'] = Capability('supported', mechanism='--name')
-        connected = (getattr(self, 'settings', {}).get('inbox_bridge') and session.state == 'running'
+        # The launch's own record decides whether it used the bridge: an auto launch may have fallen back to plain.
+        launched = session.native_mode or {}
+        plain = launched.get('mode') == 'plain'
+        bridge = bool(getattr(self, 'settings', {}).get('inbox_bridge')) and not plain
+        connected = (bridge and session.state == 'running'
                      and session.native_id and session.endpoint and session.endpoint.transport == 'unix-lines'
                      and session.bridge == 'claude-mod-v1')
+        why = (f'Launched without the bridge: {launched["fallback_reason"]}' if plain and launched.get('fallback_reason')
+               else 'The multiverse mod has not registered for this launch')
         for name in ('send_steer', 'send_follow_up'):
             result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if connected
-                            else Capability('unavailable', 'The multiverse mod has not registered for this launch',
-                                            required=True))
-        if getattr(self, 'settings', {}).get('inbox_bridge') and session.session_file:
+                            else Capability('unavailable', why, required=True))
+        if bridge and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
         if connected and session.session_file:
             result['ask'] = Capability('supported', mechanism='claude-model-fork')
@@ -340,7 +401,7 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def _compaction_capability(self, session):
         if not getattr(self, 'settings', {}).get('inbox_bridge'):
-            return Capability('unavailable', 'Needs the multiverse mod: set "inbox_bridge": true in harness.json')
+            return Capability('unavailable', 'Needs the multiverse mod: remove "inbox_bridge": false from harness.json')
         root = self._universe(Path(session.session_file).parent if session.session_file else None)
         if root is None:
             return Capability('unavailable', 'Not an agent of a universe')

@@ -130,6 +130,15 @@ class InspectTest(BaseTest):
         self.assertIn('Last error: Launch failed | because of this', text)
         self.assertNotIn('Last error', self.inspect(row('w')))
 
+    def test_a_launch_that_fell_back_to_plain_says_why(self):
+        reason = 'Claude Code 2.0.5 is older than 2.1.280, which the multiverse mod needs'
+        item = row('w', runtime={'native_mode': {'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason}})
+        self.assertIn('Note: ' + reason, self.inspect(item).splitlines())
+        self.assertEqual(self.inspect(item, json=True)['fallback'], reason)
+        plain = self.inspect(row('w', runtime={'native_mode': {'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None}}))
+        self.assertNotIn('Note:', plain)
+        self.assertIsNone(self.inspect(row('w'), json=True)['fallback'])
+
     def test_an_agent_without_a_live_terminal_says_why_not_with_the_reason_text_of_the_pane(self):
         for live, words in (('dormant', 'it is dormant.'), ('stopped', 'it is stopped.'), ('unknown', 'its state is unknown.')):
             with self.subTest(live=live):
