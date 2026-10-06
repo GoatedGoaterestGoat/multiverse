@@ -3,10 +3,36 @@
 For harness integrations (the Claude mod, the Pi extension), run as
 `python -m multiverse.tools.runtime_update`; it is not an `mv2` command.
 """
+import argparse
 import json
+import re
 
 from .. import agents
 from ._common import add_agent, callback
+
+BRIDGE_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+BRIDGE_ID_LENGTH = 40
+
+
+def bridge_id(value):
+    """The id an integration reports for itself, or `none` to clear it.
+
+    Only the shape is checked. The id is data the integration reports: each adapter compares
+    it with its own exact constant, so a well-formed id for another integration never makes
+    a launch ready or deliverable.
+    """
+    if not isinstance(value, str) or len(value) > BRIDGE_ID_LENGTH or not BRIDGE_ID.fullmatch(value):
+        raise ValueError(f"--bridge must be lowercase letters, digits and single hyphens, starting with a letter, "
+                         f"at most {BRIDGE_ID_LENGTH} characters (for example claude-mod-v1), or none")
+    return value
+
+
+def bridge_argument(value):
+    try:
+        return bridge_id(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
 
 def configure(parser):
     add_agent(parser)
@@ -15,7 +41,8 @@ def configure(parser):
                         help="idle, working, waiting or unknown")
     parser.add_argument("--usage-json", help="JSON context/cost/rate-limit usage from the harness")
 
-    parser.add_argument("--bridge", choices=("pi-inbox-v1", "pi-socket-v1", "claude-mod-v1", "none"))
+    parser.add_argument("--bridge", type=bridge_argument, metavar="ID",
+                        help="the integration's own bridge id, for example claude-mod-v1, or none")
 
 def number(value, low=0, high=None):
     ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value >= low
@@ -54,7 +81,7 @@ def run(root=None, *, agent=None, status=None, usage_json=None, bridge=None):
     if usage_json is not None:
         changes["usage"] = usage(usage_json)
     if bridge:
-        changes["native_bridge"] = None if bridge == "none" else bridge
+        changes["native_bridge"] = None if bridge_id(bridge) == "none" else bridge
     return agents.update_runtime(directory, launch_id, **changes)
 
 
