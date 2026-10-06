@@ -9,7 +9,8 @@ from pathlib import Path
 
 from rich.text import Text
 
-from .dashboard import agent_key, clean, group_key
+from .dashboard import agent_key, group_key
+from .display import clean
 from .universe import slug
 
 HINT = "#7f849c"

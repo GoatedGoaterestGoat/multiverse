@@ -10,7 +10,7 @@ import socket
 import sys
 import time
 
-from .. import harnesses, universe, usage
+from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, owned
@@ -31,8 +31,8 @@ def listing(root, recursive=False):
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
-                rows.append({**properties, "usage": measured, "tokens": usage.display(measured),
-                             "usage_detail": usage.details(measured), "universe": str(scope), **observation,
+                rows.append({**properties, "usage": measured, "tokens": display.usage_total(measured),
+                             "usage_detail": display.usage_details(measured), "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",

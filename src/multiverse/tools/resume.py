@@ -2,7 +2,7 @@
 from ..runtime import lifecycle
 from .. import universe
 from ._common import add_wait
-from .spawn import cause, outcome
+from ..display import cause, outcome
 
 def configure(parser):
     parser.add_argument("agent")

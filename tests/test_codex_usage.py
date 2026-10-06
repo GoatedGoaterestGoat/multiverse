@@ -86,9 +86,9 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         self.assertEqual(result.value['context']['tokens'], 20000)
         self.assertIsNotNone(result.value['context_reported_at'])
         self.assertNotIn('total_tokens', result.value)
-        from multiverse.usage import context_display, details
+        from multiverse.display import context_display, usage_details
         self.assertEqual(context_display(result.to_dict()), '20k/258k')
-        self.assertNotIn('Cumulative', details(result.to_dict()))
+        self.assertNotIn('Cumulative', usage_details(result.to_dict()))
         self.assertEqual(self.adapter.capabilities(self.session)['get_usage'].state, 'supported')
 
     def test_old_launch_wrong_thread_and_stopped_launch_cannot_publish(self):

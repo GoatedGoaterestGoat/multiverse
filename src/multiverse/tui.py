@@ -10,7 +10,8 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static, TextArea
 
-from .dashboard import COLUMNS, LocalBackend, agent_key, clean, group_key, hierarchy, rate_limits
+from .dashboard import COLUMNS, LocalBackend, agent_key, group_key, hierarchy, rate_limits
+from .display import clean
 from .draft import AgentDraft, SubverseDraft
 from .compaction_screens import CompactionScreen
 from .inspector import Inspector

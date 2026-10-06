@@ -5,7 +5,8 @@ import re
 
 from datetime import datetime, timezone
 
-from . import universe, usage
+from . import display, universe
+from .display import clean
 from .harnesses import load as load_harness
 from .store import read
 from .tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move, native_status, remove,
@@ -20,10 +21,6 @@ COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9)
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
 # Former column keys that views written for older versions still use.
 COLUMN_ALIASES = {"activity": "status", "tokens": "context"}
-
-
-def clean(value):
-    return "".join(c if c.isprintable() else " " for c in str(value))
 
 
 def view(root):
@@ -57,8 +54,8 @@ def columns(root):
 def with_usage(agent):
     """Display fields from the agent's native usage reading."""
     reading = agent.get("usage") if isinstance(agent.get("usage"), dict) else {}
-    return {**agent, "context": usage.context_display(reading), "context_level": usage.context_level(reading),
-            "cost": usage.cost_display(reading), "context_line": usage.context_line(reading)}
+    return {**agent, "context": display.context_display(reading), "context_level": display.context_level(reading),
+            "cost": display.cost_display(reading), "context_line": display.context_line(reading)}
 
 
 def rate_limits(items):
@@ -68,7 +65,7 @@ def rate_limits(items):
     for agent in items:
         if agent.get("live") != "alive" or not isinstance(agent.get("usage"), dict):
             continue
-        for label, percent, resets, reported in usage.rate_limit_windows(agent["usage"]):
+        for label, percent, resets, reported in display.rate_limit_windows(agent["usage"]):
             try:
                 if resets and datetime.fromisoformat(resets.replace("Z", "+00:00")) <= now:
                     continue

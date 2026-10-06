@@ -3,8 +3,7 @@ import re
 from ..universe import agents
 from ..runtime import lifecycle
 from .. import universe
-from .list_agents import error_text, state
-from .spawn import label, mode
+from ..display import error_text, label, mode, state
 
 TAIL_LINES = 30
 

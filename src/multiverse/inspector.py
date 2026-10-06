@@ -8,7 +8,8 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from .dashboard import clean, within
+from .display import clean
+from .dashboard import within
 
 
 class Inspector(Vertical):

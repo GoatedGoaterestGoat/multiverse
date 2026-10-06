@@ -39,7 +39,7 @@ from uuid import uuid4
 
 from ..base import ConfiguredAdapter
 from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
-from ...usage import Usage
+from ..types import Usage
 
 MOD = Path(__file__).parent / 'mod'
 # Typeahead for /multiverse, a plugin of its own: it hooks `prompt.autocomplete`, which Claude Code

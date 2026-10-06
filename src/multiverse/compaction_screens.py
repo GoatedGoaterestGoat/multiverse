@@ -21,8 +21,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Input, Label, Static
 
 from .compaction import config
-from .dashboard import clean
-from .usage import count
+from .display import clean, tokens
 
 MISSING = object()
 GENERIC = config.describe(config.Settings())['builder']
@@ -450,7 +449,7 @@ class CompactionScreen(FieldScreen):
 
 def scheduler_summary(agent):
     settings = agent.get('scheduler') or {}
-    text = settings.get('scheduler', '?') + (f" {count(settings['budget'])}" if 'budget' in settings else '')
+    text = settings.get('scheduler', '?') + (f" {tokens(settings['budget'])}" if 'budget' in settings else '')
     return text if agent.get('scheduler_from') == 'agent' else 'default'
 
 
@@ -463,7 +462,7 @@ def agent_state(agent):
 
 def share_text(value):
     """A turn's share of the budget: the allocator gives a token count."""
-    return count(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else clean(value)
+    return tokens(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else clean(value)
 
 
 class AgentScreen(FieldScreen):
@@ -621,12 +620,12 @@ class AgentScreen(FieldScreen):
             kept = 'raw' if turn.get('raw') else 'summarized'
             tree = ('built' if turn.get('has_tree') else 'missing') if turn.get('needs_tree') else '—'
             table.add_row(str(position), clean(turn.get('prompt', ''))[:30], str(turn.get('leaves', '')),
-                          count(turn['tokens']) if isinstance(turn.get('tokens'), (int, float)) else '—',
+                          tokens(turn['tokens']) if isinstance(turn.get('tokens'), (int, float)) else '—',
                           share_text(turn.get('share')), kept, tree)
         summary = detail.get('summary') or {}
-        after = count(summary.get('tokens_after', 0)) + ('+' if summary.get('after_partial') else '')
+        after = tokens(summary.get('tokens_after', 0)) + ('+' if summary.get('after_partial') else '')
         text = (f"{summary.get('turns', 0)} turns · {summary.get('summarized', 0)} summarized · "
-                f"{summary.get('trees_missing', 0)} trees missing · {count(summary.get('tokens_before', 0))} → {after}"
+                f"{summary.get('trees_missing', 0)} trees missing · {tokens(summary.get('tokens_before', 0))} → {after}"
                 + (' (partial: trees missing)' if summary.get('after_partial') else ''))
         if summary.get('dropped_turns'):
             text += f" · {summary['dropped_turns']} turns dropped"

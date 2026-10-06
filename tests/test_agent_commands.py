@@ -12,6 +12,7 @@ from multiverse.runtime import lifecycle
 from multiverse import cli
 from multiverse.store import write
 from multiverse.tools import doctor, inspect, list_agents, resume, spawn
+from multiverse import display
 from test_multiverse import BaseTest
 
 
@@ -27,21 +28,21 @@ class ListTest(BaseTest):
     def test_shorten_cuts_at_a_word_and_only_a_single_long_word_inside(self):
         text = 'Reviewing the compaction status line and its tests, then the docs'
         for limit in (20, 30, 40, 50):
-            short = list_agents.shorten(text, limit)
+            short = display.shorten(text, limit)
             self.assertLessEqual(len(short), limit)
             self.assertTrue(short.endswith('…'))
             self.assertIn(short[:-1], [' '.join(text.split()[:count]) for count in range(1, 12)], short)
-        self.assertEqual(list_agents.shorten(text, 200), text)
-        self.assertEqual(list_agents.shorten('a  b\n c', 20), 'a b c')
-        self.assertEqual(list_agents.shorten('x' * 100, 10), 'x' * 9 + '…')  # no word to stop at
-        self.assertEqual(list_agents.shorten(None), '')
+        self.assertEqual(display.shorten(text, 200), text)
+        self.assertEqual(display.shorten('a  b\n c', 20), 'a b c')
+        self.assertEqual(display.shorten('x' * 100, 10), 'x' * 9 + '…')  # no word to stop at
+        self.assertEqual(display.shorten(None), '')
 
     def test_state_says_what_a_live_agent_does_otherwise_why_it_is_not_live(self):
-        self.assertEqual(list_agents.state(row('a', status='working')), 'working')
-        self.assertEqual(list_agents.state(row('a', status='waiting')), 'waiting')
-        self.assertEqual(list_agents.state(row('a', status='unknown')), 'alive')
-        self.assertEqual(list_agents.state(row('a', live='dormant', status='—')), 'dormant')
-        self.assertEqual(list_agents.state(row('a', live='stopped', status='—')), 'stopped')
+        self.assertEqual(display.state(row('a', status='working')), 'working')
+        self.assertEqual(display.state(row('a', status='waiting')), 'waiting')
+        self.assertEqual(display.state(row('a', status='unknown')), 'alive')
+        self.assertEqual(display.state(row('a', live='dormant', status='—')), 'dormant')
+        self.assertEqual(display.state(row('a', live='stopped', status='—')), 'stopped')
 
     def test_rows_have_no_ids_and_no_universe_for_this_universe(self):
         with self.listing(row('alpha', status='working', phase='working', summary='Reading the diff'),
@@ -236,10 +237,10 @@ class LaunchTextTest(BaseTest):
                 'runtime': {'native_mode': {'mode': 'bridge'}, 'control_endpoint': {}}, **extra}
 
     def test_label_names_the_harness_and_how_it_is_connected(self):
-        self.assertEqual(spawn.label(self.record()), 'Codex, bridge')
-        self.assertEqual(spawn.label({'harness': 'claude', 'runtime': {'control_endpoint': {'transport': 'unix-lines'}}}), 'Claude, bridge')
-        self.assertEqual(spawn.label({'harness': 'pi', 'runtime': {}}), 'Pi, plain')
-        self.assertEqual(spawn.label({'harness': 'custom', 'runtime': {'native_mode': {'mode': 'bridge without compaction'}}}),
+        self.assertEqual(display.label(self.record()), 'Codex, bridge')
+        self.assertEqual(display.label({'harness': 'claude', 'runtime': {'control_endpoint': {'transport': 'unix-lines'}}}), 'Claude, bridge')
+        self.assertEqual(display.label({'harness': 'pi', 'runtime': {}}), 'Pi, plain')
+        self.assertEqual(display.label({'harness': 'custom', 'runtime': {'native_mode': {'mode': 'bridge without compaction'}}}),
                          'custom, bridge without compaction')
 
     def test_spawn_says_started_and_ready_only_after_a_wait(self):
