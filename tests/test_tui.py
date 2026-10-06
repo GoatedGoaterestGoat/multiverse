@@ -15,7 +15,7 @@ from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
 from multiverse.ui.drafts import SubverseDraft
 from multiverse.ui.app import Details, Form, KEYS, MultiverseApp
-from multiverse.ui.views import COLUMNS
+from multiverse.ui.columns import COLUMNS
 
 
 class RecordingBackend(DemoBackend):
@@ -243,7 +243,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.app.selected['status'] = 'disconnected'
             self.app.selected['runtime'] = {'native_relay': {'state': 'lost',
                 'reason': 'Native relay lost. Kill then resume the agent.', 'detail': 'daemon connection closed'}}
-            self.assertEqual(self.app.cell(self.app.selected, 'status').plain, 'disconnected')
+            self.assertEqual(COLUMNS['status'].render(self.app.selected).plain, 'disconnected')
             self.app.action_preview()
             state = str(self.app.query_one('#inspect-state', Static).render())
             self.assertIn('Native relay lost. Kill then resume', state)
@@ -530,19 +530,19 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertIn("1 waiting", str(self.app.query_one("#totals", Static).render()))
             row = self.app.visible_rows[agent_key(reviewer)]
-            name, status = MultiverseApp.cell(row, "name"), MultiverseApp.cell(row, "status")
+            name, status = COLUMNS["name"].render(row), COLUMNS["status"].render(row)
             self.assertIn("●", name.plain)
             self.assertEqual(status.plain, "waiting")
             self.assertIn("#fab387", str(status.style))
             group = self.app.visible_rows[group_key(self.review)]
-            self.assertTrue(MultiverseApp.cell(group, "summary").plain.startswith("1 waiting"))
+            self.assertTrue(COLUMNS["summary"].render(group).plain.startswith("1 waiting"))
             quiet = self.app.visible_rows[agent_key(next(a for a in self.backend.agents if a["name"] != "reviewer" and a["live"] == "alive"))]
-            self.assertNotIn("●", MultiverseApp.cell(quiet, "name").plain)
+            self.assertNotIn("●", COLUMNS["name"].render(quiet).plain)
 
     async def test_user_facing_text_says_status(self):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
-            self.assertEqual(COLUMNS["status"][0], "Status")
+            self.assertEqual(COLUMNS["status"].title, "Status")
             self.assertNotIn("ctivity", KEYS)
             self.assertIn("Inspector", [b.description for b in self.app.BINDINGS if b.show])
             await pilot.press("p")

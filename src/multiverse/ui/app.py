@@ -19,7 +19,7 @@ from .drafts import AgentDraft, SubverseDraft
 from .inspector import Inspector
 from .panels import LocalView
 from .tree import agent_key, group_key, hierarchy, rate_limits
-from .views import COLUMNS
+from .columns import COLUMNS, COMPACT_WIDTH
 
 KEYS = """NAVIGATION
 ↑ / k, ↓ / j   Select a row
@@ -359,18 +359,16 @@ class MultiverseApp(App):
                 row["kind"] = "draft"
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
-        if available < 110:
-            fields = [key for key in fields if key not in ("harness", "status", "context", "cost", "id", "updated_at")]
+        if available < COMPACT_WIDTH:
+            fields = [key for key in fields if COLUMNS[key].compact]
         if self.draft:
             fields = list(self.draft.columns)
-        widths = {key: COLUMNS[key][1] for key in fields}
-        widths.update(name=26 if available >= 68 else 23)
-        for key, width in (("live", 7), ("phase", 8), ("harness", 7), ("status", 9)):
-            if key in widths:
-                widths[key] = width
+        widths = {key: COLUMNS[key].width for key in fields}
+        if available < 68:
+            widths["name"] = 23
         if self.draft and "harness" in widths:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
-        flexible = next((key for key in ("summary", "task") if key in fields), None)
+        flexible = next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -394,7 +392,7 @@ class MultiverseApp(App):
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else self.cell(row, field)
+        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else COLUMNS[field].render(row)
                                   for field in fields]) for row in projected]
         if self.moving:
             for key, cells in rendered:
@@ -405,7 +403,7 @@ class MultiverseApp(App):
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
                 table.clear(columns=True)
                 for field in fields:
-                    table.add_column("Universe / agent" if field == "name" else COLUMNS[field][0], key=field, width=widths[field])
+                    table.add_column(COLUMNS[field].title, key=field, width=widths[field])
                 for key, cells in rendered:
                     table.add_row(*cells, key=key)
                 if keys:
@@ -421,7 +419,7 @@ class MultiverseApp(App):
 
     def draft_cell(self, row, field):
         if field == "name":
-            label = self.cell(row, field)[:sum(len(guide) for guide, _color in row["guides"])]
+            label = COLUMNS["name"].render(row)[:sum(len(guide) for guide, _color in row["guides"])]
             label.append("+ ", style=theme.TEAL)
             label.append_text(self.draft.cell("name"))
             return label
@@ -467,36 +465,6 @@ class MultiverseApp(App):
             self.draft.focus("model")
             self.populate_table()
             self.query_one("#agents", DataTable).focus()
-
-    @staticmethod
-    def cell(row, field):
-        color = row["accent"]
-        if field == "name":
-            group = row["kind"] == "group"
-            label = Text(style=f"bold {color} on {theme.BASE}" if group else color)
-            for guide, accent in row["guides"]:
-                label.append(guide, style=f"not bold {accent}")
-            label.append(("▾ " if row["expanded"] else "▸ ") if group else "  ")
-            label.append(clean(row["name"]))
-            if not group and row.get("status") == "waiting":
-                label.append(" ●", style=f"bold {theme.PEACH}")
-            return label
-        if row["kind"] == "group":
-            value = {"live": f'{row["alive"]}/{row["total"]}',
-                     "phase": "",
-                     "summary": (f'{row["waiting"]} waiting · ' if row["waiting"] else "")
-                                + (f'{row["blocked"]} blocked · ' if row["blocked"] else "") + clean(row["description"]),
-                     "task": clean(row["description"])}.get(field, "")
-            return Text(value, style=f'{color} on {theme.BASE}')
-        value = clean(row.get(field, "—"))
-        color = {"alive": theme.GREEN, "ending": theme.PEACH, "stopped": theme.OVERLAY1, "dormant": theme.OVERLAY1, "unknown": theme.YELLOW,
-                 "blocked": theme.YELLOW, "done": theme.TEAL, "working": theme.BLUE,
-                 "waiting": theme.PEACH, "disconnected": f"bold {theme.RED}"}.get(value, theme.SUBTEXT0)
-        if field == "context" and row.get("context_level"):
-            return Text(value, style={"warn": theme.YELLOW, "high": f"bold {theme.RED}"}[row["context_level"]])
-        if field == "status" and value == "waiting":
-            return Text(value, style=f"bold reverse {theme.PEACH}")
-        return Text(value, style=color)
 
     def show_selection(self, key):
         row = self.visible_rows.get(key)

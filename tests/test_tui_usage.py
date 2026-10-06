@@ -9,7 +9,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import Static
 from multiverse.ui import views
 from multiverse import display
-from multiverse.ui.views import COLUMNS, view
+from multiverse.ui.columns import COLUMNS
+from multiverse.ui.views import view
 from multiverse.ui.tree import agent_key
 from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
@@ -102,7 +103,7 @@ class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             rows = self.app.visible_rows
-            cell = lambda name, field: MultiverseApp.cell(rows[agent_key(by_name[name])], field)
+            cell = lambda name, field: COLUMNS[field].render(rows[agent_key(by_name[name])])
             self.assertEqual(cell("reviewer", "context").plain, "82k/200k")
             self.assertEqual(str(cell("reviewer", "context").style), "#a6adc8")
             self.assertEqual(cell("secondbrain", "context").style, "#f9e2af")

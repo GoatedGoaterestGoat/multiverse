@@ -5,13 +5,8 @@ import re
 from .. import universe
 from ..store import read
 from . import theme
+from .columns import COLUMNS
 from .panels import normalize_widgets
-
-COLUMNS = {"name": ("Agent", 20), "harness": ("Harness", 9), "live": ("Live", 9),
-           "context": ("Context", 10), "cost": ("Cost", 7), "status": ("Status", 12), "phase": ("Phase", 10), "summary": ("Working on", 48),
-           "id": ("ID", 12), "universe": ("Universe", 24), "task": ("Task", 48),
-           "updated_at": ("Updated", 26)}
-
 
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
 # Former column keys that views written for older versions still use.
