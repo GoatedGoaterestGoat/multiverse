@@ -1,4 +1,9 @@
-"""Compact Textual hierarchy. Backends own I/O; widgets own presentation."""
+"""The dashboard app: layout, key bindings, refreshing from the backend and moving between scopes.
+
+The table (fleet.py), tree editing (editing.py) and agent commands (commands.py)
+are mixins of MultiverseApp. Their key actions stay app actions, so bindings and
+check_action see them; Textual @on handlers must stay on this class.
+"""
 import asyncio
 from pathlib import Path
 
@@ -12,17 +17,17 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from ..display import clean
 from . import theme
 from .backend import LocalBackend
-from .columns import COLUMNS, COMPACT_WIDTH
-from .compaction import CompactionScreen
-from .drafts import AgentDraft, SubverseDraft
+from .commands import AgentCommands
+from .editing import TreeEditing
+from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
-from .screens import KEYS, Details, Form
-from .tree import agent_key, group_key, hierarchy, rate_limits
+from .screens import KEYS, Details
+from .tree import group_key, rate_limits
 from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
 
 
-class MultiverseApp(App):
+class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     CSS_PATH = "app.tcss"
     TITLE = "Multiverse"
     BINDINGS = [
@@ -168,118 +173,6 @@ class MultiverseApp(App):
         self.query_one("#agents", DataTable).scroll_to(x=scroll[0], y=scroll[1], animate=False)
         self.query_one("#local-view", LocalView).scroll_to(y=scroll[2], animate=False)
 
-    def populate_table(self):
-        if not self.snapshot:
-            return
-        self.set_class(self.draft is not None, "drafting")
-        search = self.query_one("#filter", Input).value
-        data = self.snapshot
-        if self.draft:
-            data = self.draft.add_to(data)
-        projected = hierarchy(data, self.collapsed, search)
-        for row in projected:
-            if self.draft and row["key"] == self.draft.key:
-                row["kind"] = "draft"
-        available = self.query_one("#fleet").content_size.width - 1
-        fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
-        if available < COMPACT_WIDTH:
-            fields = [key for key in fields if COLUMNS[key].compact]
-        if self.draft:
-            fields = list(self.draft.columns)
-        widths = {key: COLUMNS[key].width for key in fields}
-        if available < 68:
-            widths["name"] = 23
-        if self.draft and "harness" in widths:
-            widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
-        flexible = next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
-        if flexible:
-            widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
-        self.visible_rows = {row["key"]: row for row in projected}
-        self.visible_agents = {key: row for key, row in self.visible_rows.items() if row["kind"] == "agent"}
-        keys = list(self.visible_rows)
-        if self.selected_key not in keys:
-            # Prefer a surviving ancestor after folding/removal; otherwise first agent.
-            prior = self.selected_key
-            candidates = []
-            if prior and prior.startswith("group:"):
-                scope = Path(prior[6:])
-            elif self.selected:
-                scope = Path(self.selected["universe"])
-            else:
-                scope = None
-            while scope and scope.is_relative_to(self.root):
-                candidates.append(group_key(scope))
-                if scope == self.root:
-                    break
-                scope = scope.parent.parent
-            self.selected_key = next((key for key in candidates if key in keys),
-                                     next(iter(self.visible_agents), keys[0] if keys else None))
-        table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else COLUMNS[field].render(row)
-                                  for field in fields]) for row in projected]
-        if self.moving:
-            for key, cells in rendered:
-                if key == self.moving["key"]:
-                    cells[0].append("  ⇢ moving", style=f"italic {theme.YELLOW}")
-        signature = (list(widths.items()), rendered)
-        if signature != self._table_signature:
-            with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
-                table.clear(columns=True)
-                for field in fields:
-                    table.add_column(COLUMNS[field].title, key=field, width=widths[field])
-                for key, cells in rendered:
-                    table.add_row(*cells, key=key)
-                if keys:
-                    table.move_cursor(row=keys.index(self.selected_key), animate=False)
-            self._table_signature = signature
-        self.query_one("#empty", Static).display = not keys
-        self.query_one("#empty", Static).update("No matches. Esc clears search.")
-        table.display = bool(keys)
-        self.show_selection(self.selected_key)
-        self.call_after_refresh(self.position_harness_menu)
-        if self.inspector.row:
-            self.inspector.update_row(self.visible_rows.get(self.inspector.row["key"]))
-
-    def draft_cell(self, row, field):
-        if field == "name":
-            label = COLUMNS["name"].render(row)[:sum(len(guide) for guide, _color in row["guides"])]
-            label.append("+ ", style=theme.TEAL)
-            label.append_text(self.draft.cell("name"))
-            return label
-        return self.draft.column_cell(field)
-
-    def scope_harnesses(self, scope):
-        return next((g.get("harnesses", []) for g in self.snapshot["groups"] if g["path"] == str(scope)), [])
-
-    def position_harness_menu(self):
-        menu = self.query_one("#harness-menu", HarnessMenu)
-        draft = self.draft
-        menu.display = bool(draft and draft.active == "harness" and draft.harnesses and not self.operating)
-        if not menu.display:
-            return
-        if self._harness_options != draft.harnesses:
-            menu.clear_options().add_options(Text(name) for name in draft.harnesses)
-            self._harness_options = draft.harnesses
-        value = draft.values["harness"]
-        menu.highlighted = draft.harnesses.index(value) if value in draft.harnesses else None
-        table = self.query_one("#agents", DataTable)
-        columns = table.ordered_columns
-        column = next(i for i, item in enumerate(columns) if item.key.value == "harness")
-        x = table.content_region.x + sum(c.width + table.cell_padding * 2 for c in columns[:column]) - int(table.scroll_x)
-        row_y = table.content_region.y + table.header_height + list(table.rows).index(draft.key) - int(table.scroll_y)
-        if not table.content_region.y + table.header_height <= row_y < table.content_region.bottom:
-            menu.display = False
-            return
-        width = min(32, max(16, max(len(name) for name in draft.harnesses) + 4))
-        height = min(8, len(draft.harnesses) + 2)
-        x = max(0, min(x, self.size.width - width))
-        y = row_y + 1
-        if y + height > self.size.height - 2:
-            y = max(1, row_y - height)
-        menu.styles.width, menu.styles.height = width, height
-        menu.styles.offset = (x, y)
-        menu.scroll_to_highlight()
-
     @on(OptionList.OptionSelected, "#harness-menu")
     def choose_harness(self, event):
         event.stop()
@@ -288,42 +181,6 @@ class MultiverseApp(App):
             self.draft.focus("model")
             self.populate_table()
             self.query_one("#agents", DataTable).focus()
-
-    def show_selection(self, key):
-        row = self.visible_rows.get(key)
-        self.selected_key = key
-        self.selected = row if row and row["kind"] == "agent" else None
-        if row and row["kind"] == "draft":
-            if self.draft.active == "harness":
-                value = clean(self.draft.values["harness"])
-                hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
-                self.query_one("#selection", Static).update(f"Harness: {value} ▾ · {hint}")
-                return
-            label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
-            value = self.draft.cell(self.draft.active)
-            # Keep the insertion point visible while editing a long value.
-            budget = max(8, self.size.width - len(label.plain) - 4)
-            start = max(0, self.draft.cursor - budget + 1)
-            label.append_text(value[start:start + budget])
-            self.query_one("#selection", Static).update(label)
-            return
-        if row:
-            content = self.scope_trail(row)
-            content += " · " + clean(row.get("summary") or row.get("description") or "n new agent · g new subverse")
-            self.query_one("#selection", Static).update(content)
-        else:
-            self.query_one("#selection", Static).update("/ search · n new agent · g new subverse · ? keys")
-
-    def scope_trail(self, row):
-        path = Path(row["path"] if row["kind"] == "group" else row["universe"])
-        groups = {g["path"]: g["name"] for g in self.snapshot["groups"]}
-        parts = []
-        while path.is_relative_to(self.root):
-            parts.append(clean(groups.get(str(path), path.name)))
-            if path == self.root:
-                break
-            path = path.parent.parent
-        return " / ".join(reversed(parts))
 
     @on(DataTable.RowHighlighted, "#agents")
     def highlight(self, event):
@@ -334,36 +191,6 @@ class MultiverseApp(App):
             self.show_selection(key)
             if self.inspector.row:
                 self.queue_inspector(key)
-
-    def click_row(self, key, chain):
-        if not self.navigable():
-            return
-        self.show_selection(key)
-        if self.moving:
-            return
-        row = self.visible_rows.get(key)
-        if row and row["kind"] == "group":
-            self.enter_scope(Path(row["path"])) if chain == 2 else self.action_fold()
-        elif chain == 2:
-            self.action_attach()
-
-    def select_key(self, key):
-        keys = list(self.visible_rows)
-        if key in keys:
-            self.query_one("#agents", DataTable).move_cursor(row=keys.index(key), animate=False)
-            self.show_selection(key)
-
-    def select_cursor(self):
-        """Select the row under the table cursor, if the table has focus.
-
-        RowHighlighted is queued. A fast arrow+Enter can arrive before it,
-        so activation must use the actual cursor rather than its observer.
-        """
-        table = self.query_one("#agents", DataTable)
-        if self.focused is not table or not 0 <= table.cursor_row < table.row_count:
-            return False
-        self.show_selection(str(table.ordered_rows[table.cursor_row].key.value))
-        return True
 
     def action_open(self):
         if self.moving:
@@ -529,269 +356,6 @@ class MultiverseApp(App):
 
     def scope_name(self, root):
         return next((g["name"] for g in (self.snapshot or {}).get("groups", []) if g["path"] == str(root)), root.name)
-
-    def submit_operation(self, label, callback, *args, after=None):
-        if self.operating:
-            return
-        self.operating = True
-        self.set_status(label + "…")
-        self.execute_operation(label, callback, args, after)
-
-    @work(group="operation", exit_on_error=False)
-    async def execute_operation(self, label, callback, args, after):
-        succeeded, result = False, None
-        try:
-            result = await asyncio.to_thread(callback, *args)
-            if label == "Send message":
-                receipt = (result or {}).get('native_delivery', {})
-                state = receipt.get('state', 'queued')
-                detail = receipt.get('reason', 'delivery and an answer may follow')
-                self.set_status(f"Message saved; {state}: {detail}", error=state in ('error', 'unavailable'))
-            elif label == 'Kill agent' and (result or {}).get('native_cancellation'):
-                native = result['native_cancellation']
-                detail = native.get('reason', 'Native cancellation complete')
-                if 'cancelled_submissions' in native:
-                    detail += (f" ({native['cancelled_submissions']} queued cancelled, "
-                               f"{native['interrupted_turns']} turn interrupts)")
-                incomplete = native.get('state') != 'ok'
-                self.set_status(('Terminal closed: ' if incomplete else 'Kill complete: ') + detail, error=incomplete)
-            else:
-                self.set_status(label + " complete.")
-            succeeded = True
-        except Exception as error:
-            self.set_status(f"{label} failed: {error}", error=True)
-            self.notify(str(error), title=label, severity="error", markup=False)
-        finally:
-            self.operating = False
-        # A scan started before the action may contain old state. Finish it, then
-        # read again so a completed mutation cannot be hidden until the next timer.
-        if self.scanning:
-            await self.workers.wait_for_complete([w for w in self.workers if w.group == "scan"])
-        if succeeded and after:
-            after(result)
-        self.refresh_snapshot()
-
-    def action_compaction(self):
-        if self.ready():
-            root = self.target_scope()
-            self.push_screen(CompactionScreen(root, self.backend, self.scope_name(root)), self.compaction_saved)
-
-    def compaction_saved(self, overview):
-        if overview:
-            self.set_status("Compaction settings saved. Restart agents for a changed enabled setting to apply.")
-
-    def action_spawn(self):
-        if self.ready():
-            root = self.target_scope()
-            if not self.snapshot:
-                return
-            options = self.scope_harnesses(root)
-            if not options:
-                self.set_status(f"No harnesses configured in {self.scope_name(root)}.", error=True)
-                return
-            names = {a["name"] for a in self.snapshot["agents"] if Path(a["universe"]) == root}
-            harness = next((name for name in ("codex", "claude") if name in options), options[0])
-            self.start_draft(AgentDraft(root, self.selected_key, {"name": self.unused("worker", names), "harness": harness,
-                                                                  "model": ""}, options),
-                             f"New agent in {self.scope_name(root)} · Tab field · Enter create · Esc cancel")
-
-    @staticmethod
-    def unused(base, names):
-        name, number = base, 2
-        while name in names:
-            name, number = f"{base}-{number}", number + 1
-        return name
-
-    def subverse_names(self, root):
-        return {Path(g["path"]).name for g in self.snapshot["groups"] if g["parent"] == str(root)}
-
-    def start_draft(self, draft, message):
-        self.hide_inspector()
-        self.query_one("#filter", Input).value = ""
-        self.query_one("#filter").display = False
-        self.draft = draft
-        self.selected_key = draft.key
-        scope = draft.scope
-        while scope.is_relative_to(self.root):
-            self.collapsed.discard(str(scope))
-            if scope == self.root:
-                break
-            scope = scope.parent.parent
-        self.set_status(message)
-        self.populate_table()
-        self.query_one("#agents", DataTable).focus()
-
-    def draft_key(self, event):
-        if self.operating:
-            return
-        if event.key == "escape":
-            self.cancel_draft()
-        elif event.key == "enter" and self.draft.active == "harness":
-            if self.draft.values["harness"] in self.draft.harnesses:
-                self.draft.focus("model")
-                self.populate_table()
-        elif event.key in ("enter", "ctrl+enter"):
-            self.commit_draft()
-        else:
-            self.draft.edit(event)
-            self.populate_table()
-
-    def cancel_draft(self):
-        if self.draft and not self.operating:
-            self.selected_key = self.draft.previous_key
-            self.draft = None
-            self.set_status("")
-            self.populate_table()
-            self.query_one("#agents", DataTable).focus()
-
-    def commit_draft(self):
-        draft = self.draft
-        if not draft or self.operating:
-            return
-        values = {key: value.strip() for key, value in draft.values.items()}
-        if problem := draft.problem(values, self.snapshot):
-            field, message = problem
-            draft.focus(field)
-            self.set_status(message, error=True)
-            self.populate_table()
-            return
-        self.submit_operation(draft.verb, getattr(self.backend, draft.operation), draft.scope, values, after=self.created)
-
-    def created(self, result):
-        draft, self.draft = self.draft, None
-        self.collapsed.discard(str(draft.scope))
-        self.selected_key = draft.created_key(result)
-
-    def action_subverse(self):
-        if self.ready():
-            root = self.target_scope()
-            if not self.snapshot:
-                return
-            self.start_draft(SubverseDraft(root, self.selected_key, {"name": self.unused("subverse", self.subverse_names(root))}),
-                             f"New subverse in {self.scope_name(root)} · Enter create · Esc cancel")
-
-    def movable(self, row, verb):
-        """Explain why a row cannot be moved or deleted; the backend rechecks on disk."""
-        if row["kind"] == "group" and Path(row["path"]) == self.root:
-            return (f"Go back to the parent universe to {verb} {clean(row['name'])}." if self.history
-                    else f"The top-level universe cannot be {verb}d here.")
-        running = row["alive"] if row["kind"] == "group" else int(row["live"] in ('alive', 'ending'))
-        if running:
-            what = f"{running} running agent{'s' if running != 1 else ''} inside" if row["kind"] == "group" else "it"
-            return f"Stop {what} first (s), then {verb} {clean(row['name'])}."
-        return None
-
-    def action_cut(self):
-        if self.moving:
-            self.place()
-            return
-        row = self.visible_rows.get(self.selected_key)
-        if not self.ready() or not row or row["kind"] not in ("agent", "group"):
-            return
-        if problem := self.movable(row, "move"):
-            self.set_status(problem, error=True)
-            return
-        self.hide_inspector()
-        self.moving = dict(row)
-        self.set_status(f"Moving {clean(row['name'])} · choose a group · Enter or x places it · Esc cancels")
-        self.populate_table()
-
-    def cancel_move(self):
-        self.moving = None
-        self.set_status("")
-        self.populate_table()
-
-    def place(self):
-        if not self.navigable():
-            return
-        moving, destination = self.moving, self.target_scope()
-        if moving["kind"] == "agent":
-            self.submit_operation("Move agent", self.backend.move_agent, Path(moving["universe"]), moving["id"],
-                                  destination, after=lambda result: self.moved(agent_key(result), destination))
-        else:
-            self.submit_operation("Move subverse", self.backend.move_subverse, Path(moving["path"]), destination,
-                                  after=lambda result: self.moved(group_key(Path(result["universe"])), destination))
-
-    def moved(self, key, destination):
-        self.moving = None
-        self.collapsed.discard(str(destination))
-        self.selected_key = key
-
-    def action_remove(self):
-        row = self.visible_rows.get(self.selected_key)
-        if not self.ready() or not row or row["kind"] not in ("agent", "group"):
-            return
-        if problem := self.movable(row, "delete"):
-            self.set_status(problem, error=True)
-            return
-        name = clean(row["name"])
-        if row["kind"] == "agent":
-            detail = f"{name} moves to this universe's trash with its inbox and launch history."
-            callback, args, label = self.backend.remove_agent, (Path(row["universe"]), row["id"]), "Delete agent"
-        else:
-            count = row["total"]
-            detail = (f"{name}, its subverses and {count} agent{'s' if count != 1 else ''} move to the parent universe's trash.")
-            callback, args, label = self.backend.remove_subverse, (Path(row["path"]),), "Delete subverse"
-        self.push_screen(Form(f"Delete {name}?", description=
-                              f"{detail} mv2 trash lists it; mv2 trash --empty deletes permanently. "
-                              "Ctrl+Enter deletes. Esc cancels."),
-                         lambda values: self.submit_operation(label, callback, *args) if values is not None else None)
-
-    def action_message(self):
-        if self.ready() and self.selected:
-            agent = dict(self.selected)
-            self.push_screen(Form(f'Message {agent["name"]}', [("text", "Message", "", True, True)]),
-                             lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
-                                                                  agent["id"], values["text"]) if values is not None else None)
-
-    def action_stop(self):
-        self.action_kill()
-
-    def action_kill(self):
-        if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant'):
-            agent = dict(self.selected)
-            description = ("Ctrl+Enter cancels native work only; no terminal remains to close."
-                           if agent['live'] == 'dormant' else
-                           "Ctrl+Enter ends running work and removes its tmux wrapper.")
-            self.push_screen(Form(f'Kill {agent["name"]}?', description=description +
-                                  " Files and conversation remain for resume. Esc cancels."),
-                             lambda values: self.submit_operation("Kill agent", self.backend.kill, Path(agent["universe"]),
-                                                                  agent["id"]) if values is not None else None)
-
-    def action_resume(self):
-        if self.ready() and self.selected and self.selected["live"] in ('stopped', 'dormant'):
-            agent = dict(self.selected)
-            self.submit_operation("Resume agent", self.backend.resume, Path(agent["universe"]), agent["id"])
-
-    def action_attach(self):
-        if self.ready() and self.selected and self.selected["live"] == "alive":
-            self.operating = True
-            self.attach_agent(dict(self.selected))
-
-    @work(group="attach", exit_on_error=False)
-    async def attach_agent(self, agent):
-        try:
-            if self.backend.demo:
-                self.set_status("Demo terminal. In a live universe, Enter opens the agent's tmux pane.")
-            else:
-                attach_error = None
-                with self.suspend():
-                    # Textual resumes the terminal only after a normal exit.
-                    # Report attach failures after leaving suspension.
-                    try:
-                        # Suspend stops the terminal writer. Do not yield to UI
-                        # timers here: rendering can fill its queue and deadlock
-                        # the event loop before the driver can be resumed.
-                        self.backend.attach(Path(agent["universe"]), agent["id"])
-                    except Exception as error:
-                        attach_error = error
-                if attach_error is not None:
-                    raise attach_error
-        except Exception as error:
-            self.set_status(f"Attach failed: {error}", error=True)
-        finally:
-            self.operating = False
-            self.refresh_snapshot()
 
     def action_quit(self):
         if len(self.screen_stack) > 1:
