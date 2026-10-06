@@ -1,4 +1,7 @@
-"""Small declarative local views. No imports, commands or executable plugins."""
+"""Local view panels: one Panel per widget type a view's `widgets` list can name.
+
+Panels are declarative: a view file cannot import code, run commands or load plugins.
+"""
 from pathlib import Path
 
 from rich.syntax import Syntax
@@ -8,6 +11,71 @@ from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, DataTable, Footer, Label, Link, Markdown, Static
+
+
+class Panel:
+    """One kind of local view widget: how its JSON is checked, and the widgets it shows.
+
+    `parse` returns the normalized widget or raises ValueError, which becomes an
+    inline error in place of that widget. `compose` returns Textual widgets.
+    """
+    def parse(self, widget, title):
+        raise NotImplementedError
+
+    def compose(self, view, root, widget, index):
+        raise NotImplementedError
+
+
+class MarkdownPanel(Panel):
+    def parse(self, widget, title):
+        return {"type": "markdown", "title": title, "text": str(widget.get("text", ""))[:32768]}
+
+    def compose(self, view, root, widget, index):
+        return [Markdown(widget["text"], open_links=False)]
+
+
+class TablePanel(Panel):
+    def parse(self, widget, title):
+        columns, rows = widget.get("columns"), widget.get("rows", [])
+        if not isinstance(columns, list) or not columns or not all(isinstance(c, str) for c in columns):
+            raise ValueError("table columns must be a nonempty string array")
+        if not isinstance(rows, list) or not all(isinstance(r, list) and len(r) == len(columns) for r in rows):
+            raise ValueError("table rows must match columns")
+        return {"type": "table", "title": title, "columns": columns[:16],
+                "rows": [[str(c)[:2000] for c in row[:16]] for row in rows[:500]]}
+
+    def compose(self, view, root, widget, index):
+        table = DataTable(id=f"view-table-{index}", classes="view-table", cursor_type="row")
+        table.add_columns(*widget["columns"])
+        for row in widget["rows"]:
+            # Literal cells: fixture data must not become Rich markup.
+            table.add_row(*(Text(cell) for cell in row))
+        table.styles.height = min(12, max(3, len(widget["rows"]) + 1))
+        return [table]
+
+
+class ArtifactsPanel(Panel):
+    def parse(self, widget, title):
+        items = widget.get("items", [])
+        if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("path"), str) for i in items):
+            raise ValueError("artifacts items require a path")
+        return {"type": "artifacts", "title": title, "items": [
+            {"label": str(i.get("label", i["path"]))[:200], "path": i["path"],
+             "description": str(i.get("description", ""))[:2000]} for i in items[:100]]}
+
+    def compose(self, view, root, widget, index):
+        children = []
+        for item_index, item in enumerate(widget["items"]):
+            key = f"artifact-{index}-{item_index}"
+            view.artifacts[key] = (root, item)
+            children.append(Button(Text(item["label"]), id=key, classes="artifact-button"))
+            if item["description"]:
+                children.append(Static(item["description"], classes="artifact-description", markup=False))
+        return children
+
+
+# A view's `widgets` entries name one of these by "type".
+PANELS = {"markdown": MarkdownPanel(), "table": TablePanel(), "artifacts": ArtifactsPanel()}
 
 
 def normalize_widgets(value):
@@ -21,25 +89,9 @@ def normalize_widgets(value):
                 raise ValueError("expected an object")
             kind = widget.get("type")
             title = str(widget.get("title", kind or "Widget"))[:200]
-            if kind == "markdown":
-                result.append({"type": kind, "title": title, "text": str(widget.get("text", ""))[:32768]})
-            elif kind == "table":
-                columns, rows = widget.get("columns"), widget.get("rows", [])
-                if not isinstance(columns, list) or not columns or not all(isinstance(c, str) for c in columns):
-                    raise ValueError("table columns must be a nonempty string array")
-                if not isinstance(rows, list) or not all(isinstance(r, list) and len(r) == len(columns) for r in rows):
-                    raise ValueError("table rows must match columns")
-                result.append({"type": kind, "title": title, "columns": columns[:16],
-                               "rows": [[str(c)[:2000] for c in row[:16]] for row in rows[:500]]})
-            elif kind == "artifacts":
-                items = widget.get("items", [])
-                if not isinstance(items, list) or not all(isinstance(i, dict) and isinstance(i.get("path"), str) for i in items):
-                    raise ValueError("artifacts items require a path")
-                result.append({"type": kind, "title": title, "items": [
-                    {"label": str(i.get("label", i["path"]))[:200], "path": i["path"],
-                     "description": str(i.get("description", ""))[:2000]} for i in items[:100]]})
-            else:
+            if kind not in PANELS:
                 raise ValueError(f"unknown widget type: {kind}")
+            result.append(PANELS[kind].parse(widget, title))
         except ValueError as error:
             result.append({"type": "markdown", "title": f"Widget {index + 1} error", "text": str(error)})
     return result
@@ -111,23 +163,7 @@ class LocalView(VerticalScroll):
         children = []
         for index, widget in enumerate(widgets):
             children.append(Label(widget["title"], classes="view-title", markup=False))
-            if widget["type"] == "markdown":
-                children.append(Markdown(widget["text"], open_links=False))
-            elif widget["type"] == "table":
-                table = DataTable(id=f"view-table-{index}", classes="view-table", cursor_type="row")
-                table.add_columns(*widget["columns"])
-                for row in widget["rows"]:
-                    # Literal cells: fixture data must not become Rich markup.
-                    table.add_row(*(Text(cell) for cell in row))
-                table.styles.height = min(12, max(3, len(widget["rows"]) + 1))
-                children.append(table)
-            else:
-                for item_index, item in enumerate(widget["items"]):
-                    key = f"artifact-{index}-{item_index}"
-                    self.artifacts[key] = (root, item)
-                    children.append(Button(Text(item["label"]), id=key, classes="artifact-button"))
-                    if item["description"]:
-                        children.append(Static(item["description"], classes="artifact-description", markup=False))
+            children.extend(PANELS[widget["type"]].compose(self, root, widget, index))
         if children:
             await self.mount(*children)
 
