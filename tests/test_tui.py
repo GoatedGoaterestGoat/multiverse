@@ -14,7 +14,8 @@ from textual import events
 from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
 from multiverse.ui.drafts import SubverseDraft
-from multiverse.ui.app import Details, Form, KEYS, MultiverseApp
+from multiverse.ui.screens import Details, Form, KEYS
+from multiverse.ui.app import MultiverseApp
 from multiverse.ui.columns import COLUMNS
 
 

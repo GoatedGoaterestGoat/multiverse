@@ -6,197 +6,20 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
-from textual.widgets import DataTable, Footer, Input, Label, OptionList, Static, TextArea
+from textual.containers import Horizontal
+from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextArea
 
 from ..display import clean
-from ..universe import slug
 from . import theme
 from .backend import LocalBackend
+from .columns import COLUMNS, COMPACT_WIDTH
 from .compaction import CompactionScreen
 from .drafts import AgentDraft, SubverseDraft
 from .inspector import Inspector
 from .panels import LocalView
+from .screens import KEYS, Details, Form
 from .tree import agent_key, group_key, hierarchy, rate_limits
-from .columns import COLUMNS, COMPACT_WIDTH
-
-KEYS = """NAVIGATION
-↑ / k, ↓ / j   Select a row
-← / h          Fold a group, or go to its parent
-→ / l          Expand a group, or select its first child
-Space          Fold / expand the selected group
-Enter          Enter a subverse; attach to a live agent
-Backspace      Return to the previous universe, restoring its context
-Tab            Move between hierarchy, local view and artifact links
-/              Search every subverse, including folded groups
-Esc            Clear search, cancel a move, or close the current dialog
-
-AGENTS & GROUPS
-n              New agent in the selected group
-m              Message the selected agent
-K / s          Kill (with confirmation); s is an alias
-r              Resume a stopped or dormant agent
-v              Full agent details or group configuration
-p              Show / hide the inspector (opens only with this key)
-c              Compaction settings for the selected scope; Enter on an agent opens its plan
-g              New subverse inside the selected group (inline, name only)
-x              Move the selected agent or subverse: choose a group, then Enter or x
-d              Delete the selected agent or subverse (to trash, with confirmation)
-F5             Refresh
-q              Quit the dashboard; agents keep running
-
-FORMS
-Tab / Shift-Tab  Move between fields
-Ctrl+Enter       Submit
-Esc              Cancel
-
-INLINE NEW AGENT
-n                Add a draft row in the selected group
-Tab / Shift-Tab  Name → harness → model
-↑ / ↓           Choose a configured harness; Enter confirms it
-Enter            Create; Esc discards the draft
-
-MOUSE
-Click a group to fold / expand; double-click to enter it.
-Click the breadcrumb to return to the previous universe.
-Double-click an agent to attach. Scroll the list normally.
-The key hints along the bottom are clickable.
-
-Ctrl-b d detaches from an attached agent and returns to the dashboard that
-opened it, including when that dashboard runs inside tmux. The dashboard and
-agent keep running. On the dashboard itself, Ctrl-b d detaches normally.
-These are the default tmux keys; custom prefixes and bindings are preserved.
-Ctrl-b L is tmux's stock last-session action, not the dashboard return key."""
-
-
-class Form(ModalScreen[dict | None]):
-    """Button-free forms; cancellation never dispatches an action."""
-    BINDINGS = [Binding("escape", "cancel", "Cancel"), Binding("ctrl+enter", "submit", "Submit")]
-
-    def __init__(self, title, fields=(), description=""):
-        super().__init__()
-        self.form_title, self.fields, self.description = title, fields, description
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="dialog"):
-            yield Label(self.form_title, id="dialog-title", markup=False)
-            if self.description:
-                yield Static(self.description, id="dialog-description", markup=False)
-            with VerticalScroll(id="form-fields"):
-                for key, label, default, multiline, required in self.fields:
-                    yield Label(label + (" *" if required else ""), markup=False)
-                    if multiline:
-                        yield TextArea(default, id=f"field-{key}", classes="multiline", soft_wrap=True)
-                    else:
-                        yield Input(value=default, id=f"field-{key}")
-            yield Static("", id="form-error", markup=False)
-        yield Footer()
-
-    def on_mount(self):
-        if self.fields:
-            self.query_one(f"#field-{self.fields[0][0]}").focus()
-
-    def action_cancel(self):
-        self.dismiss(None)
-
-    def action_submit(self):
-        values = {}
-        for key, label, _default, multiline, required in self.fields:
-            widget = self.query_one(f"#field-{key}")
-            value = (widget.text if multiline else widget.value).strip()
-            if required and not value:
-                self.query_one("#form-error", Static).update(f"{label} is required.")
-                widget.focus()
-                return
-            if key in ("name", "harness") and value:
-                try:
-                    slug(value)
-                except ValueError as error:
-                    self.query_one("#form-error", Static).update(str(error))
-                    widget.focus()
-                    return
-            values[key] = value
-        self.dismiss(values)
-
-
-class Details(ModalScreen):
-    BINDINGS = [Binding("escape", "close", "Close")]
-
-    def __init__(self, title, content):
-        super().__init__()
-        self.detail_title, self.content = title, content
-
-    def compose(self):
-        with Vertical(id="details-dialog"):
-            yield Label(clean(self.detail_title), classes="detail-title", markup=False)
-            with VerticalScroll(id="full-details"):
-                yield Static(self.content, markup=False)
-        yield Footer()
-
-    def action_close(self):
-        self.dismiss()
-
-
-class HarnessMenu(OptionList, can_focus=False):
-    """Mouse-selectable menu; keyboard input stays with the inline draft."""
-
-
-class AgentTable(DataTable):
-    BINDINGS = [
-        Binding("enter", "app.open", "Open"),
-        Binding("space", "app.fold", "Fold", show=False),
-        Binding("left,h", "app.tree_left", "Fold / parent", show=False),
-        Binding("right,l", "app.tree_right", "Expand / child", show=False),
-        Binding("j", "cursor_down", "Down", show=False),
-        Binding("k", "cursor_up", "Up", show=False),
-    ]
-
-    async def _on_click(self, event):
-        if self.app.draft:
-            if not self.app.operating:
-                row = event.style.meta.get("row", -1)
-                if not 0 <= row < self.row_count or self.ordered_rows[row].key.value != self.app.draft.key:
-                    return
-                column = event.style.meta.get("column", -1)
-                if 0 <= column < len(self.ordered_columns):
-                    field = str(self.ordered_columns[column].key.value)
-                    self.app.draft.focus_column(field)
-                    self.app.populate_table()
-            return
-        # Textual's default emits RowSelected only on an already selected cell.
-        # Folder rows should fold on the first click; agent activation is double-click.
-        await super()._on_click(event)
-        row = event.style.meta.get("row", -1)
-        if 0 <= row < self.row_count and not event.style.meta.get("out_of_bounds"):
-            self.app.click_row(str(self.ordered_rows[row].key.value), event.chain)
-
-    def on_key(self, event):
-        if self.app.draft:
-            event.stop()
-            event.prevent_default()
-            self.app.draft_key(event)
-        elif event.key in ("up", "down", "left", "right", "j", "k", "h", "l", "home", "end", "pageup", "pagedown"):
-            self.app.cancel_inspector_timer()
-
-    def on_paste(self, event):
-        if self.app.draft:
-            event.stop()
-            event.prevent_default()
-            if not self.app.operating:
-                self.app.draft.paste(event.text)
-                self.app.populate_table()
-
-
-class Fleet(Vertical):
-    def on_resize(self):
-        # Child resize occurs after layout: use the actual available column width.
-        self.call_later(self.app.populate_table)
-
-
-class Breadcrumb(Static):
-    def on_click(self):
-        self.app.action_back(from_mouse=True)
+from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
 
 
 class MultiverseApp(App):

@@ -13,7 +13,8 @@ from multiverse.universe import relocate, templates, trash
 from multiverse.ui.backend import LocalBackend
 from multiverse.ui.tree import agent_key, group_key
 from multiverse.store import read, write
-from multiverse.ui.app import Form, MultiverseApp
+from multiverse.ui.screens import Form
+from multiverse.ui.app import MultiverseApp
 
 
 class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
