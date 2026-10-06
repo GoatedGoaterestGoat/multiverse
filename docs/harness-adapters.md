@@ -940,6 +940,17 @@ shadowed. Everything but `list` acts with the person's authority at this termina
 agent has read), so it runs only for a prompt the person typed (the composer, or
 Remote Control); a plugin, the SDK or a peer can only list.
 
+On Claude Code 2.1.292 or newer the launch also loads `claude/typeahead/`, a
+second small plugin that fills the prompt box's typeahead while `/multiverse` is
+typed: the first word offers `list`, `send`, `inbox` and the catalog's commands,
+workflows and skills (`kind/name` when a bare name is shared or reserved); after
+`send` it offers this universe's agents other than this one (a comma list
+completes its last name); a catalog entry's arguments get nothing. It reads `mv2
+catalog` and `mv2 list --json` in the background and keeps them five seconds, so
+typing never waits on mv2, and a failed read offers no rows. It is separate
+because it hooks `prompt.autocomplete`, which older Claude refuses: there the
+adapter does not load it, and the mod keeps working without it.
+
 The mod also keeps one status line under the prompt (Claude allows one per plugin;
 the person's own `statusLine` command is untouched). Its items come from
 `statusline.json` at the universe root, which every template ships and `mv2
