@@ -222,7 +222,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                           [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
             backend.tag(terminal["pane"], properties, launch_id)
-            family = next((name for name, cls in harnesses.BUILTINS.items() if isinstance(adapter, cls)), '')
+            family = getattr(adapter, 'family', '')  # independent adapters may not declare one
             backend.configure_status(terminal, root, properties, launch_id, family)
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux

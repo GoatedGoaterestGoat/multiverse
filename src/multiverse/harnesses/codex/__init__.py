@@ -17,6 +17,7 @@ from ..types import BridgeUnavailable
 class CodexAdapter(ConfiguredAdapter):
     package = Path(__file__).parent
     supports_bridge = True
+    family = 'codex'
     resume_prompt_args = ('{task}',)
 
     def _configure_launch(self):
