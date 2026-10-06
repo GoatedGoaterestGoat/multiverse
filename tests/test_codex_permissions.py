@@ -11,9 +11,12 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents, harnesses
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
 from multiverse.harnesses.codex import CodexAdapter
-from multiverse.store import read, write, inbox
+from multiverse.store import read, write
+from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
@@ -95,12 +98,12 @@ class CodexPermissionTest(TerminalBase):
         spec['settings'] = {'args': ['--dangerously-bypass-approvals-and-sandbox'], 'spawn_args': ['--no-daemon']}
         write(config, spec)
         with patch.dict(os.environ, env):
-            launched = agents.start(self.root, 'permissions', 'permission-probe-spawn', socket_path=self.socket)
+            launched = lifecycle.start(self.root, 'permissions', 'permission-probe-spawn', socket_path=self.socket)
         directory = agents.directory(self.root, launched['id'])
 
         def stop_owned():
             try:
-                agents.terminal_action(self.root, launched['id'], 'stop')
+                lifecycle.terminal_action(self.root, launched['id'], 'stop')
             except (ValueError, RuntimeError):
                 pass
             self.kill_server()
@@ -111,7 +114,7 @@ class CodexPermissionTest(TerminalBase):
             native_id = read(directory / 'properties.json')['native_session_id']
             self.assertEqual(read(self.work / 'permission-spawn.json')['native_id'], native_id)
             for stage in ('plain-wake', 'bridge-wake', 'bridge', 'repeat'):
-                agents.terminal_action(self.root, launched['id'], 'stop')
+                lifecycle.terminal_action(self.root, launched['id'], 'stop')
                 spec['settings'] = {'args': ['--dangerously-bypass-approvals-and-sandbox']}
                 if stage == 'plain-wake':
                     spec['settings']['inbox_bridge'] = False
@@ -131,12 +134,12 @@ class CodexPermissionTest(TerminalBase):
                             sender={'name': 'reviewer'}, delivery='follow-up') if stage == 'bridge-wake' else None
                         if additional:
                             self.assertEqual(additional['state'], 'pending', additional)
-                        resumed = agents.wait_ready(self.root, directory, agents.runtime(directory)['launch_id'],
+                        resumed = lifecycle.wait_ready(self.root, directory, agents.runtime(directory)['launch_id'],
                                                     harnesses.load(self.root, 'codex'), 30)
                         request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
                         self.assertEqual(request['argv'][-1], 'Message from reviewer:\npermission-probe-' + stage)
                     else:
-                        resumed = agents.start(self.root, resume=launched['id'], socket_path=self.socket,
+                        resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket,
                                                wait=True, wait_timeout=30)
                 self.assertTrue(resumed['ready'], resumed)
                 self.assertEqual(resumed['runtime']['state'], 'running')
@@ -150,7 +153,7 @@ class CodexPermissionTest(TerminalBase):
                 until(lambda: (self.work / f'permission-{stage}.json').exists() and stage in completed, seconds=30)
                 self.assertEqual(read(self.work / f'permission-{stage}.json')['native_id'], native_id)
                 self.assertEqual((self.work / f'.git/mv2-{stage}').read_text(), 'writable')
-                self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+                self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
                 self.assertEqual(read(directory / 'properties.json')['task'], 'permission-probe-spawn')
                 if stage.endswith('-wake'):
                     receipt = next(m['tracking'] for m in inbox(directory, all_messages=True)['messages']
@@ -167,7 +170,7 @@ class CodexPermissionTest(TerminalBase):
         except Exception:
             print('PERMISSION RUNTIME', agents.runtime(directory))
             try:
-                print(agents.terminal_action(self.root, launched['id'], 'inspect'))
+                print(lifecycle.terminal_action(self.root, launched['id'], 'inspect'))
             except Exception:
                 pass
             raise

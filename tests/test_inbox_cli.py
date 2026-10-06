@@ -13,7 +13,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from test_multiverse import BaseTest, ROOT
-from multiverse import cli, store, universe
+from multiverse import cli, store
+from multiverse.universe import mailbox
 from multiverse.universe import templates
 from multiverse.tools import inbox as inbox_tool
 
@@ -28,7 +29,7 @@ class InboxCliTest(BaseTest):
         self.enterContext(patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current'}))
 
     def message(self, text, sender=None, **kwargs):
-        return store.append_message(self.directory, text, sender or {'name': 'a person'}, **kwargs)
+        return mailbox.append_message(self.directory, text, sender or {'name': 'a person'}, **kwargs)
 
     def output(self, *flags):
         output = io.StringIO()
@@ -130,7 +131,7 @@ class InboxCliTest(BaseTest):
                     patch('sys.stderr', io.StringIO()):
                 self.output(*flags)
         self.assertFalse((self.directory / 'inbox.cursor').exists())
-        self.assertEqual(len(store.inbox(self.directory, peek=True)['messages']), 1)
+        self.assertEqual(len(mailbox.inbox(self.directory, peek=True)['messages']), 1)
 
     def test_failed_write_or_flush_leaves_existing_cursor_unchanged(self):
         self.message('already read')
@@ -157,9 +158,9 @@ class InboxCliTest(BaseTest):
             raise BrokenPipeError()
         def second_read():
             second_started.set()
-            return store.inbox(self.directory)
+            return mailbox.inbox(self.directory)
         with ThreadPoolExecutor(max_workers=2) as pool:
-            first = pool.submit(store.inbox, self.directory, present=fail_output)
+            first = pool.submit(mailbox.inbox, self.directory, present=fail_output)
             try:
                 self.assertTrue(presenting.wait(5))
                 second = pool.submit(second_read)
@@ -192,11 +193,11 @@ class InboxCliTest(BaseTest):
 
     def test_wait_ignores_native_delivery_and_reads_only_after_inbox_changes(self):
         scanned = threading.Event()
-        original = store.inbox
+        original = mailbox.inbox
         def scan(*args, **kwargs):
             scanned.set()
             return original(*args, **kwargs)
-        with patch.object(store, 'inbox', side_effect=scan) as calls, ThreadPoolExecutor(max_workers=1) as pool:
+        with patch.object(mailbox, 'inbox', side_effect=scan) as calls, ThreadPoolExecutor(max_workers=1) as pool:
             waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
             self.assertTrue(scanned.wait(2))
             self.message('native only', delivery='steer')
@@ -207,7 +208,7 @@ class InboxCliTest(BaseTest):
             self.message('wake this read')
             result = waiting.result(timeout=3)
         self.assertEqual([message['text'] for message in result['messages']], ['wake this read'])
-        self.assertEqual(store.inbox(self.directory)['messages'], [])
+        self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
 
     def test_waiting_subprocess_flushes_and_consumes_when_a_message_arrives(self):
         process = subprocess.Popen([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
@@ -219,7 +220,7 @@ class InboxCliTest(BaseTest):
         output, error = process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0, error)
         self.assertEqual(output, 'Message from user:\narrived for waiting reader\n')
-        self.assertEqual(store.inbox(self.directory)['messages'], [])
+        self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
 
     def test_wait_timeout_is_plain_or_json_and_never_advances_cursor(self):
         for machine in (False, True):
@@ -245,11 +246,11 @@ class InboxCliTest(BaseTest):
         with self.assertRaises(ValueError):
             inbox_tool.run(self.root, agent=self.agent, timeout='1s')
         scanned = threading.Event()
-        original = store.inbox
+        original = mailbox.inbox
         def scan(*args, **kwargs):
             scanned.set()
             return original(*args, **kwargs)
-        with patch.object(store, 'inbox', side_effect=scan), ThreadPoolExecutor(max_workers=1) as pool:
+        with patch.object(mailbox, 'inbox', side_effect=scan), ThreadPoolExecutor(max_workers=1) as pool:
             waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
             self.assertTrue(scanned.wait(2))
             store.write(self.directory / 'runtime.json', {'launch_id': 'replacement'})

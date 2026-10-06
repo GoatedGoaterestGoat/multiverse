@@ -10,8 +10,10 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse import agents
-from multiverse.store import read, write, inbox
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.store import read, write
+from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
 from test_multiverse import TerminalBase, until
 
@@ -27,30 +29,30 @@ class PiWakePromptTest(TerminalBase):
         write(path, spec)
         env = {'PI_CODING_AGENT_DIR': str(self.work / 'pi-home'), 'PI_OFFLINE': '1'}
         with patch.dict(os.environ, env):
-            first = agents.start(self.root, 'pi-wake', 'Seed conversation', 'pi', socket_path=self.socket)
+            first = lifecycle.start(self.root, 'pi-wake', 'Seed conversation', 'pi', socket_path=self.socket)
         directory = agents.directory(self.root, first['id'])
         requests = directory / 'mock-requests.jsonl'
         until(requests.exists, seconds=25)
         native_id = json.loads((directory / 'session.jsonl').read_text().splitlines()[0])['id']
-        agents.kill(self.root, first['id'])
+        lifecycle.kill(self.root, first['id'])
         prompt = 'Message from reviewer:\nPI_WAKE_SENTINEL'
         with patch.dict(os.environ, env):
             sent = send.run(self.root, agent=first['id'], text='PI_WAKE_SENTINEL', sender={'name': 'reviewer'})
         self.assertTrue(sent['ok'], sent)
-        resumed = agents.launch_result(self.root, directory)
+        resumed = lifecycle.launch_result(self.root, directory)
         until(lambda: 'PI_WAKE_SENTINEL' in requests.read_text(), seconds=25)
         last = json.loads(requests.read_text().splitlines()[-1])
         self.assertEqual(last['messages'][-1]['content'][0]['text'], prompt)
         self.assertEqual(json.loads((directory / 'session.jsonl').read_text().splitlines()[0])['id'], native_id)
         self.assertEqual(read(directory / 'properties.json')['task'], 'Seed conversation')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
         self.assertNotEqual(resumed['runtime']['launch_id'], first['runtime']['launch_id'])
         saved = inbox(directory, all_messages=True)['messages'][-1]
         self.assertEqual(saved['tracking']['submission_state'], 'accepted')
         self.assertEqual(saved['tracking']['delivery_method'], 'resume_prompt')
         self.assertIsNone(saved['tracking']['native_receipt']['transcript_confirmed'])
         # A bridged wake holds a concurrent second message until registration.
-        agents.kill(self.root, first['id'])
+        lifecycle.kill(self.root, first['id'])
         spec['settings']['inbox_bridge'] = True
         write(path, spec)
         with patch.dict(os.environ, env):
@@ -63,7 +65,7 @@ class PiWakePromptTest(TerminalBase):
         wake_index = next(i for i, request in enumerate(submitted) if 'PI_BRIDGE_WAKE' in json.dumps(request))
         next_index = next(i for i, request in enumerate(submitted) if 'PI_AFTER_WAKE' in json.dumps(request))
         self.assertGreater(next_index, wake_index)
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
 
 
 @unittest.skipUnless(shutil.which('claude') and shutil.which('tmux'), 'Claude and tmux required')
@@ -130,7 +132,7 @@ class ClaudeWakePromptTest(TerminalBase):
         with patch.dict(os.environ, env, clear=True):
             sent = send.run(self.root, agent=agent_id, text='CLAUDE_WAKE_SENTINEL', sender={'name': 'reviewer'})
         self.assertTrue(sent['ok'], sent)
-        resumed = agents.launch_result(self.root, directory)
+        resumed = lifecycle.launch_result(self.root, directory)
         try:
             consented = False
             def submitted():
@@ -145,7 +147,7 @@ class ClaudeWakePromptTest(TerminalBase):
                 return False
             until(submitted, seconds=25)
             self.assertEqual(resumed['native_session_id'], native_id)
-            self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+            self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
             self.assertTrue(any(message.get('role') == 'user' and any(block.get('text') == prompt
                 for block in message.get('content', []) if isinstance(block, dict))
                 for request in seen for message in request.get('messages', [])))

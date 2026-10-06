@@ -12,11 +12,15 @@ from native_safety import install as install_native_safety
 install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents, runner, universe, harnesses
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import runner
+from multiverse import harnesses
 from multiverse.universe import templates
 import json
 from multiverse.cli import parser, run
-from multiverse.store import append_message, inbox, read, write, lock
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write, lock
 from multiverse.tools import runtime_update
 
 
@@ -30,7 +34,7 @@ class LaunchIsolationTest(unittest.TestCase):
         definition = read(path)
         definition['settings']['inbox_bridge'] = False
         write(path, definition)
-        self.enterContext(patch('multiverse.native.start_shared_service',
+        self.enterContext(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('Offline launch contracts must never prepare a native daemon')))
 
     def test_empty_inbox_read_preserves_future_messages(self):
@@ -128,14 +132,14 @@ class LaunchIsolationTest(unittest.TestCase):
         terminal = {"socket": "/actual/tmux.sock", "session": "$1", "pane": "%1"}
         backend = Mock()
         backend.create.return_value = terminal
-        with patch.object(agents, "Tmux", return_value=backend) as tmux, \
-                patch.object(agents.shutil, "which", return_value="/fake/executable"), \
-                patch.object(agents, "observe", return_value={"live": "dormant"}), \
+        with patch.object(lifecycle, "Tmux", return_value=backend) as tmux, \
+                patch.object(lifecycle.shutil, "which", return_value="/fake/executable"), \
+                patch.object(lifecycle, "observe", return_value={"live": "dormant"}), \
                 patch.dict(os.environ, {"MV2_TMUX_SOCKET": "/inherited/tmux.sock"}):
-            first = agents.start(self.root, "test", "test", "pi", socket_path="/explicit/tmux.sock")
+            first = lifecycle.start(self.root, "test", "test", "pi", socket_path="/explicit/tmux.sock")
             directory = agents.directory(self.root, first["id"])
             (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")
-            for result in (first, agents.start(self.root, resume=first["id"])):
+            for result in (first, lifecycle.start(self.root, resume=first["id"])):
                 launch = directory / "launches" / result["runtime"]["launch_id"]
                 self.assertTrue((launch / "ready").exists())
                 request = read(launch / "request.json")
@@ -148,16 +152,16 @@ class LaunchIsolationTest(unittest.TestCase):
         backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}
         other = self.work / "other-worktree"
         other.mkdir()
-        with patch.object(agents, "Tmux", return_value=backend), \
-                patch.object(agents.shutil, "which", return_value="/fake/executable"), \
-                patch.object(agents, "observe", return_value={"live": "dormant"}):
-            first = agents.start(self.root, "worker", "task", "pi")
+        with patch.object(lifecycle, "Tmux", return_value=backend), \
+                patch.object(lifecycle.shutil, "which", return_value="/fake/executable"), \
+                patch.object(lifecycle, "observe", return_value={"live": "dormant"}):
+            first = lifecycle.start(self.root, "worker", "task", "pi")
             directory = agents.directory(self.root, first["id"])
             (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")
             metadata = read(self.root / "universe.json")
             metadata["workspace"] = str(other)
             write(self.root / "universe.json", metadata)
-            resumed = agents.start(self.root, resume=first["id"])
+            resumed = lifecycle.start(self.root, resume=first["id"])
             self.assertEqual(resumed["workspace"], str(self.work))
             self.assertEqual(backend.create.call_args.args[1], self.work)
             directory = agents.directory(self.root, first["id"])
@@ -165,10 +169,10 @@ class LaunchIsolationTest(unittest.TestCase):
             properties["workspace"] = str(self.work / "missing")
             write(directory / "properties.json", properties)
             with self.assertRaisesRegex(ValueError, "Workspace does not exist"):
-                agents.start(self.root, resume=first["id"])
+                lifecycle.start(self.root, resume=first["id"])
             del properties["workspace"]
             write(directory / "properties.json", properties)
-            legacy = agents.start(self.root, resume=first["id"])
+            legacy = lifecycle.start(self.root, resume=first["id"])
             self.assertEqual(legacy["workspace"], str(other))
             self.assertEqual(backend.create.call_args.args[1], other)
 
@@ -197,16 +201,16 @@ class LaunchIsolationTest(unittest.TestCase):
         backend = Mock()
         backend.create.side_effect = [RuntimeError("socket access denied"),
                                       {"socket": "/actual/tmux.sock", "session": "$1", "pane": "%1"}]
-        with patch.object(agents, "Tmux", return_value=backend), \
-                patch.object(agents.shutil, "which", return_value="/fake/executable"):
+        with patch.object(lifecycle, "Tmux", return_value=backend), \
+                patch.object(lifecycle.shutil, "which", return_value="/fake/executable"):
             with self.assertRaises(RuntimeError) as failure:
-                agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+                lifecycle.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
             failed = agents.directory(self.root, "same-name")
             self.assertEqual(agents.runtime(failed)["state"], "failed")
             with self.assertRaisesRegex(ValueError, "already has an agent named same-name"):
-                agents.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
+                lifecycle.start(self.root, "same-name", "test", socket_path="/actual/tmux.sock")
             self.assertEqual(backend.create.call_count, 1)
-            successful = agents.start(self.root, "retry-name", "test", socket_path="/actual/tmux.sock")
+            successful = lifecycle.start(self.root, "retry-name", "test", socket_path="/actual/tmux.sock")
         self.assertIn(failed.name, str(failure.exception))
         self.assertIn("unique name", str(failure.exception))
         self.assertEqual(agents.directory(self.root, failed.name), failed)

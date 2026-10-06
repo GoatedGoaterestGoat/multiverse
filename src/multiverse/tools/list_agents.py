@@ -1,6 +1,7 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from .. import agents, universe
+from ..runtime import lifecycle
+from .. import universe
 
 SUMMARY_LENGTH = 80
 ERROR_LENGTH = 200
@@ -53,7 +54,7 @@ def place(row, root):
 
 def run(root=None, *, recursive=False, json=False, wide=False):
     root = universe.resolve(root)
-    rows = agents.listing(root, recursive)
+    rows = lifecycle.listing(root, recursive)
     if json:
         return rows
     if not rows:

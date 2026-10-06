@@ -7,10 +7,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import DataTable, Static
-from multiverse import agents, universe
-from multiverse.universe import templates
-from multiverse.universe import relocate
-from multiverse.universe import trash
+from multiverse import universe
+from multiverse.runtime import lifecycle
+from multiverse.universe import relocate, templates, trash
 from multiverse.dashboard import LocalBackend, agent_key, group_key
 from multiverse.store import read, write
 from multiverse.tui import Form, MultiverseApp
@@ -35,7 +34,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
         # Only "busy" has a live terminal; the listing and relocate agree on that.
         observed = lambda properties, *_args: {"live": "alive" if properties["name"] == "busy" else "stopped",
                                                "reason": ""}
-        for module in (agents, relocate):
+        for module in (lifecycle, relocate):
             patcher = patch.object(module, "observe", observed)
             patcher.start()
             self.addCleanup(patcher.stop)

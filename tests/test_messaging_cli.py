@@ -9,7 +9,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from test_multiverse import BaseTest, ROOT
-from multiverse import cli, harnesses, native, store
+from multiverse import cli, harnesses, store
+from multiverse.universe import mailbox
+from multiverse.runtime import native
 from multiverse.harnesses.types import NativeResult
 from multiverse.tools import deliver, send
 from multiverse.tools._messaging import delivery_line
@@ -54,7 +56,7 @@ class MessagingCliTest(BaseTest):
         return output.getvalue()
 
     def history(self, name):
-        return store.inbox(self.directories[name], all_messages=True, limit=None)['messages']
+        return mailbox.inbox(self.directories[name], all_messages=True, limit=None)['messages']
 
     def test_send_does_not_echo_text_or_internal_identifiers_and_json_is_original(self):
         secret = '多行 PRIVATE BODY\nquotes $(false) `false`'

@@ -1,5 +1,6 @@
 """End native work and its process, then remove the agent's tmux wrapper."""
-from .. import agents, universe
+from ..runtime import lifecycle
+from .. import universe
 
 
 def configure(parser):
@@ -7,7 +8,7 @@ def configure(parser):
 
 
 def run(root=None, *, agent):
-    return agents.kill(universe.resolve(root), agent)
+    return lifecycle.kill(universe.resolve(root), agent)
 
 
 if __name__ == '__main__':

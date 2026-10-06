@@ -10,7 +10,7 @@ from contextlib import ExitStack
 import os
 
 from . import exact, parent, trash, tree, workspace
-from ..agents import directory, runtime, update_runtime
+from .agents import directory, runtime, update_runtime
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
 

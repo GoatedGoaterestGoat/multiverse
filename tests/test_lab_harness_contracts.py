@@ -13,9 +13,12 @@ from native_safety import install as install_native_safety
 install_native_safety()
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, cli, universe
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import cli
 from multiverse.universe import templates
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 
 
 class LabHarnessContracts(unittest.TestCase):
@@ -32,16 +35,16 @@ class LabHarnessContracts(unittest.TestCase):
         self.socket = '/offline-test/tmux.sock'
         self.patches = ExitStack()
         self.addCleanup(self.patches.close)
-        self.backend = self.patches.enter_context(patch('multiverse.agents.Tmux'))
+        self.backend = self.patches.enter_context(patch('multiverse.runtime.lifecycle.Tmux'))
         self.backend.return_value.create.return_value = {
             'socket': self.socket, 'session': '$offline', 'pane': '%offline'}
-        self.patches.enter_context(patch('multiverse.agents.shutil.which', return_value=sys.executable))
+        self.patches.enter_context(patch('multiverse.runtime.lifecycle.shutil.which', return_value=sys.executable))
         self.patches.enter_context(patch.dict(os.environ, MV2_TMUX_SOCKET=self.socket))
-        self.patches.enter_context(patch('multiverse.native.start_shared_service',
+        self.patches.enter_context(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('Offline lab must never prepare a native daemon')))
 
     def start(self, name='offline', **kwargs):
-        return agents.start(self.root, name=name, task='literal $(false) `false`\nquoted',
+        return lifecycle.start(self.root, name=name, task='literal $(false) `false`\nquoted',
                             model='gpt-6-astra', socket_path=self.socket, **kwargs)
 
     def request(self, row):
@@ -59,7 +62,7 @@ class LabHarnessContracts(unittest.TestCase):
             'import json,os,pathlib; pathlib.Path(' + repr(str(output)) + ').write_text(json.dumps('
             '{k:v for k,v in os.environ.items() if k.startswith("MV2_") or k=="CODEX_THREAD_ID"}))']
         write(launch / 'request.json', request)
-        runner = Path(agents.__file__).with_name('runner.py')
+        runner = Path(lifecycle.__file__).with_name('runner.py')
         result = subprocess.run([sys.executable, str(runner), str(launch)],
             env={**os.environ, 'CODEX_THREAD_ID': 'parent-session', 'MV2_PARENT_SENTINEL': 'must-strip'},
             text=True, capture_output=True, timeout=10)
@@ -81,8 +84,8 @@ class LabHarnessContracts(unittest.TestCase):
                     agents.bind_session(self.root, row['id'], native, row['runtime']['launch_id'])
                 if harness == 'pi':
                     (directory / 'session.jsonl').write_text(__import__('json').dumps({'type': 'session', 'id': str(uuid4())}) + '\n')
-                with patch('multiverse.agents.observe', return_value={'live': 'dormant'}):
-                    resumed = agents.start(self.root, resume=row['id'], socket_path=self.socket)
+                with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}):
+                    resumed = lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
                 argv = self.request(resumed)['argv']
                 self.assertEqual(resumed['id'], row['id'])
                 self.assertNotEqual(resumed['runtime']['launch_id'], row['runtime']['launch_id'])
@@ -95,9 +98,9 @@ class LabHarnessContracts(unittest.TestCase):
 
     def test_unbound_codex_cannot_resume(self):
         row = self.start()
-        with patch('multiverse.agents.observe', return_value={'live': 'dormant'}), \
+        with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'dormant'}), \
                 self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
-            agents.start(self.root, resume=row['id'], socket_path=self.socket)
+            lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
 
     def test_h002_empty_read_and_existing_message_boundaries(self):
         row = self.start()

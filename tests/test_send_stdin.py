@@ -13,7 +13,7 @@ from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
-from multiverse import cli, universe
+from multiverse import cli
 from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import send

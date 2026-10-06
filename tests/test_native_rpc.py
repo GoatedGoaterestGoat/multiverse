@@ -10,8 +10,8 @@ import unittest
 from websockets.sync.server import unix_serve
 
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec, RpcNotification
-from multiverse.rpc import execute
-from multiverse import native
+from multiverse.runtime.rpc import execute
+from multiverse.runtime import native
 from multiverse.harnesses.codex.protocol import check_connection
 from multiverse.harnesses.types import SessionHandle, NativeEndpoint
 from multiverse.harnesses.codex import CodexAdapter

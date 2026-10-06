@@ -4,9 +4,14 @@ import os
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses, native
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native
+from multiverse.universe import mailbox
 from multiverse.harnesses.types import Capability, NativeResult
-from multiverse.store import inbox, lock, message_record, read, update_message, write
+from multiverse.universe.mailbox import inbox, message_record, update_message
+from multiverse.store import lock, read, write
 from multiverse.tools import deliver, send
 from test_multiverse import BaseTest, TerminalBase, until
 
@@ -27,7 +32,7 @@ class WakeTest(BaseTest):
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', side_effect=lambda props, facts: {
             'live': 'alive' if facts['state'] in ('starting', 'running') else facts['state']}))
-        self.start = self.enterContext(patch.object(agents, 'start', side_effect=self.register))
+        self.start = self.enterContext(patch.object(lifecycle, 'start', side_effect=self.register))
 
     def register(self, root, *, resume, resume_message_id, socket_path=None):
         # Acquiring the real file lock proves send did not retain it across start.
@@ -54,7 +59,7 @@ class WakeTest(BaseTest):
         first = messages[0]
         self.assertEqual(first['tracking']['submission_state'], 'submitting')
         self.assertTrue(all(m['tracking']['submission_state'] == 'pending' for m in messages[1:]))
-        native.finish_wake(self.directory, 'new', first['id'], True)
+        mailbox.finish_wake(self.directory, 'new', first['id'], True)
         self.assertEqual(self.messages()[0]['tracking']['submission_state'], 'accepted')
         self.assertIsNone(self.messages()[0]['tracking']['native_receipt']['transcript_confirmed'])
         # Pre-binding recovery checks must not attempt a native call.
@@ -93,7 +98,7 @@ class WakeTest(BaseTest):
     def test_failed_process_start_can_be_retried_and_is_not_native_acceptance(self):
         send.run(self.root, agent=self.agent, text='wake')
         message = self.messages()[0]
-        native.finish_wake(self.directory, 'new', message['id'], False, 'Executable failed before startup')
+        mailbox.finish_wake(self.directory, 'new', message['id'], False, 'Executable failed before startup')
         self.assertEqual(self.messages()[0]['tracking']['submission_state'], 'failed')
         agents.update_runtime(self.directory, 'new', state='dormant')
         self.assertTrue(deliver.run(self.root, agent=self.agent, retry=True)['ok'])

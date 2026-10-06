@@ -3,7 +3,9 @@ from datetime import datetime, timedelta, timezone
 import json as json_module
 import re
 import time
-from .. import agents, store
+from ..universe import agents
+from .. import store
+from ..universe import mailbox
 from ._common import add_agent, callback
 
 def configure(parser):
@@ -78,7 +80,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
             current = signature() if wait else None
             if not wait or current != previous:
                 try:
-                    value = store.inbox(directory, limit=limit, after=after, all_messages=all_messages, peek=peek,
+                    value = mailbox.inbox(directory, limit=limit, after=after, all_messages=all_messages, peek=peek,
                                         last=last, since=cutoff, present=present)
                 except NoUnread:
                     previous = current
@@ -103,7 +105,7 @@ def timeout_seconds(value):
 
 
 def readable(root, result):
-    from ..native import framed_text
+    from ..runtime.native import framed_text
     blocks = []
     for message in result['messages']:
         sender = message.get('from') or {}

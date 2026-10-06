@@ -9,7 +9,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents, harnesses as adapters
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses as adapters
 from multiverse.cli import parser
 from multiverse.dashboard import harnesses
 from multiverse.store import read, write
@@ -47,7 +49,7 @@ class HarnessFilesTest(BaseTest):
 class HarnessLaunchTest(TerminalBase):
     def setUp(self):
         super().setUp()
-        self.enterContext(patch('multiverse.native.start_shared_service',
+        self.enterContext(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('Fake CLI contracts must never prepare a native daemon')))
 
     def fake_cli(self, harness, report=True):
@@ -70,7 +72,7 @@ class HarnessLaunchTest(TerminalBase):
         write(directory / "harness.json", spec)
 
     def stop_agent(self, agent):
-        agents.terminal_action(self.root, agent["id"], "stop")
+        lifecycle.terminal_action(self.root, agent["id"], "stop")
         time.sleep(0.1)
 
     def test_codex_and_claude_launch_literals_models_and_exact_resume(self):
@@ -80,7 +82,7 @@ class HarnessLaunchTest(TerminalBase):
                 marker = "CODEX_THREAD_ID" if harness == "codex" else "CLAUDECODE"
                 prompt = '--pretend-flag "quoted"\n$(touch MUST_NOT_EXIST) `echo no` {literal}'
                 with patch.dict(os.environ, {marker: "parent-session"}):
-                    first = agents.start(self.root, harness, prompt, harness, "chosen-model", socket_path=self.socket)
+                    first = lifecycle.start(self.root, harness, prompt, harness, "chosen-model", socket_path=self.socket)
                 directory = agents.directory(self.root, first["id"])
                 seen = directory / "seen.json"
                 until(lambda: seen.exists())
@@ -104,7 +106,7 @@ class HarnessLaunchTest(TerminalBase):
                     self.assertEqual(argv[argv.index("--session-id") + 1], native)
                 self.stop_agent(first)
                 seen.unlink()
-                agents.start(self.root, resume=first["id"], socket_path=self.socket)
+                lifecycle.start(self.root, resume=first["id"], socket_path=self.socket)
                 until(lambda: seen.exists())
                 resumed = read(seen)["argv"]
                 self.assertIn(native, resumed)
@@ -114,13 +116,13 @@ class HarnessLaunchTest(TerminalBase):
 
     def test_codex_missing_registration_never_guesses_latest_session(self):
         self.fake_cli("codex", report=False)
-        first = agents.start(self.root, "unregistered", "test", socket_path=self.socket)
+        first = lifecycle.start(self.root, "unregistered", "test", socket_path=self.socket)
         directory = agents.directory(self.root, first["id"])
         until(lambda: (directory / "seen.json").exists())
         self.stop_agent(first)
         launches = list((directory / "launches").iterdir())
         with self.assertRaisesRegex(ValueError, "No native session ID recorded"):
-            agents.start(self.root, resume=first["id"], socket_path=self.socket)
+            lifecycle.start(self.root, resume=first["id"], socket_path=self.socket)
         self.assertEqual(list((directory / "launches").iterdir()), launches)
 
 

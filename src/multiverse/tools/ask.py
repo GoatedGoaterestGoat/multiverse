@@ -1,5 +1,6 @@
 """Ask an isolated side question without changing the main conversation."""
-from .. import native, universe
+from ..runtime import native
+from .. import universe
 
 
 def configure(parser):

@@ -467,7 +467,7 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
-        from ... import agents
+        from ...universe import agents
         if not session.native_id:
             return NativeResult('unavailable', 'No Claude session ID recorded')
         reported = {}

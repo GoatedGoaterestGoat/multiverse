@@ -1,3 +1,4 @@
+"""An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
 import json
 import math
@@ -9,48 +10,14 @@ import socket
 import sys
 import time
 
-from . import universe, harnesses
-from .universe import catalog
-from .harnesses.types import LaunchContext, SessionHandle, NativeResult, normalize_session_id, BridgeUnavailable
-from .store import lock, now, read, uid, write, message_record, update_message
-from .terminal.tmux import Tmux, observe, owned
-
-
-def directory(root, reference):
-    matches = []
-    for path in (root / "state" / "agents").glob("*/properties.json"):
-        data = read(path)
-        if reference in (data["id"], data["name"]) or data["id"].startswith(reference):
-            matches.append(path.parent)
-    if not matches:
-        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents.")
-    if len(matches) != 1:
-        detail = ". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
-        raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
-    return matches[0]
-
-
-def _check_available_name(root, name):
-    for path in (root / "state" / "agents").glob("*/properties.json"):
-        if read(path).get("name") == name:
-            raise ValueError(f"This universe already has an agent named {name}; "
-                             f"pick another name or resume it with mv2 resume {name}")
-
-
-def runtime(agent_dir):
-    path = agent_dir / "runtime.json"
-    return read(path) if path.exists() else {}
-
-
-def update_runtime(agent_dir, launch_id, **changes):
-    with lock(agent_dir / ".runtime.lock"):
-        data = runtime(agent_dir)
-        if data.get("launch_id") != launch_id:
-            raise ValueError("Outdated launch; refusing to update current runtime")
-        data.update(changes, observed_at=now())
-        write(agent_dir / "runtime.json", data)
-        return data
-
+from .. import harnesses, universe, usage
+from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
+from ..store import existing_lock, lock, now, read, uid, write
+from ..terminal.tmux import Tmux, observe, owned
+from ..universe import agents, catalog, mailbox
+from ..universe.agents import check_available_name, directory, runtime, update_runtime
+from ..universe.mailbox import message_record, update_message
+from . import native
 
 def listing(root, recursive=False):
     rows, snapshots = [], {}
@@ -60,7 +27,6 @@ def listing(root, recursive=False):
                 properties = read(path)
                 facts = runtime(path.parent)
                 observation = observe(properties, facts, snapshots)
-                from . import native, usage
                 measured = native.usage_snapshot(scope, properties, facts)
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
@@ -77,21 +43,6 @@ def listing(root, recursive=False):
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
                              "live": "unknown", "status": "unknown", "phase": "unknown", "summary": str(error)})
     return rows
-
-
-def bind_session(root, reference, session_id, launch_id=None):
-    """Record a harness-reported session without guessing from global history."""
-    agent_dir = directory(root, reference)
-    with lock(agent_dir / ".launch.lock"), lock(agent_dir / ".properties.lock"):
-        if launch_id and runtime(agent_dir).get("launch_id") != launch_id:
-            raise ValueError("Outdated launch")
-        data = read(agent_dir / "properties.json")
-        session_id = normalize_session_id(session_id)
-        if data.get("native_session_id") not in (None, session_id):
-            raise ValueError("This agent is already bound to a different native session")
-        data.update(native_session_id=session_id, updated_at=now())
-        write(agent_dir / "properties.json", data)
-    return data
 
 
 def plain_fallback(command, error):
@@ -115,7 +66,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         harness, model = properties["harness"], model or properties.get("model")
     else:
         universe.slug(name)
-        _check_available_name(root, name)
+        check_available_name(root, name)
         task = task or ""
         properties = {"id": uid(), "universe_id": read(root / "universe.json")["id"],
                       "name": name, "task": task, "summary": "", "phase": "starting",
@@ -138,7 +89,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError(f"Workspace does not exist: {workdir}")
     properties["workspace"] = str(workdir)
     if _recovery:
-        from .recovery import existing_lock
         launch_lock = existing_lock
     else:
         agent_dir.mkdir(parents=True, exist_ok=True)
@@ -154,14 +104,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         if resume_message_id is not None:
-            from .native import framed_text
             message, tracking = message_record(agent_dir, resume_message_id)
             target = tracking.get('target_session') or message.get('target_session')
             if target and target != properties.get('native_session_id'):
                 raise ValueError('Wake message targets a different native session')
             if message.get('delivery') not in ('steer', 'follow-up') or tracking.get('submission_state', 'pending') not in ('pending', 'failed'):
                 raise ValueError('Wake message is ineligible or may already have been submitted; refusing replay')
-            resume_prompt = framed_text(root, message)
+            resume_prompt = native.framed_text(root, message)
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
         launch_id = uid()
         launch = agent_dir / "launches" / launch_id
@@ -182,7 +131,6 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
                                 resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
-        from .native import service_handle, validate_recovery_command, launch_attachment
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
             if resume and properties.get('native_service_identity') not in (None, identity):
@@ -190,7 +138,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                  'resume with the original native storage settings or spawn a new agent')
             properties['native_service_identity'] = identity
         if _recovery:
-            validate_recovery_command(command, session)
+            native.validate_recovery_command(command, session)
             command = replace(command, fallback=None)
         argv = list(command.argv)
         if not shutil.which(argv[0]):
@@ -202,7 +150,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(resume_prompt if resume_prompt is not None else properties["task"])
-        cli = Path(__file__).resolve().parents[2] / "bin" / "mv2"
+        cli = Path(__file__).resolve().parents[3] / "bin" / "mv2"
         invoked = Path(sys.argv[0]).resolve()
         cli_path = str(cli) if cli.exists() else str(invoked) if invoked.name == "mv2" and invoked.is_file() else shutil.which("mv2")
         if not cli_path:
@@ -223,7 +171,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Publish a name atomically across spawns, before starting any
             # native service or terminal. Resume keeps its existing record.
             with lock(root / "state" / ".agents.lock"):
-                _check_available_name(root, name)
+                check_available_name(root, name)
                 write(agent_dir / "properties.json", properties)
         initial_runtime = {"launch_id": launch_id, "state": "starting", "host": socket.gethostname(),
                            "started_at": now(), "native_mode": command.native_mode}
@@ -249,12 +197,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         try:
             shared_endpoint = None
             if command.shared_service:
-                from .native import start_shared_service
                 if _recovery:
                     shared_endpoint = session.service.endpoint
                 else:
                     try:
-                        shared_endpoint = start_shared_service(command.shared_service, workdir,
+                        shared_endpoint = native.start_shared_service(command.shared_service, workdir,
                             launch / 'native-service.log', command.unset_env,
                             observe_versions=lambda versions: update_runtime(agent_dir, launch_id, native_versions=versions))
                     except BridgeUnavailable as error:
@@ -284,14 +231,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             env['PATH'] = str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')
             executor = None
             if command.shared_service:
-                from .native import NativeExecutor
-                executor = NativeExecutor(workdir, properties, runtime(agent_dir))
+                executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt)
             if command.shared_service:
                 try:
                     command = adapter.resume(session, context) if resume else adapter.spawn(context)
                     if _recovery:
-                        validate_recovery_command(command, session)
+                        native.validate_recovery_command(command, session)
                         command = replace(command, fallback=None)
                 except BridgeUnavailable as error:
                     command = plain_fallback(command, error)
@@ -300,12 +246,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     if service_directory_created:
                         shutil.rmtree(service_dir)
                         service_directory_created = False
-            service = service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
+            service = native.service_handle(command.shared_service, shared_endpoint) if command.shared_service else None
             if service and asdict(service.identity) != properties.get('native_service_identity'):
                 raise ValueError('Native service scope changed during launch preparation')
             if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
                 raise ValueError('Native relay targets a different service endpoint')
-            command = replace(command, attachment=launch_attachment(command))
+            command = replace(command, attachment=native.launch_attachment(command))
             if command.attachment and command.attachment.readiness == 'binding':
                 if not command.rpc_proxy or not command.rpc_proxy.binds_session:
                     raise ValueError('Attachment requires an adapter protocol that validates binding')
@@ -342,8 +288,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             (launch / "ready").touch()
         except Exception as error:
             if resume_message_id is not None and not (launch / 'ready').exists():
-                from .native import finish_wake
-                finish_wake(agent_dir, launch_id, resume_message_id, False,
+                mailbox.finish_wake(agent_dir, launch_id, resume_message_id, False,
                             f'Resume failed before native process startup: {error}')
             if service_directory_created:
                 shutil.rmtree(service_dir)
@@ -355,8 +300,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     pass
             update_runtime(agent_dir, launch_id, state="failed", error=str(error))
             if _recovery:
-                from .recovery import record
-                record(agent_dir, launch_id, 'failed', 'Automatic reconnect failed: ' + str(error))
+                agents.record_recovery(agent_dir, launch_id, 'failed', 'Automatic reconnect failed: ' + str(error))
             recovery = (f"Resume this agent by its full UUID: {properties['id']}"
                         if resume
                         else "The native session has not started; retry spawn with a unique name")
@@ -391,11 +335,10 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                    and facts.get('startup_checked', True))
         session = SessionHandle.from_records(result, facts, agent_dir)
-        from .native import attachment_ready, legacy_attachment
         if ('attachment' not in facts and 'attachment' not in request
                 and request.get('rpc_proxy') and session.endpoint):
-            session = replace(session, attachment=legacy_attachment(request.get('shared_service')))
-        ready = running and attachment_ready(adapter, session)
+            session = replace(session, attachment=native.legacy_attachment(request.get('shared_service')))
+        ready = running and native.attachment_ready(adapter, session)
         ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
         if ready:
             return {**result, 'ok': True, 'ready': True}
@@ -425,19 +368,6 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
                     'error': f'Timed out after {timeout:g}s waiting for launch readiness; '
                              'the launch was not stopped. Inspect its runtime or terminal before retrying.'}
         time.sleep(min(.05, remaining))
-
-
-def report(root, reference, phase=None, summary=None):
-    agent_dir = directory(root, reference)
-    with lock(agent_dir / ".properties.lock"):
-        data = read(agent_dir / "properties.json")
-        if phase is not None:
-            data["phase"] = phase
-        if summary is not None:
-            data["summary"] = summary
-        data["updated_at"] = now()
-        write(agent_dir / "properties.json", data)
-    return data
 
 
 def terminal_action(root, reference, action):
@@ -474,8 +404,7 @@ def kill(root, reference):
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
         update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
         try:
-            from .native import stop
-            cancellation = stop(root, reference)
+            cancellation = native.stop(root, reference)
         except Exception as error:
             if live not in ('stopped', 'dormant'):
                 update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
@@ -484,8 +413,7 @@ def kill(root, reference):
                 raise
             # A dead child has no terminal connection to preserve. Removing its
             # owned wrapper must not depend on an unreachable shared service.
-            from .native import end_startup_messages
-            cancelled = end_startup_messages(agent_dir, launch_id, 'Cancelled by explicit agent stop', cancelled=True)
+            cancelled = mailbox.end_startup_messages(agent_dir, launch_id, 'Cancelled by explicit agent stop', cancelled=True)
             cancellation = NativeResult('unknown',
                 f'Native cancellation unconfirmed: {error}. Retry stop when the native service is reachable.',
                 {'cancelled_startup_messages': cancelled})

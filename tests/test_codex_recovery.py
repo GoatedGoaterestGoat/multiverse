@@ -15,11 +15,14 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, recovery
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import recovery
 from multiverse.harnesses.codex.protocol import recovery_check
 from multiverse.harnesses.types import NativeEndpoint, NativeResult, SessionHandle, NativeServiceHandle, ServiceIdentity, AttachmentSpec
-from multiverse.runner import RelayPublisher, StatusWatcher
-from multiverse.store import append_message, now, read, update_message, write
+from multiverse.runtime.runner import RelayPublisher, StatusWatcher
+from multiverse.universe.mailbox import append_message, update_message
+from multiverse.store import now, read, write
 from multiverse.terminal.tmux import Tmux
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
@@ -179,7 +182,7 @@ class RecoveryWorkerTest(unittest.TestCase):
         self.publish_loss()
         with patch.object(recovery, 'BACKOFF', (0, 0, 0)), \
                 patch.object(recovery, 'check', side_effect=ConnectionRefusedError('daemon down')) as checked, \
-                patch.object(agents, 'start') as start:
+                patch.object(lifecycle, 'start') as start:
             recovery.run(self.directory, self.launch)
         self.assertEqual(checked.call_count, 3)
         start.assert_not_called()
@@ -234,7 +237,7 @@ class RecoveryWorkerTest(unittest.TestCase):
     def test_fresh_native_background_work_and_frontend_children_prevent_shutdown(self):
         self.publish_loss()
         with patch.object(recovery, 'check', return_value=NativeResult('unavailable', 'Background processes running')), \
-                patch.object(agents, 'start') as start, patch.object(recovery, 'owned') as owned:
+                patch.object(lifecycle, 'start') as start, patch.object(recovery, 'owned') as owned:
             recovery.run(self.directory, self.launch)
         start.assert_not_called(); owned.assert_not_called()
         write(self.directory / 'runtime.json', self.facts)
@@ -242,7 +245,7 @@ class RecoveryWorkerTest(unittest.TestCase):
         backend = Mock()
         with patch.object(recovery, 'check', return_value=NativeResult('ok')), \
                 patch.object(recovery, 'owned', return_value=(backend, '%1')), \
-                patch.object(recovery, 'frontend_children', return_value=True), patch.object(agents, 'start') as start:
+                patch.object(recovery, 'frontend_children', return_value=True), patch.object(lifecycle, 'start') as start:
             recovery.run(self.directory, self.launch)
         backend.signal_child.assert_not_called(); start.assert_not_called()
 
@@ -255,7 +258,7 @@ class RecoveryWorkerTest(unittest.TestCase):
                 def racing_check(*args):
                     write(self.directory / 'runtime.json', {**read(self.directory / 'runtime.json'), **changes})
                     return NativeResult('ok')
-                with patch.object(recovery, 'check', side_effect=racing_check), patch.object(agents, 'start') as start:
+                with patch.object(recovery, 'check', side_effect=racing_check), patch.object(lifecycle, 'start') as start:
                     recovery.run(self.directory, self.launch)
                 start.assert_not_called()
                 facts = read(self.directory / 'runtime.json')
@@ -351,12 +354,12 @@ class RecoveryLiveTest(TerminalBase):
 
     def launch(self, task='idle-recovery-probe'):
         with patch.dict(os.environ, self.env):
-            result = agents.start(self.root, 'idle', task, socket_path=self.socket, wait=True, wait_timeout=30)
+            result = lifecycle.start(self.root, 'idle', task, socket_path=self.socket, wait=True, wait_timeout=30)
         self.assertTrue(result['ready'], result)
         directory = agents.directory(self.root, result['id'])
         def cleanup():
             try:
-                agents.kill(self.root, result['id'])
+                lifecycle.kill(self.root, result['id'])
             except (OSError, ValueError, RuntimeError):
                 pass
         self.addCleanup(cleanup)
@@ -367,7 +370,7 @@ class RecoveryLiveTest(TerminalBase):
         until(lambda: (agents.runtime(directory).get('recovery_snapshot') or {}).get('safe'), seconds=30)
         native_id = read(directory / 'properties.json')['native_session_id']
         old = agents.runtime(directory)
-        from multiverse.runner import UsagePublisher
+        from multiverse.runtime.runner import UsagePublisher
         UsagePublisher(directory, old['launch_id'])({'native_session_id': native_id,
                                                    'context': {'tokens': 17457}, 'source': 'codex-app-server'})
         measurement = agents.runtime(directory)['usage']

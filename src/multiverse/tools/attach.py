@@ -2,7 +2,8 @@
 import os
 import shlex
 import subprocess
-from .. import agents, universe
+from ..runtime import lifecycle
+from .. import universe
 from ..terminal.tmux import Tmux
 
 
@@ -11,7 +12,7 @@ def configure(parser):
 
 
 def run(root=None, *, agent):
-    backend, pane = agents.terminal_action(universe.resolve(root), agent, "attach")
+    backend, pane = lifecycle.terminal_action(universe.resolve(root), agent, "attach")
     command = [*backend.prefix, "attach-session", "-t", pane]
     current = os.environ.get("TMUX", "").split(",")[0]
     if current:

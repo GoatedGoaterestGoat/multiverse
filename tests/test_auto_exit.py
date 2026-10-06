@@ -7,14 +7,16 @@ import sys
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, runner
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import runner
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase, until
 
 
 class AutoExitTest(TerminalBase):
     def start_ready(self):
-        result = agents.start(self.root, 'manual-exit', harness='fake', socket_path=self.socket,
+        result = lifecycle.start(self.root, 'manual-exit', harness='fake', socket_path=self.socket,
                               wait=True, wait_timeout=5)
         self.assertTrue(result['ready'], result)
         return result, agents.directory(self.root, result['id'])
@@ -52,7 +54,7 @@ class AutoExitTest(TerminalBase):
         self.assertNotIn(pane, self.backend.snapshot()[0])
         self.assertEqual(agents.runtime(directory)['state'], 'dormant')
         self.assertEqual(read(directory / 'properties.json')['native_session_id'], native_id)
-        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket, wait=True, wait_timeout=5)
+        resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(resumed['ready'], resumed)
         self.assertEqual(resumed['native_session_id'], native_id)
 
@@ -65,7 +67,7 @@ class AutoExitTest(TerminalBase):
         attached, terminal = self.attach_client(pane)
         os.write(terminal, b'\x03')
         until(lambda: 'TURN INTERRUPTED' in self.backend.run('capture-pane', '-p', '-t', pane))
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
         self.assertIsNone(attached.poll())
         os.kill(agents.runtime(directory)['pid'], signal.SIGTERM)
         until(lambda: agents.runtime(directory).get('state') == 'dormant')

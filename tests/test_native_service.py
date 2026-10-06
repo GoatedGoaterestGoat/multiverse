@@ -5,7 +5,10 @@ import socket
 import sys
 from unittest.mock import patch
 
-from multiverse import agents, harnesses, native
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native
 from multiverse.harnesses.types import CommandSpec, SharedServiceSpec
 from multiverse.store import read
 from test_multiverse import TerminalBase, until
@@ -46,7 +49,7 @@ class NativeServiceTest(TerminalBase):
                                shared_service=SharedServiceSpec((sys.executable, '-c', starter), 'socketPath',
                                                                 ('cliVersion', 'appServerVersion')))
         with patch.object(harnesses.CodexAdapter, 'spawn', launch):
-            result = agents.start(self.root, 'exit', 'test', 'codex', socket_path=self.socket)
+            result = lifecycle.start(self.root, 'exit', 'test', 'codex', socket_path=self.socket)
         directory = agents.directory(self.root, result['id'])
         facts = until(lambda: (r if (r := agents.runtime(directory)).get('state') == 'stopped' else None))
         self.assertEqual(read(seen), {})
@@ -74,7 +77,7 @@ class NativeServiceTest(TerminalBase):
                                                                         ('cliVersion', 'appServerVersion')))
                 with patch.object(harnesses.CodexAdapter, 'spawn', launch):
                     with self.assertRaisesRegex(RuntimeError, expected):
-                        agents.start(self.root, f'error-{index}', 'test', 'codex', socket_path=self.socket)
+                        lifecycle.start(self.root, f'error-{index}', 'test', 'codex', socket_path=self.socket)
                 directory = agents.directory(self.root, f'error-{index}')
                 facts = until(lambda: (r if (r := agents.runtime(directory)).get('state') == 'failed' else None))
                 self.assertIn(expected, facts['error'])

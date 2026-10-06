@@ -8,7 +8,9 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents, universe
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import universe
 from multiverse.universe import templates
 from multiverse.universe import relocate
 from multiverse.universe import trash
@@ -125,7 +127,7 @@ class RelocateTests(unittest.TestCase):
         self.assertFalse(source.exists())
         self.assertEqual(entry.parent, self.lab / "trash")
         self.assertEqual(read(entry / trash.RECORD)["origin"], str(source))
-        self.assertEqual(agents.listing(self.lab), [])
+        self.assertEqual(lifecycle.listing(self.lab), [])
         listed = trash.contents(self.root)["entries"]
         self.assertEqual([(e["kind"], e["name"]) for e in listed], [("agent", "worker")])
         (entry / trash.RECORD).unlink()

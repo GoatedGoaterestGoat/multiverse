@@ -1,9 +1,10 @@
 """Check local definitions and report uncertain agent state."""
 import sys
 
-from .. import agents, harnesses, universe
+from ..runtime import lifecycle
+from .. import harnesses, universe
 from ..universe import catalog
-from ..store import inbox
+from ..universe.mailbox import inbox
 
 def configure(parser):
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
@@ -21,7 +22,7 @@ def check(root, notes=None):
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
             catalog.catalog(scope)
-            for item in agents.listing(scope):
+            for item in lifecycle.listing(scope):
                 runtime = item.get("runtime", {})
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
                 recovery = runtime.get('auto_recovery') or {}

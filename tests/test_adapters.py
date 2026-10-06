@@ -11,10 +11,12 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, harnesses, native, universe, usage
+from multiverse import harnesses, universe, usage
+from multiverse.runtime import native
 from multiverse.dashboard import LocalBackend, harnesses as discover
 from multiverse.harnesses.types import CAPABILITIES, SessionHandle, Capability, CommandSpec, LaunchContext, NativeEndpoint, NativeResult
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 from multiverse.tools import capabilities, deliver, native_status
 from test_multiverse import BaseTest
 

@@ -6,7 +6,8 @@ The CLI runs `run`; the dashboard's compaction screens use `overview`,
 import json
 import sys
 
-from .. import agents, harnesses, universe
+from ..runtime import lifecycle
+from .. import harnesses, universe
 from ..compaction import config as settings_file
 from ..compaction.build import Build, Cancelled, Reporter
 from ..compaction.config import IMAGE_MODES, SCHEDULERS
@@ -143,7 +144,7 @@ def overview(root=None):
                      'defaults': defaults, 'options': [key for key in defaults if key not in settings_file.BUILDER],
                      'problem': state[1]})
     members = []
-    for item in agents.listing(root):
+    for item in lifecycle.listing(root):
         if item.get('harness') not in adapters:
             continue
         directory = root / 'state' / 'agents' / item['id']

@@ -5,7 +5,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import cli, universe
+from multiverse import cli
 from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import refresh

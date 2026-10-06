@@ -2,7 +2,7 @@
 from dataclasses import dataclass, replace
 import threading
 
-from .. import native
+from ..runtime import native
 from . import config as settings_file
 from .build import Build, Reporter
 from .config import Schedule, Settings

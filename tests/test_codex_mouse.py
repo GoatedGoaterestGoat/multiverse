@@ -16,7 +16,8 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse import agents
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
 from multiverse.store import read, write
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
@@ -39,7 +40,7 @@ class CodexMouseSetupTest(TerminalBase):
         write(self.root / 'harnesses/custom-codex/harness.json',
               {'schema': 2, 'adapter': 'codex',
                'settings': {'executable': str(worker), 'inbox_bridge': False}})
-        started = agents.start(self.root, 'mouse', harness='custom-codex', socket_path=self.socket,
+        started = lifecycle.start(self.root, 'mouse', harness='custom-codex', socket_path=self.socket,
                                wait=True, wait_timeout=5)
         self.assertTrue(started['ready'], started)
         directory = agents.directory(self.root, started['id'])
@@ -52,10 +53,10 @@ class CodexMouseSetupTest(TerminalBase):
         self.assertEqual(self.backend.run('list-keys', '-T', 'root', 'WheelUpPane'), binding)
         # Recreate the server: this must be launch setup, not a one-time server setting.
         self.kill_server()
-        until(lambda: agents.listing(self.root)[0]['live'] == 'dormant')
+        until(lambda: lifecycle.listing(self.root)[0]['live'] == 'dormant')
         other = self.backend.create('new-other', self.work, ['sleep', '60'])
         self.backend.run('set-option', '-g', 'mouse', 'off')
-        resumed = agents.start(self.root, resume=started['id'], socket_path=self.socket,
+        resumed = lifecycle.start(self.root, resume=started['id'], socket_path=self.socket,
                                wait=True, wait_timeout=5)
         self.assertTrue(resumed['ready'], resumed)
         self.assertEqual((directory / 'launches' / resumed['runtime']['launch_id'] / 'mouse-at-start').read_text(), 'on\n')
@@ -69,7 +70,7 @@ class CodexMouseSetupTest(TerminalBase):
         self.backend.run('set-option', '-g', 'mouse', 'off')
         write(self.root / 'harnesses/codex/harness.json', read(self.root / 'harnesses/fake/harness.json'))
         shutil.copy(self.root / 'harnesses/fake/worker.py', self.root / 'harnesses/codex/worker.py')
-        started = agents.start(self.root, 'legacy', harness='codex', socket_path=self.socket,
+        started = lifecycle.start(self.root, 'legacy', harness='codex', socket_path=self.socket,
                                wait=True, wait_timeout=5)
         self.assertTrue(started['ready'], started)
         self.assertEqual(self.backend.run('show-options', '-Av', '-t', started['runtime']['tmux']['session'], 'mouse'), 'off')
@@ -167,7 +168,7 @@ class CodexWheelTest(TerminalBase):
             # create it inside the isolated native environment too.
             self.backend.create('unrelated', self.work, ['sleep', '60'])
             self.backend.run('set-option', '-g', 'mouse', 'off')
-            started = agents.start(self.root, 'wheel', 'HISTORY_SENTINEL', 'codex', socket_path=self.socket,
+            started = lifecycle.start(self.root, 'wheel', 'HISTORY_SENTINEL', 'codex', socket_path=self.socket,
                                    wait=True, wait_timeout=30)
         self.assertTrue(started['ready'], started)
         pane = started['runtime']['tmux']['pane']
@@ -189,9 +190,9 @@ class CodexWheelTest(TerminalBase):
         check_wheel(master, pane)
         if bridge:
             native_id = started['native_session_id']
-            agents.terminal_action(self.root, started['id'], 'stop')
+            lifecycle.terminal_action(self.root, started['id'], 'stop')
             with patch.dict(os.environ, environment):
-                resumed = agents.start(self.root, resume=started['id'], socket_path=self.socket,
+                resumed = lifecycle.start(self.root, resume=started['id'], socket_path=self.socket,
                                        wait=True, wait_timeout=30)
             self.assertTrue(resumed['ready'], resumed)
             self.assertEqual(resumed['native_session_id'], native_id)

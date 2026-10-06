@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 from multiverse.harnesses.types import NativeEndpoint, SessionHandle
-from multiverse.native import NativeExecutor
+from multiverse.runtime.native import NativeExecutor
 
 
 class ExtensionTransportTest(unittest.TestCase):

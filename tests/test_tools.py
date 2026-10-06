@@ -11,7 +11,7 @@ from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
-from multiverse import cli, universe
+from multiverse import cli
 from multiverse.universe import templates
 from multiverse.dashboard import LocalBackend
 from multiverse.store import read, write
@@ -148,7 +148,7 @@ class ToolsTest(unittest.TestCase):
         literal = "--flag\n$(false) `false` {literal}"
         task_file = self.work / "task.md"
         task_file.write_text(literal)
-        with patch.object(spawn.agents, "start", return_value={"id": "created"}) as start:
+        with patch.object(spawn.lifecycle, "start", return_value={"id": "created"}) as start:
             cli.run(cli.parser().parse_args(["-u", str(self.root), "spawn", "--name", "worker",
                                             "--task-file", str(task_file), "--model", "chosen"]))
             first = start.call_args

@@ -1,6 +1,7 @@
 """Launch an agent in a tagged tmux pane."""
 from pathlib import Path
-from .. import agents, universe
+from ..runtime import lifecycle
+from .. import universe
 from ._common import add_wait
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}
@@ -20,7 +21,7 @@ def run(root=None, *, name, task=None, task_file=None, harness="codex", model=No
         json=False):  # `json` is the command line's presentation flag: the record is always returned here
     root = universe.resolve(root)
     prompt = Path(task_file).read_text() if task_file is not None else task
-    return agents.start(root, name, prompt, harness, model, wait=wait, wait_timeout=wait_timeout)
+    return lifecycle.start(root, name, prompt, harness, model, wait=wait, wait_timeout=wait_timeout)
 
 
 def mode(record):

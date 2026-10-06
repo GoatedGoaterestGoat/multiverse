@@ -7,7 +7,7 @@ import argparse
 import json
 import re
 
-from .. import agents
+from ..universe import agents
 from ._common import add_agent, callback
 
 BRIDGE_ID = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")

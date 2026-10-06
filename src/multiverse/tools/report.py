@@ -1,5 +1,6 @@
 """Report agent phase and current work."""
-from .. import agents, store
+from ..universe import agents
+from ..universe import mailbox
 from ._common import add_agent, callback
 
 def configure(parser):
@@ -19,7 +20,7 @@ def unread(directory):
     Nothing is marked read, and an inbox that cannot be read never fails the report.
     """
     try:
-        return len(store.inbox(directory, limit=None, peek=True)['messages'])
+        return len(mailbox.inbox(directory, limit=None, peek=True)['messages'])
     except (OSError, ValueError):
         return 0
 

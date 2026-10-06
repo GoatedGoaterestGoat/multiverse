@@ -1,5 +1,6 @@
 """Read measured usage for the exact native session."""
-from .. import native, universe
+from ..runtime import native
+from .. import universe
 
 
 def configure(parser):

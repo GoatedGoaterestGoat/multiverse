@@ -11,7 +11,8 @@ from uuid import uuid4
 from websockets.asyncio.client import unix_connect
 from websockets.asyncio.server import unix_serve
 
-from multiverse import agents, rpc
+from multiverse.universe import agents
+from multiverse.runtime import rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, SessionHandle

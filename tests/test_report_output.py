@@ -6,7 +6,8 @@ from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.cli import parser, run
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 from multiverse.tools import report
 from test_multiverse import BaseTest
 

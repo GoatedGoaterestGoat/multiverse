@@ -16,12 +16,15 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents, native, rpc
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import native, rpc
 from multiverse.universe import templates
 from multiverse.harnesses.codex.protocol import _thread, result as rpc_result
 from multiverse.harnesses.codex.launch import name_session
 from multiverse.harnesses.types import NativeResult, RpcSpec, RpcRequest
-from multiverse.store import inbox, read, write
+from multiverse.universe.mailbox import inbox
+from multiverse.store import read, write
 from multiverse.tools import send
 from native_safety import check_spawn, isolated_home
 from test_multiverse import TerminalBase, until
@@ -133,7 +136,7 @@ class CodexDaemonTest(TerminalBase):
             spec['settings'] = {'spawn_args': ['--sandbox', 'workspace-write', '--ask-for-approval', 'never']}
             write(path, spec)
         with patch.dict(os.environ, env), ThreadPoolExecutor(max_workers=2) as pool:
-            results = list(pool.map(lambda root: agents.start(root, 'same-name', 'Record identity then finish.',
+            results = list(pool.map(lambda root: lifecycle.start(root, 'same-name', 'Record identity then finish.',
                                                             'codex', socket_path=self.socket,
                                                             wait=True, wait_timeout=30), roots))
         self.assertTrue(all(result['ready'] for result in results), results)
@@ -148,7 +151,7 @@ class CodexDaemonTest(TerminalBase):
                 if pid:
                     pids.append(pid)
                 try:
-                    agents.terminal_action(root, result['id'], 'stop')
+                    lifecycle.terminal_action(root, result['id'], 'stop')
                 except (ValueError, OSError, RuntimeError):
                     pass
             self.kill_server()
@@ -193,7 +196,7 @@ class CodexDaemonTest(TerminalBase):
             queued = send.run(roots[0], agent=results[0]['id'], text='CANCEL_ON_STOP', delivery='follow-up')
             self.assertEqual(queued['state'], 'native_queued')
             _, _, first_session, _ = native.context(roots[0], results[0]['id'])
-            agents.terminal_action(roots[0], results[0]['id'], 'stop')
+            lifecycle.terminal_action(roots[0], results[0]['id'], 'stop')
             def check_stopped(session=first_session):
                 def plan():
                     result = yield from _thread(session)
@@ -219,7 +222,7 @@ class CodexDaemonTest(TerminalBase):
             self.assertEqual(thread_name(roots[0], results[0]['id']), 'renamed-native')
             # Resume from a monitor with a DIFFERENT home must retain saved storage.
             with patch.dict(os.environ, {**env, 'CODEX_HOME': str(self.work / 'wrong-home')}):
-                resumed = agents.start(roots[0], resume=results[0]['id'], socket_path=self.socket)
+                resumed = lifecycle.start(roots[0], resume=results[0]['id'], socket_path=self.socket)
             self.assertEqual(resumed['native_environment']['CODEX_HOME'], str(home))
             self.assertEqual(resumed['native_session_id'], read(agents.directory(roots[0], resumed['id']) / 'properties.json')['native_session_id'])
             until(lambda: native.capabilities(roots[0], resumed['id'], run_probe=True)['send_steer']['state'] == 'supported')
@@ -236,8 +239,8 @@ class CodexDaemonTest(TerminalBase):
             self.assertEqual(message['state'], 'native_queued', message)
             _, _, second_session, _ = native.context(roots[1], results[1]['id'])
             self.backend.run('kill-pane', '-t', results[1]['runtime']['tmux']['pane'])
-            until(lambda: agents.listing(roots[1])[0]['live'] == 'dormant')
-            cancelled = agents.terminal_action(roots[1], results[1]['id'], 'stop')['native_cancellation']
+            until(lambda: lifecycle.listing(roots[1])[0]['live'] == 'dormant')
+            cancelled = lifecycle.terminal_action(roots[1], results[1]['id'], 'stop')['native_cancellation']
             self.assertEqual(cancelled['cancelled_submissions'], 1)
             self.assertEqual(cancelled['interrupted_turns'], 1)
             self.assertTrue(cancelled['background_terminal_cleanup_requested'])

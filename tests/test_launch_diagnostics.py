@@ -4,8 +4,11 @@ import sys
 import threading
 from unittest.mock import patch
 
-from multiverse import agents, native, runner
-from multiverse.store import inbox, read, write
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import native, runner
+from multiverse.universe.mailbox import inbox
+from multiverse.store import read, write
 from multiverse.tools import deliver, doctor, inspect, list_agents, send
 from test_multiverse import BaseTest, TerminalBase, until
 
@@ -46,7 +49,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
 
     def test_failed_wait_retains_output_for_list_inspect_doctor_and_gone_wrapper(self):
         self.failing_harness()
-        result = agents.start(self.root, 'bad-session', harness='fake', socket_path=self.socket,
+        result = lifecycle.start(self.root, 'bad-session', harness='fake', socket_path=self.socket,
                               wait=True, wait_timeout=5)
         self.assertFalse(result['ready'], result)
         self.assertIn(ERROR, result['error'])
@@ -69,15 +72,15 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
 
     def test_early_clean_exit_has_a_reason_but_explicit_kill_does_not(self):
         self.failing_harness(code=0)
-        ended = agents.start(self.root, 'early', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
+        ended = lifecycle.start(self.root, 'early', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertFalse(ended['ready'])
         self.assertEqual(ended['runtime']['state'], 'stopped')
         self.assertIn('code 0', ended['error'])
         self.assertIn(ERROR, ended['error'])
         self.failing_harness(delay=30)
-        live = agents.start(self.root, 'normal', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
+        live = lifecycle.start(self.root, 'normal', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(live['ready'], live)
-        agents.kill(self.root, live['id'])
+        lifecycle.kill(self.root, live['id'])
         self.assertNotIn('output_tail_file', agents.runtime(agents.directory(self.root, live['id'])))
 
     def test_failed_wake_reports_native_output_without_replaying_uncertain_prompt(self):
@@ -88,7 +91,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         spec = read(self.root / 'harnesses/claude/harness.json')
         spec['settings'] = {'executable': str(executable), 'inbox_bridge': False}
         write(self.root / 'harnesses/claude/harness.json', spec)
-        first = agents.start(self.root, 'wake-error', harness='claude', socket_path=self.socket,
+        first = lifecycle.start(self.root, 'wake-error', harness='claude', socket_path=self.socket,
                              wait=True, wait_timeout=5)
         self.assertFalse(first['ready'])
         directory = agents.directory(self.root, first['id'])
@@ -102,7 +105,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         self.assertIn(ERROR, checked['reason'])
         self.assertIn('unconfirmed', checked['reason'])
         self.assertIn(ERROR, deliver.run(self.root, agent=first['id'], check=True)['messages'][0]['reason'])
-        with patch.object(agents, 'start', side_effect=AssertionError('Uncertain prompt must not be replayed')):
+        with patch.object(lifecycle, 'start', side_effect=AssertionError('Uncertain prompt must not be replayed')):
             retried = native.send_or_wake(self.root, first['id'], message['id'], retry=True)
         self.assertIn(ERROR, retried['reason'])
 
@@ -114,7 +117,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         spec = read(self.root / 'harnesses/claude/harness.json')
         spec['settings'] = {'executable': str(executable), 'inbox_bridge': True}
         write(self.root / 'harnesses/claude/harness.json', spec)
-        result = agents.start(self.root, 'queue-error', harness='claude', socket_path=self.socket)
+        result = lifecycle.start(self.root, 'queue-error', harness='claude', socket_path=self.socket)
         directory = agents.directory(self.root, result['id'])
         sent = send.run(self.root, agent=result['id'], text='Wait for registration')
         self.assertEqual(sent['state'], 'pending', sent)
@@ -127,7 +130,7 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
         for code in (1, 0):
             with self.subTest(code=code):
                 self.failing_harness(code=code, delay=3)
-                result = agents.start(self.root, f'later-{code}', harness='fake', socket_path=self.socket,
+                result = lifecycle.start(self.root, f'later-{code}', harness='fake', socket_path=self.socket,
                                       wait=True, wait_timeout=5)
                 self.assertTrue(result['ready'], result)
                 directory = agents.directory(self.root, result['id'])

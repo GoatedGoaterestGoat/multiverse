@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-from multiverse import native, rpc
+from multiverse.runtime import native, rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import launch_settings
 from multiverse.harnesses.types import LaunchContext, RpcSpec

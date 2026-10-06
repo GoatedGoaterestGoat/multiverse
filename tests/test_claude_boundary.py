@@ -16,7 +16,10 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, harnesses, native, recovery
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native, recovery
 from multiverse.harnesses.base import ConfiguredAdapter
 from multiverse.harnesses.claude import BRIDGE, MOD, NOT_REGISTERED
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, SessionHandle
@@ -237,7 +240,7 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
     def setUp(self):
         super().setUp()
         self.prepare()
-        self.enterContext(patch('multiverse.native.start_shared_service',
+        self.enterContext(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('A fake Claude must never prepare a native daemon')))
         directory = self.root / 'harnesses/claude'
         executable = directory / 'fake-cli'
@@ -249,8 +252,8 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
         self.adapter_ = self.adapter(None)
 
     def test_a_launched_claude_has_an_inbox_but_no_service_and_waits_for_the_mod(self):
-        agent = agents.start(self.root, 'bridged', '', 'claude', socket_path=self.socket)
-        self.addCleanup(lambda: agents.terminal_action(self.root, agent['id'], 'stop'))
+        agent = lifecycle.start(self.root, 'bridged', '', 'claude', socket_path=self.socket)
+        self.addCleanup(lambda: lifecycle.terminal_action(self.root, agent['id'], 'stop'))
         directory = agents.directory(self.root, agent['id'])
         until(lambda: (directory / 'seen.json').exists())
         facts = read(directory / 'runtime.json')
@@ -271,7 +274,7 @@ class ClaudeBoundaryLaunchTest(BoundaryBase, TerminalBase):
                 runtime_update.run(self.root, agent=agent['id'], **changes)
 
         def waited(timeout):
-            return agents.wait_ready(self.root, directory, launch, self.adapter_, timeout, include_delivery=False)
+            return lifecycle.wait_ready(self.root, directory, launch, self.adapter_, timeout, include_delivery=False)
 
         # Readiness: the process running is not enough; a foreign id does not count; the exact id does.
         until(lambda: read(directory / 'runtime.json').get('startup_checked') is True)

@@ -7,7 +7,9 @@ from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, harnesses
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
 from multiverse.harnesses.claude import FRESH_SESSION
 from multiverse.harnesses.types import LaunchContext, SessionHandle
 from multiverse.store import read, write
@@ -137,7 +139,7 @@ class ClaudeResumeLaunchTest(TerminalBase):
 
     def setUp(self):
         super().setUp()
-        self.enterContext(patch('multiverse.native.start_shared_service',
+        self.enterContext(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('A fake Claude must never prepare a native daemon')))
         self.storage = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.storage)}))
@@ -150,11 +152,11 @@ class ClaudeResumeLaunchTest(TerminalBase):
         write(directory / 'harness.json', spec)
 
     def stop_agent(self, agent):
-        agents.terminal_action(self.root, agent['id'], 'stop')
+        lifecycle.terminal_action(self.root, agent['id'], 'stop')
         time.sleep(0.1)
 
     def launch(self, name, task):
-        agent = agents.start(self.root, name, task, 'claude', socket_path=self.socket)
+        agent = lifecycle.start(self.root, name, task, 'claude', socket_path=self.socket)
         directory = agents.directory(self.root, agent['id'])
         until(lambda: (directory / 'seen.json').exists())
         return agent, directory
@@ -162,7 +164,7 @@ class ClaudeResumeLaunchTest(TerminalBase):
     def restart(self, agent, directory):
         self.stop_agent(agent)
         (directory / 'seen.json').unlink()
-        agents.start(self.root, resume=agent['id'], socket_path=self.socket)
+        lifecycle.start(self.root, resume=agent['id'], socket_path=self.socket)
         until(lambda: (directory / 'seen.json').exists())
         return read(directory / 'seen.json')['argv'], read(directory / 'runtime.json')
 

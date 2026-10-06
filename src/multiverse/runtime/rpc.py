@@ -10,7 +10,7 @@ import json
 from websockets.asyncio.client import unix_connect
 from websockets.exceptions import WebSocketException
 
-from .harnesses.types import NativeResult
+from ..harnesses.types import NativeResult
 
 
 async def _execute(spec, timeout):
