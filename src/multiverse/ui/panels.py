@@ -89,12 +89,17 @@ def normalize_widgets(value):
                 raise ValueError("expected an object")
             kind = widget.get("type")
             title = str(widget.get("title", kind or "Widget"))[:200]
-            if kind not in PANELS:
+            if not isinstance(kind, str) or kind not in PANELS:
                 raise ValueError(f"unknown widget type: {kind}")
             result.append(PANELS[kind].parse(widget, title))
-        except ValueError as error:
-            result.append({"type": "markdown", "title": f"Widget {index + 1} error", "text": str(error)})
+        except Exception as error:  # any failure stays inside its widget
+            result.append(error_widget(f"Widget {index + 1} error", error))
     return result
+
+
+def error_widget(title, error):
+    """A markdown widget in place of one that could not be read or shown."""
+    return {"type": "markdown", "title": title, "text": str(error)}
 
 
 def artifact_path(root, value):
@@ -162,8 +167,13 @@ class LocalView(VerticalScroll):
         await self.remove_children()
         children = []
         for index, widget in enumerate(widgets):
+            try:
+                shown = PANELS[widget["type"]].compose(self, root, widget, index)
+            except Exception as error:
+                widget = error_widget(f"Widget {index + 1} error", error)
+                shown = PANELS["markdown"].compose(self, root, widget, index)
             children.append(Label(widget["title"], classes="view-title", markup=False))
-            children.extend(PANELS[widget["type"]].compose(self, root, widget, index))
+            children.extend(shown)
         if children:
             await self.mount(*children)
 

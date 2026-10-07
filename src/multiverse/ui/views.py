@@ -6,7 +6,7 @@ from .. import universe
 from ..store import read
 from . import theme
 from .columns import COLUMNS
-from .panels import normalize_widgets
+from .panels import error_widget, normalize_widgets
 
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
 # Former column keys that views written for older versions still use.
@@ -14,13 +14,23 @@ COLUMN_ALIASES = {"activity": "status", "tokens": "context"}
 
 
 def view(root):
+    """The view's settings. Never raises: a view that cannot be read shows as an error
+    widget with default settings, so it cannot keep the agent list from loading."""
+    try:
+        return _read_view(root)
+    except Exception as error:
+        return {"columns": DEFAULT_COLUMNS, "accent": theme.ACCENTS[0], "title": "",
+                "widgets": [error_widget("View configuration error", error)]}
+
+
+def _read_view(root):
     path = root / "views" / "default.json"
     try:
         config = read(path) if path.is_file() else {}
         if not isinstance(config, dict):
             raise ValueError("View must be a JSON object")
     except (OSError, ValueError) as error:
-        config = {"widgets": [{"type": "markdown", "title": "View configuration error", "text": str(error)}]}
+        config = {"widgets": [error_widget("View configuration error", error)]}
     accent = config.get("accent", "auto")
     if accent == "auto":
         identity = read(root / "universe.json")["id"]

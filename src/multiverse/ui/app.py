@@ -154,7 +154,11 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             self.query_one("#totals", Static).update(
                 (limits + " · " if limits else "")
                 + f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents')
-            await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
+            try:
+                await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
+            except Exception as error:
+                # The side panel must never keep the agent table from filling.
+                self.set_status(f"Could not show this view's widgets: {error}", error=True)
             if generation != self._scope_generation:
                 return
             self.populate_table()
