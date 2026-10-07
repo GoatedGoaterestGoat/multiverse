@@ -1,10 +1,11 @@
 // Offline tests of the multiverse mod: `claude plugin test src/multiverse/harnesses/claude/mod`.
 // The test's hooks sit beneath the mod and stand in for Claude's core and the
 // host: the files it writes, the status reports it runs, the prompts it submits
-// and the forks it asks for. The kit has no core that stores a session.append
-// row, so tests check the row the mod hands down to be stored (what the model
-// and the transcript read); the receipt written once a row is stored is covered
-// by the Python tests and live runs.
+// and the forks it asks for. Its session.append stand-in records the row the mod
+// hands down to be stored (what the model and the transcript read) and passes it on.
+// From Claude Code 2.1.293 the kit stores it (mock.session), so the receipt the mod
+// writes once a row is stored is checked too; 2.1.292's kit had no core for it and
+// answers "no implementation", which `append` below accepts so the tests run on both.
 import type { On } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 
@@ -14,6 +15,17 @@ const ASK = '3f2a0c1e-1111-4222-8333-944455556663'
 const TRAILER = 'This came from another Claude session — not typed by your user.'
 
 type Submitted = { text: string; asUser: boolean }
+
+// Raise session.append; the stored row, or undefined on a kit (Claude Code before
+// 2.1.293) that has no core to store it. Any other failure fails the test.
+async function append($: { session: { append: (input: never) => Promise<unknown> } }, row: unknown) {
+  try {
+    return await $.session.append(row as never) as { uuid?: string }
+  } catch (error) {
+    if (String(error).includes('no implementation for session.append')) return undefined
+    throw error
+  }
+}
 
 function world(on: On) {
   mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent' })
@@ -97,12 +109,17 @@ describe('delivery', () => {
     const text = 'Message from lead:\nRebase first.'
     const received = await $.session.receive({ origin: { kind: 'peer' }, text: `<<MV2 steer id=${STEER}>>${text}<</MV2>>` })
     expect(received).toEqual({ text })
-    await expect($.session.append({
+    const stored = await append($, {
       message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
                  content: [{ type: 'text', text: wrapped(text) }] },
-      door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-1' } as never)).rejects.toThrow('no implementation')
+      door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-1' })
     expect(w.appended).toEqual([[{ type: 'text', text: `<system-reminder>\n${text}\n</system-reminder>` }]])
     expect(w.submitted).toEqual([])
+    if (stored) {
+      // Stored, so the mod writes its receipt for this message.
+      await w.clock.settle()
+      expect([...w.files.keys()].filter((path) => path.includes('claude-receipts'))).toEqual([`/agent/claude-receipts/${STEER}.json`])
+    }
   })
 
   test('an idle steer and a follow-up are submitted as the person’s words', async ($, on) => {
@@ -116,11 +133,14 @@ describe('delivery', () => {
     await w.clock.settle()
     expect(w.submitted).toEqual([{ text: 'Hello.', asUser: true }, { text: 'Then test.', asUser: true }])
     // Their rows are stored as submitted: bare text, no tags, no wrapper.
-    await expect($.session.append({
+    const stored = await append($, {
       message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'Hello.' }] },
-      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: 'row-2' } as never))
-      .rejects.toThrow('no implementation')
+      door: 'prompt', origin: { kind: 'plugin', name: 'multiverse', asUser: true }, uuid: 'row-2' })
     expect(w.appended).toEqual([[{ type: 'text', text: 'Hello.' }]])
+    if (stored) {
+      await w.clock.settle()
+      expect([...w.files.keys()].filter((path) => path.includes('claude-receipts'))).toEqual([`/agent/claude-receipts/${STEER}.json`])
+    }
   })
 
   test('a steer no tool result took is dropped as a peer prompt and submitted instead', async ($, on) => {
@@ -139,10 +159,10 @@ describe('delivery', () => {
     const text = 'A message from another of your sessions.'
     expect(await $.session.receive({ origin: { kind: 'peer' }, text })).toEqual({ text })
     await $.turn.start({ text: 'work', turnId: 't1' })
-    await expect($.session.append({
+    await append($, {
       message: { type: 'attachment', name: 'queued_command', role: 'user', isMeta: true,
                  content: [{ type: 'text', text: wrapped(text) }] },
-      door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-4' } as never)).rejects.toThrow('no implementation')
+      door: 'delivery', origin: { kind: 'peer' }, uuid: 'row-4' })
     expect(w.appended).toEqual([[{ type: 'text', text: wrapped(text) }]])
     await w.clock.settle()
     expect(w.submitted).toEqual([])
