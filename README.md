@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.290; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.292; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -46,6 +46,14 @@ EOF
 ```
 
 `-u` selects a universe. Inside a spawned agent it defaults to `$MV2_UNIVERSE`; outside an agent it searches the current directory and ancestors. Cross-universe commands use an explicit `-u`. Agent references accept a full UUID, an unambiguous UUID prefix, or a unique name. New agents must have a unique name within their universe, including names of failed or dormant agents; use `mv2 resume NAME` to restart an existing agent. Older records with duplicate names remain reachable by UUID or an unambiguous UUID prefix. Ambiguity is an error.
+
+## Updating mv2
+
+`mv2 update --check` fetches the running package's Git checkout and reports available changes. `mv2 update` fast-forwards its current branch from its upstream, then runs `uv sync --locked` in that checkout when `uv` and `uv.lock` are available. Both commands support `--json` for scripts and work from any directory; `-u` does not select the repository to update.
+
+The command refuses tracked, uncommitted changes, a branch without an upstream, or a branch ahead of or diverged from it. `--check` still fetches and counts pending commits when an upstream exists, even when tracked changes prevent updating. Refusals exit 1; successful checks and updates exit 0. Untracked files are left alone; Git refuses an update that would overwrite them. It never switches branches, rebases, resets or stashes. A package installation without a source checkout cannot use this command. Missing `uv` or `uv.lock` is reported as a skipped environment sync; a failed sync reports the error and can be retried with `uv sync --locked` in the mv2 checkout.
+
+Running agents and the dashboard keep their old code until relaunched. After updating mv2, use `mv2 refresh --apply` to bring a universe's installed template files up to date. The command prints these reminders only after pulling new commits.
 
 ## Individual tools
 

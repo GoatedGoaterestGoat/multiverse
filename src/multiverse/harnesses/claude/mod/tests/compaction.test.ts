@@ -4,7 +4,7 @@
 // builder it runs, and the status line, notices and toasts it shows.
 import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { describeCompaction, parseStatus } from '../hooks/compaction'
+import { describeCompaction, oneOff, parseStatus } from '../hooks/compaction'
 
 type Spawned = { argv: readonly string[]; input?: string }
 
@@ -141,6 +141,17 @@ describe('turn end', () => {
 })
 
 const statusRuns = (runs: (readonly string[])[]) => runs.filter((run) => run[3] === 'status')
+
+describe('one-off scheduler', () => {
+  test("the summary line names the settings a /compact's arguments chose, and nothing otherwise", () => {
+    expect(oneOff({ scheduler_from: 'arguments', scheduler: { scheduler: 'proportional', budget: 60000 } }))
+      .toBe(' (this time: proportional, budget 60000)')
+    expect(oneOff({ scheduler_from: 'arguments', scheduler: { scheduler: 'last_k_raw', budget: 0, k: 4, image_mode: 'drop_all' } }))
+      .toBe(' (this time: last_k_raw, budget 0, k 4)')
+    expect(oneOff({ scheduler_from: 'universe', scheduler: { scheduler: 'last_k_raw', budget: 0, k: 2 } })).toBe('')
+    expect(oneOff({})).toBe('')
+  })
+})
 
 describe('status line', () => {
   test('the compaction item shows built trees out of all turns', () => {

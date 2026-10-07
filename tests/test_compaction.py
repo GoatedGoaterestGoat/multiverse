@@ -166,6 +166,43 @@ class SettingsTest(BaseTest):
         self.assertEqual(limits.wait(1, retry_after=9000), 300)
 
 
+class ArgumentsTest(unittest.TestCase):
+    def test_a_compaction_commands_arguments_are_one_off_scheduler_settings(self):
+        cases = {'': {}, '  ': {}, 'proportional 60k': {'scheduler': 'proportional', 'budget': 60000},
+                 'budget=20k k=4': {'budget': 20000, 'k': 4}, '1.5M': {'budget': 1500000}, 'BUDGET=60_000': {'budget': 60000},
+                 'scheduler=recency_boosted recency-ratio=2.5 recency_half_life=8':
+                     {'scheduler': 'recency_boosted', 'recency_ratio': 2.5, 'recency_half_life': 8.0},
+                 'image_mode=keep_all uniform': {'image_mode': 'keep_all', 'scheduler': 'uniform'}}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(config.parse_arguments(text), expected)
+        self.assertEqual(config.parse_arguments(None), {})
+
+    def test_anything_else_is_refused_with_what_is_accepted(self):
+        cases = {'keep the plan': "unknown argument 'keep'", 'colour=red': "unknown setting 'colour'",
+                 'budget=': 'budget has no value', 'budget=lots': 'budget must be a whole number',
+                 '0.5': 'budget must be a whole number', 'k=two': 'k must be a whole number',
+                 'recency_ratio=high': 'recency_ratio must be a number', '60k budget=1': 'budget is given twice',
+                 'uniform proportional': 'scheduler is given twice'}
+        for text, expected in cases.items():
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError) as caught:
+                    config.parse_arguments(text)
+                self.assertIn(expected, str(caught.exception))
+                self.assertIn('It accepts a scheduler name (last_k_raw, proportional', str(caught.exception))
+
+    def test_changes_apply_on_top_of_a_schedule_and_are_checked_as_a_whole(self):
+        base = config.Schedule('last_k_raw', 0, 2)
+        self.assertEqual(config.override(base, {'budget': 5000}), config.Schedule('last_k_raw', 5000, 2))
+        self.assertEqual(config.override(base, {'scheduler': 'proportional', 'k': None}),
+                         config.Schedule('proportional', 0))
+        self.assertEqual(config.override(config.Schedule('proportional', 9, image_mode='keep_all'),
+                                         {'scheduler': 'last_k_raw'}),
+                         config.Schedule('last_k_raw', 9, 2, image_mode='keep_all'))
+        with self.assertRaisesRegex(ValueError, 'proportional does not take k'):
+            config.override(base, {'scheduler': 'proportional', 'k': 3})
+
+
 class ScheduleTest(unittest.TestCase):
     def test_last_k_raw_keeps_the_tail_whole_even_at_budget_zero(self):
         turns = [turn(f't{i}') for i in range(5)]
@@ -477,6 +514,35 @@ class EntryPointTest(BaseTest):
         payload = json.loads(Path(events.items[-1]['path']).read_text())
         self.assertEqual(payload['install_id'], events.items[-1]['install_id'])
         self.assertIsNone(Store(self.directory).status()['activity'])
+
+    def test_install_applies_the_commands_arguments_to_this_compaction_only(self):
+        events = Events()
+        with self.patched(FakeSource([turn('t0', 3), turn('t1', 2)])):
+            request = {'trigger': 'manual', 'instructions': 'proportional 100'}
+            self.assertEqual(entry.install(str(self.directory), request, events), 0)
+        stats = events.items[-1]['stats']
+        self.assertEqual((stats['scheduler'], stats['scheduler_from']),
+                         ({'scheduler': 'proportional', 'budget': 100}, 'arguments'))
+        self.assertFalse((self.directory / 'compaction/config.json').exists())  # nothing saved
+        events = Events()
+        with self.patched(FakeSource([turn('t0', 3), turn('t1', 2)])):
+            self.assertEqual(entry.install(str(self.directory), {'trigger': 'manual'}, events), 0)
+        self.assertEqual(events.items[-1]['stats']['scheduler_from'], 'universe')
+
+    def test_install_refuses_arguments_it_does_not_understand_before_any_work(self):
+        for text, expected in (('keep the plan', "unknown argument 'keep'"), ('proportional k=3', 'does not take k')):
+            with self.subTest(text=text):
+                events = Events()
+                source = FakeSource([turn('t0', 3), turn('t1', 2)])
+                with self.patched(source):
+                    self.assertEqual(entry.install(str(self.directory), {'instructions': text}, events), 1)
+                self.assertEqual([event['event'] for event in events.items], ['failed'])
+                self.assertIn("the compaction command's arguments", events.items[-1]['message'])
+                self.assertIn(expected, events.items[-1]['message'])
+                self.assertEqual((source.calls, source.rendered), (0, None))
+                held = Store(self.directory).install_lock()
+                self.assertIsNotNone(held)  # no lock was left behind
+                held.release()
 
     def test_install_fails_with_a_message_instead_of_a_partial_result(self):
         cases = [(FakeSource([turn('t0', 3), turn('t1', 2)], [MergeError('usage_limit', 'limit reached')]), True,

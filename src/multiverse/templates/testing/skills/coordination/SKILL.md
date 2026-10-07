@@ -26,6 +26,8 @@ The quoted delimiter needs no escaping inside the message. Use a delimiter that 
 
 - Report your own phase with `report --phase working|blocked|done --summary '...'`. The CLI prints one line such as `Reported working.`; when you have unread inbox messages it adds how many (`You have 2 unread inbox messages.`), and `mv2 inbox` reads them. Properties are self-reported. The TUI shows process observations separately.
 
+- `update --check` fetches and checks the running mv2 source checkout; `update` fast-forwards its current branch from its upstream and syncs its environment with `uv sync --locked` when available. Tracked changes, missing upstreams and local commits are refused; no branch changes or stashing. Use `--json` for scripts. Running agents and the dashboard need relaunching to use the new code; `refresh --apply` updates installed universe template files.
+
 Harness instructions live in `harnesses/<name>/`. If an adapter fails, inspect its manifest, docs and pane. Do not type into a pane based only on its window name. Match the recorded universe, agent and launch tags first. Avoid sending keys into an active model turn or an unknown shell.
 
 Workflows are prompts. Read the selected workflow, delegate bounded work, review evidence, and choose the next step. No scheduler decides for you. A manager is an ordinary agent with an appropriate task.

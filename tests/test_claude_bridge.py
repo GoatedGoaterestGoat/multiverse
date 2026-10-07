@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -14,7 +15,7 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses, native, universe
-from multiverse.harnesses.claude import MOD, measured_usage
+from multiverse.harnesses.claude import MOD, measured_usage, TYPEAHEAD, TYPEAHEAD_VERSION
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
 from multiverse.tools import runtime_update, send
@@ -387,6 +388,53 @@ class ClaudeBridgeTest(BaseTest):
         for sender, expected in cases:
             with self.subTest(sender=sender):
                 self.assertEqual(native.framed_text(self.root, {'from': sender, 'text': 'hi'}), expected)
+
+    def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
+        for setting in (None, True):
+            for mode in ('spawn', 'resume'):
+                for version, expected in (((2, 1, 292), True), ((2, 1, 300), True), ((3, 0, 0), True),
+                                          ((2, 1, 291), False), ((2, 1, 280), False), (None, False)):
+                    with self.subTest(setting=setting, mode=mode, version=version):
+                        command, _ = self.launch(setting, version, mode)
+                        if version is not None and version < (2, 1, 280):
+                            continue
+                        argv = list(command.argv)
+                        self.assertEqual(argv[1:3], ['--plugin-dir', str(MOD)])  # the mod and its flags come first
+                        self.assertEqual(argv.count(str(TYPEAHEAD)), 1 if expected else 0)
+                        if expected:
+                            self.assertEqual(argv[argv.index(str(TYPEAHEAD)) - 1], '--plugin-dir')
+                            self.assertEqual(argv.index(str(TYPEAHEAD)), 8)  # right after the bridge flags
+        for version in ((2, 1, 292), (2, 1, 270)):
+            plain, _ = self.launch(False, version)
+            self.assertNotIn(str(TYPEAHEAD), plain.argv)
+        self.assertEqual(TYPEAHEAD_VERSION, (2, 1, 292))
+
+    def test_the_typeahead_offers_the_mods_own_command_and_subcommands(self):
+        mod = (MOD / 'hooks/multiverse.ts').read_text()
+        typeahead = (TYPEAHEAD / 'hooks/index.ts').read_text()
+        self.assertIn('export const NAME = "multiverse"', mod)
+        self.assertIn('export const COMMAND = "multiverse"', typeahead)
+        reserved = re.search(r'const RESERVED = new Set\(\[([^\]]*)\]\)', typeahead).group(1)
+        offered = re.findall(r'\{ text: "(\w+) ?"', typeahead)
+        self.assertEqual(sorted(re.findall(r'"(\w+)"', reserved)), ['inbox', 'list', 'send'])
+        self.assertEqual(sorted(offered), ['inbox', 'list', 'send'])
+        for word in ('list', 'send', 'inbox'):
+            self.assertIn(f'word === "{word}"', mod)  # the mod's parse() handles each one
+        self.assertTrue((TYPEAHEAD / '.claude-plugin/plugin.json').is_file())
+
+    def installed_claude_knows_the_typeahead_event(self):
+        if not shutil.which('claude'):
+            self.skipTest('Claude Code is not installed')
+        version = self.real_claude_version('claude')
+        if version is None or version < TYPEAHEAD_VERSION:
+            self.skipTest('The installed Claude Code is older than the typeahead needs')
+
+    def test_packaged_typeahead_passes_claude_validation_and_its_plugin_tests(self):
+        self.installed_claude_knows_the_typeahead_event()
+        for command, timeout in ((['claude', 'plugin', 'validate', str(TYPEAHEAD)], 60),
+                                 (['claude', 'plugin', 'test', str(TYPEAHEAD)], 180)):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     @unittest.skipUnless(shutil.which('claude'), 'Claude Code is not installed')
     def test_packaged_mod_passes_claude_validation(self):

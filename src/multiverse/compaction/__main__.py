@@ -1,8 +1,9 @@
 """Entry points harness integrations run: `python -m multiverse.compaction ACTION --agent-dir DIR`.
 
 install     compact the session now: read the install trigger's request on
-            stdin; write progress, then each message, then the result as JSON
-            lines on stdout
+            stdin (its `instructions`, the compaction command's arguments,
+            are one-off scheduler settings); write progress, then each
+            message, then the result as JSON lines on stdout
 background  note that a turn ended (--turn-ended MARKER) and start the background
             tree builder unless one is running; returns at once, printing the
             status
@@ -25,6 +26,7 @@ import subprocess
 import sys
 import threading
 
+from . import config as settings_file
 from .build import Build, Cancelled, Reporter, json_lines
 from .pipeline import CompactionError, compact, conversation, open_agent, plan
 from .store import Store
@@ -58,6 +60,12 @@ def install(directory: str, request: dict, emit) -> int:
     if not agent.settings.enabled:
         return fail(f'compaction is no longer enabled for the {agent.harness} harness in this universe; '
                     'restart the agent to use its native compaction')
+    try:
+        changes = settings_file.parse_arguments(request.get('instructions'))
+        if changes:
+            agent.schedule(changes)  # refuse an impossible combination before any work
+    except ValueError as error:
+        return fail(f'the compaction command\'s arguments: {error}')
     store = agent.store
     held = store.install_lock()
     if held is None:
@@ -74,7 +82,7 @@ def install(directory: str, request: dict, emit) -> int:
     with held:
         store.set_activity({'phase': 'compacting', 'trigger': request.get('trigger')})
         try:
-            payload, stats = compact(agent, request.get('offered'), reporter, cancel)
+            payload, stats = compact(agent, request.get('offered'), reporter, cancel, changes)
             install_id, path = store.save_install({**payload, 'stats': stats, 'trigger': request.get('trigger')})
         except Cancelled:
             return fail('cancelled')

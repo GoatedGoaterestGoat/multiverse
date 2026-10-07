@@ -20,4 +20,5 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 multiverse = ["templates/**/*", "templates/**/.gitignore", "*.tcss", "harnesses/**/*.json", "harnesses/**/*.ts",
-              "harnesses/claude/mod/.claude-plugin/plugin.json"]
+              "harnesses/claude/mod/.claude-plugin/plugin.json",
+              "harnesses/claude/typeahead/.claude-plugin/plugin.json"]

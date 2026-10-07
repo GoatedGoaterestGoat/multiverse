@@ -42,6 +42,10 @@ from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_
 from ...usage import Usage
 
 MOD = Path(__file__).parent / 'mod'
+# Typeahead for /multiverse, a plugin of its own: it hooks `prompt.autocomplete`, which Claude Code
+# 2.1.292 added and an older Claude refuses, so it is loaded only from that version on.
+TYPEAHEAD = Path(__file__).parent / 'typeahead'
+TYPEAHEAD_VERSION = (2, 1, 292)
 # The mod acts only on text between these tags and removes them. The opening
 # tag names the delivery mode, which the mod honors, and the message ID for its
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
@@ -369,9 +373,11 @@ class ClaudeAdapter(ConfiguredAdapter):
             # An unusable compaction.json never stops a launch: this one runs without compaction.
             native_mode = {'policy': policy, 'mode': 'bridge without compaction',
                            'fallback_reason': f'Launched without compaction: {problem}'}
+        version = claude_version(command.argv[0])
+        typeahead = ('--plugin-dir', str(TYPEAHEAD)) if version is not None and version >= TYPEAHEAD_VERSION else ()
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', json.dumps(settings), *command.argv[1:]),
+                  '--settings', json.dumps(settings), *typeahead, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
             environment=environment, native_mode=native_mode)
 

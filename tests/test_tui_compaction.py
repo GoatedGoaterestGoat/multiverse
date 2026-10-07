@@ -1,4 +1,5 @@
 """The compaction screens: pure edit logic, then the dashboard flow against a fake backend."""
+import asyncio
 import copy
 from pathlib import Path
 import sys
@@ -152,6 +153,23 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             await self.app.workers.wait_for_complete()
         await pilot.pause(0.05)
 
+    async def until(self, pilot, check, what, timeout=8.0):
+        """Wait for `check()` to hold, so a slow machine only makes a test slower, never wrong."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            await self.app.workers.wait_for_complete()
+            try:
+                if check():
+                    return
+            except Exception:  # a widget not mounted yet
+                pass
+            if asyncio.get_running_loop().time() > deadline:
+                self.fail(f"timed out waiting for {what}")
+            await pilot.pause(0.02)
+
+    def shown(self, screen, selector=".cerror"):
+        return str(screen.query_one(selector, Static).render())
+
     async def open(self, pilot):
         await self.settle(pilot)
         await pilot.press("c")
@@ -280,15 +298,13 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             first = len(self.backend.previews)
             self.widget(agent, "agent.mode").action_step(1)
             self.widget(agent, "agent.budget").value = "5000"
-            await pilot.pause(0.7)
-            await self.settle(pilot)
-            self.assertEqual(self.backend.previews[-1]["scheduler"], {"scheduler": "last_k_raw", "budget": 5000, "k": 2})
+            want = {"scheduler": "last_k_raw", "budget": 5000, "k": 2}
+            await self.until(pilot, lambda: self.backend.previews[-1].get("scheduler") == want
+                             and "25k" in self.shown(agent, "#plan-summary"), "the preview of the edited scheduler")
             self.assertEqual(self.backend.saved, [])
-            self.assertIn("25k", str(agent.query_one("#plan-summary", Static).render()))
             await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual(self.backend.schedulers, [{"scheduler": "last_k_raw", "budget": 5000, "k": 2}])
-            self.assertIs(self.app.screen, screen)
+            await self.until(pilot, lambda: self.app.screen is screen, "the agent screen to close after saving")
+            self.assertEqual(self.backend.schedulers, [want])
 
     async def test_errors_show_only_in_the_agent_screen_and_only_while_a_turn_is_failed(self):
         self.backend.agent = {**self.backend.agent, "recent_errors": [{"message": "turn 3 refused"}]}
@@ -307,11 +323,8 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             # The retry worked: nothing failed any more, so a stale error must not show.
             self.backend.agent = {**self.backend.agent, "failed_turns": 0, "last_error": "turn 3 refused"}
             agent.tick()
-            await pilot.pause(0.3)
-            await self.settle(pilot)
-            status = str(agent.query_one("#agent-status", Static).render())
-            self.assertNotIn("Error", status)
-            self.assertNotIn("refused", status)
+            await self.until(pilot, lambda: "Error" not in self.shown(agent, "#agent-status"), "the stale error to clear")
+            self.assertNotIn("refused", self.shown(agent, "#agent-status"))
 
     async def test_failed_turns_show_their_reasons_when_the_backend_gives_them(self):
         self.backend.agent = {**self.backend.agent, "failed_turns": 2, "recent_errors": [{"message": "old noise"}],
@@ -331,8 +344,8 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             screen = await self.open(pilot)
             self.backend.agent = {**self.backend.agent, "trees_cached": 56, "activity": None}
             screen.tick()
-            await self.settle(pilot)
-            self.assertEqual(screen.query_one("#compaction-agents", DataTable).get_row_at(0)[3], "56")
+            await self.until(pilot, lambda: screen.query_one("#compaction-agents", DataTable).get_row_at(0)[3] == "56",
+                             "the refreshed agents table")
             screen.query_one("#compaction-agents", DataTable).focus()
             await pilot.press("enter")
             await self.settle(pilot)
@@ -340,10 +353,8 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.backend.agent = {**self.backend.agent, "trees_cached": 57}
             before = len(self.backend.previews)
             agent.tick()
-            await pilot.pause(0.3)
-            await self.settle(pilot)
-            self.assertGreater(len(self.backend.previews), before)
-            self.assertIn("57 trees", str(agent.query_one("#agent-status", Static).render()))
+            await self.until(pilot, lambda: len(self.backend.previews) > before
+                             and "57 trees" in self.shown(agent, "#agent-status"), "the refreshed tree count")
 
     async def test_plan_table_takes_the_space_left_in_the_screen(self):
         self.backend.long_plan = 60
@@ -351,16 +362,16 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
         for size in ((100, 30), (100, 50)):
             app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
             async with app.run_test(size=size) as pilot:
-                await pilot.pause(0.3)
-                await app.workers.wait_for_complete()
+                self.app = app
+                await self.settle(pilot)
                 await pilot.press("c")
-                await pilot.pause(0.3)
-                await app.workers.wait_for_complete()
+                await self.until(pilot, lambda: isinstance(app.screen, CompactionScreen)
+                                 and app.screen.query_one("#compaction-agents", DataTable).row_count == 1, "the compaction screen")
                 app.screen.query_one("#compaction-agents", DataTable).focus()
                 await pilot.press("enter")
-                await pilot.pause(0.3)
-                await app.workers.wait_for_complete()
-                await pilot.pause(0.2)
+                await self.until(pilot, lambda: isinstance(app.screen, AgentScreen)
+                                 and app.screen.query_one("#plan", DataTable).row_count == 60, "the 60-turn plan")
+                await pilot.pause(0.1)
                 agent = app.screen
                 plan = agent.query_one("#plan", DataTable)
                 dialog = agent.query_one("#compaction-dialog").region
@@ -380,13 +391,11 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             agent = self.app.screen
             self.assertEqual(self.widget(agent, "agent.mode").value, "own")
             self.widget(agent, "agent.budget").value = "lots"
-            await pilot.pause(0.7)
-            self.assertIn("must be a whole number", str(agent.query_one(".cerror", Static).render()))
+            await self.until(pilot, lambda: "must be a whole number" in self.shown(agent), "the bad-number error")
             self.assertEqual(agent.query_one("#plan", DataTable).row_count, 2)
             self.widget(agent, "agent.mode").action_step(1)
             await pilot.press("ctrl+enter")
-            await self.settle(pilot)
-            self.assertEqual(self.backend.schedulers, [None])
+            await self.until(pilot, lambda: self.backend.schedulers == [None], "the agent to return to the default")
 
     async def test_agent_save_error_stays_on_the_screen(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
@@ -398,9 +407,29 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.widget(agent, "agent.mode").action_step(1)
             self.backend.error = "budget must be a whole number of at least 0"
             await pilot.press("ctrl+enter")
-            await self.settle(pilot)
+            await self.until(pilot, lambda: "budget must be" in self.shown(agent), "the save error")
             self.assertIs(self.app.screen, agent)
-            self.assertIn("budget must be", str(agent.query_one(".cerror", Static).render()))
+
+    async def test_a_finishing_preview_never_clears_a_save_error(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            screen.query_one("#compaction-agents", DataTable).focus()
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, AgentScreen) and self.app.screen.detail is not None,
+                             "the agent screen")
+            agent = self.app.screen
+            self.widget(agent, "agent.mode").action_step(1)
+            self.backend.error = "budget must be a whole number of at least 0"
+            await pilot.press("ctrl+enter")
+            await self.until(pilot, lambda: "budget must be" in self.shown(agent), "the save error")
+            # Previews that were pending, or that run now, must leave the error alone.
+            before = len(self.backend.previews)
+            agent.start_preview()
+            agent.tick()
+            await self.until(pilot, lambda: len(self.backend.previews) > before and not agent.previewing, "a preview to finish")
+            await pilot.pause(0.5)
+            self.assertIn("budget must be", self.shown(agent))
+            self.assertIs(self.app.screen, agent)
 
 
 if __name__ == "__main__":
