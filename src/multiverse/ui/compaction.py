@@ -150,7 +150,7 @@ def own_scheduler(fields, values, prefix):
 
 class SchedulerScreen(FieldScreen):
     """A field screen whose scheduler fields show only for the scheduler chosen in their group."""
-    def visible(self, item, values):
+    def applies(self, item, values):
         return visible(item, values)
 
 

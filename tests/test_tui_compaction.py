@@ -209,6 +209,18 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.widget(screen, "shared.scheduler").value, "proportional")
             self.assertFalse(screen.rows["shared.k"].display)
 
+    async def test_field_screens_keep_textuals_visible_property(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            self.assertIs(screen.visible, True)
+            # Setting it is Textual's way to hide a widget; the row hook must keep working after.
+            screen.visible = False
+            self.assertIs(screen.visible, False)
+            screen.visible = True
+            self.widget(screen, "shared.scheduler").action_step(1)
+            await pilot.pause()
+            self.assertFalse(screen.rows["shared.k"].display)
+
     async def test_save_sends_the_file_with_only_the_edits_and_closes(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
             screen = await self.open(pilot)

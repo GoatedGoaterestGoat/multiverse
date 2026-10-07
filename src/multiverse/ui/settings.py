@@ -174,14 +174,17 @@ class FieldScreen(ModalScreen):
     def values(self):
         return {key: widget.value for key, widget in self.widgets.items()}
 
-    def visible(self, item, values):
-        """Hook: whether a field applies, given every field's current value."""
+    def applies(self, item, values):
+        """Hook: whether a field applies, given every field's current value.
+
+        Not `visible`: that is Textual's own property on every widget, this screen included.
+        """
         return True
 
     def refresh_rows(self):
         values = self.values()
         for item in self.fields:
-            self.rows[item.key].display = self.visible(item, values)
+            self.rows[item.key].display = self.applies(item, values)
 
     def on_input_changed(self, event):
         self.refresh_rows()
