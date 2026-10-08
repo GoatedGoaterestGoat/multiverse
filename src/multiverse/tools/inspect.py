@@ -1,8 +1,9 @@
 """Show an agent's key facts and the end of its live terminal."""
 import re
-from .. import agents, universe
-from .list_agents import error_text, state
-from .spawn import label, mode
+from ..universe import agents
+from ..runtime import lifecycle
+from .. import universe
+from ..display import error_text, label, mode, state
 
 TAIL_LINES = 30
 
@@ -14,7 +15,7 @@ def configure(parser):
 
 
 def run(root=None, *, agent, lines=None, json=False):  # `lines` and `json` only shape the command line's text
-    return agents.terminal_action(universe.resolve(root), agent, "inspect")
+    return lifecycle.terminal_action(universe.resolve(root), agent, "inspect")
 
 
 def tail(capture, lines):
@@ -29,7 +30,7 @@ def tail(capture, lines):
 def facts(root, agent):
     """The agent's row from the listing: the same facts the dashboard shows."""
     identity = agents.directory(root, agent).name
-    return next(row for row in agents.listing(root) if row["id"] == identity)
+    return next(row for row in lifecycle.listing(root) if row["id"] == identity)
 
 
 def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):

@@ -5,6 +5,7 @@ from pathlib import Path
 from importlib import import_module
 
 from . import universe
+from .universe import templates
 from .tools._common import add_universe, output
 
 # Explicit built-ins only. No plugin discovery or registration machinery.
@@ -46,8 +47,8 @@ def run(args, *, cli=False):
                 values["root"] = universe.resolve()
             except universe.UniverseNotFoundError:
                 cwd = Path.cwd()
-                values["root"] = universe.create(cwd / ".multiverse", cwd.name,
-                                                template=str(universe.TEMPLATES / "base"), workdir=cwd)
+                values["root"] = templates.create(cwd / ".multiverse", cwd.name,
+                                                 template=str(templates.TEMPLATES / "base"), workdir=cwd)
     module = tool(action)
     handler = getattr(module, 'cli_run', module.run) if cli else module.run
     return handler(**values)

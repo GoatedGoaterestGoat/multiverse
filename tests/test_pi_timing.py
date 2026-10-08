@@ -7,9 +7,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-from multiverse import agents, native
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import native
 from multiverse.tools import send
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 from test_multiverse import TerminalBase, until
 
 
@@ -23,7 +26,7 @@ class PiTimingTest(TerminalBase):
                             str(Path(__file__).with_name('steering-provider.ts')), '--provider', 'mv2-steering', '--model', 'test']}
         write(path, spec)
         with patch.dict(os.environ, PI_CODING_AGENT_DIR=str(self.work / 'pi-home'), PI_OFFLINE='1'):
-            result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'pi', socket_path=self.socket)
+            result = lifecycle.start(self.root, 'timing', 'Run the offline tool sequence.', 'pi', socket_path=self.socket)
         directory = agents.directory(self.root, result['id'])
         try:
             until(lambda: (directory / 'tool-1-start').exists(), seconds=25)
@@ -60,7 +63,7 @@ class PiTimingTest(TerminalBase):
                   'normal_ms': records[3]['at'] - sent, 'tool_duration_ms': 4000,
                   'urgent_before_second_tool': True, 'normal_after_final_turn': True}))
         except Exception:
-            print(agents.terminal_action(self.root, result['id'], 'inspect'))
+            print(lifecycle.terminal_action(self.root, result['id'], 'inspect'))
             raise
 
 

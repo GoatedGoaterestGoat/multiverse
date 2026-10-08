@@ -1,5 +1,6 @@
 """Move a stopped agent, or a subverse whose agents are all stopped, to the trash."""
-from .. import relocate, universe
+from ..universe import relocate
+from .. import universe
 
 
 def configure(parser):

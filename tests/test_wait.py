@@ -9,7 +9,9 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
 from multiverse.cli import parser, run
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase
@@ -26,11 +28,11 @@ class WaitTest(BaseTest):
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'starting', 'pid': 123,
             'control_endpoint': {'transport': 'unix-websocket', 'address': '/fake/socket'}})
         write(self.directory / 'launches' / self.launch / 'request.json', {'shared_service': True, 'rpc_proxy': {'settings': {}}})
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'alive'}))
+        self.enterContext(patch.object(lifecycle, 'observe', return_value={'live': 'alive'}))
         self.adapter = harnesses.load(self.root, 'codex')
 
     def wait(self, timeout=.08):
-        return agents.wait_ready(self.root, self.directory, self.launch, self.adapter, timeout)
+        return lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, timeout)
 
     def test_wait_allows_binding_but_requires_validation_before_ready(self):
         agents.update_runtime(self.directory, self.launch, attachment={'work_owner': 'service', 'readiness': 'binding'})
@@ -108,7 +110,7 @@ class WaitTest(BaseTest):
                                   reason='Native startup failed: No such file or directory')
             return {'live': 'stopped'}
         agents.update_runtime(self.directory, self.launch, state='running')
-        with patch.object(agents, 'observe', side_effect=exited):
+        with patch.object(lifecycle, 'observe', side_effect=exited):
             result = self.wait()
         self.assertFalse(result['ready'])
         self.assertEqual(result['runtime']['state'], 'failed')
@@ -116,7 +118,7 @@ class WaitTest(BaseTest):
 
     def test_exit_without_runner_finalization_is_bounded_and_preserves_generation_checks(self):
         started = time.monotonic()
-        with patch.object(agents, 'observe', return_value={'live': 'dormant'}):
+        with patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}):
             result = self.wait(timeout=2)
         self.assertFalse(result['ready'])
         self.assertIn('ended before becoming ready', result['error'])
@@ -125,14 +127,14 @@ class WaitTest(BaseTest):
         def replaced(*args):
             write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
             return {'live': 'stopped'}
-        with patch.object(agents, 'observe', side_effect=replaced), self.assertRaisesRegex(ValueError, 'replacement'):
+        with patch.object(lifecycle, 'observe', side_effect=replaced), self.assertRaisesRegex(ValueError, 'replacement'):
             self.wait()
 
     def test_invalid_timeout_is_rejected_before_creating_an_agent(self):
         before = list((self.root / 'state/agents').iterdir())
         for timeout in (0, -1, float('nan'), float('inf')):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, 'finite positive'):
-                agents.start(self.root, 'invalid', wait=True, wait_timeout=timeout)
+                lifecycle.start(self.root, 'invalid', wait=True, wait_timeout=timeout)
         self.assertEqual(list((self.root / 'state/agents').iterdir()), before)
 
 
@@ -145,7 +147,7 @@ class WaitTerminalTest(TerminalBase):
             self.assertTrue(first['runtime']['pid'])
             identifier = str(uuid4())
             agents.bind_session(self.root, first['id'], identifier)
-            agents.kill(self.root, first['id'])
+            lifecycle.kill(self.root, first['id'])
             resumed = run(parser().parse_args(['-u', str(self.root), 'resume', first['id'], '--wait']))
         self.assertTrue(resumed['ready'], resumed)
         self.assertEqual(resumed['session']['native_id'], identifier)

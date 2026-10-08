@@ -36,7 +36,7 @@ class CrossHarnessParentIdentity(unittest.TestCase):
                         'env': {'MV2_CLI': str(Path(temp) / 'mv2'), 'MV2_AGENT_ID': 'child-agent'},
                         'unset_env': spec.get('unset_env', [])})
                     (launch / 'ready').touch()
-                    result = subprocess.run([sys.executable, str(SOURCE / 'multiverse/runner.py'), str(launch)],
+                    result = subprocess.run([sys.executable, str(SOURCE / 'multiverse/runtime/runner.py'), str(launch)],
                         env={**os.environ, 'CODEX_THREAD_ID': 'synthetic-parent-codex',
                              'CLAUDECODE': 'synthetic-parent-claude', 'MV2_AGENT_ID': 'parent-agent'},
                         text=True, capture_output=True, timeout=10)

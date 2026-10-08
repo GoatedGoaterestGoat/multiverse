@@ -11,10 +11,12 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, harnesses, native, universe, usage
-from multiverse.dashboard import LocalBackend, harnesses as discover
+from multiverse import display, harnesses, universe
+from multiverse.runtime import native
+from multiverse.ui.backend import LocalBackend, harnesses as discover
 from multiverse.harnesses.types import CAPABILITIES, SessionHandle, Capability, CommandSpec, LaunchContext, NativeEndpoint, NativeResult
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 from multiverse.tools import capabilities, deliver, native_status
 from test_multiverse import BaseTest
 
@@ -384,8 +386,8 @@ class NativeDeliveryTest(BaseTest):
                 self.assertIn(result.reason, row['usage_detail'])
         with patch.object(harnesses.CodexAdapter, 'get_usage', side_effect=RuntimeError('adapter failed')):
             self.assertEqual(LocalBackend().snapshot(self.root)['agents'][0]['usage']['state'], 'error')
-        self.assertEqual(usage.display({'state': 'ok', 'value': {'total_tokens': 0}}), '0')
-        self.assertEqual(usage.display({'state': 'ok', 'value': {'total_tokens': None}}), 'N/A')
+        self.assertEqual(display.usage_total({'state': 'ok', 'value': {'total_tokens': 0}}), '0')
+        self.assertEqual(display.usage_total({'state': 'ok', 'value': {'total_tokens': None}}), 'N/A')
 
     def test_native_subprocess_scrubs_identity_and_preserves_literal_argv(self):
         script = 'import json,os,sys; print(json.dumps([sys.argv[1:], sorted(k for k in os.environ if k.startswith("MV2_") or k in ("CODEX_THREAD_ID","CLAUDECODE"))]))'

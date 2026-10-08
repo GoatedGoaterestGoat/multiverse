@@ -8,7 +8,12 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import agents, relocate, universe
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import universe
+from multiverse.universe import templates
+from multiverse.universe import relocate
+from multiverse.universe import trash
 from multiverse.cli import parser, run
 from multiverse.store import read, write
 
@@ -18,10 +23,10 @@ class RelocateTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.work = Path(self.temp.name) / "work"
         self.work.mkdir()
-        self.root = universe.create(self.work / ".multiverse", "top", workdir=self.work)
-        self.lab = universe.create(self.root / "subverses/lab", "lab", workdir=self.work)
-        self.deep = universe.create(self.lab / "subverses/deep", "deep", workdir=self.work)
-        self.review = universe.create(self.root / "subverses/review", "review", workdir=self.work)
+        self.root = templates.create(self.work / ".multiverse", "top", workdir=self.work)
+        self.lab = templates.create(self.root / "subverses/lab", "lab", workdir=self.work)
+        self.deep = templates.create(self.lab / "subverses/deep", "deep", workdir=self.work)
+        self.review = templates.create(self.root / "subverses/review", "review", workdir=self.work)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -99,7 +104,7 @@ class RelocateTests(unittest.TestCase):
 
     def test_move_subverse_refusals(self):
         self.agent(self.deep, "busy")
-        universe.create(self.review / "subverses/lab", "lab", workdir=self.work)
+        templates.create(self.review / "subverses/lab", "lab", workdir=self.work)
         with self.live("busy"):
             for path, destination, message in (
                     (self.lab, self.deep, "into itself"),
@@ -121,11 +126,11 @@ class RelocateTests(unittest.TestCase):
         entry = Path(result["trash"])
         self.assertFalse(source.exists())
         self.assertEqual(entry.parent, self.lab / "trash")
-        self.assertEqual(read(entry / relocate.RECORD)["origin"], str(source))
-        self.assertEqual(agents.listing(self.lab), [])
-        listed = relocate.trash(self.root)["entries"]
+        self.assertEqual(read(entry / trash.RECORD)["origin"], str(source))
+        self.assertEqual(lifecycle.listing(self.lab), [])
+        listed = trash.contents(self.root)["entries"]
         self.assertEqual([(e["kind"], e["name"]) for e in listed], [("agent", "worker")])
-        (entry / relocate.RECORD).unlink()
+        (entry / trash.RECORD).unlink()
         entry.rename(source)
         self.assertEqual(agents.directory(self.lab, "worker"), source)
 
@@ -142,10 +147,10 @@ class RelocateTests(unittest.TestCase):
         self.assertEqual(universe.workspace(entry / "subverses/deep"), self.work.resolve())
         with self.assertRaisesRegex(ValueError, "top-level"):
             relocate.remove_subverse(self.root)
-        self.assertEqual(len(relocate.trash(self.root)["entries"]), 1)
-        self.assertEqual(len(relocate.trash(self.root, empty=True)["entries"]), 1)
+        self.assertEqual(len(trash.contents(self.root)["entries"]), 1)
+        self.assertEqual(len(trash.contents(self.root, empty=True)["entries"]), 1)
         self.assertFalse(entry.exists())
-        self.assertEqual(relocate.trash(self.root), {"entries": [], "emptied": False})
+        self.assertEqual(trash.contents(self.root), {"entries": [], "emptied": False})
 
     def test_trash_names_do_not_collide_and_have_no_timezone_suffix(self):
         for _ in range(2):

@@ -8,7 +8,7 @@ def configure(parser):
 def run(root=None):
     root = universe.resolve(root)
     try:
-        from ..tui import start
+        from ..ui.app import start
     except ModuleNotFoundError as error:
         raise RuntimeError("Install the TUI dependencies with `uv sync` or `pip install .`.") from error
     start(root)

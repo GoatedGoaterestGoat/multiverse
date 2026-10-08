@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import universe
 from multiverse.store import write
 from multiverse.tools import catalog
+from multiverse.universe import catalog as universe_catalog
 from test_multiverse import BaseTest
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -33,7 +34,7 @@ class CatalogJsonTest(BaseTest):
         return result.stdout
 
     def test_json_lists_every_entry_with_kind_name_description_and_path(self):
-        entries = universe.catalog(self.root)
+        entries = universe_catalog.catalog(self.root)
         self.assertTrue(entries)
         for standalone in (True, False):
             with self.subTest(standalone=standalone):
@@ -46,7 +47,7 @@ class CatalogJsonTest(BaseTest):
         self.assertEqual(catalog.run(self.root, json=True), entries)
 
     def test_the_text_output_is_unchanged(self):
-        entries = universe.catalog(self.root)
+        entries = universe_catalog.catalog(self.root)
         expected = '\n'.join(f'{e["kind"]}/{e["name"]}: {e["description"]}\n  {e["path"]}' for e in entries)
         self.assertEqual(catalog.run(self.root), expected)
         for standalone in (True, False):

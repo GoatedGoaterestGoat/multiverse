@@ -11,8 +11,9 @@ from uuid import uuid4
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
-from multiverse import cli, universe
-from multiverse.dashboard import LocalBackend
+from multiverse import cli
+from multiverse.universe import templates
+from multiverse.ui.backend import LocalBackend
 from multiverse.store import read, write
 from multiverse.tools import spawn
 
@@ -22,7 +23,7 @@ class ToolsTest(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)
-        self.root = universe.create(self.work / "universe", "tools", workdir=self.work)
+        self.root = templates.create(self.work / "universe", "tools", workdir=self.work)
         self.env = {k: v for k, v in os.environ.items() if not k.startswith("MV2_")}
         self.env["PYTHONPATH"] = str(PROJECT / "src")
         self.agent = str(uuid4())
@@ -147,7 +148,7 @@ class ToolsTest(unittest.TestCase):
         literal = "--flag\n$(false) `false` {literal}"
         task_file = self.work / "task.md"
         task_file.write_text(literal)
-        with patch.object(spawn.agents, "start", return_value={"id": "created"}) as start:
+        with patch.object(spawn.lifecycle, "start", return_value={"id": "created"}) as start:
             cli.run(cli.parser().parse_args(["-u", str(self.root), "spawn", "--name", "worker",
                                             "--task-file", str(task_file), "--model", "chosen"]))
             first = start.call_args

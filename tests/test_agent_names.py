@@ -8,7 +8,10 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from test_multiverse import BaseTest, ROOT
-from multiverse import agents, harnesses, universe
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.universe import templates
 from multiverse.store import read, write
 
 
@@ -20,9 +23,9 @@ class AgentNamesTest(BaseTest):
         write(self.root / 'harnesses/fake/harness.json', self.recipe)
         self.backend = Mock()
         self.backend.create.return_value = {'socket': '/unused/tmux.sock', 'session': '$1', 'pane': '%1'}
-        self.enterContext(patch.object(agents, 'Tmux', return_value=self.backend))
-        self.enterContext(patch.object(agents.shutil, 'which', return_value=sys.executable))
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'dormant'}))
+        self.enterContext(patch.object(lifecycle, 'Tmux', return_value=self.backend))
+        self.enterContext(patch.object(lifecycle.shutil, 'which', return_value=sys.executable))
+        self.enterContext(patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}))
 
     def record(self, name, identifier=None, state=None):
         identifier = identifier or str(uuid4())
@@ -42,7 +45,7 @@ class AgentNamesTest(BaseTest):
                     write(directory / 'runtime.json', {'launch_id': 'old', 'state': state})
                 before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
                 with self.assertRaisesRegex(ValueError, 'already has an agent named worker; pick another name or resume it with mv2 resume worker'):
-                    agents.start(self.root, 'worker', harness='fake')
+                    lifecycle.start(self.root, 'worker', harness='fake')
                 after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
                 self.assertEqual(after, before)
         self.backend.create.assert_not_called()
@@ -58,7 +61,7 @@ class AgentNamesTest(BaseTest):
         adapter.spawn = spawn
         def start():
             try:
-                return agents.start(self.root, 'shared-name', harness='fake')
+                return lifecycle.start(self.root, 'shared-name', harness='fake')
             except ValueError as error:
                 return error
         with patch.object(harnesses, 'load', return_value=adapter), ThreadPoolExecutor(max_workers=2) as pool:
@@ -71,14 +74,14 @@ class AgentNamesTest(BaseTest):
         self.assertEqual(self.backend.create.call_count, 1)
 
     def test_same_name_in_a_subverse_is_allowed_and_resume_reuses_the_original_record(self):
-        first = agents.start(self.root, 'worker', harness='fake')
-        child = universe.create(self.root / 'subverses/child', 'child', workdir=self.work)
+        first = lifecycle.start(self.root, 'worker', harness='fake')
+        child = templates.create(self.root / 'subverses/child', 'child', workdir=self.work)
         write(child / 'harnesses/fake/harness.json', self.recipe)
-        second = agents.start(child, 'worker', harness='fake')
+        second = lifecycle.start(child, 'worker', harness='fake')
         self.assertNotEqual(first['id'], second['id'])
         native_id = str(uuid4())
         agents.bind_session(self.root, first['id'], native_id)
-        resumed = agents.start(self.root, resume='worker')
+        resumed = lifecycle.start(self.root, resume='worker')
         self.assertEqual(resumed['id'], first['id'])
         self.assertEqual(resumed['native_session_id'], native_id)
         self.assertEqual(len(list((self.root / 'state/agents').glob('*/properties.json'))), 1)
@@ -90,8 +93,8 @@ class AgentNamesTest(BaseTest):
             agents.directory(self.root, 'old-name')
         self.assertEqual(agents.directory(self.root, first.name[:8]), first)
         self.assertEqual(agents.directory(self.root, second.name), second)
-        self.assertEqual(agents.start(self.root, resume=first.name[:8])['id'], first.name)
-        self.assertEqual(agents.start(self.root, resume=second.name[:8])['id'], second.name)
+        self.assertEqual(lifecycle.start(self.root, resume=first.name[:8])['id'], first.name)
+        self.assertEqual(lifecycle.start(self.root, resume=second.name[:8])['id'], second.name)
 
     def test_unknown_agent_error_is_plain_in_core_and_cli(self):
         expected = "No agent named missing here. Run mv2 list to see this universe's agents."

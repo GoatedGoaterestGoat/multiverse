@@ -1,5 +1,5 @@
 """Record a native session UUID for exact resume."""
-from .. import agents
+from ..universe import agents
 from ._common import add_agent, callback
 
 def configure(parser):

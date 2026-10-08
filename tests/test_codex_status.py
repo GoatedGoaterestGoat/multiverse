@@ -10,11 +10,11 @@ from unittest.mock import Mock, patch
 
 from websockets.asyncio.server import unix_serve
 
-from multiverse import rpc
+from multiverse.runtime import rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.status import status
 from multiverse.harnesses.types import NativeEndpoint, SessionHandle
-from multiverse.runner import StatusWatcher
+from multiverse.runtime.runner import StatusWatcher
 from multiverse.store import read, write
 
 
@@ -234,7 +234,7 @@ class StatusStreamTest(unittest.IsolatedAsyncioTestCase):
 
 class RunnerLifetimeTest(unittest.TestCase):
     def test_bridge_is_starting_until_relay_accepts_binding(self):
-        from multiverse import runner
+        from multiverse.runtime import runner
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             agent_id, launch_id, native_id = str(uuid4()), str(uuid4()), str(uuid4())
@@ -258,11 +258,11 @@ class RunnerLifetimeTest(unittest.TestCase):
             process.wait.side_effect = waited
             with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                  patch.object(runner.subprocess, 'Popen', return_value=process), \
-                 patch('multiverse.harnesses.load'), patch('multiverse.rpc.LaunchProxy') as proxy_factory:
+                 patch('multiverse.harnesses.load'), patch('multiverse.runtime.rpc.LaunchProxy') as proxy_factory:
                 self.assertEqual(runner.main(), 0)
 
     def test_watcher_follows_terminal_exit_and_signal_but_plain_has_none(self):
-        from multiverse import runner
+        from multiverse.runtime import runner
         for bridge, outcome in [(False, 0), (True, 0), (True, 1), (True, SystemExit(143))]:
             with self.subTest(bridge=bridge, outcome=outcome), tempfile.TemporaryDirectory() as temp:
                 root = Path(temp)

@@ -10,7 +10,37 @@ import json
 from websockets.asyncio.client import unix_connect
 from websockets.exceptions import WebSocketException
 
-from .harnesses.types import NativeResult
+from ..harnesses.types import NativeResult
+
+
+async def _exchange(connection, plan, request, max_requests, send):
+    """Send a plan's requests in turn, feeding it each response, until it returns.
+
+    Returns (True, what the plan returned), or (False, None) when it wants more
+    than `max_requests`. Notifications that arrive before a response are skipped:
+    approvals belong to the attached native TUI (even an error response could
+    resolve a native permission request), and a snapshot response supersedes
+    earlier events. `send(message, kind)` writes a request or notification.
+    """
+    for identifier in range(1, max_requests + 1):
+        await send({'jsonrpc': '2.0', 'id': identifier, 'method': request.method, 'params': request.params}, 'request')
+        while True:
+            value = json.loads(await connection.recv())
+            if not isinstance(value, dict):
+                raise ValueError('Native RPC returned a non-object')
+            if 'method' in value:
+                continue
+            if value.get('id') != identifier:
+                raise ValueError('Native RPC response ID mismatch')
+            break
+        if 'result' in value and 'error' not in value:
+            for notification in request.on_success:
+                await send({'jsonrpc': '2.0', 'method': notification.method, 'params': notification.params}, 'notification')
+        try:
+            request = plan.send(value)
+        except StopIteration as done:
+            return True, done.value
+    return False, None
 
 
 async def _execute(spec, timeout):
@@ -20,7 +50,7 @@ async def _execute(spec, timeout):
             async with unix_connect(spec.socket_path, compression=None, open_timeout=timeout,
                                     close_timeout=0.2, ping_interval=None, max_size=1024 * 1024,
                                     max_queue=8) as connection:
-                async def send(value):
+                async def send(value, _kind):
                     payload = json.dumps(value, ensure_ascii=False)
                     if len(payload.encode()) > 1024 * 1024:
                         raise ValueError('Native RPC request exceeds 1 MiB')
@@ -29,29 +59,12 @@ async def _execute(spec, timeout):
                 request = next(plan)
                 if not 1 <= spec.max_requests <= 256:
                     raise ValueError('Native RPC request budget must be between 1 and 256')
-                for identifier in range(1, spec.max_requests + 1):
-                    await send({'jsonrpc': '2.0', 'id': identifier, 'method': request.method, 'params': request.params})
-                    while True:
-                        value = json.loads(await connection.recv())
-                        if not isinstance(value, dict):
-                            raise ValueError('Native RPC returned a non-object')
-                        if 'method' in value:
-                            # Approval belongs to the attached native TUI. Even an
-                            # error response could resolve a native permission request.
-                            continue
-                        if value.get('id') != identifier:
-                            raise ValueError('Native RPC response ID mismatch')
-                        break
-                    if 'result' in value and 'error' not in value:
-                        for notification in request.on_success:
-                            await send({'jsonrpc': '2.0', 'method': notification.method, 'params': notification.params})
-                    try:
-                        request = plan.send(value)
-                    except StopIteration as done:
-                        if not isinstance(done.value, NativeResult):
-                            raise ValueError('Native RPC plan did not return a NativeResult')
-                        return done.value
-                raise ValueError(f'Native RPC plan exceeds {spec.max_requests} requests')
+                finished, result = await _exchange(connection, plan, request, spec.max_requests, send)
+                if not finished:
+                    raise ValueError(f'Native RPC plan exceeds {spec.max_requests} requests')
+                if not isinstance(result, NativeResult):
+                    raise ValueError('Native RPC plan did not return a NativeResult')
+                return result
     except WebSocketException as error:
         raise RuntimeError(f'Native RPC transport failed: {error}; acceptance may be unknown') from error
     except TimeoutError as error:
@@ -85,41 +98,20 @@ async def watch(spec, interpret, publish, timeout=5):
                                 close_timeout=0.2, ping_interval=20, ping_timeout=20,
                                 max_size=1024 * 1024, max_queue=8) as connection:
             async with asyncio.timeout(timeout):
+                async def send(value, kind):
+                    payload = json.dumps(value)
+                    if len(payload.encode()) > 1024 * 1024:
+                        raise ValueError(f'Native RPC {kind} exceeds 1 MiB')
+                    await connection.send(payload)
+
                 if not 1 <= spec.max_requests <= 256:
                     raise ValueError('Native RPC request budget must be between 1 and 256')
-                request = next(plan)
-                for identifier in range(1, spec.max_requests + 1):
-                    payload = json.dumps({'jsonrpc': '2.0', 'id': identifier,
-                                          'method': request.method, 'params': request.params})
-                    if len(payload.encode()) > 1024 * 1024:
-                        raise ValueError('Native RPC request exceeds 1 MiB')
-                    await connection.send(payload)
-                    while True:
-                        value = json.loads(await connection.recv())
-                        if not isinstance(value, dict):
-                            raise ValueError('Native RPC returned a non-object')
-                        if 'method' in value:
-                            # The snapshot response supersedes earlier events.
-                            continue
-                        if value.get('id') != identifier:
-                            raise ValueError('Native RPC response ID mismatch')
-                        break
-                    if 'result' in value and 'error' not in value:
-                        for notification in request.on_success:
-                            payload = json.dumps({'jsonrpc': '2.0', 'method': notification.method, 'params': notification.params})
-                            if len(payload.encode()) > 1024 * 1024:
-                                raise ValueError('Native RPC notification exceeds 1 MiB')
-                            await connection.send(payload)
-                    try:
-                        request = plan.send(value)
-                    except StopIteration as done:
-                        initial = done.value
-                        if not isinstance(initial, NativeResult) or initial.state != 'ok':
-                            return
-                        publish(initial.value)
-                        break
-                else:
+                finished, initial = await _exchange(connection, plan, next(plan), spec.max_requests, send)
+                if not finished:
                     raise ValueError('Native RPC snapshot exceeded request budget')
+                if not isinstance(initial, NativeResult) or initial.state != 'ok':
+                    return
+                publish(initial.value)
             async for payload in connection:
                 value = json.loads(payload)
                 if not isinstance(value, dict):

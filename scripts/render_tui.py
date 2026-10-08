@@ -10,8 +10,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from tui_demo import DemoBackend
-from multiverse.tui import MultiverseApp
-from multiverse.dashboard import group_key
+from multiverse.ui.app import MultiverseApp
+from multiverse.ui.tree import group_key
 
 
 async def render(output):

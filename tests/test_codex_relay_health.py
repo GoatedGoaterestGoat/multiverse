@@ -2,10 +2,14 @@
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses, native
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native
 from multiverse.harnesses.types import NativeResult
-from multiverse.runner import RelayPublisher, StatusWatcher
-from multiverse.store import inbox, read, write
+from multiverse.runtime.runner import RelayPublisher, StatusWatcher
+from multiverse.universe.mailbox import inbox
+from multiverse.store import read, write
 from multiverse.tools import list_agents, send
 from test_multiverse import BaseTest
 
@@ -22,20 +26,20 @@ class RelayHealthTest(BaseTest):
             'control_endpoint': {'transport': 'unix-websocket', 'address': '/fake/native.sock'}})
         write(self.directory / 'launches' / self.launch / 'request.json', {'rpc_proxy': {'settings': {}}})
         self.publish = RelayPublisher(self.directory, self.launch)
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'alive'}))
+        self.enterContext(patch.object(lifecycle, 'observe', return_value={'live': 'alive'}))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.enterContext(patch.object(native.NativeExecutor, 'check_session'))
 
     def test_loss_overrides_optional_status_and_fails_readiness(self):
         self.publish('daemon shutdown')
         StatusWatcher(self.directory, self.launch, self.root)._publish('working')
-        row = agents.listing(self.root)[0]
+        row = lifecycle.listing(self.root)[0]
         self.assertEqual((row['live'], row['status']), ('alive', 'disconnected'))
         self.assertIn('resume', row['connection_error'])
         output = list_agents.run(self.root)
         self.assertIn('disconnected', output)
         self.assertIn(row['connection_error'], output)
-        result = agents.wait_ready(self.root, self.directory, self.launch, harnesses.load(self.root, 'codex'), .1)
+        result = lifecycle.wait_ready(self.root, self.directory, self.launch, harnesses.load(self.root, 'codex'), .1)
         self.assertFalse(result['ready'])
         self.assertNotIn('timed_out', result)
         self.assertIn('relay lost', result['error'])

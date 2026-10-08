@@ -13,7 +13,10 @@ from websockets.sync.server import unix_serve
 from websockets.sync.client import unix_connect
 from websockets.exceptions import ConnectionClosed
 
-from multiverse import agents, harnesses, native, recovery, rpc, runner
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native, recovery, rpc, runner
 from multiverse.harnesses.base import ConfiguredAdapter
 from multiverse.harnesses.types import (AttachmentSpec, CommandSpec, NativeActivity, NativeEndpoint,
     NativeResult, RpcNotification, RpcProxySpec, RpcRequest, RpcSpec, ServiceIdentity, SharedServiceSpec,
@@ -108,12 +111,12 @@ class NativeBackendTest(BaseTest):
         self.addCleanup(thread.join, 2)
         self.addCleanup(server.shutdown)
         self.enterContext(patch.object(harnesses, 'load', return_value=self.adapter))
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'dormant'}))
+        self.enterContext(patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}))
         self.backend = Mock()
         self.terminal = {'socket': '/fake', 'session': '$1', 'pane': '%1'}
         self.backend.create.return_value = self.backend.respawn.return_value = self.terminal
-        self.enterContext(patch.object(agents, 'Tmux', return_value=self.backend))
-        self.result = agents.start(self.root, name='service-worker', harness='service-test')
+        self.enterContext(patch.object(lifecycle, 'Tmux', return_value=self.backend))
+        self.result = lifecycle.start(self.root, name='service-worker', harness='service-test')
         self.directory = agents.directory(self.root, self.result['id'])
         self.addCleanup(self.clean_sockets)
         self.properties = read(self.directory / 'properties.json')
@@ -176,7 +179,7 @@ class NativeBackendTest(BaseTest):
         with patch.object(recovery, 'owned', return_value=(self.backend, '%1')), \
              patch.object(recovery, 'frontend_children', return_value=False), \
              patch.object(native, 'start_shared_service', side_effect=AssertionError('Recovery started a service')), \
-             patch.object(agents, 'wait_ready', return_value={'ready': True}):
+             patch.object(lifecycle, 'wait_ready', return_value={'ready': True}):
             recovery.run(self.directory, self.launch)
         facts = agents.runtime(self.directory)
         self.assertNotEqual(facts['launch_id'], self.launch)
@@ -194,7 +197,7 @@ class NativeBackendTest(BaseTest):
     def test_scope_change_rejects_resume_before_starting_service_or_terminal(self):
         self.adapter.home = self.work / 'different-account'
         with patch.object(native, 'start_shared_service') as start, self.assertRaisesRegex(ValueError, 'scope'):
-            agents.start(self.root, resume=self.properties['id'])
+            lifecycle.start(self.root, resume=self.properties['id'])
         start.assert_not_called()
         self.assertEqual(agents.runtime(self.directory), self.facts)
         self.backend.respawn.assert_not_called()
@@ -206,7 +209,7 @@ class NativeBackendTest(BaseTest):
             return replace(command, attachment=replace(command.attachment, mouse=bool(context.endpoint)))
         self.backend.run.reset_mock()
         with patch.object(self.adapter, 'command', side_effect=prepared):
-            result = agents.start(self.root, name='final-mouse', harness='service-test')
+            result = lifecycle.start(self.root, name='final-mouse', harness='service-test')
         directory = agents.directory(self.root, result['id'])
         self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + result['runtime']['launch_id']), True)
         self.assertTrue(result['runtime']['attachment']['mouse'])
@@ -219,7 +222,7 @@ class NativeBackendTest(BaseTest):
             command = original(context)
             return replace(command, fallback=CommandSpec((sys.executable, '-c', 'pass'), attachment=AttachmentSpec(mouse=True)))
         with patch.object(self.adapter, 'command', side_effect=prepared):
-            result = agents.start(self.root, name='different-fallback', harness='service-test')
+            result = lifecycle.start(self.root, name='different-fallback', harness='service-test')
         self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + result['runtime']['launch_id']), True)
         request = read(agents.directory(self.root, result['id']) / 'launches' / result['runtime']['launch_id'] / 'request.json')
         self.assertFalse(request['attachment']['mouse'])
@@ -258,7 +261,7 @@ class NativeBackendTest(BaseTest):
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
                      patch.object(runner.subprocess, 'Popen', side_effect=start) as child, \
-                     patch('multiverse.tmux.owned', return_value=(self.backend, '%1')), \
+                     patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
                      patch.object(runner, 'launch_diagnostic', return_value={}):
                     self.assertEqual(runner.main(), 0)
                 child.assert_called_once()
@@ -280,7 +283,7 @@ class NativeBackendTest(BaseTest):
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
                      patch.object(runner.subprocess, 'Popen') as child, \
-                     patch('multiverse.tmux.owned', side_effect=ValueError('Foreign pane')) as owned, \
+                     patch('multiverse.terminal.tmux.owned', side_effect=ValueError('Foreign pane')) as owned, \
                      patch.object(runner, 'launch_diagnostic', return_value={}), patch.object(native, 'flush_startup'):
                     if stale:
                         with self.assertRaisesRegex(ValueError, 'Outdated launch'):
@@ -327,7 +330,7 @@ class NativeBackendTest(BaseTest):
             return replace(command, rpc_proxy=replace(command.rpc_proxy, upstream_path='/other.sock'))
         with patch.object(self.adapter, 'command', side_effect=prepared), \
              self.assertRaisesRegex(RuntimeError, 'different service endpoint'):
-            agents.start(self.root, name='other-endpoint', harness='service-test')
+            lifecycle.start(self.root, name='other-endpoint', harness='service-test')
 
     def test_service_lifetime_cannot_authorize_core_ownership(self):
         specification = replace(self.adapter.command(self.adapter.calls[-1][-1]).shared_service, lifetime='owned')
@@ -351,11 +354,11 @@ class NativeBackendTest(BaseTest):
         self.assertTrue(native.attachment_ready(self.adapter, session))
         self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_relay=None)))
         self.assertFalse(native.attachment_ready(self.adapter, replace(session, native_id=None)))
-        with patch.object(agents, 'observe', return_value={'live': 'alive'}):
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
             write(self.directory / 'runtime.json', {**self.facts, 'startup_delivery': 'waiting'})
-            self.assertFalse(agents.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+            self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
             write(self.directory / 'runtime.json', self.facts)
-            self.assertTrue(agents.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
 
     def test_real_relay_binds_only_after_provider_identity_workspace_and_grant_validation(self):
         request = read(self.directory / 'launches' / self.launch / 'request.json')
@@ -396,7 +399,7 @@ class NativeBackendTest(BaseTest):
             command = original(context)
             return replace(command, attachment=None, rpc_proxy=replace(command.rpc_proxy, binds_session=False))
         with patch.object(self.adapter, 'command', side_effect=legacy):
-            result = agents.start(self.root, name='old-provider', harness='service-test')
+            result = lifecycle.start(self.root, name='old-provider', harness='service-test')
         self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + result['runtime']['launch_id']), True)
         policy = result['runtime']['attachment']
         self.assertEqual((policy['readiness'], policy['work_owner'], policy['recovery']),
@@ -422,10 +425,10 @@ class NativeBackendTest(BaseTest):
             self.assertEqual(facts['attachment']['readiness'], 'legacy-binding')
             self.assertIsNotNone(recovery.eligibility(self.properties, facts))
             agents.update_runtime(self.directory, self.launch, startup_checked=True, startup_delivery='waiting')
-            with patch.object(agents, 'observe', return_value={'live': 'alive'}):
-                self.assertFalse(agents.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+            with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+                self.assertFalse(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
                 agents.update_runtime(self.directory, self.launch, startup_delivery='ready')
-                self.assertTrue(agents.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+                self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
             return 0
         process.wait.side_effect = waited
         with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
@@ -445,8 +448,8 @@ class NativeBackendTest(BaseTest):
         write(launch / 'request.json', request)
         facts = {k: v for k, v in self.facts.items() if k not in ('attachment', 'native_service', 'native_relay')}
         write(self.directory / 'runtime.json', facts)
-        with patch.object(agents, 'observe', return_value={'live': 'alive'}):
-            self.assertTrue(agents.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
+        with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            self.assertTrue(lifecycle.wait_ready(self.root, self.directory, self.launch, self.adapter, .01)['ready'])
         self.assertIsNotNone(recovery.eligibility(self.properties, facts))
 
     def test_service_and_relay_without_policy_do_not_start_monitors(self):

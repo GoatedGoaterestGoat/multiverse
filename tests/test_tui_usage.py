@@ -7,9 +7,12 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import Static
-from multiverse import dashboard, usage
-from multiverse.dashboard import COLUMNS, agent_key, view
-from multiverse.tui import MultiverseApp
+from multiverse.ui import views
+from multiverse import display
+from multiverse.ui.columns import COLUMNS
+from multiverse.ui.views import view
+from multiverse.ui.tree import agent_key
+from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
 
 
@@ -25,38 +28,38 @@ def reading(tokens=None, window=None, percent=None, cost=None, limits=(), at="20
 
 class UsageDisplayTests(unittest.TestCase):
     def test_context_reads_the_latest_request_never_the_cumulative_total(self):
-        self.assertEqual(usage.context_display(reading(82000, 200000, 41)), "82k/200k")
-        self.assertEqual(usage.context_display(reading(820000, 1000000)), "820k/1.0m")
-        self.assertEqual(usage.context_display(reading(8200, 200000)), "8.2k/200k")
-        self.assertEqual(usage.context_display(reading(82000)), "82k")
-        self.assertEqual(usage.context_display(reading()), "N/A")
-        self.assertEqual(usage.context_display({"state": "unavailable"}), "N/A")
-        self.assertEqual(usage.context_display({}), "N/A")
+        self.assertEqual(display.context_display(reading(82000, 200000, 41)), "82k/200k")
+        self.assertEqual(display.context_display(reading(820000, 1000000)), "820k/1.0m")
+        self.assertEqual(display.context_display(reading(8200, 200000)), "8.2k/200k")
+        self.assertEqual(display.context_display(reading(82000)), "82k")
+        self.assertEqual(display.context_display(reading()), "N/A")
+        self.assertEqual(display.context_display({"state": "unavailable"}), "N/A")
+        self.assertEqual(display.context_display({}), "N/A")
 
     def test_levels_line_cost_and_percent_fallback(self):
-        self.assertEqual([usage.context_level(reading(1, 100, p)) for p in (69, 70, 89, 90)], [None, "warn", "warn", "high"])
-        self.assertEqual(usage.context_level(reading(75, 100)), "warn")
-        self.assertIsNone(usage.context_level(reading(75)))
-        self.assertEqual(usage.context_line(reading(82000, 200000, 41, 1.234)), "Context: 82k/200k (41%) · Cost: $1.23")
-        self.assertEqual(usage.context_line(reading(82000)), "Context: 82k")
-        self.assertEqual(usage.cost_display(reading(1, 2)), "—")
+        self.assertEqual([display.context_level(reading(1, 100, p)) for p in (69, 70, 89, 90)], [None, "warn", "warn", "high"])
+        self.assertEqual(display.context_level(reading(75, 100)), "warn")
+        self.assertIsNone(display.context_level(reading(75)))
+        self.assertEqual(display.context_line(reading(82000, 200000, 41, 1.234)), "Context: 82k/200k (41%) · Cost: $1.23")
+        self.assertEqual(display.context_line(reading(82000)), "Context: 82k")
+        self.assertEqual(display.cost_display(reading(1, 2)), "—")
 
     def test_estimates_are_marked_and_last_known_readings_are_labelled_but_not_estimated(self):
         estimate = reading(22000, 200000)
         estimate["value"]["context"]["estimated"] = True
-        self.assertEqual(usage.context_display(estimate), "~22k/200k")
-        self.assertEqual(usage.context_line(estimate), "Context: ~22k/200k (11%, estimated after compaction: conversation only)")
-        self.assertEqual(usage.context_line({"state": "ok", "value": {"context": {"tokens": 5000, "estimated": True}}}),
+        self.assertEqual(display.context_display(estimate), "~22k/200k")
+        self.assertEqual(display.context_line(estimate), "Context: ~22k/200k (11%, estimated after compaction: conversation only)")
+        self.assertEqual(display.context_line({"state": "ok", "value": {"context": {"tokens": 5000, "estimated": True}}}),
                          "Context: ~5.0k (estimated after compaction: conversation only)")
         known = reading(82000, 200000, 41)
         known["value"]["context"]["last_known"] = True
-        self.assertEqual(usage.context_display(known), "82k/200k")
-        self.assertEqual(usage.context_line(known), "Context: 82k/200k (41%) (last known)")
-        self.assertIn("(last known)", usage.details(known))
-        self.assertEqual(usage.context_level(estimate), None)
+        self.assertEqual(display.context_display(known), "82k/200k")
+        self.assertEqual(display.context_line(known), "Context: 82k/200k (41%) (last known)")
+        self.assertIn("(last known)", display.usage_details(known))
+        self.assertEqual(display.context_level(estimate), None)
 
     def test_details_keep_cumulative_totals_out_of_the_lead(self):
-        text = usage.details(reading(82000, 200000, 41, 1.2, [{"window": "five_hour", "percent_used": 34.5}]))
+        text = display.usage_details(reading(82000, 200000, 41, 1.2, [{"window": "five_hour", "percent_used": 34.5}]))
         self.assertTrue(text.startswith("Context: 82k/200k (41%)"))
         self.assertIn("Rate limit 5h: 34.5% used", text)
         self.assertIn("total_tokens: 999999", text)
@@ -73,17 +76,17 @@ class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
 
     def test_views_with_the_old_tokens_key_still_show_the_context_column(self):
-        self.assertEqual(dashboard.COLUMN_ALIASES["tokens"], "context")
+        self.assertEqual(views.COLUMN_ALIASES["tokens"], "context")
         self.assertNotIn("tokens", COLUMNS)
-        self.assertIn("context", dashboard.DEFAULT_COLUMNS)
+        self.assertIn("context", views.DEFAULT_COLUMNS)
         self.assertIn("cost", COLUMNS)
-        self.assertNotIn("cost", dashboard.DEFAULT_COLUMNS)
+        self.assertNotIn("cost", views.DEFAULT_COLUMNS)
 
     def test_view_file_with_tokens_key_loads(self):
         import tempfile, json
-        from multiverse import universe
+        from multiverse.universe import templates
         with tempfile.TemporaryDirectory() as temp:
-            root = universe.create(Path(temp) / ".multiverse", "top", workdir=Path(temp))
+            root = templates.create(Path(temp) / ".multiverse", "top", workdir=Path(temp))
             (root / "views").mkdir(exist_ok=True)
             (root / "views" / "default.json").write_text(json.dumps({"columns": ["name", "tokens", "activity", "cost"]}))
             self.assertEqual(view(root)["columns"], ["name", "context", "status", "cost"])
@@ -100,7 +103,7 @@ class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.settle(pilot)
             rows = self.app.visible_rows
-            cell = lambda name, field: MultiverseApp.cell(rows[agent_key(by_name[name])], field)
+            cell = lambda name, field: COLUMNS[field].render(rows[agent_key(by_name[name])])
             self.assertEqual(cell("reviewer", "context").plain, "82k/200k")
             self.assertEqual(str(cell("reviewer", "context").style), "#a6adc8")
             self.assertEqual(cell("secondbrain", "context").style, "#f9e2af")

@@ -6,7 +6,8 @@ The CLI runs `run`; the dashboard's compaction screens use `overview`,
 import json
 import sys
 
-from .. import agents, harnesses, universe
+from ..runtime import lifecycle, native
+from .. import harnesses, universe
 from ..compaction import config as settings_file
 from ..compaction.build import Build, Cancelled, Reporter
 from ..compaction.config import IMAGE_MODES, SCHEDULERS
@@ -48,10 +49,16 @@ def _stderr(event):
         print(event['message'], file=sys.stderr)
 
 
+def find_agent(root, agent):
+    """The named agent's compaction context."""
+    directory, adapter, session, _ = native.context(root, agent)
+    return open_agent(root, directory, adapter, session)
+
+
 def run(root=None, *, agent, scheduler=None, budget=None, k=None, recency_ratio=None, recency_half_life=None,
         image_mode=None, use_default=False, plan=False, build=False):
     root = universe.resolve(root)
-    target = open_agent(root, agent)
+    target = find_agent(root, agent)
     changing = any(value is not None for value in (scheduler, budget, k, recency_ratio, recency_half_life, image_mode))
     if use_default and changing:
         raise ValueError('Use either --use-default or scheduler options, not both')
@@ -143,7 +150,7 @@ def overview(root=None):
                      'defaults': defaults, 'options': [key for key in defaults if key not in settings_file.BUILDER],
                      'problem': state[1]})
     members = []
-    for item in agents.listing(root):
+    for item in lifecycle.listing(root):
         if item.get('harness') not in adapters:
             continue
         directory = root / 'state' / 'agents' / item['id']
@@ -183,7 +190,7 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
     whose build is still failed failed, as 'turn <n>: <reason>'.
     """
     root = universe.resolve(root)
-    target = open_agent(root, agent)
+    target = find_agent(root, agent)
     written, origin = settings_file.schedule_for(target.directory, target.settings)
     if scheduler is SAVED:
         trying = written
@@ -244,7 +251,7 @@ def _failures(failed: dict, turns) -> list[str]:
 def set_scheduler(root=None, *, agent, scheduler):
     """Give the agent its own scheduler, or with None return it to the default; returns agent_view without a plan."""
     root = universe.resolve(root)
-    target = open_agent(root, agent)
+    target = find_agent(root, agent)
     settings_file.save_schedule(target.directory, None if scheduler is None else settings_file.parse_schedule(scheduler))
     return agent_view(root, agent=agent, preview=False)
 

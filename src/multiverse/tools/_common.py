@@ -5,7 +5,8 @@ import os
 import subprocess
 import sys
 
-from .. import agents, universe
+from ..universe import agents
+from .. import universe
 
 
 def add_universe(parser):

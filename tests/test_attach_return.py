@@ -8,8 +8,9 @@ import time
 from uuid import uuid4
 
 from test_multiverse import ROOT, TerminalBase, until
-from multiverse import agents
-from multiverse.tmux import Tmux
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.terminal.tmux import Tmux
 from multiverse.store import read
 
 
@@ -211,7 +212,7 @@ class AttachReturnTest(TerminalBase):
         self.assert_agent_alive()
 
     def test_dashboard_selection_survives_attach_and_return(self):
-        other = agents.start(self.root, 'z-selected', 'second agent', 'fake', socket_path=self.socket)
+        other = lifecycle.start(self.root, 'z-selected', 'second agent', 'fake', socket_path=self.socket)
         agents.report(self.root, other['id'], summary='second agent')
         dashboard = self.backend.create('dashboard', self.work, self.tui_command())
         master, _ = self.client([*self.backend.prefix, 'attach-session', '-t', dashboard['pane']])
@@ -270,7 +271,7 @@ class AttachReturnTest(TerminalBase):
         code = (
             'import sys; from pathlib import Path; '
             f'sys.path.insert(0, {str(ROOT / "src")!r}); '
-            'from multiverse.tui import MultiverseApp; '
+            'from multiverse.ui.app import MultiverseApp; '
             f'MultiverseApp(Path({str(self.root)!r}), refresh_interval=.05).run()'
         )
         master, process = self.client([sys.executable, '-c', code])

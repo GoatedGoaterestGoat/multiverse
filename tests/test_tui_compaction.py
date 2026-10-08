@@ -8,9 +8,11 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
-from multiverse.compaction_screens import AgentScreen, Choice, CompactionScreen, Field, apply_changes, sections
-from multiverse.dashboard import group_key
-from multiverse.tui import KEYS, MultiverseApp
+from multiverse.ui.compaction import AgentScreen, CompactionScreen, apply_changes, sections
+from multiverse.ui.settings import Choice, Field
+from multiverse.ui.tree import group_key
+from multiverse.ui.screens import KEYS
+from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
 
 FILE = {"schema": 1, "enabled": False,
@@ -205,6 +207,18 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             self.widget(screen, "shared.scheduler").action_step(1)
             await pilot.pause()
             self.assertEqual(self.widget(screen, "shared.scheduler").value, "proportional")
+            self.assertFalse(screen.rows["shared.k"].display)
+
+    async def test_field_screens_keep_textuals_visible_property(self):
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open(pilot)
+            self.assertIs(screen.visible, True)
+            # Setting it is Textual's way to hide a widget; the row hook must keep working after.
+            screen.visible = False
+            self.assertIs(screen.visible, False)
+            screen.visible = True
+            self.widget(screen, "shared.scheduler").action_step(1)
+            await pilot.pause()
             self.assertFalse(screen.rows["shared.k"].display)
 
     async def test_save_sends_the_file_with_only_the_edits_and_closes(self):

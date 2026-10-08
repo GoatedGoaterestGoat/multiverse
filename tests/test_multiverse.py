@@ -18,11 +18,18 @@ install_native_safety()
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from multiverse import agents, universe
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import universe
+from multiverse.universe import catalog
+from multiverse.universe import templates
 from multiverse.tools import send
-from multiverse.store import append_message, inbox, read, write
-from multiverse.tmux import Tmux, observe
-from multiverse.dashboard import LocalBackend, columns, hierarchy
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
+from multiverse.terminal.tmux import Tmux, observe
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.views import columns
+from multiverse.ui.tree import hierarchy
 
 
 def append_many(args):
@@ -46,15 +53,15 @@ class BaseTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="mv2-test-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name).resolve()
-        self.root = universe.create(self.work / ".multiverse", "test", workdir=self.work)
+        self.root = templates.create(self.work / ".multiverse", "test", workdir=self.work)
 
 
 class FilesTest(BaseTest):
     def test_clean_recursive_install(self):
-        child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
-        universe.create(child / "subverses" / "verify", "verify", workdir=self.work)
+        child = templates.create(self.root / "subverses" / "review", "review", workdir=self.work)
+        templates.create(child / "subverses" / "verify", "verify", workdir=self.work)
         (child / "state" / "secret").write_text("never clone live state")
-        clone = universe.create(self.work / "copy", "copy", str(self.root), self.work)
+        clone = templates.create(self.work / "copy", "copy", str(self.root), self.work)
         old = list(universe.tree(self.root))
         new = list(universe.tree(clone))
         self.assertEqual(len(new), 3)
@@ -65,24 +72,24 @@ class FilesTest(BaseTest):
         self.assertEqual(universe.resolve(child), child)
         self.assertEqual(universe.parent(child), self.root)
         with self.assertRaises(ValueError):
-            universe.create(self.root, "overwrite")
+            templates.create(self.root, "overwrite")
 
     def test_catalog_loads_only_exact_unique_entry(self):
-        self.assertIn("Review the requested change", universe.command(self.root, "review"))
+        self.assertIn("Review the requested change", catalog.command(self.root, "review"))
         duplicate = self.root / "commands" / "review"
         duplicate.mkdir()
         write(duplicate / "entry.json", {"description": "ambiguous"})
         (duplicate / "prompt.md").write_text("DO NOT EXECUTE")
         with self.assertRaises(ValueError):
-            universe.command(self.root, "review")
+            catalog.command(self.root, "review")
         with self.assertRaises(ValueError):
-            universe.command(self.root, "rev")
-        self.assertEqual(universe.command(self.root, "commands/review"), "DO NOT EXECUTE")
+            catalog.command(self.root, "rev")
+        self.assertEqual(catalog.command(self.root, "commands/review"), "DO NOT EXECUTE")
 
     def test_bootstrap_does_not_load_skill_bodies(self):
         skill = self.root / "skills" / "coordination" / "SKILL.md"
         skill.write_text("SENTINEL_LONG_CAPABILITY\n" * 1000)
-        prompt = universe.bootstrap(self.root, {"id": "worker-id", "name": "worker", "universe_id": "u"})
+        prompt = catalog.bootstrap(self.root, {"id": "worker-id", "name": "worker", "universe_id": "u"})
         self.assertNotIn("SENTINEL_LONG_CAPABILITY", prompt)
         self.assertLess(len(prompt.split()), 260)
 
@@ -122,11 +129,11 @@ class FilesTest(BaseTest):
         self.assertEqual(result["live"], "dormant")
 
     def test_subverse_view_is_local_and_parent_shows_summary(self):
-        child = universe.create(self.root / "subverses" / "review", "review", workdir=self.work)
+        child = templates.create(self.root / "subverses" / "review", "review", workdir=self.work)
         write(child / "views" / "default.json", {"columns": ["name", "phase", "harness"]})
         self.assertEqual(columns(child), ["name", "phase", "harness"])
         self.assertNotEqual(columns(child), columns(self.root))
-        nested = universe.create(child / "subverses" / "verify", "verify", workdir=self.work)
+        nested = templates.create(child / "subverses" / "verify", "verify", workdir=self.work)
         data = LocalBackend().snapshot(self.root)
         self.assertEqual([row["path"] for row in hierarchy(data)], [str(self.root), str(child), str(nested)])
         self.assertEqual(data["groups"][-1]["parent"], str(child))
@@ -160,7 +167,7 @@ class TerminalBase(BaseTest):
         def core_processes():
             output = subprocess.run(['ps', '-axo', 'pid=,args='], text=True,
                                     capture_output=True, check=True, timeout=5).stdout
-            runner = str(ROOT / 'src/multiverse/runner.py') + ' '
+            runner = str(ROOT / 'src/multiverse/runtime/runner.py') + ' '
             workspace = ' ' + str(self.work) + '/'
             return {int(fields[0]) for line in output.splitlines()
                     if len(fields := line.strip().split(None, 1)) == 2
@@ -183,7 +190,7 @@ class TerminalBase(BaseTest):
         until(lambda: not core_processes(), seconds=15)
 
     def spawn(self):
-        result = agents.start(self.root, "tester", "a task", "fake", socket_path=self.socket)
+        result = lifecycle.start(self.root, "tester", "a task", "fake", socket_path=self.socket)
         agent_dir = agents.directory(self.root, result["id"])
         until(lambda: (agent_dir / "seen.json").exists())
         return result, agent_dir
@@ -201,19 +208,19 @@ class TerminalTest(TerminalBase):
         self.assertEqual(read(agent_dir / "seen.json")[0], self.literal)
         self.assertFalse((self.work / "SHOULD_NOT_EXIST").exists())
         self.assertFalse((self.work / "ALSO_NOT").exists())
-        row = agents.listing(self.root)[0]
+        row = lifecycle.listing(self.root)[0]
         self.assertEqual(row["live"], "alive")
-        self.assertIn("FAKE READY", agents.terminal_action(self.root, result["id"], "inspect"))
+        self.assertIn("FAKE READY", lifecycle.terminal_action(self.root, result["id"], "inspect"))
         pane = row["runtime"]["tmux"]["pane"]
         self.backend.run("rename-window", "-t", pane, "unrelated-name")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "alive")
+        self.assertEqual(lifecycle.listing(self.root)[0]["live"], "alive")
         with self.assertRaises(ValueError):
-            agents.start(self.root, resume=result["id"], socket_path=self.socket)
-        agents.terminal_action(self.root, result["id"], "stop")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
+            lifecycle.start(self.root, resume=result["id"], socket_path=self.socket)
+        lifecycle.terminal_action(self.root, result["id"], "stop")
+        self.assertEqual(lifecycle.listing(self.root)[0]["live"], "dormant")
         until(lambda: not self.backend.snapshot()[0])
         time.sleep(0.1)
-        resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket)
+        resumed = lifecycle.start(self.root, resume=result["id"], socket_path=self.socket)
         self.assertEqual(resumed["id"], result["id"])
         self.assertNotEqual(resumed["runtime"]["launch_id"], row["runtime"]["launch_id"])
         with self.assertRaises(ValueError):
@@ -223,25 +230,25 @@ class TerminalTest(TerminalBase):
         result, _ = self.spawn()
         pane = result["runtime"]["tmux"]["pane"]
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
-        self.assertEqual(agents.listing(self.root)[0]["live"], "dormant")
+        self.assertEqual(lifecycle.listing(self.root)[0]["live"], "dormant")
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result["id"], "inspect")
-        self.assertEqual(agents.terminal_action(self.root, result["id"], "stop")['state'], 'dormant')
+            lifecycle.terminal_action(self.root, result["id"], "inspect")
+        self.assertEqual(lifecycle.terminal_action(self.root, result["id"], "stop")['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_hostname_change_preserves_owned_pane_and_duplicate_launch_guard(self):
         result, agent_dir = self.spawn()
         agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
-        self.assertIn('FAKE READY', agents.terminal_action(self.root, result['id'], 'inspect'))
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
+        self.assertIn('FAKE READY', lifecycle.terminal_action(self.root, result['id'], 'inspect'))
         with self.assertRaisesRegex(ValueError, 'refusing a duplicate launch'):
-            agents.start(self.root, resume=result['id'], socket_path=self.socket)
+            lifecycle.start(self.root, resume=result['id'], socket_path=self.socket)
         pane = result['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
         with self.assertRaises(ValueError):
-            agents.terminal_action(self.root, result['id'], 'inspect')
-        self.assertEqual(agents.terminal_action(self.root, result['id'], 'stop')['state'], 'dormant')
+            lifecycle.terminal_action(self.root, result['id'], 'inspect')
+        self.assertEqual(lifecycle.terminal_action(self.root, result['id'], 'stop')['state'], 'dormant')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_missing_pane_after_hostname_change_can_resume_same_session(self):
@@ -251,13 +258,13 @@ class TerminalTest(TerminalBase):
         self.backend.run('kill-pane', '-t', result['runtime']['tmux']['pane'])
         until(lambda: not self.backend.snapshot()[0])
         agents.update_runtime(agent_dir, result['runtime']['launch_id'], host='old-hostname', state='running')
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'dormant')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
         time.sleep(0.1)
-        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket)
+        resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket)
         self.assertEqual(resumed['native_session_id'], native_id)
         self.assertEqual(resumed['id'], result['id'])
         self.assertNotEqual(resumed['runtime']['launch_id'], result['runtime']['launch_id'])
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
 
     def test_dashboard_can_close_without_stopping_agent(self):
         self.spawn()
@@ -293,7 +300,7 @@ class TerminalTest(TerminalBase):
                     except OSError:
                         break
             self.assertEqual(process.wait(timeout=5), 0)
-            self.assertEqual(agents.listing(self.root)[0]["live"], "alive")
+            self.assertEqual(lifecycle.listing(self.root)[0]["live"], "alive")
         finally:
             if process.poll() is None:
                 process.kill()
@@ -312,7 +319,7 @@ class PiTest(TerminalBase):
         spec["settings"].update(args=extra, inbox_bridge=True)
         write(harness_dir / "harness.json", spec)
         with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-            result = agents.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket,
+            result = lifecycle.start(self.root, "pi-test", "First test turn", "pi", socket_path=self.socket,
                                   wait=True, wait_timeout=25)
         agent_dir = agents.directory(self.root, result["id"])
         log = agent_dir / "mock-requests.jsonl"
@@ -328,12 +335,12 @@ class PiTest(TerminalBase):
             self.assertIn("You work in a Multiverse universe", request["systemPrompt"])
             self.assertEqual(sorted(t["name"] for t in request["tools"]), ["bash", "edit", "read", "write"])
             until(lambda: agents.runtime(agent_dir).get("status") == "idle")
-            agents.terminal_action(self.root, result["id"], "stop")
+            lifecycle.terminal_action(self.root, result["id"], "stop")
             until(lambda: not self.backend.snapshot()[0])
             time.sleep(0.1)
             before = len(log.read_text().splitlines())
             with patch.dict(os.environ, {"PI_CODING_AGENT_DIR": str(self.work / "pi-home"), "PI_OFFLINE": "1"}):
-                resumed = agents.start(self.root, resume=result["id"], socket_path=self.socket, wait=True, wait_timeout=25)
+                resumed = lifecycle.start(self.root, resume=result["id"], socket_path=self.socket, wait=True, wait_timeout=25)
                 self.assertTrue(resumed['ready'], resumed)
             until(lambda: agents.runtime(agent_dir).get("native_bridge") == "pi-socket-v1", seconds=20)
             sent = send.run(self.root, agent=result["id"], text="AFTER_RESUME", sender={"name": "test"})
@@ -344,7 +351,7 @@ class PiTest(TerminalBase):
         except Exception:
             print("Pi runtime:", agents.runtime(agent_dir), file=sys.stderr)
             try:
-                print(agents.terminal_action(self.root, result["id"], "inspect"), file=sys.stderr)
+                print(lifecycle.terminal_action(self.root, result["id"], "inspect"), file=sys.stderr)
             except Exception:
                 pass
             raise

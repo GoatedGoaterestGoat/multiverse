@@ -12,11 +12,13 @@ import subprocess
 import time
 import re
 
-from . import agents, harnesses
-from .harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
-                             BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
-from .store import lock, now, read, message_record, update_message, inbox
-from .tmux import owned, observe
+from .. import harnesses
+from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
+                               BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
+from ..store import lock, now, read
+from ..terminal.tmux import owned, observe
+from ..universe import agents
+from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
 
 
 def environment(command):
@@ -315,75 +317,6 @@ def control(root, reference, operation_name):
     return NativeResult('unavailable', 'Use a named operation; no native side effect attempted').to_dict()
 
 
-def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False):
-    """A CLI prompt has no native receipt ID; record process-start evidence only."""
-    if not message_id:
-        return
-    with lock(directory / '.delivery.lock'):
-        _, tracking = message_record(directory, message_id)
-        if (tracking.get('wake_launch_id') != launch_id or
-                tracking.get('submission_state') not in ('submitting', 'unknown')):
-            return
-        if uncertain:
-            reason += '\nStarting prompt consumption is unconfirmed; no automatic resend'
-        receipt = {'state': 'unknown' if uncertain else 'ok' if started else 'error', 'ok': started, 'at': now(),
-                   'reason': ('Started the resumed session with this message as its interactive prompt; '
-                              'consumption is unconfirmed') if started else reason,
-                   'launch_id': launch_id, 'value': {'transcript_confirmed': None}}
-        update_message(directory, message_id, submission_state='unknown' if uncertain else 'accepted' if started else 'failed',
-                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'])
-
-
-def send_or_wake(root, reference, message_id, retry=False):
-    """Caller holds .send.lock. Release .launch.lock before start takes it."""
-    directory = agents.directory(root, reference)
-    with lock(directory / '.launch.lock'):
-        message, tracking = message_record(directory, message_id)
-        _, adapter, session, executor = context(root, reference)
-        live = observe(executor.properties, executor.facts)['live']
-        state = tracking.get('submission_state', 'pending')
-        eligible = state == 'pending' or (retry and state == 'failed')
-        wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
-        capability = adapter.capabilities(session).get('wake') if wake else None
-        if wake and (capability is None or capability.state != 'supported'):
-            receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt'}
-            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
-            return receipt
-    if not wake:
-        return deliver(root, reference, message_id, retry=retry)
-    try:
-        previous_socket = (executor.facts.get('tmux') or {}).get('socket')
-        launched = agents.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
-        _, tracking = message_record(directory, message_id)
-        if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
-            return tracking['attempts'][-1]
-        return {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
-                'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
-    except Exception as error:
-        _, tracking = message_record(directory, message_id)
-        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}'}
-        # If startup was registered, uncertainty belongs to the runner. Never
-        # turn a possibly submitted command-line prompt into a retryable failure.
-        if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
-            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
-        return receipt
-
-
-def end_startup_messages(directory, launch_id, reason, cancelled=False):
-    """Caller holds .launch.lock; these messages have never reached a harness."""
-    if launch_id is None:
-        return 0
-    count = 0
-    for message in inbox(directory, all_messages=True, limit=None)['messages']:
-        tracking = message['tracking']
-        if tracking.get('deferred_launch_id') == launch_id and tracking['submission_state'] == 'pending':
-            receipt = {'state': 'unavailable', 'ok': False, 'reason': reason, 'at': now()}
-            update_message(directory, message['id'], submission_state='cancelled' if cancelled else 'failed',
-                           attempts=[*tracking.get('attempts', []), receipt], last_receipt=receipt)
-            count += 1
-    return count
-
-
 def flush_startup(root, directory, launch_id, error=None):
     # Same lock order as send. Setting ready and taking the batch is atomic with
     # new sends; hold send.lock through submission to preserve batch ordering.
@@ -503,4 +436,42 @@ def deliver(root, reference, message_id, retry=False, check=False):
                  'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]
         update_message(directory, message_id, submission_state=state, attempts=[*previous, receipt],
                        native_receipt=result.value)
+        return receipt
+
+
+def send_or_wake(root, reference, message_id, retry=False):
+    """Caller holds .send.lock. Release .launch.lock before start takes it."""
+    # Waking a stopped agent launches it, and launching uses this module: the one
+    # import that has to wait until the call.
+    from . import lifecycle
+    directory = agents.directory(root, reference)
+    with lock(directory / '.launch.lock'):
+        message, tracking = message_record(directory, message_id)
+        _, adapter, session, executor = context(root, reference)
+        live = observe(executor.properties, executor.facts)['live']
+        state = tracking.get('submission_state', 'pending')
+        eligible = state == 'pending' or (retry and state == 'failed')
+        wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
+        capability = adapter.capabilities(session).get('wake') if wake else None
+        if wake and (capability is None or capability.state != 'supported'):
+            receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt'}
+            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
+            return receipt
+    if not wake:
+        return deliver(root, reference, message_id, retry=retry)
+    try:
+        previous_socket = (executor.facts.get('tmux') or {}).get('socket')
+        launched = lifecycle.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
+        _, tracking = message_record(directory, message_id)
+        if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
+            return tracking['attempts'][-1]
+        return {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
+                'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
+    except Exception as error:
+        _, tracking = message_record(directory, message_id)
+        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}'}
+        # If startup was registered, uncertainty belongs to the runner. Never
+        # turn a possibly submitted command-line prompt into a retryable failure.
+        if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
+            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
         return receipt

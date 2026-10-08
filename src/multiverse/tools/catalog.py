@@ -1,5 +1,6 @@
 """List local capabilities without loading their prompts."""
 from .. import universe
+from ..universe import catalog
 
 def configure(parser):
     parser.add_argument("--json", action="store_true",
@@ -7,7 +8,7 @@ def configure(parser):
 
 
 def run(root=None, json=False):
-    entries = universe.catalog(universe.resolve(root))
+    entries = catalog.catalog(universe.resolve(root))
     if json:
         return entries
     return "\n".join(f'{e["kind"]}/{e["name"]}: {e["description"]}\n  {e["path"]}' for e in entries)

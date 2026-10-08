@@ -1,7 +1,8 @@
 """Resume an agent using its recorded native session."""
-from .. import agents, universe
+from ..runtime import lifecycle
+from .. import universe
 from ._common import add_wait
-from .spawn import cause, outcome
+from ..display import cause, outcome
 
 def configure(parser):
     parser.add_argument("agent")
@@ -11,7 +12,7 @@ def configure(parser):
 
 
 def run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False):  # `json`: presentation only
-    return agents.start(universe.resolve(root), resume=agent, model=model, wait=wait, wait_timeout=wait_timeout)
+    return lifecycle.start(universe.resolve(root), resume=agent, model=model, wait=wait, wait_timeout=wait_timeout)
 
 
 def cli_run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False):

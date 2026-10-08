@@ -10,9 +10,11 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import Button, DataTable, Input, Markdown, Static
-from multiverse.dashboard import LocalBackend, group_key, view
-from multiverse.tui import MultiverseApp
-from multiverse.views import ArtifactPreview, artifact_path
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.tree import group_key
+from multiverse.ui.views import DEFAULT_COLUMNS, view
+from multiverse.ui.app import MultiverseApp
+from multiverse.ui.panels import ArtifactPreview, LocalView, TablePanel, artifact_path
 
 
 class PortalTests(unittest.IsolatedAsyncioTestCase):
@@ -175,6 +177,46 @@ class PortalTests(unittest.IsolatedAsyncioTestCase):
         (self.cad / "views/default.json").write_text("{")
         config = view(self.cad)
         self.assertEqual(config["widgets"][0]["title"], "View configuration error")
+
+    def test_unexpected_view_errors_become_error_widgets(self):
+        # A type that is not a string must not reach the PANELS lookup (unhashable).
+        self.write_view(self.cad, {"widgets": [{"type": ["markdown"]}, {"type": {"x": 1}},
+                                               {"type": "markdown", "text": "kept"}]})
+        widgets = view(self.cad)["widgets"]
+        self.assertEqual([w["title"] for w in widgets], ["Widget 1 error", "Widget 2 error", "markdown"])
+        self.assertIn("unknown widget type", widgets[0]["text"])
+        # Whatever else goes wrong reading a view, view() returns defaults and the error.
+        (self.cad / "universe.json").write_text(json.dumps({"schema": 1, "id": 5, "name": "cad", "workspace": "."}))
+        config = view(self.cad)
+        self.assertEqual(config["columns"], DEFAULT_COLUMNS)
+        self.assertEqual(config["widgets"][0]["title"], "View configuration error")
+
+    async def test_widget_failures_never_keep_the_agent_table_from_filling(self):
+        self.write_view(self.root, {"title": "Lab", "widgets": [{"type": ["markdown"]}]})
+        async with self.app.run_test(size=(150, 35)) as pilot:
+            await self.settle(pilot)
+            self.assertGreater(self.app.query_one("#agents", DataTable).row_count, 0)
+            self.assertIn("unknown widget type", str(self.app.query_one("#local-view Markdown").source))
+        rows = {}
+        for failure, patched in (("compose", patch.object(TablePanel, "compose", side_effect=RuntimeError("compose broke"))),
+                                 ("show", patch.object(LocalView, "show_view", side_effect=RuntimeError("panel broke")))):
+            self.write_view(self.root, {"title": "Lab", "widgets": [
+                {"type": "table", "title": "Queue", "columns": ["ID"], "rows": [["UI-01"]]}]})
+            app = MultiverseApp(self.root, refresh_interval=0)
+            with patched:
+                async with app.run_test(size=(150, 35)) as pilot:
+                    await pilot.pause()
+                    await app.workers.wait_for_complete()
+                    await pilot.pause()
+                    rows[failure] = app.query_one("#agents", DataTable).row_count
+                    status = str(app.query_one("#status", Static).render())
+                    if failure == "compose":
+                        self.assertIn("compose broke", str(app.query_one("#local-view Markdown").source))
+                        self.assertNotIn("Could not", status)
+                    else:
+                        self.assertIn("Could not show this view's widgets: panel broke", status)
+        self.assertGreater(rows["compose"], 0)
+        self.assertGreater(rows["show"], 0)
 
 
 if __name__ == "__main__":

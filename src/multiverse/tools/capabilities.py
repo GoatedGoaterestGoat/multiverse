@@ -1,7 +1,8 @@
 """Discover operation support for a configured harness or exact session."""
 from dataclasses import asdict
 
-from .. import harnesses, native, universe
+from .. import harnesses, universe
+from ..runtime import native
 from ..harnesses.types import SessionHandle
 
 

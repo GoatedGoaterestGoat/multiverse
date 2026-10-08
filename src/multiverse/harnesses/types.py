@@ -250,3 +250,21 @@ class AttachmentProvider(Protocol):
     def attachment_recovery(self, session: SessionHandle) -> RpcSpec | None: ...
     def attachment_ready(self, session: SessionHandle) -> bool: ...
     def retained_usage(self, session: SessionHandle, runtime: Mapping[str, Any]) -> Mapping[str, Any] | None: ...
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Measured cumulative usage of one native session.
+
+    Input includes cached input; cache counts are subsets, never added twice.
+    Unknown counters are None. An observed zero is distinct from unavailable.
+    """
+    native_session_id: str
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    source: str
+    reported_at: str
+    cached_input_tokens: int | None = None
+    cache_write_tokens: int | None = None
+    complete: bool = True

@@ -10,12 +10,15 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import test_codex_launch as launch_tests
-from multiverse import agents, dashboard, rpc
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.ui import tree
+from multiverse.runtime import rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex.usage import last_measurement, notification
 from multiverse.harnesses.types import SessionHandle
-from multiverse.runner import UsagePublisher
+from multiverse.runtime.runner import UsagePublisher
 from multiverse.store import read, write
 from test_multiverse import TerminalBase
 
@@ -83,9 +86,9 @@ class CodexUsageRuntimeTest(unittest.TestCase):
         self.assertEqual(result.value['context']['tokens'], 20000)
         self.assertIsNotNone(result.value['context_reported_at'])
         self.assertNotIn('total_tokens', result.value)
-        from multiverse.usage import context_display, details
+        from multiverse.display import context_display, usage_details
         self.assertEqual(context_display(result.to_dict()), '20k/258k')
-        self.assertNotIn('Cumulative', details(result.to_dict()))
+        self.assertNotIn('Cumulative', usage_details(result.to_dict()))
         self.assertEqual(self.adapter.capabilities(self.session)['get_usage'].state, 'supported')
 
     def test_old_launch_wrong_thread_and_stopped_launch_cannot_publish(self):
@@ -162,7 +165,7 @@ class CodexUsageLifecycleTest(TerminalBase):
         worker.chmod(0o700)
         write(self.root / 'harnesses/custom-codex/harness.json', {'schema': 2, 'adapter': 'codex',
               'settings': {'executable': str(worker), 'inbox_bridge': False}})
-        started = agents.start(self.root, 'context', harness='custom-codex', socket_path=self.socket,
+        started = lifecycle.start(self.root, 'context', harness='custom-codex', socket_path=self.socket,
                                wait=True, wait_timeout=5)
         self.assertTrue(started['ready'], started)
         directory = agents.directory(self.root, started['id'])
@@ -174,15 +177,15 @@ class CodexUsageLifecycleTest(TerminalBase):
         original = read(directory / 'runtime.json')['usage']
 
         def row():
-            return dashboard.with_usage(agents.listing(self.root)[0])
+            return tree.with_usage(lifecycle.listing(self.root)[0])
 
         self.assertEqual(row()['context'], '180k/258k')
         for _ in range(2):
-            agents.kill(self.root, started['id'])
+            lifecycle.kill(self.root, started['id'])
             self.assertEqual(row()['live'], 'dormant')
             self.assertEqual(row()['context'], '180k/258k')
             self.assertTrue(row()['usage']['value']['context']['last_known'])
-            resumed = agents.start(self.root, resume=started['id'], socket_path=self.socket,
+            resumed = lifecycle.start(self.root, resume=started['id'], socket_path=self.socket,
                                    wait=True, wait_timeout=5)
             self.assertTrue(resumed['ready'], resumed)
             self.assertEqual(row()['context'], '180k/258k')
@@ -193,11 +196,11 @@ class CodexUsageLifecycleTest(TerminalBase):
         UsagePublisher(directory, launch)(notification(event(native_id, tokens=20000), native_id))
         self.assertEqual(row()['context'], '20k/258k')
         self.assertNotIn('last_known', row()['usage']['value']['context'])
-        agents.kill(self.root, started['id'])
+        lifecycle.kill(self.root, started['id'])
         self.assertEqual(row()['context'], '20k/258k')
-        with patch('multiverse.agents.Tmux.create', side_effect=RuntimeError('Cannot create wrapper')):
+        with patch('multiverse.runtime.lifecycle.Tmux.create', side_effect=RuntimeError('Cannot create wrapper')):
             with self.assertRaisesRegex(RuntimeError, 'Cannot create wrapper'):
-                agents.start(self.root, resume=started['id'], socket_path=self.socket)
+                lifecycle.start(self.root, resume=started['id'], socket_path=self.socket)
         self.assertEqual(row()['runtime']['state'], 'failed')
         self.assertEqual(row()['context'], '20k/258k')
         self.assertTrue(row()['usage']['value']['context']['last_known'])
@@ -211,7 +214,7 @@ class CodexUsageRelayTest(unittest.IsolatedAsyncioTestCase):
 
     async def connect(self):
         from websockets.asyncio.client import unix_connect
-        from multiverse.agents import bind_session
+        from multiverse.universe.agents import bind_session
         self.settings['native_id'] = self.native_id
         self.protocol = LaunchProtocol(self.settings)
         self.publisher = UsagePublisher(self.directory, 'launch')
@@ -253,7 +256,7 @@ class CodexUsageRelayTest(unittest.IsolatedAsyncioTestCase):
     async def test_telemetry_write_failure_does_not_disconnect_native_tui(self):
         await self.connect()
         await self.bind()
-        with patch('multiverse.runner.update_runtime', side_effect=OSError('read-only runtime')):
+        with patch('multiverse.runtime.runner.update_runtime', side_effect=OSError('read-only runtime')):
             await self.observe(event(self.native_id))
         await self.observe({'method': 'future/event', 'params': {}})
         self.assertNotIn('usage', read(self.directory / 'runtime.json'))

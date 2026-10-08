@@ -11,9 +11,12 @@ import unittest
 from unittest.mock import patch
 
 from multiverse.tools import send
-from multiverse import agents, native, rpc
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import native, rpc
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
-from multiverse.store import inbox, append_message, read, write
+from multiverse.universe.mailbox import inbox, append_message
+from multiverse.store import read, write
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, until
 
@@ -92,7 +95,7 @@ class CodexTimingTest(TerminalBase):
         self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=daemon_env,
                                                capture_output=True, timeout=20))
         with patch.dict(os.environ, test_env):
-            result = agents.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket,
+            result = lifecycle.start(self.root, 'timing', 'Run the offline tool sequence.', 'codex', socket_path=self.socket,
                                   wait=True, wait_timeout=30)
             self.assertTrue(result['ready'], result)
         self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
@@ -101,10 +104,10 @@ class CodexTimingTest(TerminalBase):
 
         def stop_owned():
             try:
-                if agents.listing(self.root)[0]['live'] == 'alive':
-                    agents.terminal_action(self.root, result['id'], 'stop')
+                if lifecycle.listing(self.root)[0]['live'] == 'alive':
+                    lifecycle.terminal_action(self.root, result['id'], 'stop')
             finally:
-                until(lambda: agents.listing(self.root)[0]['live'] == 'dormant', seconds=10)
+                until(lambda: lifecycle.listing(self.root)[0]['live'] == 'dormant', seconds=10)
                 self.assertTrue(endpoint.exists(), 'Terminal exit must leave shared daemon running')
 
         self.addCleanup(stop_owned)
@@ -135,7 +138,7 @@ class CodexTimingTest(TerminalBase):
             old_endpoint = endpoint
             stop_owned()
             with patch.dict(os.environ, test_env):
-                resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket,
+                resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket,
                                        wait=True, wait_timeout=30)
             self.assertTrue(resumed['ready'], resumed)
             self.backend.run('set-option', '-g', 'remain-on-exit', 'on')
@@ -197,7 +200,7 @@ class CodexTimingTest(TerminalBase):
                 if shutdown:
                     stop_owned()
                     with patch.dict(os.environ, test_env):
-                        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket,
+                        resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket,
                                                wait=True, wait_timeout=30)
                     self.assertTrue(resumed['ready'], resumed)
                     self.assertEqual(resumed['native_session_id'], original_native)

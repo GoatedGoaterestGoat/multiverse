@@ -8,7 +8,7 @@ from multiverse.harnesses.types import SessionHandle
 from multiverse.store import read, write
 from multiverse.tools import runtime_update
 from multiverse import harnesses
-from multiverse import usage as usage_module
+from multiverse import display
 from test_multiverse import BaseTest
 
 REPORT = {'context': {'tokens': 82000, 'window': 200000, 'percent': 41}, 'cost_usd': 1.25,
@@ -97,7 +97,7 @@ class ClaudeUsageTest(BaseTest):
         self.assertEqual(value['context'], {'tokens': 82005})
         # The cumulative total stays available beside it.
         self.assertGreater(value['total_tokens'], 82005)
-        self.assertEqual(usage_module.context_display({'state': 'ok', 'value': value}), '82k')
+        self.assertEqual(display.context_display({'state': 'ok', 'value': value}), '82k')
 
     def test_mod_window_is_kept_and_a_reported_request_size_wins(self):
         agent, directory = self.agent()
@@ -146,15 +146,15 @@ class ClaudeUsageTest(BaseTest):
                          (22000, 200000, True, install))
         self.assertNotIn('percent', context)
         value = adapter.get_usage(session).value
-        self.assertEqual(usage_module.context_display({'state': 'ok', 'value': value}), '~22k/200k')
-        self.assertIn('11%, estimated after compaction: conversation only', usage_module.context_line({'state': 'ok', 'value': value}))
+        self.assertEqual(display.context_display({'state': 'ok', 'value': value}), '~22k/200k')
+        self.assertIn('11%, estimated after compaction: conversation only', display.context_line({'state': 'ok', 'value': value}))
         with (project / f'{native_id}.jsonl').open('a') as handle:
             handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
         context = self.context(adapter, session)
         # The mod's report predates the new response, so the transcript has the real request size.
         self.assertEqual(context['tokens'], 32005)
         self.assertNotIn('estimated', context)
-        self.assertEqual(usage_module.context_display({'state': 'ok', 'value': adapter.get_usage(session).value}), '32k/200k')
+        self.assertEqual(display.context_display({'state': 'ok', 'value': adapter.get_usage(session).value}), '32k/200k')
 
     def test_the_mods_newer_report_wins_once_it_follows_the_response(self):
         adapter, session, project, native_id, install = self.compacted()

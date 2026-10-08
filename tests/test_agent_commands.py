@@ -8,9 +8,11 @@ from unittest.mock import patch
 from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse import agents, cli
+from multiverse.runtime import lifecycle
+from multiverse import cli
 from multiverse.store import write
 from multiverse.tools import doctor, inspect, list_agents, resume, spawn
+from multiverse import display
 from test_multiverse import BaseTest
 
 
@@ -21,26 +23,26 @@ def row(name, live='alive', status='idle', phase='done', summary='', universe=No
 
 class ListTest(BaseTest):
     def listing(self, *rows):
-        return patch.object(agents, 'listing', return_value=[{**r, 'universe': r['universe'] or str(self.root)} for r in rows])
+        return patch.object(lifecycle, 'listing', return_value=[{**r, 'universe': r['universe'] or str(self.root)} for r in rows])
 
     def test_shorten_cuts_at_a_word_and_only_a_single_long_word_inside(self):
         text = 'Reviewing the compaction status line and its tests, then the docs'
         for limit in (20, 30, 40, 50):
-            short = list_agents.shorten(text, limit)
+            short = display.shorten(text, limit)
             self.assertLessEqual(len(short), limit)
             self.assertTrue(short.endswith('…'))
             self.assertIn(short[:-1], [' '.join(text.split()[:count]) for count in range(1, 12)], short)
-        self.assertEqual(list_agents.shorten(text, 200), text)
-        self.assertEqual(list_agents.shorten('a  b\n c', 20), 'a b c')
-        self.assertEqual(list_agents.shorten('x' * 100, 10), 'x' * 9 + '…')  # no word to stop at
-        self.assertEqual(list_agents.shorten(None), '')
+        self.assertEqual(display.shorten(text, 200), text)
+        self.assertEqual(display.shorten('a  b\n c', 20), 'a b c')
+        self.assertEqual(display.shorten('x' * 100, 10), 'x' * 9 + '…')  # no word to stop at
+        self.assertEqual(display.shorten(None), '')
 
     def test_state_says_what_a_live_agent_does_otherwise_why_it_is_not_live(self):
-        self.assertEqual(list_agents.state(row('a', status='working')), 'working')
-        self.assertEqual(list_agents.state(row('a', status='waiting')), 'waiting')
-        self.assertEqual(list_agents.state(row('a', status='unknown')), 'alive')
-        self.assertEqual(list_agents.state(row('a', live='dormant', status='—')), 'dormant')
-        self.assertEqual(list_agents.state(row('a', live='stopped', status='—')), 'stopped')
+        self.assertEqual(display.state(row('a', status='working')), 'working')
+        self.assertEqual(display.state(row('a', status='waiting')), 'waiting')
+        self.assertEqual(display.state(row('a', status='unknown')), 'alive')
+        self.assertEqual(display.state(row('a', live='dormant', status='—')), 'dormant')
+        self.assertEqual(display.state(row('a', live='stopped', status='—')), 'stopped')
 
     def test_rows_have_no_ids_and_no_universe_for_this_universe(self):
         with self.listing(row('alpha', status='working', phase='working', summary='Reading the diff'),
@@ -93,7 +95,7 @@ class ListTest(BaseTest):
         rows = [row('a')]
         with self.listing(*rows):
             self.assertEqual([r['name'] for r in list_agents.run(self.root, json=True)], ['a'])
-        with patch.object(agents, 'listing', return_value=[]):
+        with patch.object(lifecycle, 'listing', return_value=[]):
             self.assertEqual(list_agents.run(self.root), 'No agents.')
 
     def test_automatic_reconnect_is_a_note_not_an_error(self):
@@ -156,7 +158,7 @@ class InspectTest(BaseTest):
         self.assertEqual(dormant['note'], 'gone')
 
     def test_the_python_function_still_returns_the_raw_capture(self):
-        with patch.object(agents, 'terminal_action', return_value='raw') as action:
+        with patch.object(lifecycle, 'terminal_action', return_value='raw') as action:
             self.assertEqual(inspect.run(self.root, agent='w'), 'raw')
         self.assertEqual(action.call_args.args[1:], ('w', 'inspect'))
 
@@ -208,7 +210,7 @@ class DoctorTest(BaseTest):
         item = row('worker', recovery_note='Reconnected automatically',
                    runtime={'auto_recovery': {'state': 'reconnected'}})
         output = io.StringIO()
-        with patch.object(agents, 'listing', return_value=[item]), contextlib.redirect_stdout(output):
+        with patch.object(lifecycle, 'listing', return_value=[item]), contextlib.redirect_stdout(output):
             result = doctor.run(self.root)
             doctor.cli_run(self.root)
         self.assertTrue(result['ok'])
@@ -221,7 +223,7 @@ class DoctorTest(BaseTest):
             reason = 'Automatic reconnect ' + state + ': native background processes are running'
             item = row('worker', status='disconnected', connection_error=reason,
                        runtime={'auto_recovery': {'state': state, 'reason': reason}})
-            with self.subTest(state=state), patch.object(agents, 'listing', return_value=[item]):
+            with self.subTest(state=state), patch.object(lifecycle, 'listing', return_value=[item]):
                 self.assertFalse(doctor.run(self.root)['ok'])
                 self.assertIn(reason, doctor.run(self.root)['problems'][0])
                 with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
@@ -235,28 +237,28 @@ class LaunchTextTest(BaseTest):
                 'runtime': {'native_mode': {'mode': 'bridge'}, 'control_endpoint': {}}, **extra}
 
     def test_label_names_the_harness_and_how_it_is_connected(self):
-        self.assertEqual(spawn.label(self.record()), 'Codex, bridge')
-        self.assertEqual(spawn.label({'harness': 'claude', 'runtime': {'control_endpoint': {'transport': 'unix-lines'}}}), 'Claude, bridge')
-        self.assertEqual(spawn.label({'harness': 'pi', 'runtime': {}}), 'Pi, plain')
-        self.assertEqual(spawn.label({'harness': 'custom', 'runtime': {'native_mode': {'mode': 'bridge without compaction'}}}),
+        self.assertEqual(display.label(self.record()), 'Codex, bridge')
+        self.assertEqual(display.label({'harness': 'claude', 'runtime': {'control_endpoint': {'transport': 'unix-lines'}}}), 'Claude, bridge')
+        self.assertEqual(display.label({'harness': 'pi', 'runtime': {}}), 'Pi, plain')
+        self.assertEqual(display.label({'harness': 'custom', 'runtime': {'native_mode': {'mode': 'bridge without compaction'}}}),
                          'custom, bridge without compaction')
 
     def test_spawn_says_started_and_ready_only_after_a_wait(self):
-        with patch.object(agents, 'start', return_value=self.record()):
+        with patch.object(lifecycle, 'start', return_value=self.record()):
             self.assertEqual(spawn.cli_run(self.root, name='codex-ui'), 'Started codex-ui (Codex, bridge).')
-        with patch.object(agents, 'start', return_value=self.record(ok=True, ready=True)) as start:
+        with patch.object(lifecycle, 'start', return_value=self.record(ok=True, ready=True)) as start:
             self.assertEqual(spawn.cli_run(self.root, name='codex-ui', wait=True), 'Started codex-ui (Codex, bridge): ready.')
         self.assertTrue(start.call_args.kwargs['wait'])
 
     def test_resume_says_resumed(self):
-        with patch.object(agents, 'start', return_value=self.record()):
+        with patch.object(lifecycle, 'start', return_value=self.record()):
             self.assertEqual(resume.cli_run(self.root, agent='lifecycle'), 'Resumed codex-ui (Codex, bridge).')
-        with patch.object(agents, 'start', return_value=self.record(ok=True, ready=True)):
+        with patch.object(lifecycle, 'start', return_value=self.record(ok=True, ready=True)):
             self.assertEqual(resume.cli_run(self.root, agent='lifecycle', wait=True), 'Resumed codex-ui (Codex, bridge): ready.')
 
     def test_a_launch_that_failed_to_become_ready_raises_with_its_reason(self):
         failed = self.record(ok=False, ready=False, error='Launch ended before becoming ready (stopped)\nlast output line')
-        with patch.object(agents, 'start', return_value=failed):
+        with patch.object(lifecycle, 'start', return_value=failed):
             with self.assertRaisesRegex(ValueError, r'^codex-ui did not start: Launch ended before becoming ready \(stopped\)\nlast output'):
                 spawn.cli_run(self.root, name='codex-ui', wait=True)
             with self.assertRaisesRegex(ValueError, r'^codex-ui did not resume: Launch ended'):  # the agent's own name
@@ -271,7 +273,7 @@ class LaunchTextTest(BaseTest):
                                    "unreachable. Failed record preserved. Resume this agent by its full UUID: 9ae0d4ec.") from inner
         except RuntimeError as error:
             failure = error
-        with patch.object(agents, 'start', side_effect=failure):
+        with patch.object(lifecycle, 'start', side_effect=failure):
             with self.assertRaises(ValueError) as caught:
                 spawn.cli_run(self.root, name='codex-ui')
             self.assertEqual(str(caught.exception), 'codex-ui did not start: tmux server unreachable')
@@ -280,7 +282,7 @@ class LaunchTextTest(BaseTest):
 
     def test_json_keeps_the_whole_record_and_the_python_functions_are_unchanged(self):
         record = self.record(ok=False, error='x')
-        with patch.object(agents, 'start', return_value=record):
+        with patch.object(lifecycle, 'start', return_value=record):
             self.assertIs(spawn.cli_run(self.root, name='codex-ui', json=True), record)
             self.assertIs(spawn.run(self.root, name='codex-ui'), record)
             self.assertIs(resume.run(self.root, agent='lifecycle'), record)
@@ -290,7 +292,7 @@ class DispatchTest(BaseTest):
     """The command line reaches the readable handlers; the Python `run` functions stay as they were."""
 
     def test_every_command_dispatches_to_its_readable_handler(self):
-        with patch.object(agents, 'listing', return_value=[]):
+        with patch.object(lifecycle, 'listing', return_value=[]):
             self.assertEqual(cli.run(cli.parser().parse_args(['-u', str(self.root), 'list']), cli=True), 'No agents.')
             self.assertEqual(cli.run(cli.parser().parse_args(['-u', str(self.root), 'list']), cli=False), 'No agents.')
             self.assertEqual(cli.run(cli.parser().parse_args(['-u', str(self.root), 'list', '--json']), cli=True), [])

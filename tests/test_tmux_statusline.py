@@ -14,8 +14,12 @@ import time
 import unittest
 from uuid import uuid4
 
-from multiverse import agents, statusline, universe
-from multiverse.store import append_message, inbox, read, write
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.universe import templates
+from multiverse.terminal import statusline
+from multiverse.universe.mailbox import append_message, inbox
+from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase
 
 
@@ -44,7 +48,7 @@ class StatusRendererTest(BaseTest):
 
     def test_template_and_code_defaults_match_including_key_order(self):
         for name in ('base', 'development', 'testing'):
-            data = read(universe.TEMPLATES / name / 'statusline.json')['tmux']
+            data = read(templates.TEMPLATES / name / 'statusline.json')['tmux']
             self.assertEqual(data, statusline.DEFAULTS)
             self.assertEqual(list(data['items']), list(statusline.DEFAULTS['items']))
         self.assertNotIn('ctx', self.render())
@@ -82,7 +86,7 @@ class StatusRendererTest(BaseTest):
         self.assertEqual(self.render(), 'ctx 82k/200k · worker · codex')
 
     def test_subverse_identity_and_control_and_format_escaping(self):
-        child = universe.create(self.root / 'subverses/review', 'review', workdir=self.work)
+        child = templates.create(self.root / 'subverses/review', 'review', workdir=self.work)
         self.root = child
         self.directory = child / 'state/agents' / self.agent
         self.properties.update(universe_id=read(child / 'universe.json')['id'],
@@ -154,7 +158,7 @@ class StatusRendererTest(BaseTest):
     def test_entry_point_has_no_cli_harness_or_tui_imports_and_does_not_write(self):
         paths = {path: path.read_bytes() for path in self.directory.iterdir() if path.is_file()}
         code = ('import runpy,sys; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__"); '
-                'assert not any(n.startswith(("multiverse.agents","multiverse.cli","textual","websockets")) for n in sys.modules)')
+                'assert not any(n.startswith(("multiverse.universe.agents","multiverse.cli","textual","websockets")) for n in sys.modules)')
         result = subprocess.run([sys.executable, '-S', '-c', code, str(Path(statusline.__file__).resolve()),
                                  str(self.root), self.agent, self.launch, 'codex'],
                                 capture_output=True, text=True, check=True)
@@ -198,11 +202,11 @@ class StatusWrapperTest(TerminalBase):
         global_format = self.backend.run('show-options', '-gv', 'status-format[0]')
         for resume in (None, 'saved'):
             if resume:
-                agents.terminal_action(self.root, agent_id, 'stop')
+                lifecycle.terminal_action(self.root, agent_id, 'stop')
                 write(self.root / 'statusline.json', {'tmux': {'refresh_seconds': 5}})
-                result = agents.start(self.root, resume=agent_id, socket_path=self.socket, wait=True, wait_timeout=5)
+                result = lifecycle.start(self.root, resume=agent_id, socket_path=self.socket, wait=True, wait_timeout=5)
             else:
-                result = agents.start(self.root, 'reader', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
+                result = lifecycle.start(self.root, 'reader', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
                 agent_id = result['id']
             self.assertTrue(result['ready'], result)
             terminal = result['runtime']['tmux']
@@ -229,13 +233,13 @@ class StatusWrapperTest(TerminalBase):
         worker.chmod(0o700)
         write(self.root / 'harnesses/custom/harness.json', {'schema': 2, 'adapter': 'codex',
               'settings': {'executable': str(worker), 'inbox_bridge': False}})
-        result = agents.start(self.root, 'custom', harness='custom', socket_path=self.socket, wait=True, wait_timeout=5)
+        result = lifecycle.start(self.root, 'custom', harness='custom', socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(result['ready'], result)
         command = (agents.directory(self.root, result['id']) / 'status-at-start').read_text()
         self.assertEqual(shlex.split(command)[-1], 'codex')
 
     def test_attached_status_updates_from_files_and_escapes_agent_text(self):
-        result = agents.start(self.root, 'display', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
+        result = lifecycle.start(self.root, 'display', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
         directory = agents.directory(self.root, result['id'])
         master, _ = self.attach(result['runtime']['tmux']['session'])
         self.output_until(master, 'display · fake · phase starting')
@@ -251,11 +255,11 @@ class StatusWrapperTest(TerminalBase):
         self.assertEqual(len(inbox(directory, peek=True)['messages']), 1)
 
     def test_shell_and_tmux_characters_in_root_paths_are_literal(self):
-        root = universe.create(self.work / "odd ' ) #(touch BAD) #{pane_id}" / '.multiverse', 'odd', workdir=self.work)
+        root = templates.create(self.work / "odd ' ) #(touch BAD) #{pane_id}" / '.multiverse', 'odd', workdir=self.work)
         # Use the existing fixture's stand-in harness without creating another native process type.
         import shutil
         shutil.copytree(self.root / 'harnesses/fake', root / 'harnesses/fake')
-        result = agents.start(root, 'quoted', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
+        result = lifecycle.start(root, 'quoted', harness='fake', socket_path=self.socket, wait=True, wait_timeout=5)
         master, _ = self.attach(result['runtime']['tmux']['session'])
         self.output_until(master, 'quoted · fake · phase starting')
         self.assertFalse((self.work / 'BAD').exists())

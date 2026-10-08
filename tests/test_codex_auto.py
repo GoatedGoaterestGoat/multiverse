@@ -7,9 +7,13 @@ import sys
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses, native, runner
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native, runner
 from multiverse.harnesses.types import CommandSpec, NativeResult
-from multiverse.store import append_message, message_record, read, update_message, write
+from multiverse.universe.mailbox import append_message, message_record, update_message
+from multiverse.store import read, write
 from multiverse.tools.capabilities import run as capabilities
 from native_safety import isolated_home
 from test_multiverse import TerminalBase, BaseTest, until
@@ -59,7 +63,7 @@ else:
     def launch(self, name='auto', resume=None, native_home=None, **kwargs):
         with patch.dict(os.environ, {'CODEX_HOME': str(native_home or self.work / 'native-home')}), \
              patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('ok', value={'exclude': [], 'writable_roots': []})):
-            result = agents.start(self.root, name, 'literal task', resume=resume, socket_path=self.socket, **kwargs)
+            result = lifecycle.start(self.root, name, 'literal task', resume=resume, socket_path=self.socket, **kwargs)
         directory = agents.directory(self.root, result['id'])
         until(lambda: (directory / 'executed.json').exists())
         return result, directory
@@ -99,7 +103,7 @@ else:
                 self.assertIsNone(harnesses.load(self.root, 'codex').status_watch(
                     native.context(self.root, launched['id'])[2]))
                 self.assertEqual(self.config.read_bytes(), before)
-                agents.kill(self.root, launched['id'])
+                lifecycle.kill(self.root, launched['id'])
         self.assertTrue(self.address.exists(), 'Fallback must not remove the shared service socket')
 
     def test_different_versions_allow_auto_and_required_bridge_with_visible_evidence(self):
@@ -116,9 +120,9 @@ else:
                 with patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('unavailable', 'config/read unsupported')):
                     if policy:
                         with self.assertRaisesRegex(RuntimeError, 'config/read unsupported'):
-                            agents.start(self.root, 'bad-required', socket_path=self.socket)
+                            lifecycle.start(self.root, 'bad-required', socket_path=self.socket)
                     else:
-                        fallback = agents.start(self.root, 'bad-auto', socket_path=self.socket, wait=True, wait_timeout=5)
+                        fallback = lifecycle.start(self.root, 'bad-auto', socket_path=self.socket, wait=True, wait_timeout=5)
                         self.assertEqual(fallback['runtime']['native_mode']['mode'], 'plain')
                         self.assertIn('config/read unsupported', fallback['runtime']['native_mode']['fallback_reason'])
 
@@ -143,7 +147,7 @@ else:
         first, directory = self.launch(wait=True, wait_timeout=5)
         native_id = str(uuid4())
         agents.bind_session(self.root, first['id'], native_id)
-        agents.kill(self.root, first['id'])
+        lifecycle.kill(self.root, first['id'])
         (directory / 'executed.json').unlink()
         self.set_case(info={**self.info, 'cliVersion': '0.159.3', 'appServerVersion': '0.160.0'})
         resumed, directory = self.launch(resume=first['id'])
@@ -159,7 +163,7 @@ else:
         # The fixture has no model work to cancel. End its real child and pane,
         # then make the bridge unavailable for the next exact-session resume.
         with patch.object(native, 'stop', return_value=NativeResult('ok')):
-            agents.kill(self.root, first['id'])
+            lifecycle.kill(self.root, first['id'])
         (directory / 'executed.json').unlink()
         self.set_case(failure='unavailable again')
         plain, directory = self.launch(resume=first['id'], native_home=self.work / 'different-home',
@@ -175,7 +179,7 @@ else:
     def test_config_rpc_unavailability_falls_back_before_any_native_child(self):
         self.configure()
         with patch.object(native.NativeExecutor, 'rpc', return_value=NativeResult('unavailable', 'old config API')):
-            launched = agents.start(self.root, 'config-fallback', 'task', socket_path=self.socket, wait=True, wait_timeout=5)
+            launched = lifecycle.start(self.root, 'config-fallback', 'task', socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(launched['ready'], launched)
         self.assertEqual(launched['runtime']['native_mode']['mode'], 'plain')
         self.assertIn('old config API', launched['runtime']['native_mode']['fallback_reason'])
@@ -205,8 +209,8 @@ class AutoRunnerTest(BaseTest):
                 process.wait.return_value = 0
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(runner.subprocess, 'Popen', return_value=process) as child, \
-                     patch('multiverse.tmux.owned', return_value=(Mock(**{'run.return_value': ''}), '%1')), \
-                     patch.object(harnesses, 'load'), patch('multiverse.rpc.LaunchProxy', return_value=proxy):
+                     patch('multiverse.terminal.tmux.owned', return_value=(Mock(**{'run.return_value': ''}), '%1')), \
+                     patch.object(harnesses, 'load'), patch('multiverse.runtime.rpc.LaunchProxy', return_value=proxy):
                     code = runner.main()
                 if auto and not bound:
                     self.assertEqual(code, 0)

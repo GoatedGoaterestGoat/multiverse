@@ -59,9 +59,9 @@ Running agents and the dashboard keep their old code until relaunched. After upd
 
 Each action lives in `src/multiverse/tools/` with its own argument definitions
 and importable `run` function. `mv2` remains a small compatibility dispatcher;
-the TUI backend calls the same tool functions directly. Shared file, terminal
-identity and launch mechanics remain in `store.py`, `tmux.py`, `agents.py` and
-`runner.py`.
+the TUI backend calls the same tool functions directly. Records live in
+`universe/`, launching and the pane runner in `runtime/`, and tmux in
+`terminal/`; see [source layout](docs/architecture.md).
 
 With the package installed, run a tool without the dispatcher:
 
@@ -158,7 +158,7 @@ Codex wrappers enable tmux mouse handling for their own session before every spa
 
 `x` marks the selected agent or subverse for moving. Arrow keys, folding and clicks keep working; Enter or `x` on a group moves it there, and on an agent it moves into that agent's universe. Esc cancels, and a refused destination keeps the move pending so another can be chosen. `d` deletes to the trash after a confirmation that names what goes, including the agent count for a subverse. Both refuse running agents and the universe currently shown as the top; they call the same tools as `mv2 move` and `mv2 remove`.
 
-Filesystem and tmux work run outside the UI event loop. Stable agent keys preserve selection across refreshes. New agents and subverses belong to the selected group; selecting an agent targets its group. Drafts and dialogs capture the intended universe and recipient before submitting an action. Rendering and I/O are separated in `tui.py` and `dashboard.py` for testing.
+Filesystem and tmux work run outside the UI event loop. Stable agent keys preserve selection across refreshes. New agents and subverses belong to the selected group; selecting an agent targets its group. Drafts and dialogs capture the intended universe and recipient before submitting an action. Rendering and I/O are separated: `ui/backend.py` is the dashboard's only path to the tools.
 
 ### Agent identity
 

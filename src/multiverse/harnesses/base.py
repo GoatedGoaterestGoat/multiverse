@@ -29,6 +29,8 @@ def arguments(value, label, required=False):
 class ConfiguredAdapter:
     package = None
     supports_bridge = False
+    # The built-in adapter a harness uses ('codex', 'claude', 'pi'); '' for a local definition.
+    family = ''
     resume_prompt_args = None
 
     @classmethod

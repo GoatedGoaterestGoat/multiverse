@@ -4,11 +4,15 @@ import sys
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses, native
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse import harnesses
+from multiverse.runtime import native
 from multiverse.cli import parser
-from multiverse.dashboard import LocalBackend
+from multiverse.ui.backend import LocalBackend
 from multiverse.harnesses.types import CAPABILITIES, Capability, CommandSpec, NativeResult, SessionHandle
-from multiverse.store import inbox, read, write
+from multiverse.universe.mailbox import inbox
+from multiverse.store import read, write
 from multiverse.tools import ask, deliver, get_usage, send, spawn
 from test_multiverse import BaseTest
 
@@ -67,11 +71,11 @@ class OperationTest(BaseTest):
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.loader = self.enterContext(patch.object(harnesses, 'load', return_value=self.adapter))
-        self.enterContext(patch.object(agents, 'observe', return_value={'live': 'dormant'}))
+        self.enterContext(patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}))
         backend = Mock()
         backend.create.return_value = {'socket': '/fake', 'session': '$1', 'pane': '%1'}
-        self.enterContext(patch.object(agents, 'Tmux', return_value=backend))
-        self.enterContext(patch.object(agents.shutil, 'which', return_value='/fake/binary'))
+        self.enterContext(patch.object(lifecycle, 'Tmux', return_value=backend))
+        self.enterContext(patch.object(lifecycle.shutil, 'which', return_value='/fake/binary'))
         self.first = spawn.run(self.root, name='fourth-worker', harness='fourth')
         self.agent = self.first['id']
         self.directory = agents.directory(self.root, self.agent)
@@ -98,7 +102,7 @@ class OperationTest(BaseTest):
         runtime = (self.directory / 'runtime.json').read_bytes()
         launches = list((self.directory / 'launches').iterdir())
         with patch.object(self.adapter, 'resume', side_effect=ValueError('Invalid saved session')), \
-                patch.object(agents, 'Tmux') as terminal:
+                patch.object(lifecycle, 'Tmux') as terminal:
             with self.assertRaisesRegex(ValueError, 'Invalid saved session'):
                 LocalBackend().resume(self.root, self.agent)
             terminal.assert_not_called()

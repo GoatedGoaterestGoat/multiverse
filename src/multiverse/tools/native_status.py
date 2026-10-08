@@ -1,5 +1,6 @@
 """Read optional native observations; unavailable and failed observations are explicit."""
-from .. import native, universe
+from ..runtime import native
+from .. import universe
 
 
 def configure(parser):

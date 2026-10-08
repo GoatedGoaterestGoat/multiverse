@@ -7,9 +7,11 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse import agents, harnesses, native
+from multiverse import harnesses
+from multiverse.runtime import native
 from multiverse.harnesses.types import NativeResult
-from multiverse.store import append_message, inbox, message_record, read, update_message, write
+from multiverse.universe.mailbox import append_message, inbox, message_record, update_message
+from multiverse.store import read, write
 from multiverse.tools import send, deliver
 from test_multiverse import BaseTest
 

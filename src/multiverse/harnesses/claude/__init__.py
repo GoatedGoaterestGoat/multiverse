@@ -39,7 +39,8 @@ from uuid import uuid4
 
 from ..base import ConfiguredAdapter
 from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
-from ...usage import Usage
+from ..types import Usage
+from ...store import read
 
 MOD = Path(__file__).parent / 'mod'
 # Typeahead for /multiverse, a plugin of its own: it hooks `prompt.autocomplete`, which Claude Code
@@ -303,6 +304,7 @@ class ClaudeAdapter(ConfiguredAdapter):
     resume_prompt_args = ('--', '{task}')
     package = Path(__file__).parent
     supports_bridge = True
+    family = 'claude'
     bridge_policy = 'auto'
 
     @classmethod
@@ -467,12 +469,12 @@ class ClaudeAdapter(ConfiguredAdapter):
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
-        from ... import agents
         if not session.native_id:
             return NativeResult('unavailable', 'No Claude session ID recorded')
         reported = {}
         try:
-            facts = agents.runtime(Path(session.session_file).parent)
+            # The agent's runtime record; a missing one leaves nothing reported.
+            facts = read(Path(session.session_file).parent / 'runtime.json')
             mod = facts.get('usage')
             if isinstance(mod, dict) and session.launch_id and facts.get('launch_id') == session.launch_id:
                 reported = {key: mod[key] for key in ('context', 'cost_usd', 'rate_limits') if key in mod}

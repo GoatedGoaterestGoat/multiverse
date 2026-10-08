@@ -2,8 +2,11 @@
 import os
 from pathlib import Path
 import sys
-from .. import agents, native, universe
-from ..store import append_message, read, lock, message_record, update_message
+from .. import universe
+from ..runtime import native
+from ..store import read, lock
+from ..universe import agents
+from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
 from ._messaging import delivery_line, failure_reason
 

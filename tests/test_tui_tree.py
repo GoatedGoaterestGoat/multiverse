@@ -7,20 +7,24 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import DataTable, Static
-from multiverse import agents, relocate, universe
-from multiverse.dashboard import LocalBackend, agent_key, group_key
+from multiverse import universe
+from multiverse.runtime import lifecycle
+from multiverse.universe import relocate, templates, trash
+from multiverse.ui.backend import LocalBackend
+from multiverse.ui.tree import agent_key, group_key
 from multiverse.store import read, write
-from multiverse.tui import Form, MultiverseApp
+from multiverse.ui.screens import Form
+from multiverse.ui.app import MultiverseApp
 
 
 class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.work = Path(self.temp.name)
-        self.root = universe.create(self.work / ".multiverse", "top", workdir=self.work)
-        self.lab = universe.create(self.root / "subverses/lab", "lab", workdir=self.work)
-        self.deep = universe.create(self.lab / "subverses/deep", "deep", workdir=self.work)
-        self.review = universe.create(self.root / "subverses/review", "review", workdir=self.work)
+        self.root = templates.create(self.work / ".multiverse", "top", workdir=self.work)
+        self.lab = templates.create(self.root / "subverses/lab", "lab", workdir=self.work)
+        self.deep = templates.create(self.lab / "subverses/deep", "deep", workdir=self.work)
+        self.review = templates.create(self.root / "subverses/review", "review", workdir=self.work)
         self.ids = {}
         for scope, name in ((self.root, "idle"), (self.lab, "worker"), (self.deep, "inner"), (self.review, "busy")):
             agent_id = f"00000000-0000-4000-8000-{len(self.ids) + 1:012d}"
@@ -32,7 +36,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
         # Only "busy" has a live terminal; the listing and relocate agree on that.
         observed = lambda properties, *_args: {"live": "alive" if properties["name"] == "busy" else "stopped",
                                                "reason": ""}
-        for module in (agents, relocate):
+        for module in (lifecycle, relocate):
             patcher = patch.object(module, "observe", observed)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -132,7 +136,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("d", "ctrl+enter")
             await self.settle(pilot)
             self.assertFalse((self.root / "state/agents" / self.ids["idle"]).exists())
-            self.assertEqual([(e["kind"], e["name"]) for e in relocate.trash(self.root)["entries"]], [("agent", "idle")])
+            self.assertEqual([(e["kind"], e["name"]) for e in trash.contents(self.root)["entries"]], [("agent", "idle")])
             self.assertIn(self.app.selected_key, self.app.visible_rows)
             self.app.select_key(group_key(self.root))
             await pilot.press("d")
@@ -149,7 +153,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             self.assertFalse(self.lab.exists())
             self.assertNotIn(group_key(self.lab), self.app.visible_rows)
-            self.assertEqual({e["name"] for e in relocate.trash(self.root)["entries"]}, {"idle", "lab"})
+            self.assertEqual({e["name"] for e in trash.contents(self.root)["entries"]}, {"idle", "lab"})
 
     async def test_the_universe_being_viewed_cannot_be_deleted_from_inside(self):
         async with self.app.run_test(size=(140, 32)) as pilot:

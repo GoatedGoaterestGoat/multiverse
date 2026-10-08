@@ -26,6 +26,7 @@ import subprocess
 import sys
 import threading
 
+from ..runtime import native
 from . import config as settings_file
 from .build import Build, Cancelled, Reporter, json_lines
 from .pipeline import CompactionError, compact, conversation, open_agent, plan
@@ -41,7 +42,8 @@ def _agent(directory: str):
     root = directory.parents[2] if len(directory.parents) > 2 else None
     if root is None or directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
         raise ValueError(f'Not an agent directory: {directory}')
-    return open_agent(root, directory.name)
+    found, adapter, session, _ = native.context(root, directory.name)
+    return open_agent(root, found, adapter, session)
 
 
 def install(directory: str, request: dict, emit) -> int:

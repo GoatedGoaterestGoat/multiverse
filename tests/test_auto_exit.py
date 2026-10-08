@@ -7,14 +7,16 @@ import sys
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from multiverse import agents, runner
+from multiverse.universe import agents
+from multiverse.runtime import lifecycle
+from multiverse.runtime import runner
 from multiverse.store import read, write
 from test_multiverse import BaseTest, TerminalBase, until
 
 
 class AutoExitTest(TerminalBase):
     def start_ready(self):
-        result = agents.start(self.root, 'manual-exit', harness='fake', socket_path=self.socket,
+        result = lifecycle.start(self.root, 'manual-exit', harness='fake', socket_path=self.socket,
                               wait=True, wait_timeout=5)
         self.assertTrue(result['ready'], result)
         return result, agents.directory(self.root, result['id'])
@@ -52,7 +54,7 @@ class AutoExitTest(TerminalBase):
         self.assertNotIn(pane, self.backend.snapshot()[0])
         self.assertEqual(agents.runtime(directory)['state'], 'dormant')
         self.assertEqual(read(directory / 'properties.json')['native_session_id'], native_id)
-        resumed = agents.start(self.root, resume=result['id'], socket_path=self.socket, wait=True, wait_timeout=5)
+        resumed = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket, wait=True, wait_timeout=5)
         self.assertTrue(resumed['ready'], resumed)
         self.assertEqual(resumed['native_session_id'], native_id)
 
@@ -65,7 +67,7 @@ class AutoExitTest(TerminalBase):
         attached, terminal = self.attach_client(pane)
         os.write(terminal, b'\x03')
         until(lambda: 'TURN INTERRUPTED' in self.backend.run('capture-pane', '-p', '-t', pane))
-        self.assertEqual(agents.listing(self.root)[0]['live'], 'alive')
+        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
         self.assertIsNone(attached.poll())
         os.kill(agents.runtime(directory)['pid'], signal.SIGTERM)
         until(lambda: agents.runtime(directory).get('state') == 'dormant')
@@ -85,7 +87,7 @@ class AutoExitOwnershipTest(BaseTest):
     def test_old_cleanup_cannot_touch_replacement_launch(self):
         directory = self.root / 'state/agents/agent'
         write(directory / 'runtime.json', {'launch_id': 'replacement'})
-        with patch('multiverse.tmux.owned', side_effect=AssertionError('Must not control replacement')):
+        with patch('multiverse.terminal.tmux.owned', side_effect=AssertionError('Must not control replacement')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(read(directory / 'runtime.json'), {'launch_id': 'replacement'})
 
@@ -96,7 +98,7 @@ class AutoExitOwnershipTest(BaseTest):
                                           'tmux': {'socket': '/fake', 'pane': '%1'}})
         backend = Mock()
         backend.run.side_effect = ['own\t%1\nother\t%2', '', '']
-        with patch('multiverse.tmux.owned', return_value=(backend, '%1')):
+        with patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(backend.run.call_args_list[1].args, ('detach-client', '-t', 'own'))
         self.assertEqual(backend.run.call_args_list[2].args, ('kill-pane', '-t', '%1'))
@@ -106,7 +108,7 @@ class AutoExitOwnershipTest(BaseTest):
         directory = self.root / 'state/agents/agent'
         write(directory / 'properties.json', {'id': 'agent', 'universe_id': 'universe'})
         write(directory / 'runtime.json', {'launch_id': 'old', 'state': 'stopped', 'exit_code': 0})
-        with patch('multiverse.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
+        with patch('multiverse.terminal.tmux.owned', side_effect=RuntimeError('tmux unavailable')):
             runner.cleanup_wrapper(directory / 'launches/old')
         self.assertEqual(agents.runtime(directory)['state'], 'stopped')
         self.assertIn('tmux unavailable', agents.runtime(directory)['error'])
