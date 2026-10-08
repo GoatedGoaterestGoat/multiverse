@@ -1,7 +1,7 @@
 """A universe on disk: its directory, workspace and nested subverses.
 
 Submodules hold the rest of what lives in a universe directory: agent records
-(agents), message logs (inbox), definitions installed from a template
+(agents), message logs (mailbox), definitions installed from a template
 (templates), what agents can look up (catalog), and moving or removing things
 (relocate, trash).
 """

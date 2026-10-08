@@ -48,11 +48,11 @@ class Inspector(Vertical):
             self.close()
             return
         group = row["kind"] == "group"
-        identity = (row["key"], row.get("live"), row.get("runtime", {}).get("launch_id"))
-        changed = identity != self.identity
+        current = (row["key"], row.get("live"), row.get("runtime", {}).get("launch_id"))
+        changed = current != self.identity
         if changed:
             self.generation += 1
-            self.identity = identity
+            self.identity = current
             self.follow_next = True
             self.query_one("#preview", Static).update("Reading terminal…")
             self.query_one("#pane-scroll").border_title = "LIVE PANE"

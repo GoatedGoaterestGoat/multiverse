@@ -9,7 +9,6 @@ from .screens import Form
 from .tree import agent_key, group_key
 
 
-
 class TreeEditing:
     """MultiverseApp's actions for n, g, x and d. A draft or a pending move is a mode the app checks."""
     def action_spawn(self):

@@ -16,6 +16,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Static
 
 from ..display import clean
+
 MISSING = object()
 BOOL_OPTIONS = ((True, 'true'), (False, 'false'))
 

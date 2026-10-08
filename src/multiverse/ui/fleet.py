@@ -11,7 +11,6 @@ from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
 
-
 class FleetView:
     """MultiverseApp's table: rows from the snapshot, column widths, selection and the harness menu."""
     def populate_table(self):

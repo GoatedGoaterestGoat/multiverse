@@ -163,7 +163,7 @@ def context_line(result):
 
 
 def rate_limit_windows(result):
-    """[(label, percent_used, resets_at)] for the five-hour and seven-day windows."""
+    """[(label, percent_used, resets_at, reported_at)] for the five-hour and seven-day windows."""
     value = result.get('value') if result.get('state') == 'ok' else None
     found = []
     for limit in value.get('rate_limits') or [] if isinstance(value, dict) else []:

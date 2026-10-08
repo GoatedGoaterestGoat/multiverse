@@ -7,6 +7,7 @@ from textual.widgets import Footer, Input, Label, Static, TextArea
 
 from ..display import clean
 from ..universe import slug
+
 KEYS = """NAVIGATION
 ↑ / k, ↓ / j   Select a row
 ← / h          Fold a group, or go to its parent

@@ -1,7 +1,8 @@
 """Former module of automatic reconnect (now multiverse.runtime.recovery).
 
 Runners started before the package restructure start `python -m multiverse.recovery`
-after a relay loss, so it stays until no such agent remains.
+after a relay loss, so it stays until no such agent remains. It covers only that new
+process: code already loaded inside an old runner is not changed by it.
 """
 import sys
 from pathlib import Path

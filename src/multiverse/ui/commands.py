@@ -8,7 +8,6 @@ from .compaction import CompactionScreen
 from .screens import Form
 
 
-
 class AgentCommands:
     """MultiverseApp's actions on the selected agent, and the operation runner they share."""
     def submit_operation(self, label, callback, *args, after=None, describe=None):
