@@ -52,9 +52,21 @@ Three top-level files are stubs for agents launched before this layout:
 once no agent launched before the change is still running or stopped with its
 wrapper; a resume relaunches with the new paths.
 
-Stubs cover only the paths that start fresh processes. A runner that was already
-running keeps the old modules it loaded, and some of its later imports
-(automatic reconnect, wake bookkeeping, startup message delivery) would load the
-new code into that process, which cannot work with the old `store` and
-`universe` already in memory. After pulling this change, kill and resume each
-running agent once. Its conversation and records are kept.
+Stubs cover only the paths that start fresh processes. Two kinds of process
+started before the change keep running the old code they loaded:
+
+- **The dashboard** (`mv2` with no command). It goes on working, and anything it
+  launches starts through the `runner.py` stub, but it shows and does what the
+  old code did until it is restarted.
+- **Each agent's runner.** Most of what a runner needs is loaded when it starts,
+  so it keeps working. A few imports happen only later, such as scheduling a
+  reconnect after a relay loss. If that module moved, the import fails inside
+  the old runner (for example, the `recovery.py` stub has no `schedule`).
+
+After pulling this change:
+
+1. Quit the dashboard and start `mv2` again.
+2. For each running agent, from a new shell: `mv2 kill NAME`, then
+   `mv2 resume NAME`. Do the agent coordinating the others last. Conversations
+   and records are kept.
+3. Check `mv2 list` shows every agent alive again.
