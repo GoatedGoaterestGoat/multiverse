@@ -2,7 +2,6 @@
 from dataclasses import dataclass, replace
 import threading
 
-from ..runtime import native
 from . import config as settings_file
 from .build import Build, Reporter
 from .config import Schedule, Settings
@@ -45,12 +44,13 @@ class Agent:
         return schedule if self.source.keeps_images else replace(schedule, image_mode='drop_all')
 
 
-def open_agent(root, reference) -> Agent:
+def open_agent(root, directory, adapter, session) -> Agent:
     """The agent's compaction context, through its harness adapter's compaction support.
 
-    The harness supplies its builder defaults and checks the builder settings.
+    The caller finds the agent (`runtime.native.context`), so compaction does not
+    depend on how agents run. The harness supplies its builder defaults and checks
+    the builder settings.
     """
-    directory, adapter, session, _ = native.context(root, reference)
     factory = getattr(adapter, 'compaction', None)
     if factory is None:
         raise CompactionError(f'The {session.harness} harness does not support compaction')

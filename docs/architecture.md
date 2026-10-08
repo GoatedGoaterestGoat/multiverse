@@ -16,10 +16,20 @@ what runs, the terminal it runs in, and how people see it.
 | `store.py` | Atomic JSON writes, file locks, IDs and timestamps. |
 | `cli.py` | The `mv2` command line, built from `tools/`. |
 
-Dependencies point one way: `store` and `terminal` depend on nothing else here;
-`universe` on those; `runtime` on `universe`, `terminal` and `harnesses`; `tools`
-and `ui` on everything below them. Waking a stopped agent is the one place
-`runtime.native` reaches back into `runtime.lifecycle`, inside the function.
+Dependencies point one way, from the bottom up:
+
+1. `store`, `terminal` and `display` depend on nothing else here.
+2. `compaction` (its model, schedule, builds and pipeline) on `store`.
+3. `harnesses` on `store` and `compaction`: adapters implement the compaction
+   protocol and read agent files themselves.
+4. `universe` on `store`, `terminal` and the contract types in `harnesses`.
+5. `runtime` on everything above.
+6. The entry points on top: `tools`, `ui`, `cli`, and `compaction/__main__.py`
+   (the compaction commands the Claude mod runs). Compaction commands find the
+   agent through `runtime` and hand it to `compaction.pipeline.open_agent`.
+
+Waking a stopped agent is the one place `runtime.native` reaches back into
+`runtime.lifecycle`, inside the function.
 
 ## The dashboard
 

@@ -560,9 +560,9 @@ class AdapterTest(Fixture):
             with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, expected):
                 source.check_builder(value)
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'builder': {'effort': 'extreme'}}}})
-        from multiverse.compaction import pipeline
+        from multiverse.tools.compaction import find_agent
         with self.assertRaisesRegex(ValueError, 'harnesses.claude.builder: effort'):
-            pipeline.open_agent(self.root, self.agent_dir.name)
+            find_agent(self.root, self.agent_dir.name)
 
     def test_compaction_needs_the_bridge(self):
         self.assertIsNone(self.source().unavailable())
@@ -621,7 +621,8 @@ class DashboardBackendTest(Fixture):
         self.assertEqual(current['failures'], [])
         # A turn whose build is still failed says why, numbered as the plan numbers it.
         from multiverse.compaction.store import Store
-        turns = pipeline.conversation(pipeline.open_agent(self.root, agent).source.turns())
+        from multiverse.tools.compaction import find_agent
+        turns = pipeline.conversation(find_agent(self.root, agent).source.turns())
         store = Store(self.agent_dir)
         store.set_failure(turns[2].id, 'the model refused this merge')
         store.set_failure('0123456789abcdef', 'gone')
