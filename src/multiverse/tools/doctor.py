@@ -39,6 +39,7 @@ def check(root, notes=None):
             found.extend((problem, problem) for problem in _compaction(scope))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
+        found.extend((problem, problem) for problem in _plugins(scope))
     return found
 
 
@@ -89,6 +90,19 @@ def _compaction(scope):
         if problem:
             found.append(problem)
     return found
+
+
+def _plugins(scope):
+    """Plugins that are on here but not working, then what the plugins' own checks find, each prefixed "plugin"."""
+    try:
+        from .. import plugins
+        from ..cli import RESERVED
+        from ..plugins import api
+        found = plugins.problems(scope, RESERVED)
+        found += plugins.doctor(scope, lambda loaded: api.Universe(scope, api.Plugin(loaded)))
+    except Exception as error:  # the rest of doctor must still run
+        found = [f"the plugins could not be checked: {type(error).__name__}: {error}"]
+    return [f"Plugin {problem}" if not problem.startswith("plugins.json") else problem for problem in found]
 
 
 if __name__ == "__main__":

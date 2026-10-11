@@ -5,7 +5,7 @@ from ..store import read
 KINDS = ("skills", "commands", "workflows", "harnesses")
 
 
-def catalog(root):
+def _own(root):
     result = []
     for kind in KINDS:
         filename = "harness.json" if kind == "harnesses" else "entry.json"
@@ -16,9 +16,31 @@ def catalog(root):
     return result
 
 
+def _plugin_entries(root):
+    """Catalog entries of plugins on here; a plugin that cannot be read adds nothing."""
+    from .. import plugins
+    try:
+        return plugins.catalog_entries(root)
+    except Exception:
+        return []
+
+
+def catalog(root):
+    """The universe's own entries, then those of plugins on here (with `plugin`) that no own entry of the same kind and name shadows."""
+    result = _own(root)
+    taken = {(entry["kind"], entry["name"]) for entry in result}
+    return result + [entry for entry in _plugin_entries(root) if (entry["kind"], entry["name"]) not in taken]
+
+
 def command(root, query, arguments=""):
-    candidates = [e for e in catalog(root) if e["kind"] in ("commands", "workflows", "skills")
-                  and query in (e["name"], f'{e["kind"]}/{e["name"]}')]
+    reference, qualified, plugin = query.partition("@")
+    if qualified:
+        # `name@plugin` or `kind/name@plugin` names a plugin's entry, even one the universe shadows.
+        entries = [e for e in _plugin_entries(root) if e["plugin"] == plugin]
+    else:
+        entries = catalog(root)
+    candidates = [e for e in entries if e["kind"] in ("commands", "workflows", "skills")
+                  and reference in (e["name"], f'{e["kind"]}/{e["name"]}')]
     if len(candidates) != 1:
         raise ValueError(f"Expected one exact match for {query!r}; found {len(candidates)}. Use mv2 catalog.")
     entry = candidates[0]
@@ -28,9 +50,20 @@ def command(root, query, arguments=""):
 
 def bootstrap(root, properties):
     # Only the short bootstrap and identity are automatic. Catalog bodies stay on disk.
-    return (root / "bootstrap.md").read_text().strip() + "\n\n" + "\n".join([
+    text = (root / "bootstrap.md").read_text().strip() + "\n\n" + "\n".join([
         f'Universe: {read(root / "universe.json")["name"]} ({properties["universe_id"]})',
         f'Agent: {properties["name"]} ({properties["id"]})',
         f"Universe files: {root}",
         f'Your state: {root / "state" / "agents" / properties["id"]}',
     ]) + "\n"
+    lines = _plugin_lines(root)
+    return text + ("\n" + "".join(line + "\n" for line in lines) if lines else "")
+
+
+def _plugin_lines(root):
+    """At most 2 short lines from each plugin on here, in plugin-name order, after the identity lines."""
+    from .. import plugins
+    try:
+        return plugins.bootstrap_lines(root)
+    except Exception:
+        return []

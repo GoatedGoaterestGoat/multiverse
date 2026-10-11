@@ -107,7 +107,8 @@ class DiscoveryTest(PluginTestCase):
         states = {found.name: (found.state, found.problem) for found in plugins.entries(self.root)}
         self.assertEqual(states["ghost"][0], "missing")
         self.assertEqual(states["future"][0], "incompatible")
-        self.assertIn("needs plugin API 1.9; this mv2 has 1.0; update mv2", states["future"][1])
+        have = ".".join(map(str, loader.API_VERSION))
+        self.assertIn(f"needs plugin API 1.9; this mv2 has {have}; update mv2", states["future"][1])
         self.assertEqual(states["bad"][0], "invalid")
 
     def test_safe_mode_loads_nothing(self):
