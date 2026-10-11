@@ -1,6 +1,6 @@
 // The status line's pure logic: config parsing, rendering and the shared slot.
 import { describe, expect, test } from 'claude-code/testing'
-import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, render, setBase, setProgress } from '../hooks/statusline'
+import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, setProgress } from '../hooks/statusline'
 
 const FACTS = { agent: 'reviewer', universe: 'pr-review', phase: 'working', summary: 'reading the diff', inbox: 2, compaction: 'trees 3 · prepared' }
 
@@ -127,5 +127,58 @@ describe('statusline slot', () => {
     expect(currentLine()).toBe('idle')
     setBase(undefined)
     expect(currentLine()).toBeUndefined()
+  })
+})
+
+describe('plugin items', () => {
+  const COST = { name: 'cost', plugin: 'cost-item', claude: true, tmux: true }
+  const TESTS = { name: 'test-runs', plugin: 'ci', claude: false, tmux: true }
+  const runtime = (status_items: unknown) => ({ state: 'running', plugins: { plugins: {}, status_items } })
+
+  test('a launch declares its items in runtime.json; a malformed record declares none', async () => {
+    expect(parseItems(runtime([COST, TESTS]))).toEqual([COST, TESTS])
+    for (const bad of [undefined, null, 'x', [], { plugins: null }, { plugins: { status_items: {} } }, { plugins: [] }]) {
+      expect(parseItems(bad)).toEqual([])
+    }
+  })
+
+  test('a malformed entry, a bad or core name and a repeated name are left out', async () => {
+    const items = parseItems(runtime([
+      COST, { ...COST, plugin: 'other' },                       // the same name again
+      { ...COST, name: 'Cost' }, { ...COST, name: 'a--b' }, { ...COST, name: '-a' }, { ...COST, name: 'a/b' },
+      { ...COST, name: '../x' }, { ...COST, name: 'x'.repeat(41) },  // the name rule
+      ...['agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'context', 'compaction'].map((name) => ({ ...COST, name })),
+      { ...COST, name: 'n1', claude: 'yes' }, { ...COST, name: 'n2', plugin: 3 }, { name: 'n3' }, null, 'cost',
+      TESTS, { ...TESTS, name: 'x'.repeat(40) },
+    ]))
+    expect(items.map((item) => item.name)).toEqual(['cost', 'test-runs', 'x'.repeat(40)])
+  })
+
+  test('an item the file does not name shows by its claude default, after everything else', async () => {
+    const { config, problem } = parseConfig('{"items": {"inbox": true, "phase": true}}', [COST, TESTS])
+    expect(problem).toBeUndefined()
+    expect(config.order).toEqual(['inbox', 'phase', 'agent', 'summary', 'compaction', 'cost', 'test-runs'])
+    expect([config.on.cost, config.on['test-runs']]).toEqual([true, false])
+    expect(parseConfig(undefined, [COST]).config).toEqual(defaultConfig([COST]))
+    expect(parseConfig('not json', [COST]).config.on.cost).toBe(true)  // an unusable file still keeps the defaults
+  })
+
+  test('the file places an item and turns it on or off like a core one', async () => {
+    const { config, problem } = parseConfig('{"items": {"cost": false, "test-runs": true, "phase": true, "nobody": true, "agent": "yes"}}', [COST, TESTS])
+    // In the file's order (an item turned off still keeps its place); `agent` is malformed, so it falls back to its default place.
+    expect(config.order).toEqual(['cost', 'test-runs', 'phase', 'agent', 'summary', 'inbox', 'compaction'])
+    expect([config.on.cost, config.on['test-runs']]).toEqual([false, true])
+    expect(config.on.nobody).toBeUndefined()  // a key no launch declared is ignored, as before
+    expect(problem).toBe('statusline.json items agent must be true or false')
+  })
+
+  test('the text is its first line, cleaned and shortened like a summary; empty or missing shows nothing', async () => {
+    const config = parseConfig('{"items": {"phase": true, "cost": true, "test-runs": true}}', [COST, TESTS]).config
+    const facts = { inbox: 0, phase: 'working', plugins: { cost: '$1.20\u001b[31m today\nsecond line', 'test-runs': 'x'.repeat(100) } }
+    expect(render(config, facts)).toBe(`working · $1.20 [31m today · ${'x'.repeat(59)}…`)
+    expect(render(config, { inbox: 0, phase: 'working', plugins: { cost: '   ', 'test-runs': '' } })).toBe('working')
+    expect(render(config, { inbox: 0, phase: 'working' })).toBe('working')
+    // A text for an item that is off, or that no launch declared, never shows.
+    expect(render(parseConfig('{"items": {"cost": false}}', [COST]).config, { inbox: 0, plugins: { cost: 'x', other: 'y' } })).toBeUndefined()
   })
 })

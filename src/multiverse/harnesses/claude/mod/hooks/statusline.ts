@@ -13,6 +13,13 @@
 // The order of the keys is the order on screen. A key that is missing keeps
 // its default, an unknown key is ignored, and an unreadable file means the
 // defaults.
+//
+// Plugins add items of their own. A launch declares them in runtime.json
+// (`plugins.status_items`: name, plugin and whether each line shows it by
+// default), and the plugin writes the text to
+// `state/agents/<id>/status-items/<name>.txt`. A declared item is a key like the
+// core ones: `items` names it to place it or turn it on or off; one it does not
+// name shows by its `claude` default, after everything else.
 
 export const ITEMS = ["agent", "phase", "summary", "inbox", "compaction"] as const
 export type Item = (typeof ITEMS)[number]
@@ -20,7 +27,15 @@ export type Item = (typeof ITEMS)[number]
 export const DEFAULTS: Readonly<Record<Item, boolean>> =
   { agent: false, phase: true, summary: false, inbox: true, compaction: true }
 
-export type Config = { order: readonly Item[]; on: Readonly<Record<Item, boolean>> }
+export type Config = { order: readonly string[]; on: Readonly<Record<string, boolean>> }
+
+// One status-line item a plugin declared for this launch.
+export type PluginItem = { name: string; plugin: string; claude: boolean; tmux: boolean }
+
+// The manifest's rule for item names, and the names core keeps for itself (on either line).
+const ITEM_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+const ITEM_NAME_LENGTH = 40
+const CORE_NAMES = new Set(["agent", "harness", "status", "phase", "summary", "inbox", "context", "compaction"])
 
 // What the line shows. `inbox` counts unread inbox-only messages.
 export type Facts = {
@@ -30,6 +45,8 @@ export type Facts = {
   summary?: string
   inbox: number
   compaction?: string
+  // Each plugin item's text, by item name, as its file holds it.
+  plugins?: Readonly<Record<string, string>>
 }
 
 const SEPARATOR = " · "
@@ -42,47 +59,72 @@ export function isSubverse(universePath: string): boolean {
   return parts.length >= 2 && parts[parts.length - 2] === "subverses"
 }
 
-export function defaultConfig(): Config {
-  return { order: [...ITEMS], on: { ...DEFAULTS } }
+export function defaultConfig(declared: readonly PluginItem[] = []): Config {
+  const on: Record<string, boolean> = { ...DEFAULTS }
+  for (const item of declared) on[item.name] = item.claude
+  return { order: [...ITEMS, ...declared.map((item) => item.name)], on }
+}
+
+// The plugin items a launch declared: runtime.json's `plugins.status_items`. A
+// malformed record declares none; a malformed entry, a name that breaks the rule
+// or is a core one, and a repeated name are left out.
+export function parseItems(runtime: unknown): PluginItem[] {
+  const plugins = typeof runtime === "object" && runtime !== null ? (runtime as Record<string, unknown>).plugins : undefined
+  const listed = typeof plugins === "object" && plugins !== null ? (plugins as Record<string, unknown>).status_items : undefined
+  if (!Array.isArray(listed)) return []
+  const items: PluginItem[] = []
+  for (const entry of listed) {
+    if (typeof entry !== "object" || entry === null) continue
+    const { name, plugin, claude, tmux } = entry as Record<string, unknown>
+    if (typeof name !== "string" || name.length > ITEM_NAME_LENGTH || !ITEM_NAME.test(name) || CORE_NAMES.has(name)) continue
+    if (typeof plugin !== "string" || typeof claude !== "boolean" || typeof tmux !== "boolean") continue
+    if (items.some((item) => item.name === name)) continue
+    items.push({ name, plugin, claude, tmux })
+  }
+  return items
 }
 
 // `text` is the file's content, or undefined when there is no file: the
 // defaults, with nothing to report. Anything unusable also gives the defaults,
 // with the reason to log.
-export function parseConfig(text: string | undefined): { config: Config; problem?: string } {
-  if (text === undefined) return { config: defaultConfig() }
+export function parseConfig(text: string | undefined, declared: readonly PluginItem[] = []): { config: Config; problem?: string } {
+  const fallback = () => defaultConfig(declared)
+  if (text === undefined) return { config: fallback() }
   let data: unknown
   try {
     data = JSON.parse(text)
   } catch {
-    return { config: defaultConfig(), problem: "statusline.json is not valid JSON" }
+    return { config: fallback(), problem: "statusline.json is not valid JSON" }
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
-    return { config: defaultConfig(), problem: "statusline.json must be an object" }
+    return { config: fallback(), problem: "statusline.json must be an object" }
   }
   const file = data as Record<string, unknown>
   if (file.schema !== undefined && file.schema !== 1) {
-    return { config: defaultConfig(), problem: `statusline.json has unsupported schema ${JSON.stringify(file.schema)}` }
+    return { config: fallback(), problem: `statusline.json has unsupported schema ${JSON.stringify(file.schema)}` }
   }
   const items = file.items
-  if (items === undefined) return { config: defaultConfig() }
+  if (items === undefined) return { config: fallback() }
   if (typeof items !== "object" || items === null || Array.isArray(items)) {
-    return { config: defaultConfig(), problem: "statusline.json items must be an object" }
+    return { config: fallback(), problem: "statusline.json items must be an object" }
   }
-  const on = { ...DEFAULTS }
-  const order: Item[] = []
+  const defaults = fallback()
+  const on: Record<string, boolean> = { ...defaults.on }
+  const everything = defaults.order
+  const known = new Set(everything)
+  const order: string[] = []
   const wrong: string[] = []
   for (const [key, value] of Object.entries(items)) {
-    const item = ITEMS.find((name) => name === key)
-    if (item === undefined) continue
+    if (!known.has(key) || order.includes(key)) continue
     if (typeof value !== "boolean") {
       wrong.push(key)
       continue
     }
-    on[item] = value
-    order.push(item)
+    on[key] = value
+    order.push(key)
   }
-  for (const item of ITEMS) if (!order.includes(item)) order.push(item)
+  // What the file leaves out keeps its default: the core items, then the plugins' in declared order.
+  for (const item of everything) if (!order.includes(item)) order.push(item)
   return { config: { order, on }, problem: wrong.length ? `statusline.json items ${wrong.join(", ")} must be true or false` : undefined }
 }
 
@@ -115,6 +157,10 @@ export function render(config: Config, facts: Facts): string | undefined {
       if (facts.inbox > 0) parts.push(`inbox ${facts.inbox >= INBOX_LIMIT ? `${INBOX_LIMIT}+` : facts.inbox}`)
     } else if (item === "compaction") {
       const text = clean(facts.compaction ?? "")
+      if (text) parts.push(text)
+    } else {
+      // A plugin's item: the first line of its file, cleaned and shortened like a summary.
+      const text = clean((facts.plugins?.[item] ?? "").split(/\r?\n/, 1)[0] ?? "", SUMMARY_LENGTH)
       if (text) parts.push(text)
     }
   }

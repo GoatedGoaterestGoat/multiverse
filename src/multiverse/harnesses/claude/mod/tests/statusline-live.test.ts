@@ -28,7 +28,9 @@ function session(on: On, env: Record<string, string> = { MV2_AGENT_DIR: AGENT, M
     if (!file) return { deny: 'ENOENT' }
     return { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
   })
+  const reads: string[] = []
   on('fs.read', async ($, e) => {
+    reads.push(e.path)
     const file = files.get(e.path)
     return file ? { value: file.text } : { deny: 'ENOENT' }
   })
@@ -46,7 +48,7 @@ function session(on: On, env: Record<string, string> = { MV2_AGENT_DIR: AGENT, M
   on('ui.status', async ($, e) => { lines.push(e.text); return { value: undefined } })
   on('ui.toast', async () => ({ value: undefined }))
   const logs: string[] = []
-  return { clock, disk, peeks, lines, logs, setUnread: (messages: unknown[]) => { unread = messages } }
+  return { clock, disk, peeks, lines, logs, reads, setUnread: (messages: unknown[]) => { unread = messages } }
 }
 
 const properties = (phase: string, summary = '') => JSON.stringify({ id: 'a1', name: 'reviewer', phase, summary })
@@ -195,3 +197,94 @@ describe('status line', () => {
     expect(w.lines).toEqual(['working', 'working'])
   })
 })
+
+describe('plugin items on the status line', () => {
+  const COST = { name: 'cost', plugin: 'cost-item', claude: true, tmux: true }
+  const TESTS = { name: 'test-runs', plugin: 'ci', claude: false, tmux: true }
+  const runtime = (items: unknown[], status = 'idle') => JSON.stringify({ state: 'running', status, plugins: { plugins: {}, status_items: items } })
+  const item = (name: string) => `${AGENT}/status-items/${name}.txt`
+
+  test('a declared item shows its file after the core items, and follows the file', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20 today')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual(['working · $1.20 today'])
+    w.disk(item('cost'), '$1.35 today')
+    await w.clock.advance(2000)
+    w.disk(item('cost'), undefined)  // a missing file shows nothing
+    await w.clock.advance(2000)
+    w.disk(item('cost'), '')         // nor does an empty one
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working · $1.20 today', 'working · $1.35 today', 'working'])
+  })
+
+  test('an item that is off is never read; statusline.json turns it on, and off again', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([TESTS]))
+    w.disk(item('test-runs'), '3 failing')
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working'])
+    expect(w.reads).not.toContain(item('test-runs'))
+    w.disk(`${UNIVERSE}/statusline.json`, JSON.stringify({ schema: 1, items: { 'test-runs': true, phase: true } }))
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('3 failing · working')  // placed where the file names it
+    w.disk(`${UNIVERSE}/statusline.json`, JSON.stringify({ schema: 1, items: { 'test-runs': false } }))
+    await w.clock.advance(2000)
+    const read = w.reads.filter((path) => path === item('test-runs')).length
+    w.disk(item('test-runs'), '4 failing')
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('working')
+    expect(w.reads.filter((path) => path === item('test-runs')).length).toBe(read)
+  })
+
+  test('status reports rewrite runtime.json often; the item files are read only when they change', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    for (const status of ['working', 'idle', 'waiting', 'idle']) {
+      w.disk(`${AGENT}/runtime.json`, runtime([COST], status))
+      await w.clock.advance(2000)
+    }
+    expect(w.reads.filter((path) => path === item('cost')).length).toBe(1)
+    expect(w.lines).toEqual(['working · $1.20'])
+  })
+
+  test('an item declared later is picked up; a malformed record declares none', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, '{not json')
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual(['working'])
+    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running', plugins: 'nonsense' }))
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working'])
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working', 'working · $1.20'])
+    w.disk(`${AGENT}/runtime.json`, runtime([]))  // and dropped when a launch no longer declares it
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('working')
+  })
+
+  test('outside a Multiverse agent there are no items, as there is no line', async ($, on) => {
+    const w = session(on, {})
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual([])
+    expect(w.reads).toEqual([])
+  })
+})
+

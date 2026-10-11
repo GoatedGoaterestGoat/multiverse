@@ -975,6 +975,18 @@ progress takes the slot while it lasts and the normal line returns after. Text
 reported by other agents is shown with control characters removed and a summary is
 shortened.
 
+Plugins add items of their own ([plugins](plugins.md#status-lines)). A launch
+declares them in `runtime.json` (`plugins.status_items`: each item's name, plugin
+and whether the Claude line shows it by default), and the plugin writes the text to
+`state/agents/<id>/status-items/<name>.txt`. A declared item is a key like the core
+ones: `statusline.json` places it or turns it on or off, and one the file does not
+name shows by its default, after everything else. The timer then also watches
+`runtime.json` (status reports rewrite it often; the items are read again only when
+they change) and the file of each item that is on; an item that is off is never
+read. The text is its first line, cleaned and shortened like a summary, and an
+empty or missing file shows nothing. A malformed record, a name that breaks the
+manifest rule or is a core name, and a repeated name declare nothing.
+
 The mod also registers the bridge (`BRIDGE`, `claude-mod-v1`) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
