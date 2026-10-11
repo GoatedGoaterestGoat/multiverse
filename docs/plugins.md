@@ -267,8 +267,17 @@ where they happen and delivered where plugins run**:
 - Core appends each event to the universe's journal under `state/events/`. It
   has a sequence number from a lock-protected counter. Appending is best
   effort: a failed append is logged and never fails the operation that caused
-  it. A universe writes a journal only while a plugin that is on there has event
-  handlers, so a universe that uses none writes nothing.
+  it. A universe writes a journal only while a plugin that is on there
+  subscribes to that type of event, so a universe that uses none writes nothing.
+- What recording promises about locks: it takes only the journal's lock, waits
+  at most 0.2 s for it (then drops the event and logs it), and imports and runs
+  no plugin code. The emitters for runtime records, messages and reports
+  record after releasing their own persistence lock. Some events are recorded
+  while a caller still holds an outer lock (a launch is recorded under its
+  launch lock), which is safe because the journal never takes a core lock, so
+  the order is always core lock, then journal. Optional work with real cost
+  (deciding readiness, which loads the adapter) runs after the send and launch
+  locks are released.
 - The plugin host tails the journals of every scope in its tree and calls each
   handler in order. It keeps each plugin's cursor in
   `state/plugins/NAME/events.cursor`, so a handler sees each event at least once
@@ -380,15 +389,22 @@ is closed. The alternatives each have a real cost:
 
 So the host is a general **supervisor** for plugins' long-running work:
 
-- **Starting.** It runs only while some plugin that is on in its universe tree
-  registers an event handler or a service. With none, it is never started.
-  `mv2 plugins enable` starts it when it becomes needed, and the dashboard
-  starts it on open if it is needed and not running. `mv2 plugins host
-  start|stop|status` control it by hand.
-- **Where.** It runs in a tmux session that mv2 owns and tags like an agent
-  pane, so it outlives the shell that started it, and `mv2` can find, show and
-  stop it. Its lock, PID and log are under `state/plugins/host/`. There is one
-  per top-level universe tree.
+- **Starting.** It is needed while some plugin that is on in its universe tree
+  extends `events` or `service`, which its manifest says, so no plugin code is
+  read to decide. `mv2 plugins host start|stop|status` controls it by hand,
+  and `mv2 plugins enable` says when a plugin needs it and it is off. The
+  dashboard starts it once on open, and again after the Plugins screen changes
+  something, if it is needed and not running. A failure shows on the status
+  line and is not retried until the next change. The header shows `· host off`
+  in the warning colour while it is needed and not running, and nothing when
+  no plugin needs it. On the Plugins screen, `h` starts or stops it. Quitting
+  the dashboard never stops it.
+- **Where.** It runs in a tmux session that mv2 owns, so it outlives the shell
+  that started it. Its lock (held while it runs), status and log are under
+  `state/plugins/host/` of the top-level universe. There is one per top-level
+  universe tree.
+- **Stopping.** It exits once no plugin needs it, or on `mv2 plugins host
+  stop`, and stops its workers first.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own
@@ -396,8 +412,8 @@ So the host is a general **supervisor** for plugins' long-running work:
   stopped with the reason in `mv2 plugins` and the dashboard header.
 - **Events.** The supervisor tails the journals (see above) and hands each
   worker the events its plugin subscribed to, keeping each plugin's cursor.
-- **Stopping.** Disabling the last such plugin stops the host. Disabling one
-  plugin stops only its worker.
+- Disabling one plugin stops only its worker. Turning it off and on again gives
+  a worker that was left stopped a fresh start.
 
 Most plugins never touch the host: a column, a command, a status item, a launch
 contribution, a settings screen or a harness extension need none of this.

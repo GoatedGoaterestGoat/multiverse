@@ -413,6 +413,8 @@ def main():
             startup_checked = True
             finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
             update_runtime(agent_dir, launch.name, startup_checked=True)
+            from multiverse.runtime.lifecycle import note_ready
+            note_ready(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)
             code = process.wait()
         ending = runtime(agent_dir).get('ending_at')
         remove_wrapper = not ending and (startup_checked or code in (-signal.SIGINT, 130))
@@ -423,6 +425,11 @@ def main():
         update_runtime(agent_dir, launch.name,
                        state="stopped" if code == 0 or ending else "failed",
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
+        # Once, here, where the process's end is known; later cleanup writes record nothing.
+        from multiverse.runtime.lifecycle import _event
+        _event(agent_dir, 'agent.exited', launch.name, {
+            'state': "stopped" if code == 0 or ending else "failed", 'exit_code': code,
+            'reason': diagnostic.get('reason')})
         if watcher is not None:
             watcher.close()
             watcher = None

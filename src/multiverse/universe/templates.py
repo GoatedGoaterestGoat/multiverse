@@ -80,7 +80,24 @@ def create(destination, name, template="base", workdir=None):
     finally:
         if staging.exists():
             shutil.rmtree(staging)
+    # Its own journal, and its parent's for a subverse.
+    for scope in filter(None, (destination, _parent(destination))):
+        _event(scope, "universe.created", {"name": name, "path": str(destination), "template": str(template)})
     return destination
+
+
+def _parent(root):
+    candidate = root.parent.parent
+    return candidate if root.parent.name == "subverses" and (candidate / "universe.json").is_file() else None
+
+
+def _event(root, kind, data):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.emit(root, kind, None, None, data)
+    except Exception:
+        pass
 
 
 def refresh_plan(root, template=None, take=()):
@@ -181,4 +198,5 @@ def refresh_apply(root, plan):
     relative = os.path.relpath(source, template_source(plan["template"]))
     write(root / MANIFEST, {"schema": 1, "template": plan["template"],
                             "source": "" if relative == "." else Path(relative).as_posix(), "files": files})
+    _event(root, "refresh.applied", {"written": [c["path"] for c in writes]})
     return {"written": [c["path"] for c in writes], "trash": str(backup) if backup else None}

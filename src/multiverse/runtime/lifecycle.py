@@ -166,6 +166,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             with lock(root / "state" / ".agents.lock"):
                 check_available_name(root, name)
                 write(agent_dir / "properties.json", properties)
+            _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
               _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
@@ -258,6 +259,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                attempts=[*tracking.get('attempts', []), {'state': 'unknown',
                                    'reason': 'Resume registered; awaiting native process startup',
                                    'launch_id': launch_id, 'at': now()}])
+            # Before the runner is released, so ready and exited never come before launched.
+            _launched(root, agent_dir, launch_id, command, "wake" if resume_message_id is not None else mode, properties)
             (launch / "ready").touch()
         except Exception as error:
             if resume_message_id is not None and not (launch / 'ready').exists():
@@ -381,6 +384,76 @@ def launch_result(root, agent_dir):
             'session': asdict(SessionHandle.from_records(properties, facts, agent_dir))}
 
 
+def _event(agent_dir, kind, launch=None, data=None, properties=None):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.for_agent(agent_dir, kind, launch, data, properties)
+    except Exception:
+        pass
+
+
+def _launched(root, agent_dir, launch_id, command, mode, properties):
+    """agent.launched: how it launched and which plugins it loaded. Never fails the launch."""
+    try:
+        loaded = plugins_record(root, command)["plugins"]
+        _event(agent_dir, "agent.launched", launch_id, {
+            "mode": mode, "native_mode": (command.native_mode or {}).get("mode"),
+            "plugins": sorted(name for name, entry in loaded.items()
+                              if isinstance(entry, dict) and entry.get("state") == "loaded")}, properties)
+    except Exception:
+        pass
+
+
+def launch_ready(adapter, properties, facts, agent_dir, request, live, *, include_delivery=True):
+    """Whether a launch is ready: no launch error and no lost relay, running with its process in a live pane,
+    past its startup check, attached as its adapter requires (the bridge registered, the binding validated)
+    and, with `include_delivery`, its startup messages delivered. wait_ready and the agent.ready event use
+    this one predicate; wait_ready checks the first two itself first, to say why."""
+    if facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost':
+        return False
+    running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+               and facts.get('startup_checked', True))
+    if not running:
+        return False
+    session = SessionHandle.from_records(properties, facts, agent_dir)
+    if ('attachment' not in facts and 'attachment' not in request
+            and request.get('rpc_proxy') and session.endpoint):
+        session = replace(session, attachment=native.legacy_attachment(request.get('shared_service')))
+    ready = native.attachment_ready(adapter, session)
+    return ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
+
+
+def note_ready(root, agent_dir, launch_id):
+    """Record agent.ready once, the first time this launch passes launch_ready. Never raises.
+
+    Called by the processes that change readiness (the runner after its startup
+    check, startup delivery once done), outside their locks. The pane's liveness is
+    observed as wait_ready observes it. A marker in the launch's directory, created
+    exclusively, makes it once per launch.
+    """
+    try:
+        from ..plugins import events
+        launch = agent_dir / 'launches' / launch_id
+        marker = launch / 'ready-event'
+        if marker.exists() or not events.subscribers(root, 'agent.ready'):
+            return
+        properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+        if facts.get('launch_id') != launch_id:
+            return
+        adapter = harnesses.load(root, properties['harness'])
+        live = observe(properties, facts)['live']
+        if not launch_ready(adapter, properties, facts, agent_dir, read(launch / 'request.json'), live):
+            return
+        try:
+            os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            return
+        _event(agent_dir, 'agent.ready', launch_id, {}, properties)
+    except Exception:
+        pass
+
+
 def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
@@ -396,15 +469,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         if (facts.get('native_relay') or {}).get('state') == 'lost':
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
-        running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
-                   and facts.get('startup_checked', True))
-        session = SessionHandle.from_records(result, facts, agent_dir)
-        if ('attachment' not in facts and 'attachment' not in request
-                and request.get('rpc_proxy') and session.endpoint):
-            session = replace(session, attachment=native.legacy_attachment(request.get('shared_service')))
-        ready = running and native.attachment_ready(adapter, session)
-        ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
-        if ready:
+        if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
             return {**result, 'ok': True, 'ready': True}
         error = None
         if facts.get('state') == 'failed' or live in ('ending', 'stopped', 'dormant'):
@@ -523,6 +588,8 @@ def kill(root, reference):
             update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now(),
                            error=cancellation.reason if cancellation and cancellation.state != 'ok' else None,
                            native_cancellation=cancellation.to_dict() if cancellation else None)
+        _event(agent_dir, "agent.killed", launch_id,
+               {"native_cancellation": cancellation.state if cancellation else "ok"}, properties)
         # Receipt IDs remain internal; callers need counts and the native result.
         details = (cancellation.value or {}) if cancellation else {}
         return {'id': agent_dir.name, 'state': 'dormant', 'native_cancellation': {

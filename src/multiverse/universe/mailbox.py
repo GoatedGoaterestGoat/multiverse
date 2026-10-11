@@ -24,7 +24,18 @@ def append_message(agent_dir, text, sender, delivery="inbox-only", *, target_ses
             out.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
             out.flush()
             os.fsync(out.fileno())
+    sender = {key: sender.get(key) for key in ("name", "agent_id", "plugin") if isinstance(sender, dict) and key in sender}
+    _event(agent_dir, "message.saved", {"id": message["id"], "delivery": delivery, "length": len(text), "from": sender})
     return message
+
+
+def _event(agent_dir, kind, data):
+    """A message event in the recipient's universe; never its text. Best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.for_agent(agent_dir, kind, None, data)
+    except Exception:
+        pass
 
 
 def _cursor(agent_dir):
@@ -132,9 +143,13 @@ def inbox(agent_dir, limit=50, *, after=None, all_messages=False, peek=False,
         # output leaves the page unread; concurrent consumers cannot overtake it.
         if present is not None:
             present(result)
-        if not all_messages and not peek and cursor > read_cursor:
+        consumed = not all_messages and not peek and cursor > read_cursor
+        if consumed:
             write(agent_dir / 'inbox.cursor', cursor)
-        return result
+    if consumed and messages:
+        # Inbox-only messages read and marked read, after a successful present.
+        _event(agent_dir, "message.read", {"count": len(messages)})
+    return result
 
 
 def message_record(agent_dir, message_id):
@@ -155,9 +170,19 @@ def update_message(agent_dir, message_id, **changes):
         if not any(m['id'] == message_id for _, m in records):
             raise ValueError('Message does not belong to this recipient inbox')
         states = _states(agent_dir)
-        states[message_id] = {**states.get(message_id, {}), **changes}
+        before = states.get(message_id, {})
+        states[message_id] = after = {**before, **changes}
         write(agent_dir / 'inbox-state.json', states)
-        return states[message_id]
+    # Transitions only, each once: accepted, then (maybe later) confirmed in the transcript; or a definite failure.
+    if after.get('submission_state') == 'accepted' and before.get('submission_state') != 'accepted':
+        _event(agent_dir, "message.delivered", {"id": message_id, "stage": "accepted"})
+    if after.get('transcript_confirmed_at') and not before.get('transcript_confirmed_at'):
+        _event(agent_dir, "message.delivered", {"id": message_id, "stage": "confirmed"})
+    if after.get('submission_state') == 'failed' and before.get('submission_state') != 'failed':
+        attempts = after.get('attempts') or [{}]
+        reason = attempts[-1].get('reason') if isinstance(attempts[-1], dict) else None
+        _event(agent_dir, "message.failed", {"id": message_id, "reason": reason})
+    return after
 
 
 def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False):

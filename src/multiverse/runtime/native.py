@@ -373,6 +373,9 @@ def flush_startup(root, directory, launch_id, error=None):
                      and message['tracking']['submission_state'] == 'pending']
         for message_id in batch:
             deliver(root, directory.name, message_id)
+    # Optional, so outside the send and launch locks, after the startup batch.
+    from .lifecycle import note_ready
+    note_ready(root, directory, launch_id)
 
 
 def deliver(root, reference, message_id, retry=False, check=False):

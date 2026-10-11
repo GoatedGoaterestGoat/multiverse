@@ -121,14 +121,18 @@ class JournalTest(PluginTestCase):
             "import fcntl, sys, time; h = open(sys.argv[1], 'a'); fcntl.flock(h, fcntl.LOCK_EX); "
             "print('held', flush=True); time.sleep(30)", str(events.directory(self.root) / ".lock")],
             stdout=subprocess.PIPE, text=True)
-        self.addCleanup(holder.kill)
+
+        def stop():
+            holder.kill()
+            holder.wait()
+            holder.stdout.close()
+        self.addCleanup(stop)
         self.assertEqual(holder.stdout.readline().strip(), "held")
         started = time.monotonic()
         self.assertIsNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"}))
         self.assertLess(time.monotonic() - started, 2)
         self.assertIn("dropped: the journal was busy", (self.root / "state/plugins/events.log").read_text())
-        holder.kill()
-        holder.wait()
+        stop()
         self.assertIsNotNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"}))
 
     def test_sequence_numbers_survive_a_crash_and_a_torn_line(self):
@@ -278,5 +282,8 @@ class HostCommandTest(PluginTestCase):
         events.emit(child, "agent.status", {"id": "a", "name": "w"})
         summary = tool.run(child, plugin_action="events", prune=True)
         self.assertEqual((summary["segments"], summary["newest_seq"], summary["pruned"]), (1, 1, []))
+        enabled = tool.run(child, plugin_action="enable", name="listener")
+        self.assertEqual((enabled["needs_host"], enabled["host_running"]), (True, False))
+        self.assertIn("mv2 plugins host start", tool.text("enable", enabled))
         with self.assertRaisesRegex(ValueError, "start, stop, status|status, start, stop"):
             tool.run(child, plugin_action="host", name="restart")

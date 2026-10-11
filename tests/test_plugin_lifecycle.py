@@ -48,7 +48,8 @@ class PluginLaunchTest(NativeBackendTest):
         plugins.mkdir(parents=True)
         (plugins / "plugin.json").write_text(json.dumps({
             "schema": 1, "name": "guard", "version": "0.1.0", "api": "1.1", "module": "plugin",
-            "extends": ["statusline", "capabilities", "usage"], "statusline": {"trees": {"claude": True}}}))
+            "extends": ["statusline", "capabilities", "usage", "events"], "statusline": {"trees": {"claude": True}},
+            "events": ["agent.*"]}))
         (plugins / "plugin.py").write_text(PLUGIN)
         environment = {key: value for key, value in os.environ.items() if key != "MV2_PLUGINS"}
         environment.update(HOME=home.name, MV2_PLUGIN_PATH=str(plugins.parent))
@@ -199,6 +200,41 @@ class PluginRecordTest(PluginLaunchTest):
                 facts, request = self.launched(f"malformed-{len(str(record))}", record, fallback)
                 self.assertEqual(facts["plugins"], EMPTY)
                 self.assertEqual(request["fallback"]["plugins"], EMPTY)
+
+    def agent_events(self, agent_id):
+        from multiverse.plugins import events
+        return [event for event in events.read(self.root, 0)[0] if (event.get("agent") or {}).get("id") == agent_id]
+
+    def test_created_then_launched_before_the_runner_is_released(self):
+        facts, _ = self.launched("evented")
+        directory = next(path.parent for path in (self.root / "state/agents").glob("*/properties.json")
+                         if read(path)["name"] == "evented")
+        found = self.agent_events(directory.name)
+        self.assertEqual([event["type"] for event in found], ["agent.created", "agent.launched"])
+        self.assertEqual(found[1]["launch"], facts["launch_id"])
+        self.assertEqual(found[1]["data"], {"mode": "spawn", "native_mode": None, "plugins": []})
+        write(directory / "runtime.json", {**agents.runtime(directory), "state": "stopped"})
+        with patch.object(lifecycle, "observe", return_value={"live": "dormant"}):
+            resumed = lifecycle.start(self.root, resume=directory.name)
+        self.addCleanup(shutil.rmtree, Path("/tmp") / ("mv2-native-" + resumed["runtime"]["launch_id"]), True)
+        latest = self.agent_events(directory.name)[-1]
+        self.assertEqual((latest["type"], latest["data"]["mode"], latest["launch"]),
+                         ("agent.launched", "resume", resumed["runtime"]["launch_id"]))
+
+    def test_the_runner_records_one_exit(self):
+        launch, proxy = self.fallback_fixture(False, False)
+        process = Mock(pid=123)
+        process.poll.return_value = process.wait.return_value = 0
+        with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
+             patch.object(rpc, "LaunchProxy", return_value=proxy), \
+             patch.object(runner.subprocess, "Popen", return_value=process), \
+             patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
+             patch.object(runner, "launch_diagnostic", return_value={}):
+            self.assertEqual(runner.main(), 0)
+        exits = [event for event in self.agent_events(self.result["id"]) if event["type"] == "agent.exited"]
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0]["data"], {"state": "stopped", "exit_code": 0, "reason": None})
+        self.assertEqual(exits[0]["launch"], self.launch)
 
     def test_usage_is_adjusted_with_the_launch_it_was_measured_in(self):
         measured = {"native_session_id": "n", "total_tokens": 5}
