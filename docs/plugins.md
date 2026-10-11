@@ -233,7 +233,7 @@ each process that needs it:
 | --- | --- | --- |
 | `mv2 COMMAND` | One command | The command itself when it is a plugin's. Doctor checks. Launch contributions, since spawn, resume and wake run here. Catalog entries. |
 | Dashboard | While open | UI extension points. Launch contributions for launches it starts. Doctor. |
-| Plugin host | Long-lived, optional | Services (the remote control's server) and event handlers. |
+| Plugin host | Long-lived, only while a plugin needs it | Event handlers and services, one worker process per plugin (see [The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)). |
 | Plugin helper | One call | `python -m multiverse.plugins run NAME ACTION`, which harness extensions call, as the mod calls `python -m multiverse.compaction install` today. |
 | Agent runner | One launch | Nothing in v1. A plugin cannot crash or slow a runner. Runner-side observers can come later if a real use needs them. |
 | Harness (Claude, Pi) | One launch | The plugin's harness extension, in the harness's own language and API. |
@@ -338,18 +338,58 @@ state/events/
 - **Removal.** A subverse's journal is part of its state, so `mv2 remove` and
   `move` carry it along like the rest.
 
-### The plugin host
+### The plugin host: where long-running plugin code lives
 
-`mv2 plugins host start` runs one host per top-level universe tree in a tmux
-session that mv2 owns and tags like an agent pane. Its PID and lock are under
-`state/plugins/host/`. `stop`, `status` and the dashboard header (`host ✓`) all
-use it. It starts only when a plugin that is on declares a service or event
-handler. `mv2 plugins enable` offers to start it, and the dashboard starts it
-on open if it is needed and not running. It never needs to run for compaction,
-status items or anything else in this document except handlers and services. A
-crashing handler is logged and skipped. A crashing service is restarted with
-backoff, at most 3 times in 5 minutes, then left stopped with the reason in
-`mv2 plugins`.
+Everything mv2 runs today is short-lived or tied to something else: a command
+ends when it prints, the dashboard runs only while someone has it open, and a
+runner lives and dies with one agent. mv2 has no daemon. Most plugin code fits
+those processes. A column runs inside the dashboard, a launch contribution
+inside the spawn, a status item is written by whoever knows the value.
+
+Two extension points are different, whatever the plugin does with them:
+
+- **`mv.events.on`:** code that should run *because something happened*. An
+  agent exited, a message was delivered, an agent reported `blocked`. The
+  event happened in some other process (a runner, the mod's `runtime_update`
+  subprocess, a `send` from another agent), and nobody is waiting on the
+  handler.
+- **`mv.service`:** code that should keep running *on its own*. It listens on a
+  socket, watches a directory, polls an outside system on a timer, or holds a
+  connection open.
+
+Both need a process that is alive when no command is running and the dashboard
+is closed. The alternatives each have a real cost:
+
+| Option | Problem |
+| --- | --- |
+| Run handlers inside the process that caused the event | That process is a runner, a CLI command or the mod's status report. A slow or broken handler would delay or break core operations, in a process whose environment belongs to another agent. |
+| Run them only in the dashboard | Nothing happens while it is closed. That is surprising, since agents keep working without it. |
+| Each plugin starts its own background process | Every plugin re-solves starting once, locking, logging, restarting after a crash and stopping. `mv2` can neither show nor stop them. |
+| **One supervisor that mv2 owns** (proposed) | One more process, but only when a plugin needs one. |
+
+So the host is a general **supervisor** for plugins' long-running work:
+
+- **Starting.** It runs only while some plugin that is on in its universe tree
+  registers an event handler or a service. With none, it is never started.
+  `mv2 plugins enable` starts it when it becomes needed, and the dashboard
+  starts it on open if it is needed and not running. `mv2 plugins host
+  start|stop|status` control it by hand.
+- **Where.** It runs in a tmux session that mv2 owns and tags like an agent
+  pane, so it outlives the shell that started it, and `mv2` can find, show and
+  stop it. Its lock, PID and log are under `state/plugins/host/`. There is one
+  per top-level universe tree.
+- **Isolation.** The supervisor itself loads no plugin code. Each plugin with
+  long-running work gets its own worker process, which loads that plugin
+  alone. A plugin that blocks, leaks memory or crashes affects only its own
+  worker: it is restarted with backoff, at most 3 times in 5 minutes, then left
+  stopped with the reason in `mv2 plugins` and the dashboard header.
+- **Events.** The supervisor tails the journals (see above) and hands each
+  worker the events its plugin subscribed to, keeping each plugin's cursor.
+- **Stopping.** Disabling the last such plugin stops the host. Disabling one
+  plugin stops only its worker.
+
+Most plugins never touch the host: a column, a command, a status item, a launch
+contribution, a settings screen or a harness extension need none of this.
 
 ## The API
 
@@ -1123,17 +1163,21 @@ multiverse-v2/
 
 ## Phases
 
+The mv2 side comes first and is finished before any plugin is moved or written
+against it. Compaction and the remote control come last.
+
 | Phase | Lands | Behaviour change |
 | --- | --- | --- |
-| **1. Foundation** | `multiverse.plugins` (discovery, manifest, `plugins.json`, trust, loader, failure boundaries), `api` v1 client and utilities, `mv2 plugins` list/info/enable/disable/check/trust, extension points for CLI, catalog, doctor, dashboard columns/panels/inspector/theme/keys/screens/settings, `testing` helpers, `hello-column` | None without plugins. `cli.py`'s "no plugin discovery" note goes. |
-| **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, the Codex contract (allowlisted config, instructions, MCP servers on spawn, with the bridge's `thread/start` transform), `runtime.json` `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
-| **3. Compaction** | Steps 2 to 8 above, with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
-| **4. Events and host** | Event journal with segments and retention, emitters, the plugin host, `notifier`, `cost-item`, and `remote` in its own repository (off by default) | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
-| **5. Distribution** | Entry points, `mv2 plugins new` scaffold, per-subverse UI with plugin panels in portals, API 1.0 frozen | None |
+| **1. Foundation** | `multiverse.plugins`: discovery, manifest, `plugins.json`, `plugin-settings/`, trust, loader, failure boundaries. `api` v1 client and utilities. `mv2 plugins` list/info/enable/disable/settings/check/trust. Extension points for CLI, catalog, bootstrap, doctor, dashboard columns, panels, inspector, theme, keys, screens and settings, plus the Plugins screen. `testing` helpers. The `hello-column` example | None without plugins. `cli.py`'s "no plugin discovery" note goes. |
+| **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, the Codex contract (allowlisted config, instructions, MCP servers on spawn, with the bridge's `thread/start` transform), `runtime.json`'s `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
+| **3. Events and host** | The event journal with segments, retention and emitters. The host supervisor with per-plugin workers. Services. The `cost-item` and `notifier` examples | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
+| **4. Distribution** | Checkout plugins (`plugins/*` submodules), Python entry points, `mv2 plugins install`, `mv2 update` updating initialized submodules, `mv2 plugins migrate`, per-subverse UI with plugin panels in portals, API 1.0 frozen | None |
+| **5. Compaction** | Steps 2 to 8 of [Moving compaction](#moving-compaction-into-a-plugin), with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
+| **6. Remote control** | Its own repository as the `plugins/remote` submodule, under [its rules](#what-the-remote-control-must-do) | None until enabled |
 
-Phases 1 to 3 are the ones that matter for the compaction goal. Phase 4 can run
-alongside phase 3, since it touches different code (`universe/`, `runtime/`
-emitters and a new host), if the user wants the remote control sooner.
+Step 1 of moving compaction (extension points, each with a core user) is the
+same work as phases 1 to 3. So by phase 5 the API is complete, and compaction
+tests it rather than shaping it.
 
 ### Other agents' areas this touches
 
@@ -1159,22 +1203,23 @@ Decided by the user on 2026-10-11:
   plugin has its own settings file in a fixed layout ([Settings](#settings)),
   and compaction moves from `compaction.json` to it with a migration.
 - **Separate repositories:** compaction and the remote control are versioned in
-  their own repositories, included as optional submodules.
+  their own private repositories under `GoatedGoaterestGoat`, included as
+  optional submodules. Their names are not chosen yet.
 - **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
   extensions. Its contract is in [Codex](#codex).
+- **Universe plugins:** allowed, loaded only once trusted at their exact
+  content.
+- **Order:** the whole mv2 side first; compaction and the remote control last
+  ([Phases](#phases)).
+- **Permissions:** declared and enforced at the API, with no sandbox.
+- **The host:** the design must stay general, not shaped by one plugin. The
+  host is now described as the general place for event handlers and services
+  ([The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)),
+  for the user to confirm.
 
-Still open (recommendation first):
+Still open:
 
-1. **Repositories.** Which GitHub owner (the same as mv2's,
-   `GoatedGoaterestGoat`?), which names (`mv2-compaction`, `mv2-remote`), private
-   or public, and whether to keep compaction's history (recommended)?
-2. **Universe plugins.** Allow `<universe>/plugins/` with per-user trust pinned
-   to content (recommended)? Or allow only bundled, checkout, personal and
-   installed plugins?
-3. **Plugin host.** Run it as a long-lived tmux-hosted process, started on
-   demand (recommended, so the remote control and notifier work without the
-   dashboard)? Or run handlers only while the dashboard is open?
-4. **Order.** Foundation, then harness side, then compaction, then
-   events/host/remote (recommended)? Or bring the remote control forward?
-5. **Permissions.** Are declared permissions enforced at the API facade, with
-   no sandbox, acceptable?
+1. The two repositories' names.
+2. Whether to keep compaction's history in its repository (recommended: yes,
+   with `git filter-repo`).
+3. The host, as now described.
