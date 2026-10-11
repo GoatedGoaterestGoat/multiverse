@@ -6,7 +6,7 @@ from textual.widgets import DataTable, Input, Static
 
 from ..display import clean
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH
+from .columns import COLUMNS, COMPACT_WIDTH, lookup
 from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
@@ -28,15 +28,16 @@ class FleetView:
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
         if available < COMPACT_WIDTH:
-            fields = [key for key in fields if COLUMNS[key].compact]
+            fields = [key for key in fields if lookup(key).compact]
         if self.draft:
             fields = list(self.draft.columns)
-        widths = {key: COLUMNS[key].width for key in fields}
+        widths = {key: lookup(key).width for key in fields}
         if available < 68:
             widths["name"] = 23
         if self.draft and "harness" in widths:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
-        flexible = next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
+        flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
+                    or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -60,7 +61,7 @@ class FleetView:
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else COLUMNS[field].render(row)
+        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else lookup(field).render(row)
                                   for field in fields]) for row in projected]
         if self.moving:
             for key, cells in rendered:
@@ -71,7 +72,7 @@ class FleetView:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
                 table.clear(columns=True)
                 for field in fields:
-                    table.add_column(COLUMNS[field].title, key=field, width=widths[field])
+                    table.add_column(lookup(field).title, key=field, width=widths[field])
                 for key, cells in rendered:
                     table.add_row(*cells, key=key)
                 if keys:

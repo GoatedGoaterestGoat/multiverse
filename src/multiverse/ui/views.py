@@ -42,10 +42,32 @@ def _read_view(root):
     if not isinstance(requested, list):
         requested = DEFAULT_COLUMNS
     requested = [COLUMN_ALIASES.get(key, key) if isinstance(key, str) else key for key in requested]
-    selected = list(dict.fromkeys(key for key in requested if isinstance(key, str) and key in COLUMNS))
+    # A plugin column stays named while its plugin is off: `plugin:key` always, a short key while a plugin uses it.
+    offered = _plugin_column_keys(root) if any(isinstance(key, str) and key not in COLUMNS for key in requested) else set()
+    selected = list(dict.fromkeys(key for key in requested if isinstance(key, str)
+                                  and (key in COLUMNS or key in offered or _qualified(key))))
     return {"columns": selected or DEFAULT_COLUMNS, "accent": accent,
-            "title": str(config.get("title", "")), "widgets": normalize_widgets(config.get("widgets", []))}
+            "title": str(config.get("title", "")), "widgets": normalize_widgets(config.get("widgets", []), root)}
 
 
 def columns(root):
     return view(root)["columns"]
+
+
+def _qualified(key):
+    plugin, separator, name = key.partition(":")
+    return bool(separator and plugin and name and re.fullmatch(r"[a-z][a-z0-9-]*", plugin))
+
+
+def _plugin_column_keys(root):
+    """Short and qualified keys of the columns plugins on anywhere in this tree register (two plugins' same key included)."""
+    try:
+        from .. import plugins
+        keys = set()
+        for scope in universe.tree(root):
+            for loaded in plugins.loader.active(scope):
+                for key in loaded.registrations.columns:
+                    keys.update((key, f"{loaded.name}:{key}"))
+        return keys
+    except Exception:
+        return set()

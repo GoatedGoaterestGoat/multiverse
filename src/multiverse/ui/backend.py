@@ -6,7 +6,9 @@ from ..harnesses import load as load_harness
 from ..store import read
 from ..tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse)
-from . import theme
+from .. import plugins
+from . import columns, theme
+from .columns import COLUMNS
 from .tree import counts, within
 from .views import view
 
@@ -30,6 +32,18 @@ class LocalBackend:
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
         members = list_agents.run(root, recursive=True, json=True)
+        plugin_columns = any(key not in COLUMNS for key in config["columns"])
+        if plugin_columns:
+            # Plugin columns: resolved and computed here, off the event loop. Each agent row says which
+            # plugins its universe has on and carries its plugin cells; rendering only reads them.
+            scopes = list(universe.tree(root))
+            columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"])
+            on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
+            for member in members:
+                member["plugins"] = on.get(str(member.get("universe")), [])
+                member["plugin_cells"] = columns.cells(member)
+        else:
+            columns.PLUGIN_COLUMNS = {}
         groups = []
         for scope in universe.tree(root):
             group = {"path": str(scope), "parent": str(scope.parent.parent) if scope != root else None,
@@ -39,6 +53,8 @@ class LocalBackend:
                 data, style = read(scope / "universe.json"), view(scope)
                 groups.append({**group, "name": style["title"] or data["name"],
                                "description": data.get("description", ""), "accent": style["accent"]})
+                if plugin_columns:
+                    groups[-1]["plugin_cells"] = columns.cells(groups[-1], group=True)
             except (OSError, ValueError, KeyError) as error:
                 groups.append({**group, "name": scope.name, "description": str(error),
                                "accent": theme.RED, "error": True})

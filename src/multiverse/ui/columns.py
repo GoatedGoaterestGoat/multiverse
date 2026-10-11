@@ -3,8 +3,13 @@
 A view's `columns` list names keys of COLUMNS. A column renders agent rows and
 group (subverse) rows separately; add one by registering a Column, or a
 subclass that overrides `agent` or `group_value`, under a new key.
+
+Plugins add columns too (`mv.dashboard.column`). COLUMNS stays core only;
+`lookup` also finds the plugin columns the current view named. The backend
+resolves them into PLUGIN_COLUMNS and computes their cells (`plugin_cells`) off
+the event loop, so rendering only reads what a row already carries.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from rich.text import Text
 
@@ -105,3 +110,99 @@ COLUMNS = {column.key: column for column in (
     TaskColumn("task", "Task", 48, flexible=True),
     Column("updated_at", "Updated", 26, compact=False),
 )}
+
+
+@dataclass(frozen=True)
+class PluginColumn(Column):
+    """A plugin's column. Rows carry its cells in `plugin_cells`, computed by `cells` off the event loop.
+
+    An agent whose universe has the plugin off, a failure, or a call that ran
+    out of time shows `—`; a failure counts as the plugin's error.
+    """
+    plugin: str = ""
+    loaded: object = field(default=None, compare=False, repr=False)
+    spec: object = field(default=None, compare=False, repr=False)
+
+    def agent(self, row):
+        value = (row.get("plugin_cells") or {}).get(self.key)
+        return Text("—" if value is None else value, style=theme.SUBTEXT0)
+
+    def group_value(self, row):
+        return (row.get("plugin_cells") or {}).get(self.key) or ""
+
+    def cell(self, row, group=False):
+        """This column's text for one snapshot row (agent, or subverse when `group`), or None."""
+        from ..plugins import loader
+        function = self.spec.group if group else self.spec.value
+        if function is None or (not group and self.plugin not in row.get("plugins", ())):
+            return None
+        value = loader.guard(self.loaded, f"column {self.spec.key}", function, dict(row),
+                             root=row.get("path") if group else row.get("universe"), default=None,
+                             timeout=loader.SYNCHRONOUS_BUDGET)
+        return None if value is None else clean(str(value))
+
+
+@dataclass(frozen=True)
+class MissingColumn(Column):
+    """A plugin column the view names that no plugin on here provides (or two do): `—` throughout."""
+
+    def agent(self, row):
+        return Text("—", style=theme.SUBTEXT0)
+
+
+# Plugin columns the current view names, by the key it names them with; replaced whole by the backend.
+PLUGIN_COLUMNS = {}
+
+
+def cells(row, group=False):
+    """{key: text} of every plugin column the view names, for one snapshot row."""
+    found = {}
+    for key, column in PLUGIN_COLUMNS.items():
+        if isinstance(column, PluginColumn):
+            value = column.cell(row, group)
+            if value is not None:
+                found[key] = value
+    return found
+
+
+def reset_plugin_caches():
+    """Forget resolved plugin columns and panels, after a plugin or its settings change."""
+    global PLUGIN_COLUMNS
+    PLUGIN_COLUMNS = {}
+    from . import panels
+    panels._plugin_panels.clear()
+
+
+def lookup(key):
+    """The column a view's key names: core first, then the plugin columns resolved for the view."""
+    return COLUMNS.get(key) or PLUGIN_COLUMNS.get(key) or MissingColumn(key, key.rpartition(":")[2][:12], 8)
+
+
+def resolve_plugin_columns(scopes, keys):
+    """PluginColumn (or MissingColumn) for each non-core key, from the plugins on in `scopes`.
+
+    `plugin:key` comes from that plugin wherever in the tree it is on; a short
+    key from the one plugin on in the first scope that registers it. Two
+    plugins with one short key make it a MissingColumn.
+    """
+    from .. import plugins
+    wanted = [key for key in keys if key not in COLUMNS]
+    found = {}
+    if not wanted:
+        return found
+    offered = [plugins.dashboard_columns(scope) for scope in scopes]
+    for key in wanted:
+        owner = next((columns[key] for columns in offered if key in columns), None)
+        if owner is None and ":" not in key:
+            claimed = {loaded.name for columns in offered for name, (loaded, _) in columns.items()
+                       if name.endswith(":" + key)}
+            if len(claimed) > 1:
+                found[key] = MissingColumn(key, key[:12], 8)
+                continue
+        if owner is None:
+            found[key] = MissingColumn(key, key.rpartition(":")[2][:12], 8)
+            continue
+        loaded, spec = owner
+        found[key] = PluginColumn(key, spec.title, spec.width, spec.compact, spec.flexible,
+                                  plugin=loaded.name, loaded=loaded, spec=spec)
+    return found
