@@ -118,8 +118,10 @@ def launch_settings(workspace):
     roots = (config.get('sandbox_workspace_write') or {}).get('writable_roots') or []
     if any(not isinstance(items, list) or any(not isinstance(item, str) for item in items) for items in (exclude, roots)):
         raise ValueError('Native exclusions and writable roots must be arrays of strings')
+    from .plugins import server_version
     return NativeResult('ok', value={'exclude': exclude, 'writable_roots': roots,
-                                    'workspace_policy': config.get('sandbox_workspace_write') or {}})
+                                    'workspace_policy': config.get('sandbox_workspace_write') or {},
+                                    'daemon_version': server_version(initialized.get('userAgent'))})
 
 
 def name_session(native_id, name):
@@ -170,6 +172,12 @@ class LaunchProtocol:
             raise ValueError('Native resume does not match this launch')
         else:
             params.update(self.settings.get('resume_permissions') or {})
+        from .plugins import config_tree, merge_config
+        defaults = self.settings.get('plugin_config') or {}
+        explicit = self.settings.get('plugin_user_config') or {}
+        if defaults or explicit:
+            native = config_tree((object_field(params, 'config') if params.get('config') is not None else {}).items())
+            params['config'] = merge_config(merge_config(defaults, native), explicit)
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         self.pending = value['id']

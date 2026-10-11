@@ -30,13 +30,16 @@ class CodexAdapter(ConfiguredAdapter):
     def _launch_command(self, context):
         command = super()._launch_command(context)
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
+        from .plugins import prepare
+        plain_additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
+        plain_command = plain_additions.apply(command)
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
-        plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
+        plain = replace(plain_command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain
         try:
-            bridge = self._bridge_command(command, context)
+            bridge = self._bridge_command(command, context, plain_additions.plan)
         except BridgeUnavailable as error:
             if setting is True:
                 raise
@@ -44,7 +47,7 @@ class CodexAdapter(ConfiguredAdapter):
         return replace(bridge, native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
                        fallback=plain if setting is None else None)
 
-    def _bridge_command(self, command, context):
+    def _bridge_command(self, command, context, cli_plan=None):
         settings = getattr(self, 'settings', {})
         args = [*settings.get('args', []), *settings.get(context.mode + '_args', [])]
         if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon' for arg in args):
@@ -55,12 +58,10 @@ class CodexAdapter(ConfiguredAdapter):
                 raise BridgeUnavailable('Codex bridge resume does not support writable-directory, profile or automatic-review overrides. '
                                         'Bridge resume uses native saved permissions and TUI settings. '
                                         'Use plain mode or put initial-only settings in spawn_args; configuration is unchanged.')
-        argv = list(command.argv)
         from .launch import remote_arguments
-        argv, bootstrap, roots, permissions = remote_arguments(argv, context)
-        position = argv.index('--') if '--' in argv else len(argv)
-        workspace_policy = {}
-        options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
+        # Validate explicit grants before contacting the native service.
+        remote_arguments(command.argv, context)
+        native_settings = {}
         if context.executor:
             try:
                 observed = context.executor.rpc(RpcSpec(context.endpoint.address,
@@ -81,9 +82,20 @@ class CodexAdapter(ConfiguredAdapter):
                                f'Only when other Codex work is idle, explicitly run `{restart}`, then retry resume. '
                                'mv2 does not restart shared daemons.')
                 raise BridgeUnavailable(reason)
-            excludes = list(observed.value['exclude'])
-            roots = list(dict.fromkeys([*observed.value['writable_roots'], *roots]))
-            workspace_policy = observed.value.get('workspace_policy', {})
+            native_settings = observed.value
+        from .plugins import prepare
+        additions = prepare(context, command, bridge=True, daemon=native_settings.get('daemon_version'),
+                            final=context.executor is not None, settings=getattr(self, 'settings', {}),
+                            harness_name=self.name, cli_plan=cli_plan)
+        command = additions.apply(command)
+        argv = list(command.argv)
+        argv, bootstrap, roots, permissions = remote_arguments(argv, context)
+        position = argv.index('--') if '--' in argv else len(argv)
+        workspace_policy = native_settings.get('workspace_policy', {})
+        options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
+        if context.executor:
+            excludes = list(native_settings['exclude'])
+            roots = list(dict.fromkeys([*native_settings['writable_roots'], *roots]))
             # Preserve literal per-launch exclusions as well as native project/user config.
             for index, arg in enumerate(argv[:position]):
                 value = argv[index + 1] if arg in ('-c', '--config') and index + 1 < len(argv) else (
@@ -109,6 +121,7 @@ class CodexAdapter(ConfiguredAdapter):
         if context.environment.get('CODEX_SQLITE_HOME'):
             storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
         return CommandSpec(tuple(argv), command.unset_env,
+                           environment=command.environment, plugins=command.plugins,
                            attachment=AttachmentSpec('service', 'binding', 'idle-existing-service', True, True),
                            control_endpoint=NativeEndpoint('unix-websocket', context.values['control_socket']),
                            rpc_proxy=RpcProxySpec(context.values['control_socket'],
@@ -117,6 +130,8 @@ class CodexAdapter(ConfiguredAdapter):
                                 'workspace': context.values['workspace'],
                                 'name': context.values['name'],
                                 'resume_permissions': permissions,
+                                'plugin_config': additions.session_config,
+                                'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
                                binds_session=True),
                            shared_service=SharedServiceSpec(
