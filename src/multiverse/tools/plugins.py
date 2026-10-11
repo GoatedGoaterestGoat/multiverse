@@ -123,7 +123,9 @@ def check(directory):
         used = {"cli": registered.commands, "bootstrap": registered.bootstrap, "doctor": registered.doctor,
                 "dashboard.column": registered.columns, "dashboard.panel": registered.panels,
                 "dashboard.inspector": registered.inspector, "dashboard.theme": registered.theme,
-                "dashboard.key": registered.keys, "dashboard.screen": registered.screens}
+                "dashboard.key": registered.keys, "dashboard.screen": registered.screens,
+                "launch": registered.launch or found.harnesses, "capabilities": registered.capabilities,
+                "usage": registered.usage, "statusline": found.statusline, "helper": registered.helpers}
         unused = sorted(point for point in found.extends if point in used and not used[point])
         if unused:
             notes.append(f"extends but registers nothing for: {', '.join(unused)}")

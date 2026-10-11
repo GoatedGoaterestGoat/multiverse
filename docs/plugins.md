@@ -466,10 +466,10 @@ for several plugins using it at once.
 | `catalog` (no call: listing it in `extends` is enough) | The plugin's own `skills/`, `commands/` and `workflows/`, laid out as in a universe, found without importing its code | The universe's own entry of the same kind and name shadows a plugin's. `name@plugin` or `kind/name@plugin` always reaches a plugin's entry, even a shadowed one. Two plugins with the same name are both listed, and a bare name is then ambiguous. `/multiverse` and the typeahead see them. |
 | `mv.bootstrap.line(text)` | One line appended to the agent bootstrap | Plugin lines follow the base bootstrap in plugin-name order, at most 2 lines and 300 characters per plugin, so the short bootstrap stays short. |
 | `mv.doctor.check(fn)` | `fn(universe)` returns problems as sentences | All run. Each is listed under its plugin. |
-| `mv.launch.contribute(harness_family, fn)` | `fn(LaunchInfo)` returns a `Contribution` (see [Harness extensions](#harness-extensions)) | All run in plugin-name order. Contributions merge by fixed rules. A plugin that fails or conflicts is left out of that launch, with the reason recorded, and the launch goes on. |
-| `mv.capabilities.add(name, fn)` | A capability key, `fn(session, info)` returns `api.Capability` | Core keys are reserved. One owner per key. |
-| `mv.usage.adjust(fn)` | `fn(session, usage)` returns usage with the context replaced and `estimated_reason` set | Applied in plugin-name order, after the adapter. Compaction is the only user so far. |
-| `mv.statusline.item(name, claude=…, tmux=…)` | A status-line item (see [Status lines](#status-lines)) | Each name has one owner. The order and on/off come from `statusline.json`, as today. |
+| `mv.launch.contribute(family, fn)` | `fn(LaunchInfo)` returns an `api.Contribution` or None, within 2 s (see [Harness extensions](#harness-extensions)). The manifest's `harnesses` adds plugin directories and extensions with no code. | All run in plugin-name order. Contributions merge by fixed rules, and the harness's own settings and environment never change. A plugin that fails or conflicts is left out of that launch, with the reason recorded, and the launch goes on. |
+| `mv.capabilities.add(name, fn)` | A capability key: `fn(SessionInfo)` returns `api.Capability(state, reason, mechanism)` | Core keys are reserved. One owner per key. |
+| `mv.usage.adjust(fn)` | `fn(SessionInfo, usage)` returns usage, for example with the context replaced and marked estimated | Applied in plugin-name order, after the adapter. Compaction is the only user so far. |
+| `statusline` in the manifest, and `mv.statusline.write(agent, name, text)` | A status-line item the manifest declares (`{"trees": {"claude": true, "tmux": false}}`), with its text written by whatever process knows it (see [Status lines](#status-lines)) | Each name has one owner, and core's names are refused. The order and on/off come from `statusline.json`, as today. |
 | `mv.dashboard.column(key, title, width, value, compact=, flexible=, group=)` | An agent column: `value(row)` for agent rows, `group(row)` for subverse rows | Core keys are reserved. A view can name it `KEY` while that is unique, and `plugin:KEY` always works. A view keeps a plugin column it names even while the plugin is off, and shows `—` for rows whose universe has it off. A short name that later becomes ambiguous shows `—`, and the clash is listed on the Plugins screen. |
 | `mv.dashboard.panel(type, panel)` | A view widget type for `views/*.json` | The same naming rule. A plugin panel is code, so it shows only where its plugin is on. Elsewhere it shows "needs plugin X". |
 | `mv.dashboard.inspector_fact(fn)` | A function in `AGENT_FACTS` | Core facts first, then plugins in name order. Each fact is wrapped so an error shows as one line. |
@@ -481,7 +481,7 @@ for several plugins using it at once.
 | `mv.events.emit(type, data)` | A `NAME.type` event in the journal | Namespaced. |
 | `mv.service(start, stop)` | A long-lived service in the host | Each plugin has its own services. |
 | `mv.harness.extension(family, key, factory)` | A harness-specific object that the plugin's own code looks up, such as compaction's `CompactionSource` for Claude | Private to the plugin. Other plugins cannot see it. |
-| `mv.helper(action, fn)` | An action for `python -m multiverse.plugins run NAME ACTION` | Private to the plugin. |
+| `mv.helper.action(name, fn)` | `fn(arguments)` returns an exit code, for `python -m multiverse.plugins run PLUGIN NAME ARGS…`, which a plugin's harness code runs with `$MV2_PYTHON` | Private to the plugin. |
 
 Every call into a plugin is wrapped. An exception drops that contribution for
 that call. It is logged to `state/plugins/NAME/errors.log`, `mv2 plugins` and

@@ -23,7 +23,13 @@ EXTENSION_POINTS = frozenset({
     "cli", "catalog", "bootstrap", "doctor",
     "dashboard.column", "dashboard.panel", "dashboard.inspector", "dashboard.theme",
     "dashboard.key", "dashboard.screen",
+    # API 1.1: the harness side.
+    "launch", "capabilities", "usage", "statusline", "helper",
 })
+FAMILIES = ("claude", "codex", "pi")
+# Status-line items core draws itself; a plugin's item takes another name.
+CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context"})
+VERSION = re.compile(r"\d+\.\d+\.\d+")
 PERMISSIONS = {
     "agents.read": "read this universe's agents: names, state, reported work, terminal tails and usage",
     "agents.control": "spawn, resume and kill agents in this universe",
@@ -40,7 +46,7 @@ PERMISSIONS = {
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings"}
+                "permissions", "commands", "settings", "harnesses", "statusline"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -58,6 +64,40 @@ class Settings:
 
 
 @dataclass(frozen=True)
+class HarnessEntry:
+    """One harness extension: for Claude a plugin directory (`dir`), for Pi an extension file
+    (`extension`), for Codex the fields of its contract (`fields`, checked by the Codex adapter).
+    Versions are inclusive bounds on the harness executable's (major, minor, patch)."""
+    family: str
+    min_version: tuple | None = None
+    max_version: tuple | None = None
+    path: str | None = None
+    needs_bridge: bool = True
+    fields: dict = field(default_factory=dict)
+
+    def fits(self, version):
+        """None when this harness version can take the entry, else why not."""
+        if self.min_version is None and self.max_version is None:
+            return None
+        if version is None:
+            return "the harness version could not be read"
+        shown = ".".join(map(str, version))
+        if self.min_version is not None and version < self.min_version:
+            return f"needs {self.family} {'.'.join(map(str, self.min_version))} or newer; this is {shown}"
+        if self.max_version is not None and version > self.max_version:
+            return f"needs {self.family} {'.'.join(map(str, self.max_version))} or older; this is {shown}"
+        return None
+
+
+@dataclass(frozen=True)
+class Item:
+    """A status-line item a plugin writes: its name and whether it shows by default on each line."""
+    name: str
+    claude: bool = True
+    tmux: bool = False
+
+
+@dataclass(frozen=True)
 class Manifest:
     name: str
     version: str
@@ -70,6 +110,8 @@ class Manifest:
     permissions: frozenset = frozenset()
     commands: dict = field(default_factory=dict)
     settings: Settings | None = None
+    harnesses: dict = field(default_factory=dict)  # family -> tuple of HarnessEntry
+    statusline: tuple = ()  # Item
 
     def permission_texts(self):
         """Each permission as words, for `mv2 plugins enable` and `info`."""
@@ -183,5 +225,64 @@ def _parse(directory, data):
             _inside(directory, settings["legacy"], "settings.legacy") if "legacy" in settings else None)
         if settings.legacy is not None and Path(settings.legacy).name != settings.legacy:
             raise ValueError("settings.legacy must be a file name at a universe's root")
+    harnesses = _harnesses(directory, data.get("harnesses", {}), permissions)
+    statusline = _statusline(data.get("statusline", {}), extends)
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
-                    frozenset(extends), frozenset(permissions), dict(commands), settings)
+                    frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline)
+
+
+def _version(value, what):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not VERSION.fullmatch(value):
+        raise ValueError(f'{what} must be "MAJOR.MINOR.PATCH", such as "2.1.292"')
+    return tuple(int(part) for part in value.split("."))
+
+
+def _harnesses(directory, value, permissions):
+    if not isinstance(value, dict):
+        raise ValueError("harnesses must map a harness family to a list of entries")
+    result = {}
+    for family, entries in value.items():
+        if family not in FAMILIES:
+            raise ValueError(f"harnesses: unknown harness family {family!r}; use {', '.join(FAMILIES)}")
+        if f"harness.{family}" not in permissions:
+            raise ValueError(f'harnesses.{family} needs the permission "harness.{family}"')
+        if not isinstance(entries, list) or not all(isinstance(entry, dict) for entry in entries):
+            raise ValueError(f"harnesses.{family} must be a list of objects")
+        found = []
+        for index, entry in enumerate(entries):
+            where = f"harnesses.{family}[{index}]"
+            bounds = (_version(entry.get("min_version"), f"{where}.min_version"),
+                      _version(entry.get("max_version"), f"{where}.max_version"))
+            if family == "codex":
+                found.append(HarnessEntry(family, *bounds, fields={key: item for key, item in entry.items()
+                                                                     if key not in ("min_version", "max_version")}))
+                continue
+            key = "dir" if family == "claude" else "extension"
+            unknown = set(entry) - {key, "min_version", "max_version", "needs_bridge"}
+            if unknown:
+                raise ValueError(f"{where}: unknown fields: {', '.join(sorted(unknown))}")
+            needs_bridge = entry.get("needs_bridge", True)
+            if not isinstance(needs_bridge, bool):
+                raise ValueError(f"{where}.needs_bridge must be true or false")
+            found.append(HarnessEntry(family, *bounds, _inside(directory, entry.get(key), f"{where}.{key}"), needs_bridge))
+        result[family] = tuple(found)
+    return result
+
+
+def _statusline(value, extends):
+    if not isinstance(value, dict):
+        raise ValueError("statusline must map item names to {\"claude\": true/false, \"tmux\": true/false}")
+    if value and "statusline" not in extends:
+        raise ValueError('statusline needs "statusline" in extends')
+    items = []
+    for name, lines in value.items():
+        check_name(name, f"statusline item {name!r}")
+        if name in CORE_ITEMS:
+            raise ValueError(f"statusline item {name!r} is one mv2 draws itself")
+        if not isinstance(lines, dict) or set(lines) - {"claude", "tmux"} or not all(
+                isinstance(flag, bool) for flag in lines.values()):
+            raise ValueError(f'statusline.{name} must be {{"claude": true/false, "tmux": true/false}}')
+        items.append(Item(name, lines.get("claude", True), lines.get("tmux", False)))
+    return tuple(items)

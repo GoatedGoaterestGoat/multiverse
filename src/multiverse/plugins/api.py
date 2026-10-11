@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
-from . import loader, settings as settings_files
+from . import harness, loader, settings as settings_files
+from .harness import Contribution, LaunchInfo, SessionInfo
 
 VERSION = loader.API_VERSION
 DELETE = settings_files.DELETE
@@ -143,6 +144,82 @@ class Dashboard(_Points):
         self._allow("dashboard.screen").screens[str(name)] = _reference(reference)
 
 
+@dataclass(frozen=True)
+class Capability:
+    """A capability's answer for one session: supported, unavailable or error, why, and how."""
+    state: str
+    reason: str = ""
+    mechanism: str | None = None
+
+    def __post_init__(self):
+        if self.state not in ("supported", "unavailable", "error"):
+            raise Error("A capability is supported, unavailable or error")
+
+
+class Launch(_Points):
+    def contribute(self, family, function=None):
+        """function(LaunchInfo) -> Contribution or None, for every launch of a `family` harness
+        (claude, codex or pi) in universes where the plugin is on. It runs in the process that
+        launches, within 2 s; it may not set MV2_* variables. Usable as a decorator factory."""
+        if function is None:
+            return lambda decorated: self.contribute(family, decorated)
+        registrations = self._allow("launch")
+        if family not in ("claude", "codex", "pi") or not callable(function):
+            raise Error("contribute(family, function): family is claude, codex or pi")
+        registrations.launch.setdefault(family, []).append(function)
+        return function
+
+
+class Capabilities(_Points):
+    def add(self, name, function=None):
+        """A capability `mv2 capabilities` reports for every agent here: function(SessionInfo) -> Capability.
+        Names mv2 answers itself are refused."""
+        if function is None:
+            return lambda decorated: self.add(name, decorated)
+        registrations = self._allow("capabilities")
+        if not isinstance(name, str) or not name or not callable(function):
+            raise Error("add(name, function) needs a capability name and a function")
+        registrations.capabilities[name] = lambda info: _capability(function(info))
+        return function
+
+
+def _capability(answer):
+    if not isinstance(answer, Capability):
+        raise TypeError("a capability function returns api.Capability")
+    return answer.state, answer.reason, answer.mechanism
+
+
+class Usage(_Points):
+    def adjust(self, function):
+        """function(SessionInfo, usage) -> usage: change what `mv2 get-usage` and the dashboard report,
+        after the harness has measured it. Return the record unchanged when there is nothing to do."""
+        self._allow("usage").usage.append(function)
+        return function
+
+
+class Statusline(_Points):
+    def write(self, agent, name, text):
+        """Show `text` as status-line item `name` for `agent` (an Agent, or its directory); empty removes it.
+        The item must be declared in plugin.json `statusline`."""
+        self._allow("statusline")
+        if name not in {item.name for item in self._loaded.manifest.statusline}:
+            raise Error(f'{self._loaded.name} writes status-line item {name!r}; declare it in plugin.json "statusline"')
+        harness.write_item(agent.directory if isinstance(agent, Agent) else agent, name, text)
+
+
+class Helpers(_Points):
+    def action(self, name, function=None):
+        """`python -m multiverse.plugins run PLUGIN NAME ARGS...` runs function(ARGS) -> exit code.
+        Harness extensions call mv2 this way. Usable as a decorator factory."""
+        if function is None:
+            return lambda decorated: self.action(name, decorated)
+        registrations = self._allow("helper")
+        if not isinstance(name, str) or not name or not callable(function):
+            raise Error("action(name, function) needs a name and a function")
+        registrations.helpers[name] = function
+        return function
+
+
 def _reference(value):
     if not isinstance(value, str) or ":" not in value:
         raise Error('Name dashboard code as "module:Class" inside the plugin')
@@ -201,6 +278,8 @@ class Plugin:
         self.cli, self.bootstrap, self.doctor = Cli(loaded), Bootstrap(loaded), Doctor(loaded)
         self.dashboard = Dashboard(loaded)
         self.settings = SettingsAccess(loaded)
+        self.launch, self.capabilities, self.usage = Launch(loaded), Capabilities(loaded), Usage(loaded)
+        self.statusline, self.helper = Statusline(loaded), Helpers(loaded)
 
     @property
     def process(self):
