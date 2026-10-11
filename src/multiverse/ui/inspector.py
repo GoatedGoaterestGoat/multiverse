@@ -13,6 +13,9 @@ from . import theme
 from .tree import within
 
 
+PLUGIN_FACTS_TIMEOUT = 5.0
+
+
 class Inspector(Vertical):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -22,11 +25,14 @@ class Inspector(Vertical):
         self.capturing = False
         self.requested = None
         self.follow_next = False
+        self.reading_plugins = False
+        self.plugin_revision = None
 
     def compose(self):
         yield Static("", id="inspect-name", markup=False)
         yield Static("", id="inspect-meta", markup=False)
         yield Static("", id="inspect-state", markup=False)
+        yield Static("", id="inspect-plugins", markup=False)
         yield Static("CURRENT WORK", id="inspect-label")
         yield Static("", id="inspect-work", markup=False)
         yield Static("", id="inspect-group", markup=False)
@@ -84,7 +90,39 @@ class Inspector(Vertical):
                 self.query_one("#preview", Static).update(Text('\n'.join(
                     clean(line) for line in (row.get('reason') or message).splitlines())))
         self.query_one("#inspect-state", Static).update(state)
+        if changed:
+            self.plugin_revision = None
+            self.show_plugin_lines([])
+        self.plugin_facts_if_needed()
         self.capture_if_needed()
+
+    def show_plugin_lines(self, lines):
+        widget = self.query_one("#inspect-plugins", Static)
+        widget.display = bool(lines)
+        widget.update(Text("\n".join(f"{clean(plugin)}: {clean(text)}" for plugin, text in lines), style=theme.SUBTEXT0))
+
+    def plugin_facts_if_needed(self):
+        """Plugin lines for an agent, read off the event loop once per scan; core facts show at once."""
+        row = self.row
+        revision = (self.generation, self.app.scan_count)
+        if row and row["kind"] == "agent" and not self.reading_plugins and revision != self.plugin_revision:
+            self.plugin_revision = revision
+            self.reading_plugins = True
+            self.read_plugin_facts(dict(row), self.generation)
+
+    @work(group="plugin-facts", exit_on_error=False)
+    async def read_plugin_facts(self, row, generation):
+        try:
+            lines = await asyncio.wait_for(
+                asyncio.to_thread(self.app.plugin_service.facts, Path(row["universe"]), row), PLUGIN_FACTS_TIMEOUT)
+        except Exception:  # a hung or failing plugin never reaches the inspector
+            lines = [("plugins", "unavailable")]
+        finally:
+            self.reading_plugins = False
+        if self.row and generation == self.generation:
+            self.show_plugin_lines(lines)
+        elif self.row:
+            self.plugin_facts_if_needed()
 
     def capture_if_needed(self):
         row = self.row

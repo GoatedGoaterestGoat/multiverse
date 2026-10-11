@@ -70,7 +70,7 @@ Footer { background: $mv-mantle; }
 .short.drawer #inspect-work { max-height: 1; }
 .drawer #inspect-group { margin-top: 0; }
 .narrow #totals { width: auto; }
-Form, Details, ArtifactPreview, CompactionScreen, AgentScreen { align: center middle; background: $mv-crust 75%; }
+Form, Details, ArtifactPreview, CompactionScreen, AgentScreen, PluginsScreen, PluginSettingsScreen { align: center middle; background: $mv-crust 75%; }
 #dialog { width: 72; max-width: 94%; height: auto; max-height: 90%; border: round $mv-teal; background: $mv-base; padding: 1 2; }
 #dialog-title { text-style: bold; height: auto; margin-bottom: 1; }
 #dialog-description { height: auto; color: $mv-subtext0; margin-bottom: 1; }
@@ -105,3 +105,12 @@ Form, Details, ArtifactPreview, CompactionScreen, AgentScreen { align: center mi
 #plan { height: 1fr; min-height: 4; }
 #plan-summary, #agent-follows, #agent-status { height: auto; color: $mv-subtext0; }
 #compaction-dialog .detail-title { height: 1; }
+#plugins-dialog { width: 92%; max-width: 100; height: 92%; border: round $mv-teal; background: $mv-base; padding: 0 1; }
+#plugins-dialog .detail-title { height: 1; }
+#plugins-table { height: auto; max-height: 50%; }
+#plugin-about { height: 1fr; margin-top: 1; scrollbar-size: 1 1; }
+#plugin-details { height: auto; color: $mv-subtext0; }
+#plugin-settings-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
+#plugin-settings-body { height: 1fr; scrollbar-size: 1 1; }
+#inspect-plugins { height: auto; max-height: 4; color: $mv-subtext0; }
+#inspect-plugins { display: none; }
