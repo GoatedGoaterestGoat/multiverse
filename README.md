@@ -191,6 +191,15 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 
 Mouse: click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
 
+### Plugins in the dashboard
+
+Plugins (see [plugins](docs/plugins.md)) can add table columns, widget types for views, inspector lines, a theme, keys and screens. A plugin that is off in a scope adds nothing there: its column shows `—` and its widget says which plugin it needs. With no plugin on, the dashboard looks and behaves as before.
+
+- **Plugins screen.** Open it from the command palette (Ctrl-p, "Plugins") for the selected group. It lists the plugins that scope sees with their state. Space turns the selected plugin on or off there, Enter opens its settings (its own screen, or fields generated from its settings schema; a blank field means the plugin's default), and `h` starts or stops the plugin host. Plugin screens appear in the palette as `plugin: name`.
+- **Plugin keys** are listed under PLUGINS in the `?` help, with any key two plugins both want and neither got. Core keys always win. A plugin key acts on the selected row and group, and says so when its plugin is off there.
+- **Inspector lines** from plugins follow the agent's own facts. A plugin that fails or takes more than a few seconds shows `plugin: unavailable` instead of holding up the dashboard.
+- **Header.** `N plugin errors` counts recent plugin failures and plugin workers the host left stopped. `host off` means a plugin needs the plugin host and it is not running. The dashboard starts the host when it opens if plugins need it; the host keeps running after the dashboard quits (`mv2 plugins host stop` stops it).
+
 Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to return to the dashboard that opened it. This also works when the dashboard runs inside tmux: the host terminal opens the agent client and reattaches to the exact dashboard pane when that client exits. The dashboard's selection/state and agent process remain alive. On the dashboard itself, detach works normally. Custom prefixes and bindings are preserved; uppercase L remains tmux's stock last-session action. Each universe can customize `views/default.json`:
 
 ```json
@@ -201,7 +210,7 @@ Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to r
 }
 ```
 
-The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Arbitrary view plugins and dashboard links remain follow-up work.
+The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Plugins can add table columns and widget types (see [plugins](docs/plugins.md)); dashboard links remain follow-up work.
 
 ## Messages, commands and prompts
 
