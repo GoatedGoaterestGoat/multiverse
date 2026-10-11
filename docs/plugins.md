@@ -248,8 +248,14 @@ starts as fast as now. `mv.process` says which process it is (`cli`,
 
 `mv2 COMMAND` reads `plugins.json` and the manifests, which are small JSON
 files. It imports a plugin's module only when the command needs it: a plugin
-command is resolved from `argv[1]` before argparse is built, and `mv2 --help`
-lists plugin commands from their manifests.
+command is found from the global options and the action before argparse is
+built (`-u` selects the universe, and everything after the action belongs to
+the command), and `mv2 --help` lists plugin commands from their manifests. The
+one exception is `mv2 NAME --help` for a plugin's command: its options come from
+its `configure`, so that help imports the plugin. A plugin command that fails
+in a way it did not mean to (anything but `ValueError`, `OSError`, `KeyError`
+or `RuntimeError`, the errors commands give on purpose) prints `mv2: plugin
+NAME: …` and exits 1, with the traceback in its `errors.log`.
 
 ### Seeing lifecycle events from any process
 
@@ -457,14 +463,14 @@ for several plugins using it at once.
 | Extension point | Registers | When several plugins use it |
 | --- | --- | --- |
 | `mv.cli.command(name, configure, run, cli_run=None)` | An `mv2 NAME` command with the `tools/` shape: `configure(parser)`, `run(root, **args)` returning a record, an optional `cli_run` for readable text | Core command names are reserved. Two plugins with one name: both refused, and `mv2 plugins` says so. |
-| `mv.catalog.directory(path)` | `skills/`, `commands/`, `workflows/` under the plugin | The universe's own entry of the same name shadows a plugin's. Two plugins' entries are both listed as `kind/name@plugin`. `/multiverse` and the typeahead see them. |
+| `catalog` (no call: listing it in `extends` is enough) | The plugin's own `skills/`, `commands/` and `workflows/`, laid out as in a universe, found without importing its code | The universe's own entry of the same kind and name shadows a plugin's. `name@plugin` or `kind/name@plugin` always reaches a plugin's entry, even a shadowed one. Two plugins with the same name are both listed, and a bare name is then ambiguous. `/multiverse` and the typeahead see them. |
 | `mv.bootstrap.line(text)` | One line appended to the agent bootstrap | Plugin lines follow the base bootstrap in plugin-name order, at most 2 lines and 300 characters per plugin, so the short bootstrap stays short. |
 | `mv.doctor.check(fn)` | `fn(universe)` returns problems as sentences | All run. Each is listed under its plugin. |
 | `mv.launch.contribute(harness_family, fn)` | `fn(LaunchInfo)` returns a `Contribution` (see [Harness extensions](#harness-extensions)) | All run in plugin-name order. Contributions merge by fixed rules. A plugin that fails or conflicts is left out of that launch, with the reason recorded, and the launch goes on. |
 | `mv.capabilities.add(name, fn)` | A capability key, `fn(session, info)` returns `api.Capability` | Core keys are reserved. One owner per key. |
 | `mv.usage.adjust(fn)` | `fn(session, usage)` returns usage with the context replaced and `estimated_reason` set | Applied in plugin-name order, after the adapter. Compaction is the only user so far. |
 | `mv.statusline.item(name, claude=…, tmux=…)` | A status-line item (see [Status lines](#status-lines)) | Each name has one owner. The order and on/off come from `statusline.json`, as today. |
-| `mv.dashboard.column(column)` | A `Column` subclass, under `NAME` or `plugin:NAME` | Core keys are reserved. Short names work while they are unique, and the `plugin:name` form always works. |
+| `mv.dashboard.column(key, title, width, value, compact=, flexible=, group=)` | An agent column: `value(row)` for agent rows, `group(row)` for subverse rows | Core keys are reserved. A view can name it `KEY` while that is unique, and `plugin:KEY` always works. A view keeps a plugin column it names even while the plugin is off, and shows `—` for rows whose universe has it off. A short name that later becomes ambiguous shows `—`, and the clash is listed on the Plugins screen. |
 | `mv.dashboard.panel(type, panel)` | A view widget type for `views/*.json` | The same naming rule. A plugin panel is code, so it shows only where its plugin is on. Elsewhere it shows "needs plugin X". |
 | `mv.dashboard.inspector_fact(fn)` | A function in `AGENT_FACTS` | Core facts first, then plugins in name order. Each fact is wrapped so an error shows as one line. |
 | `mv.dashboard.theme(colors)` | A full or partial palette by `theme.py` name | Only the theme `plugins.json` names is applied. |
@@ -477,12 +483,16 @@ for several plugins using it at once.
 | `mv.harness.extension(family, key, factory)` | A harness-specific object that the plugin's own code looks up, such as compaction's `CompactionSource` for Claude | Private to the plugin. Other plugins cannot see it. |
 | `mv.helper(action, fn)` | An action for `python -m multiverse.plugins run NAME ACTION` | Private to the plugin. |
 
-Every call into a plugin is wrapped. An exception or a timeout (2 s for
-synchronous points such as launch, capabilities, usage, doctor, inspector and
-status) drops that contribution for that call. It is logged to
-`state/plugins/NAME/errors.log`, `mv2 plugins` and `doctor` show it, and the
-dashboard header counts it (`1 plugin error`). No plugin error can stop a
-launch, a send, `list` or the dashboard.
+Every call into a plugin is wrapped. An exception drops that contribution for
+that call. It is logged to `state/plugins/NAME/errors.log`, `mv2 plugins` and
+`doctor` show it, and the dashboard header counts it (`1 plugin error`). No
+plugin error can stop a launch, a send, `list` or the dashboard.
+
+What may be slow runs off the dashboard's event loop, with a time budget.
+Inspector lines are computed in the inspector's capture worker and appear when
+they arrive. Key actions run in a worker thread. Column values are called for
+every row on every refresh, so they must be quick and read only the row.
+Phase 2 gives launch, capabilities and usage contributions a 2 s budget.
 
 ## Harness extensions
 
@@ -1212,14 +1222,16 @@ Decided by the user on 2026-10-11:
 - **Order:** the whole mv2 side first; compaction and the remote control last
   ([Phases](#phases)).
 - **Permissions:** declared and enforced at the API, with no sandbox.
-- **The host:** the design must stay general, not shaped by one plugin. The
-  host is now described as the general place for event handlers and services
-  ([The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)),
-  for the user to confirm.
+- **The host:** a long-running host, as the general place for any plugin's
+  event handlers and services, not shaped by one plugin
+  ([The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)).
+  The dashboard often runs unattended for hours, but it cannot be the host:
+  agents keep working when it is closed, it may be showing another universe,
+  and plugin code must not stall its screen. It starts the host instead when a
+  plugin needs one.
 
 Still open:
 
 1. The two repositories' names.
 2. Whether to keep compaction's history in its repository (recommended: yes,
    with `git filter-repo`).
-3. The host, as now described.

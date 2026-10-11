@@ -1,0 +1,427 @@
+"""The mv2 plugin API, version 1. A plugin imports this module and nothing else from `multiverse`.
+
+    from multiverse.plugins import api
+
+    def register(mv: api.Plugin):
+        mv.dashboard.column("uptime", "Up", 8, lambda row: ...)
+
+`register(mv)` runs once in each process that loads the plugin (`mv.process`:
+cli, dashboard, host or helper). It only declares: commands, columns, keys and
+the rest are called later, each inside an error boundary, so a failing plugin
+loses its own contribution and nothing else. Name dashboard screens and panels
+by "module:Class" inside the plugin, so the command line never imports Textual.
+
+The client (`mv.universe()`, `Universe`, `Agent`) is mv2's own operations, the
+same functions `mv2` and the dashboard call. What a plugin may do follows its
+manifest's `permissions`: a call it did not ask for raises `Error`. That keeps
+a plugin's reach readable; it is not a sandbox.
+
+Versioning: VERSION's minor rises when something is added, its major when
+something changes or goes. Fields of `record` (an operation's full result)
+are not covered.
+"""
+from dataclasses import dataclass, field
+import os
+from pathlib import Path
+
+from . import loader, settings as settings_files
+
+VERSION = loader.API_VERSION
+DELETE = settings_files.DELETE
+BOOTSTRAP_LINES = 2
+BOOTSTRAP_CHARACTERS = 300
+
+
+class Error(ValueError):
+    """An operation a plugin asked for could not be done; the message says why."""
+
+
+def _call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except Error:
+        raise
+    except (OSError, ValueError, KeyError, RuntimeError) as error:
+        raise Error(str(error)) from error
+
+
+class _Points:
+    """One group of extension points; each method checks the manifest's `extends` first."""
+
+    def __init__(self, loaded):
+        self._loaded = loaded
+
+    def _allow(self, point):
+        if point not in self._loaded.manifest.extends:
+            raise Error(f'{self._loaded.name} registers {point} but its plugin.json does not list it in "extends"')
+        return self._loaded.registrations
+
+
+class Cli(_Points):
+    def command(self, name, configure, run, cli_run=None):
+        """An `mv2 NAME` command, shaped like the tools: configure(parser), run(root, **arguments)
+        returning a record, and optionally cli_run(root, **arguments) returning readable text."""
+        registrations = self._allow("cli")
+        if name not in self._loaded.manifest.commands:
+            raise Error(f'{self._loaded.name} registers command {name!r}; declare it in plugin.json "commands"')
+        if not callable(configure) or not callable(run) or (cli_run is not None and not callable(cli_run)):
+            raise Error("configure, run and cli_run must be functions")
+        registrations.commands[name] = loader.Command(name, configure, run, cli_run)
+
+
+class Bootstrap(_Points):
+    def line(self, text):
+        """One line appended to every agent's bootstrap in universes where the plugin is on.
+
+        At most 2 lines and 300 characters per plugin: the bootstrap stays short."""
+        registrations = self._allow("bootstrap")
+        if not isinstance(text, str) or len(text.strip().splitlines()) != 1:
+            raise Error("A bootstrap line must be one line of text")
+        lines = [*registrations.bootstrap, text.strip()]
+        if len(lines) > BOOTSTRAP_LINES or sum(map(len, lines)) > BOOTSTRAP_CHARACTERS:
+            raise Error(f"A plugin adds at most {BOOTSTRAP_LINES} bootstrap lines and "
+                        f"{BOOTSTRAP_CHARACTERS} characters")
+        registrations.bootstrap.append(text.strip())
+
+
+class Doctor(_Points):
+    def check(self, function):
+        """function(universe: Universe) -> list of problems as sentences, for `mv2 doctor`. Usable as a decorator."""
+        self._allow("doctor").doctor.append(function)
+        return function
+
+
+class Dashboard(_Points):
+    def column(self, key, title, width, value, *, compact=False, flexible=False, group=None):
+        """An agent column views can name as KEY (while unique) or PLUGIN:KEY.
+
+        value(row) -> str for an agent row; group(row) -> str for a subverse row
+        (blank without it). `compact` keeps it in narrow tables."""
+        registrations = self._allow("dashboard.column")
+        if not isinstance(key, str) or not key.replace("_", "").replace("-", "").isalnum():
+            raise Error("A column key is letters, digits, hyphens and underscores")
+        if not callable(value) or (group is not None and not callable(group)):
+            raise Error("value and group must be functions of the row")
+        if not isinstance(width, int) or isinstance(width, bool) or not 1 <= width <= 120:
+            raise Error("A column width is 1 to 120")
+        registrations.columns[key] = loader.Column(key, str(title), width, value, bool(compact), bool(flexible), group)
+
+    def panel(self, kind, reference):
+        """A local view widget type, "module:Class": a Panel with parse(widget, title) and compose(view, root, widget, index)."""
+        self._allow("dashboard.panel").panels[str(kind)] = _reference(reference)
+
+    def inspector(self, function):
+        """function(row) -> a line for the agent inspector, or None. Usable as a decorator."""
+        self._allow("dashboard.inspector").inspector.append(function)
+        return function
+
+    def theme(self, colors):
+        """A palette by theme.py name ({"BLUE": "#89b4fa"}), used where plugins.json names this plugin as `theme`."""
+        registrations = self._allow("dashboard.theme")
+        if not isinstance(colors, dict):
+            raise Error("A theme maps color names to #rrggbb values")
+        registrations.theme = dict(colors)
+
+    def key(self, key, label, action):
+        """A dashboard key. action(context) runs off the screen's event loop and may return a status line.
+
+        context.row is a copy of the selected row (or None), context.scope the
+        selected universe's Path. It runs only where the plugin is on.
+
+        Core keys always win; plugins.json `keys` settles two plugins wanting one key."""
+        registrations = self._allow("dashboard.key")
+        if not isinstance(key, str) or not key or not callable(action):
+            raise Error("A key needs its name and an action function")
+        registrations.keys.append(loader.Key(key, str(label), action))
+
+    def screen(self, name, reference):
+        """A Textual screen by "module:Class", opened from the command palette as "PLUGIN: NAME".
+
+        The dashboard builds it as Class(root=Path, backend=app.backend): `root` is
+        the selected universe, where the plugin is on. A screen does its file and
+        tool work in workers, as the dashboard's own screens do."""
+        self._allow("dashboard.screen").screens[str(name)] = _reference(reference)
+
+
+def _reference(value):
+    if not isinstance(value, str) or ":" not in value:
+        raise Error('Name dashboard code as "module:Class" inside the plugin')
+    return value
+
+
+class SettingsAccess:
+    """This plugin's `plugin-settings/NAME.json` in a universe."""
+
+    def __init__(self, loaded):
+        self._loaded = loaded
+
+    def _universe(self, universe):
+        return _root(universe)
+
+    def read(self, universe=None):
+        """The settings in effect: (values, problem). values is {} while problem says why they cannot be used."""
+        found = settings_files.read(self._universe(universe), self._loaded.manifest,
+                                    self._loaded.registrations.settings_check)
+        return found.values, found.problem
+
+    def edit(self, changes, universe=None):
+        """Change only the named settings ({"default.budget": 60000}, or api.DELETE to remove one)."""
+        if self._loaded.manifest.settings is None:
+            raise Error(f'{self._loaded.name} declares no "settings" in plugin.json')
+        found = _call(settings_files.edit, self._universe(universe), self._loaded.manifest, changes,
+                      self._loaded.registrations.settings_check)
+        return found.values
+
+    def check(self, function):
+        """function(settings) raises ValueError naming what is wrong. Usable as a decorator."""
+        self._loaded.registrations.settings_check = function
+        return function
+
+    def screen(self, reference):
+        """This plugin's own settings screen, "module:Class", in place of the one built from its schema.
+
+        Built as Class(root=Path, backend=app.backend), like dashboard screens."""
+        self._loaded.registrations.settings_screen = _reference(reference)
+
+
+def _root(universe):
+    if isinstance(universe, Universe):
+        return universe.path
+    from .. import universe as universes
+    return _call(universes.resolve, universe)
+
+
+class Plugin:
+    """What register(mv) receives: this plugin's identity, its extension points and the client."""
+
+    def __init__(self, loaded):
+        self._loaded = loaded
+        manifest = loaded.manifest
+        self.name, self.version, self.directory = manifest.name, manifest.version, manifest.directory
+        self.cli, self.bootstrap, self.doctor = Cli(loaded), Bootstrap(loaded), Doctor(loaded)
+        self.dashboard = Dashboard(loaded)
+        self.settings = SettingsAccess(loaded)
+
+    @property
+    def process(self):
+        """cli, dashboard, host or helper."""
+        return loader.process
+
+    def can(self, permission):
+        return permission in self._loaded.manifest.permissions
+
+    def universe(self, path=None):
+        """A universe: `path`, else the one this process works in (MV2_UNIVERSE, else the current directory)."""
+        return Universe(_root(path), self)
+
+    def state_dir(self, universe=None):
+        """state/plugins/NAME/ of a universe, created on first use."""
+        directory = _root(universe) / "state" / "plugins" / self.name
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def agent_state_dir(self, agent):
+        """state/agents/<id>/NAME/ of an agent, created on first use."""
+        directory = agent.universe.path / "state" / "agents" / agent.id / self.name
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
+
+    def log(self, text, universe=None):
+        """Append a line to state/plugins/NAME/plugin.log."""
+        from ..store import now
+        try:
+            with (self.state_dir(universe) / "plugin.log").open("a") as handle:
+                handle.write(f"{now()} {text}\n")
+        except (OSError, ValueError):
+            pass
+
+    def _need(self, permission):
+        if not self.can(permission):
+            raise Error(f'{self.name} did not ask for permission {permission!r} in plugin.json')
+
+
+class Universe:
+    """A universe or subverse, as a plugin sees it."""
+
+    def __init__(self, path, plugin):
+        self.path, self._plugin = Path(path), plugin
+
+    def __repr__(self):
+        return f"Universe({str(self.path)!r})"
+
+    def __eq__(self, other):
+        return isinstance(other, Universe) and other.path.resolve() == self.path.resolve()
+
+    def __hash__(self):
+        return hash(self.path.resolve())
+
+    @property
+    def _meta(self):
+        from ..store import read
+        return _call(read, self.path / "universe.json")
+
+    @property
+    def id(self):
+        return self._meta["id"]
+
+    @property
+    def name(self):
+        return self._meta["name"]
+
+    @property
+    def parent(self):
+        from .. import universe as universes
+        found = universes.parent(self.path)
+        return Universe(found, self._plugin) if found else None
+
+    def subverses(self):
+        from .. import universe as universes
+        return [Universe(child, self._plugin) for child in universes.children(self.path)]
+
+    def agents(self, recursive=False):
+        """Agents with their state and reported work (needs agents.read)."""
+        self._plugin._need("agents.read")
+        from ..tools import list_agents
+        return [Agent(row, self._plugin) for row in _call(list_agents.run, self.path, recursive=recursive, json=True)]
+
+    def agent(self, reference):
+        """One agent by name, unique ID prefix or ID (needs agents.read)."""
+        self._plugin._need("agents.read")
+        from ..universe import agents
+        identity = _call(agents.directory, self.path, reference).name
+        for found in self.agents():
+            if found.id == identity:
+                return found
+        raise Error(f"No agent named {reference} here")
+
+    def spawn(self, name, *, harness="codex", task=None, model=None, wait=False):
+        """Start a new agent (needs agents.control); returns it."""
+        self._plugin._need("agents.control")
+        from ..tools import spawn
+        _call(spawn.run, self.path, name=name, task=task, harness=harness, model=model, wait=wait)
+        return self.agent(name)
+
+    def catalog(self):
+        """Skills, commands, workflows and harnesses here: [{kind, name, description, path}]."""
+        from ..universe import catalog
+        return _call(catalog.catalog, self.path)
+
+    def command(self, name, arguments=""):
+        """A command, workflow or skill's prompt text with `arguments` appended, as `mv2 command` prints it."""
+        from ..universe import catalog
+        return _call(catalog.command, self.path, name, arguments)
+
+    def refresh(self, apply=False):
+        """The template refresh plan, applied when `apply` (needs universe.write to apply)."""
+        if apply:
+            self._plugin._need("universe.write")
+        from ..tools import refresh
+        return _call(refresh.run, self.path, apply=apply, json=True)
+
+    def doctor(self):
+        """mv2 doctor's result: {ok, problems} (needs agents.read)."""
+        self._plugin._need("agents.read")
+        from ..tools import doctor
+        return _call(doctor.run, self.path)
+
+
+@dataclass(frozen=True)
+class SendResult:
+    ok: bool
+    delivery: str
+    state: str
+    reason: str = ""
+    record: dict = field(default_factory=dict)
+
+
+class Agent:
+    """One agent, as the listing showed it when it was read; `reload()` reads it again."""
+
+    def __init__(self, row, plugin):
+        self.record, self._plugin = dict(row), plugin
+        self.id, self.name = row["id"], row["name"]
+        self.harness = row.get("harness")
+        self.live = row.get("live", "unknown")  # alive, ending, stopped, dormant or unknown
+        self.status = row.get("status", "unknown")  # working, waiting, idle, disconnected or unknown
+        self.phase, self.summary, self.task = row.get("phase"), row.get("summary", ""), row.get("task", "")
+        self.universe = Universe(row["universe"], plugin)
+
+    def __repr__(self):
+        return f"Agent({self.name!r}, live={self.live!r}, status={self.status!r})"
+
+    @property
+    def directory(self):
+        return self.universe.path / "state" / "agents" / self.id
+
+    def reload(self):
+        return self.universe.agent(self.id)
+
+    def terminal(self, lines=30):
+        """The last `lines` lines of the agent's terminal, or why there is none (needs agents.read)."""
+        self._plugin._need("agents.read")
+        from ..tools import inspect
+        capture = _call(inspect.run, self.universe.path, agent=self.id)
+        return "\n".join(inspect.tail(capture, lines)) if isinstance(capture, str) else str(capture)
+
+    def usage(self):
+        self._plugin._need("agents.read")
+        from ..tools import get_usage
+        return _call(get_usage.run, self.universe.path, agent=self.id)
+
+    def capabilities(self):
+        self._plugin._need("agents.read")
+        from ..tools import capabilities
+        return _call(capabilities.run, self.universe.path, agent=self.id)
+
+    def resume(self, *, wait=False):
+        self._plugin._need("agents.control")
+        from ..tools import resume
+        return _call(resume.run, self.universe.path, agent=self.id, wait=wait, json=True)
+
+    def kill(self):
+        self._plugin._need("agents.control")
+        from ..tools import kill
+        return _call(kill.run, self.universe.path, agent=self.id)
+
+    def send(self, text, delivery="steer"):
+        """Send as this plugin: the agent reads "Message from plugin NAME" (needs messages.send).
+
+        steer and follow-up wake a stopped or dormant agent; inbox-only never does."""
+        self._plugin._need("messages.send")
+        from ..tools import send
+        sender = {"name": f"plugin {self._plugin.name}", "plugin": self._plugin.name, "agent_id": None}
+        record = _call(send.run, self.universe.path, agent=self.id, text=text, sender=sender, delivery=delivery)
+        native = record.get("native_delivery") or {}
+        return SendResult(bool(record.get("ok", True)), record.get("delivery", delivery), str(record.get("state", "")),
+                          str(record.get("reason") or native.get("reason") or ""), record)
+
+    def ask(self, question):
+        """A side question answered from the agent's conversation, never added to it (needs messages.ask)."""
+        self._plugin._need("messages.ask")
+        from ..tools import ask
+        result = _call(ask.run, self.universe.path, agent=self.id, question=question)
+        if result.get("state") != "ok":
+            raise Error(result.get("reason") or "The agent did not answer")
+        return (result.get("value") or {}).get("answer", "")
+
+    def inbox(self):
+        """Unread inbox-only messages, left unread (needs messages.read): [{at, from, text, delivery}]."""
+        self._plugin._need("messages.read")
+        from ..universe import mailbox
+        found = _call(mailbox.inbox, self.directory, limit=None, peek=True)
+        return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
+                for message in found["messages"]]
+
+    def history(self, last=20):
+        """The last messages, read or not, oldest first (needs messages.read)."""
+        self._plugin._need("messages.read")
+        from ..universe import mailbox
+        found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
+        return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
+                for message in found["messages"][-last:]]
+
+
+def current_agent(plugin):
+    """The agent this process runs for (MV2_AGENT_ID), or None outside an agent."""
+    identity = os.environ.get("MV2_AGENT_ID")
+    return plugin.universe().agent(identity) if identity else None
