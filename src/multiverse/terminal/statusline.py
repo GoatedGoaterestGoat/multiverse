@@ -20,6 +20,14 @@ DEFAULTS = {
 }
 INBOX_LIMIT = 50
 READ_LIMIT = 1024 * 1024
+# Plugin items: what a launch declared (runtime.json `plugins.status_items`), each read from
+# status-items/<name>.txt. Names follow the plugin manifest rule and never take a core item's name.
+ITEM_NAME = re.compile(r'[a-z][a-z0-9]*(?:-[a-z0-9]+)*')
+ITEM_NAME_LENGTH = 40
+ITEM_READ_LIMIT = 1024
+ITEM_LENGTH = 200
+# Only the items this bar draws itself: `compaction`, a core item of the Claude line, is a plugin's here.
+CORE_ITEMS = frozenset(DEFAULTS['items'])
 SUMMARY_LENGTH = 60
 ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))')
 
@@ -37,17 +45,26 @@ def read_object(path):
         return {}
 
 
-def config(data, family=''):
-    """Resolve ordered tmux items independently of the Claude mod's items."""
+def config(data, family='', declared=()):
+    """Resolve ordered tmux items independently of the Claude mod's items.
+
+    `declared` is this launch's plugin items, [(name, shown by default)]: an
+    item `tmux.items` names takes its place among core items, and the others
+    follow the core items in declared order. Each is its default, then
+    `tmux.items`, then the family override.
+    """
     data = object_value(data)
     if type(data.get('schema', 1)) not in (int, float) or data.get('schema', 1) != 1:
         data = {}
+    known = {name for name, _ in declared}
     block = object_value(data.get('tmux'))
     supplied = object_value(block.get('items'))
     items = {key: value for key, value in supplied.items()
-             if key in DEFAULTS['items'] and isinstance(value, bool)}
+             if (key in DEFAULTS['items'] or key in known) and isinstance(value, bool)}
     for key, value in DEFAULTS['items'].items():
         items.setdefault(key, value)
+    for name, default in declared:
+        items.setdefault(name, default)
     items.update(DEFAULTS['harnesses'].get(family, {}).get('items', {}))
     override = object_value(object_value(block.get('harnesses')).get(family))
     for key, value in object_value(override.get('items')).items():
@@ -147,6 +164,32 @@ def context_text(properties, runtime, family):
     return 'ctx ' + tokens(used) + (f'/{tokens(window)}' if number(window) and window else '')
 
 
+def declared_items(runtime):
+    """[(name, shown by default)] of the plugin items this launch declared; a malformed record declares nothing."""
+    record = object_value(object_value(runtime).get('plugins'))
+    items = record.get('status_items')
+    found = []
+    for item in items if isinstance(items, list) else []:
+        item = object_value(item)
+        name = item.get('name')
+        if (not isinstance(name, str) or len(name) > ITEM_NAME_LENGTH or not ITEM_NAME.fullmatch(name)
+                or name in CORE_ITEMS or any(name == known for known, _ in found)):
+            continue
+        found.append((name, item.get('tmux') is True))
+    return found
+
+
+def plugin_item(directory, name):
+    """The first line of a plugin item's file, bounded and cleaned; '' when missing, empty or unreadable."""
+    try:
+        with (directory / 'status-items' / f'{name}.txt').open('rb') as source:
+            data = source.read(ITEM_READ_LIMIT)
+    except OSError:
+        return ''
+    lines = data.decode('utf-8', errors='replace').splitlines()
+    return clean(lines[0] if lines else '', ITEM_LENGTH)
+
+
 def render(root, agent_id, launch_id, family=''):
     root = Path(root)
     # A fixed directory, never name resolution or a scan of the universe.
@@ -159,7 +202,9 @@ def render(root, agent_id, launch_id, family=''):
     if (properties.get('id') != agent_id or runtime.get('launch_id') != launch_id
             or not launch_id or not meta.get('id') or properties.get('universe_id') != meta['id']):
         return ''
-    items, _ = config(read_object(root / 'statusline.json'), family)
+    declared = declared_items(runtime)
+    items, _ = config(read_object(root / 'statusline.json'), family, declared)
+    plugins = {name for name, _ in declared}
     phase = clean(properties.get('phase'), 24)
     summary = clean(properties.get('summary'), SUMMARY_LENGTH)
     status = runtime.get('status') if runtime.get('state') == 'running' and 'exit_code' not in runtime else None
@@ -200,6 +245,10 @@ def render(root, agent_id, launch_id, family=''):
                 parts.append(f'inbox {count}+' if count >= INBOX_LIMIT else f'inbox {count}')
         elif item == 'context':
             text = context_text(properties, runtime, family)
+            if text:
+                parts.append(text)
+        elif item in plugins:
+            text = plugin_item(directory, item)
             if text:
                 parts.append(text)
     # tmux interprets styles in job output; agent text must remain literal.
