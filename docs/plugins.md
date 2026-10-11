@@ -283,21 +283,26 @@ caller can forget one:
 
 | Event | Emitted by | Data |
 | --- | --- | --- |
-| `agent.created` | `lifecycle._record` (new record) | name, harness, model |
-| `agent.launched` | `lifecycle.start` (launch registered) | launch, mode (`spawn`/`resume`/`wake`), native mode, plugins contributed |
-| `agent.ready` | `update_runtime`: state becomes `running` with the bridge registered, or the plain launch's startup check passed | launch |
-| `agent.status` | `update_runtime`: `status` changes | from, to (`working`/`waiting`/`idle`/`unknown`/`disconnected`) |
-| `agent.exited` | the runner, at its final `update_runtime` | launch, state (`stopped`/`failed`), exit code, reason |
-| `agent.killed` | `lifecycle.kill` | launch, whether native cancellation was confirmed |
+| `agent.created` | `lifecycle.start`, once a new record is published | harness, model |
+| `agent.launched` | `lifecycle.start`, after request.json is written and before the runner is released (so `ready` and `exited` never come first) | mode (`spawn`, `resume` or `wake`), native mode, plugins loaded |
+| `agent.ready` | `lifecycle.note_ready`, called by the runner after its startup check and by startup delivery once done; it uses `wait_ready`'s own predicate and a per-launch marker, so it is once per launch | none |
+| `agent.status` | `update_runtime`, when `status` changes (after its lock) | from, to |
+| `agent.exited` | the runner, once, where the process's end is known | state (`stopped`/`failed`), exit code, reason |
+| `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
-| `agent.moved`, `agent.removed` | `relocate`, `trash` | from, to |
-| `message.saved` | `mailbox.append_message` | message id, sender, recipient, delivery, length (no text) |
-| `message.delivered` | `mailbox.update_message`: accepted or receipt | message id, route, transcript-confirmed |
-| `message.failed` | `mailbox.update_message`: definite failure | message id, reason |
-| `message.read` | `mailbox.inbox` advancing the cursor | count |
-| `universe.created` | `templates.create` | name, template |
-| `refresh.applied` | `templates.refresh_apply` | files changed |
+| `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
+| `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
+| `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
+| `message.delivered` | `mailbox.update_message`, once per stage: `accepted`, then `confirmed` when the transcript confirms it | message id, stage |
+| `message.failed` | `mailbox.update_message`, on a definite failure only (unknown and submitting are not failures) | message id, reason |
+| `message.read` | `mailbox.inbox`, after a successful read moved the cursor (never peek, history or a failed print) | count of inbox-only messages read |
+| `universe.created` | `templates.create`, in its own journal and its parent's | name, path, template |
+| `refresh.applied` | `templates.refresh_apply`, after the manifest is written | files written |
 | `PLUGIN.*` | `mv.events.emit` from a plugin | anything JSON (namespaced to its name) |
+
+Moving or removing a whole subverse records nothing in its own journal, which
+moves with it. Recording is best effort; delivery of what is recorded is at
+least once.
 
 ```json
 {"schema": 1, "seq": 1042, "at": "2026-10-11T18:20:31Z", "type": "agent.status",
@@ -477,9 +482,9 @@ for several plugins using it at once.
 | `mv.dashboard.key(key, label, action, scope="universe")` | A key binding. The action gets the selected row and scope. | Core keys win. Between plugins, `plugins.json` `keys` decides, and otherwise both are refused with a note in `?` help. |
 | `mv.dashboard.screen(name, "module:Class")` | A Textual screen, pushed by a key or the command palette | Namespaced by plugin. |
 | `mv.dashboard.settings(name, fields_fn, save_fn)` | A `FieldScreen` over one of the plugin's config files | The same pattern as compaction's `c` screen today. |
-| `mv.events.on(type, fn)` | A handler run in the host | All handlers for a type run, each in its own error boundary. |
-| `mv.events.emit(type, data)` | A `NAME.type` event in the journal | Namespaced. |
-| `mv.service(start, stop)` | A long-lived service in the host | Each plugin has its own services. |
+| `events` in the manifest, and `mv.events.on(type, fn)` | `fn(api.Event)` run in the plugin's host worker for each event of a type or pattern (`agent.*`) the manifest's `events` subscribes to. The subscription is what makes core record that type at all. | All handlers for a type run, each in its own error boundary, with a 60 s budget. An `events.gap` event says what was pruned before it could be read. |
+| `mv.events.emit(kind, data, universe=, agent=)` | A `PLUGIN.kind` event in a universe's journal | Namespaced to the plugin. |
+| `mv.service(start, stop=None)` | `start(api.ServiceContext)` runs in a thread of the plugin's worker until it returns or `context.stopping` is set; `stop()` runs when the host stops it | Each plugin has its own worker process. A worker whose service crashes is restarted at most 3 times in 5 minutes. |
 | `mv.harness.extension(family, key, factory)` | A harness-specific object that the plugin's own code looks up, such as compaction's `CompactionSource` for Claude | Private to the plugin. Other plugins cannot see it. |
 | `mv.helper.action(name, fn)` | `fn(arguments)` returns an exit code, for `python -m multiverse.plugins run PLUGIN NAME ARGS…`, which a plugin's harness code runs with `$MV2_PYTHON` | Private to the plugin. |
 

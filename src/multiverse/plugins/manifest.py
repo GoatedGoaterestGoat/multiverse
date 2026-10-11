@@ -25,7 +25,14 @@ EXTENSION_POINTS = frozenset({
     "dashboard.key", "dashboard.screen",
     # API 1.1: the harness side.
     "launch", "capabilities", "usage", "statusline", "helper",
+    # API 1.2: events and long-running work in the plugin host.
+    "events", "service",
 })
+# Event types core records; a plugin's own events are PLUGIN.*.
+CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status", "agent.exited", "agent.killed",
+               "agent.reported", "agent.moved", "agent.removed", "message.saved", "message.delivered",
+               "message.failed", "message.read", "universe.created", "refresh.applied")
+EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
 # `compaction` stays core until compaction itself is a plugin.
@@ -47,7 +54,7 @@ PERMISSIONS = {
 MODEL_PERMISSION = re.compile(r"models\.[a-z][a-z0-9-]*")
 DEFAULTS = ("on", "off")
 KNOWN_FIELDS = {"schema", "name", "version", "description", "api", "module", "default", "extends",
-                "permissions", "commands", "settings", "harnesses", "statusline"}
+                "permissions", "commands", "settings", "harnesses", "statusline", "events"}
 SETTINGS_FIELDS = {"version", "schema", "defaults", "legacy"}
 
 
@@ -113,6 +120,7 @@ class Manifest:
     settings: Settings | None = None
     harnesses: dict = field(default_factory=dict)  # family -> tuple of HarnessEntry
     statusline: tuple = ()  # Item
+    events: tuple = ()  # event type patterns it subscribes to: "agent.status", "message.*", "*"
 
     def permission_texts(self):
         """Each permission as words, for `mv2 plugins enable` and `info`."""
@@ -228,8 +236,14 @@ def _parse(directory, data):
             raise ValueError("settings.legacy must be a file name at a universe's root")
     harnesses = _harnesses(directory, data.get("harnesses", {}), permissions)
     statusline = _statusline(data.get("statusline", {}), extends)
+    events = data.get("events", [])
+    if not isinstance(events, list) or not all(isinstance(item, str) and EVENT_PATTERN.fullmatch(item) for item in events):
+        raise ValueError('events must list event types such as "agent.status", "message.*" or "*"')
+    if events and "events" not in extends:
+        raise ValueError('events needs "events" in extends')
     return Manifest(name, version.strip(), directory, description.strip(), api, module, default,
-                    frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline)
+                    frozenset(extends), frozenset(permissions), dict(commands), settings, harnesses, statusline,
+                    tuple(events))
 
 
 def _version(value, what):

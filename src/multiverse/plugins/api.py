@@ -207,6 +207,53 @@ class Statusline(_Points):
         harness.write_item(agent.directory if isinstance(agent, Agent) else agent, name, text)
 
 
+@dataclass(frozen=True)
+class Event:
+    """One recorded event, as a handler receives it. `age` is seconds since it happened, when it is read."""
+    type: str
+    seq: int
+    at: str
+    universe: "Universe"
+    agent: dict | None = None  # {"id", "name"}
+    launch: str | None = None
+    data: dict = field(default_factory=dict)
+    age: float = 0.0
+
+
+class Events(_Points):
+    def on(self, kind, function=None):
+        """Run function(Event) in the plugin host for each event of `kind` (a type or a pattern such as
+        "agent.*") in universes where the plugin is on. The manifest's `events` must subscribe to it,
+        which is what makes mv2 record it. Handlers may see an event more than once (after a restart):
+        make them idempotent, and skip old events by `event.age`. Usable as a decorator factory."""
+        if function is None:
+            return lambda decorated: self.on(kind, decorated)
+        registrations = self._allow("events")
+        import fnmatch
+        if not any(fnmatch.fnmatchcase(kind, pattern) for pattern in self._loaded.manifest.events):
+            raise Error(f'{self._loaded.name} handles {kind!r} events; subscribe to them in plugin.json "events"')
+        if not callable(function):
+            raise Error("on(kind, function) needs a function")
+        registrations.handlers.append((kind, function))
+        return function
+
+    def emit(self, kind, data=None, universe=None, agent=None):
+        """Record a PLUGIN.kind event in a universe's journal, for any plugin that subscribes to it."""
+        from . import events
+        if not isinstance(kind, str) or not kind or "." in kind:
+            raise Error("emit(kind): a short name; it is recorded as PLUGIN.kind")
+        events.emit(_root(universe), f"{self._loaded.name}.{kind}",
+                    agent={"id": agent.id, "name": agent.name} if isinstance(agent, Agent) else agent, data=data)
+
+
+@dataclass
+class ServiceContext:
+    """What a service's start() receives: the universes the host runs for, and an event set when it must stop."""
+    universes: list
+    stopping: object  # threading.Event
+    log: object = None
+
+
 class Helpers(_Points):
     def action(self, name, function=None):
         """`python -m multiverse.plugins run PLUGIN NAME ARGS...` runs function(ARGS) -> exit code.
@@ -280,6 +327,18 @@ class Plugin:
         self.settings = SettingsAccess(loaded)
         self.launch, self.capabilities, self.usage = Launch(loaded), Capabilities(loaded), Usage(loaded)
         self.statusline, self.helper = Statusline(loaded), Helpers(loaded)
+        self.events = Events(loaded)
+
+    def service(self, start, stop=None):
+        """Long-running work in the plugin host: start(ServiceContext) runs in a thread of the plugin's own
+        worker process until it returns or context.stopping is set; stop() is called when the host stops it.
+        A service that crashes is restarted with backoff, at most 3 times in 5 minutes."""
+        if "service" not in self._loaded.manifest.extends:
+            raise Error(f'{self.name} registers a service but its plugin.json does not list "service" in "extends"')
+        if not callable(start) or (stop is not None and not callable(stop)):
+            raise Error("service(start, stop) needs functions")
+        self._loaded.registrations.services.append((start, stop))
+        return start
 
     @property
     def process(self):

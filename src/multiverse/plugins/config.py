@@ -15,7 +15,7 @@ from ..store import lock, write
 from .manifest import check_name
 
 FILE = "plugins.json"
-KNOWN_FIELDS = {"schema", "enabled", "theme", "keys"}
+KNOWN_FIELDS = {"schema", "enabled", "theme", "keys", "events"}
 
 
 @dataclass(frozen=True)
@@ -25,6 +25,7 @@ class Config:
     # A dashboard key and the plugin that gets it, or None to give it to no plugin.
     keys: dict = field(default_factory=dict)
     problem: str | None = None
+    events: dict = field(default_factory=dict)  # journal retention: retain_days, max_mb
     exists: bool = False
 
     def is_on(self, name, default="off"):
@@ -78,7 +79,13 @@ def parse(data, where=FILE):
             raise ValueError(f"{where}: keys has an invalid key name {key!r}")
         if owner is not None:
             check_name(owner, f"keys.{key}")
-    return Config(dict(enabled), theme, dict(keys), None, True)
+    events = data.get("events", {})
+    if not isinstance(events, dict) or set(events) - {"retain_days", "max_mb"}:
+        raise ValueError(f"{where}: events takes retain_days and max_mb")
+    for key, value in events.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 100000:
+            raise ValueError(f"{where}: events.{key} must be a positive number")
+    return Config(enabled=dict(enabled), theme=theme, keys=dict(keys), events=dict(events), exists=True)
 
 
 def load(root):

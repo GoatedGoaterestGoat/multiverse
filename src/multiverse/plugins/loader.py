@@ -29,7 +29,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 1)
+API_VERSION = (1, 2)
 BUNDLED = Path(__file__).parent / "builtin"
 PACKAGE = "mv2_plugins"
 SAFE_MODE = "MV2_PLUGINS"  # "off" loads no plugin at all
@@ -94,6 +94,8 @@ class Registrations:
     capabilities: dict = field(default_factory=dict)  # name -> fn(SessionInfo) -> api.Capability
     usage: list = field(default_factory=list)  # fn(SessionInfo, usage) -> usage
     helpers: dict = field(default_factory=dict)  # action -> fn(arguments) -> exit code
+    handlers: list = field(default_factory=list)  # (event type pattern, fn(api.Event)), run in the host
+    services: list = field(default_factory=list)  # (start(api.ServiceContext), stop or None), run in the host
 
 
 @dataclass

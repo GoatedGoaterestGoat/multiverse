@@ -6,18 +6,20 @@ from pathlib import Path
 from .. import plugins, universe
 from ..plugins import loader, manifest as manifests, settings as settings_files, trust
 
-ACTIONS = ("list", "info", "enable", "disable", "settings", "trust", "untrust", "check")
+ACTIONS = ("list", "info", "enable", "disable", "settings", "trust", "untrust", "check", "host", "events")
+HOST_ACTIONS = ("status", "start", "stop")
 NAMED = ("info", "enable", "disable", "settings", "trust", "untrust")
 
 
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
-                        help="list (default), info, enable, disable, settings, trust, untrust or check")
-    parser.add_argument("name", nargs="?", help="The plugin (for check: its directory)")
+                        help="list (default), info, enable, disable, settings, trust, untrust, check, host or events")
+    parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="assignments",
                         help="settings: change one setting (VALUE is JSON, or else text); repeatable")
     parser.add_argument("--unset", action="append", default=[], metavar="KEY", dest="removals",
                         help="settings: remove one setting, back to its default; repeatable")
+    parser.add_argument("--prune", action="store_true", help="events: delete journal segments past retention now")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -45,7 +47,7 @@ def _changes(assignments, removals):
     return changes
 
 
-def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), json=False):
+def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, json=False):
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
     if plugin_action == "check":
@@ -57,6 +59,21 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         raise ValueError(f"mv2 plugins {plugin_action} takes a plugin's name")
     if (assignments or removals) and plugin_action != "settings":
         raise ValueError("--set and --unset belong to mv2 plugins settings")
+    if prune and plugin_action != "events":
+        raise ValueError("--prune belongs to mv2 plugins events")
+    if plugin_action == "host":
+        from ..plugins import host
+        top = root
+        while universe.parent(top) is not None:  # one host per top-level universe tree
+            top = universe.parent(top)
+        action = name or "status"
+        if action not in HOST_ACTIONS:
+            raise ValueError(f"mv2 plugins host takes {', '.join(HOST_ACTIONS)}")
+        return {"action": action, "universe": str(top), **getattr(host, action)(top)}
+    if plugin_action == "events":
+        from ..plugins import events
+        removed = [str(path) for path in events.prune(root)] if prune else []
+        return {**events.summary(root), "pruned": removed}
     if plugin_action == "list":
         return {"universe": str(root), "plugins": plugins.listing(root), "problems": plugins.problems(root, reserved())}
     if plugin_action == "info":
@@ -125,7 +142,8 @@ def check(directory):
                 "dashboard.inspector": registered.inspector, "dashboard.theme": registered.theme,
                 "dashboard.key": registered.keys, "dashboard.screen": registered.screens,
                 "launch": registered.launch or found.harnesses, "capabilities": registered.capabilities,
-                "usage": registered.usage, "statusline": found.statusline, "helper": registered.helpers}
+                "usage": registered.usage, "statusline": found.statusline, "helper": registered.helpers,
+                "events": registered.handlers, "service": registered.services}
         unused = sorted(point for point in found.extends if point in used and not used[point])
         if unused:
             notes.append(f"extends but registers nothing for: {', '.join(unused)}")
@@ -136,8 +154,8 @@ def check(directory):
             "ok": not problems, "problems": problems, "notes": notes}
 
 
-def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), json=False):
-    result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals)
+def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, json=False):
+    result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune)
     if json:
         return result
     if plugin_action == "check" and not result["ok"]:
@@ -214,6 +232,29 @@ def text(action, result):
         return f'Trusted {result["name"]} at its current content ({result["fingerprint"][:19]}…). Any change needs trust again.'
     if action == "untrust":
         return f'{result["name"]} is no longer trusted.' if result["forgotten"] else f'{result["name"]} was not trusted.'
+    if action == "host":
+        state = "running" if result["running"] else "not running"
+        lines = [f'The plugin host for {result["universe"]} is {state}' + (f' (pid {result["pid"]}).' if result["running"] and result.get("pid") else ".")]
+        if result.get("needed"):
+            lines.append(f'Plugins that need it: {", ".join(result["needed"])}.')
+        elif result["action"] in ("start", "status"):
+            lines.append("No plugin that is on here needs it (none has event handlers or services).")
+        for worker, info in (result.get("workers") or {}).items():
+            lines.append(f'- {worker}: {info["state"]}' + (f', restarted {info["restarts"]} times' if info.get("restarts") else ""))
+        for worker, reason in (result.get("stopped") or {}).items():
+            lines.append(f"! {worker}: {reason}")
+        return "\n".join(lines)
+    if action == "events":
+        if not result["segments"]:
+            return f'No event journal in {result["universe"]}: no plugin on here subscribes to events.'
+        lines = [f'{result["segments"]} segments, {result["bytes"] / 1024:.0f} KiB, kept {result["retain_days"]:g} days '
+                 f'and at most {result["max_mb"]:g} MiB; newest event {result["newest_seq"]}.']
+        if result["oldest"]:
+            lines.append(f'Oldest kept: {result["oldest"]["seq"]} at {result["oldest"]["at"]}.')
+        lines.extend(f"Cursor {name}: {seq}" for name, seq in result["cursors"].items())
+        if result["pruned"]:
+            lines.append(f'Pruned {len(result["pruned"])} segments.')
+        return "\n".join(lines)
     if action == "check":
         lines = [f'{result.get("name", result["directory"])}: ' + ("ready." if result["ok"] else "not usable.")]
         lines.extend(f"! {problem}" for problem in result["problems"])
