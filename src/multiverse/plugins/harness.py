@@ -189,6 +189,15 @@ class SessionInfo:
         return self.universe / "state" / "agents" / self.agent_id
 
 
+def session_info(session, family, runtime=None):
+    """SessionInfo for a core SessionHandle (its session_file lies in the agent's directory)."""
+    directory = Path(session.session_file).parent
+    return SessionInfo(directory.parent.parent.parent, session.agent_id, session.harness, family or "",
+                       session.native_id, session.launch_id, session.state,
+                       dict(session.native_mode) if session.native_mode else None,
+                       (runtime or {}).get("plugins"))
+
+
 def capabilities(info, taken):
     """{name: (state, reason, mechanism)} plugins on here add; names in `taken` (core's) are refused."""
     result = {}

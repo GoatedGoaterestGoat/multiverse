@@ -41,6 +41,8 @@ process = "cli"
 _lock = threading.RLock()
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
+_entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
+_generation = 0  # rises whenever a plugin is loaded or fails to load
 SYNCHRONOUS_BUDGET = 2.0  # seconds a guarded call may take where a person waits on it
 
 
@@ -190,9 +192,45 @@ def compatible(manifest):
     return None
 
 
+def _stat(path):
+    try:
+        status = path.stat()
+        return status.st_mtime_ns, status.st_size
+    except OSError:
+        return None
+
+
+def _signature(root):
+    """Everything entries() depends on, by file times and sizes: cheap enough for every refresh."""
+    parts = [os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(), _generation, _stat(trust.user_directory() / trust.FILE)]
+    if root is not None:
+        parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
+        parts.append(tuple((path.name, _stat(path)) for path in sorted((Path(root) / settings_files.DIRECTORY).glob("*.json"))))
+    for source, directory in _source_directories(root):
+        parts.append((source, str(directory), _stat(directory / manifests.FILE)))
+        if source == "universe":  # trust covers every file
+            parts.append(tuple((str(path), _stat(path)) for path in sorted(directory.rglob("*"))
+                               if "__pycache__" not in path.parts))
+    return tuple(parts)
+
+
 def entries(root):
-    """Every plugin this universe can see or names, sorted by name. Reads files only; imports nothing."""
+    """Every plugin this universe can see or names, sorted by name. Reads files only; imports nothing.
+
+    Kept while nothing it depends on changes (see _signature)."""
     root = Path(root) if root is not None else None
+    signature = _signature(root)
+    with _lock:
+        cached = _entries.get(root)
+    if cached and cached[0] == signature:
+        return list(cached[1])
+    found = _entries_uncached(root)
+    with _lock:
+        _entries[root] = (signature, found)
+    return list(found)
+
+
+def _entries_uncached(root):
     settings = config.load(root) if root is not None else config.Config()
     chosen, shadowed, invalid = {}, {}, {}
     for source, directory in _source_directories(root):
@@ -310,9 +348,16 @@ def load(found):
         except Exception as error:
             problem = f"{found.name} failed to load: {_describe(error)}"
             _loaded[directory] = Failed(found.manifest, found.source, problem)
+            _changed()
             raise PluginError(problem) from error
         _loaded[directory] = loaded
+        _changed()
         return loaded
+
+
+def _changed():
+    global _generation
+    _generation += 1
 
 
 def active(root):
@@ -412,5 +457,6 @@ def reset():
     """Forget every loaded plugin (tests only: Python cannot unload a module)."""
     with _lock:
         _loaded.clear()
+        _entries.clear()
         for name in [name for name in sys.modules if name == PACKAGE or name.startswith(PACKAGE + ".")]:
             del sys.modules[name]
