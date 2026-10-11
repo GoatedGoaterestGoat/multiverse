@@ -1156,12 +1156,18 @@ multiverse-v2/
   package with a `multiverse.plugins` entry point, so
   `pip install git+https://github.com/OWNER/mv2-compaction` works for an mv2
   installed with pip. Both routes load the same code.
-- **Updating.** `mv2 update` fetches without submodules today, and it must not
-  silently move code that running agents load. After its fast-forward it runs
-  `git submodule update` for the submodules that are already initialized, never
-  `--init`. It refuses, with the reason, when an initialized submodule has local
-  changes or commits that the new pin would drop, the same rules it applies to
-  the main checkout. `update.py` is `lifecycle`'s, so this is agreed with it.
+- **Updating.** `mv2 update` moves the plugins that are initialized with the
+  checkout and never fetches or initializes one that is not. Before the fetch,
+  again before the merge, and again before each plugin moves, each one must be
+  exactly at the commit mv2 pins, with no tracked changes or conflicts
+  (untracked files are fine). It moves with `git submodule update --checkout`,
+  one plugin at a time, with nested fetches off, whatever the user's update
+  mode is. `--check` shows which plugins would move. A plugin that cannot move
+  leaves the rest of the update in place (code and environment) and says how
+  to repair it. New plugins are reported as available (`mv2 plugins install
+  NAME`), removed ones are left on disk, and a changed URL is shown with the
+  `git submodule sync` to apply it. With no plugin submodules, `mv2 update`
+  is exactly as before.
 - **Hot reload.** A submodule's Claude directory is loaded from the checkout,
   so a submodule update reloads it into running agents, exactly like the mod.
   Changes to a plugin's Claude code follow the mod's rule: build in scratch,
