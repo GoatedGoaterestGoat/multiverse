@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "cost-item",
+  "version": "0.1.0",
+  "description": "Each agent's session cost so far as a status-line item, for Claude's line and the tmux bar",
+  "api": "1.2",
+  "module": "plugin",
+  "extends": ["events", "statusline"],
+  "events": ["agent.status"],
+  "statusline": {"cost": {"claude": true, "tmux": true}},
+  "permissions": ["agents.read"]
+}

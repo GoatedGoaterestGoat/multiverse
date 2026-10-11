@@ -84,8 +84,14 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     if plugin_action in ("enable", "disable"):
         result = plugins.set_enabled(root, name, plugin_action == "enable")
         found = plugins.entry(root, name)
+        from ..plugins import host
+        top = root
+        while universe.parent(top) is not None:
+            top = universe.parent(top)
+        needs_host = bool(found.manifest and host.NEEDS & found.manifest.extends)
         return {"universe": str(root), **result, "state": found.state, "problem": found.problem,
-                "permissions": found.manifest.permission_texts() if found.manifest else []}
+                "permissions": found.manifest.permission_texts() if found.manifest else [],
+                "needs_host": needs_host, "host_running": host.running(top) if needs_host else None}
     if plugin_action == "settings":
         changes = _changes(assignments, removals)
         if changes:
@@ -218,6 +224,9 @@ def text(action, result):
         lines.extend(f"Installed its default settings: {path}" for path in result["installed"])
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
+        if result.get("needs_host") and not result.get("host_running"):
+            lines.append("It runs in the plugin host, which is not running: start it with mv2 plugins host start "
+                         "(the dashboard starts it too).")
         lines.append("Agents launched from now on use it; restart running agents to use it there.")
         return "\n".join(lines)
     if action == "settings":
