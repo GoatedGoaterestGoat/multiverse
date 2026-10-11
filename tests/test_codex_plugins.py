@@ -97,6 +97,37 @@ class CodexPluginsTest(PluginTestCase):
         env = self.config(self.command())['mcp_servers']['mv2_demo_tools']['env']
         self.assertFalse(any(key.startswith('MV2_') for key in env))
 
+    def test_initial_core_context_reaches_plain_and_fallback_mcp(self):
+        from multiverse import harnesses
+        from multiverse.runtime import lifecycle
+        self.add_plugin(fields={'mcp_servers': {'tools': {'command': 'python3'}}})
+        for setting in (False, None):
+            settings = {} if setting is None else {'inbox_bridge': setting}
+            adapter = CodexAdapter.configured('codex', settings)
+            captured = []
+            spawn = adapter.spawn
+            def prepare_and_stop(context):
+                captured.append((context, spawn(context)))
+                raise ValueError('fixture stops before native preparation')
+            with self.subTest(setting=setting), patch.dict(os.environ, {'MV2_AGENT_ID': 'sender',
+                    'MV2_CLI': '/sender/mv2', 'MV2_TMUX_SOCKET': '/sender/tmux'}), \
+                 patch.object(harnesses, 'load', return_value=adapter), \
+                 patch.object(lifecycle, '_cli_path', return_value='/target/bin/mv2'), \
+                 patch.object(lifecycle.shutil, 'which', return_value='/fixture/tmux'), \
+                 patch.object(adapter, 'spawn', side_effect=prepare_and_stop):
+                with self.assertRaisesRegex(ValueError, 'fixture stops'):
+                    lifecycle.start(self.root, name='initial-plain' if setting is False else 'initial-fallback')
+            context, command = captured[0]
+            candidate = command.fallback if command.fallback else command
+            env = self.config(candidate)['mcp_servers']['mv2_demo_tools']['env']
+            for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID',
+                        'MV2_CONTROL_SOCKET', 'MV2_CLI', 'MV2_PYTHON', 'PATH'):
+                self.assertEqual(env[key], context.environment[key], key)
+            self.assertEqual(env['MV2_CLI'], '/target/bin/mv2')
+            self.assertEqual(env['MV2_PYTHON'], sys.executable)
+            self.assertNotEqual(env['MV2_AGENT_ID'], 'sender')
+            self.assertNotIn('MV2_TMUX_SOCKET', env)
+
     def test_user_override_forms_and_modes_win(self):
         self.add_plugin(fields={'config': {'model_verbosity': 'low', 'tui.animations': True}})
         for flags in (['-c', 'model_verbosity="high"'], ['--config', 'model_verbosity="high"'],
