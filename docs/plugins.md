@@ -1,7 +1,7 @@
 # Plugins (design)
 
-Status: **proposal**, for the user's decisions (see [Decisions](#decisions-wanted)).
-Nothing here is implemented yet. It builds on PR #16's layout and registries
+Status: **proposal**, revised after the user's first decisions (see
+[Decisions](#decisions)). Nothing here is implemented yet. It builds on PR #16's layout and registries
 ([architecture](architecture.md)).
 
 A plugin is a directory of Python and, optionally, harness code that adds to mv2
@@ -24,8 +24,8 @@ The design has two goals that test it:
 
 1. **Tree compaction stops being built in.** Today it is spread over core,
    the Claude adapter, the mod, two tools, the dashboard and the templates. When
-   it is a bundled plugin with every behaviour, setting and file unchanged, the
-   API is good enough.
+   it is a plugin in its own repository with every behaviour kept, the API is
+   good enough.
 2. **Sample plugins** that show developers the API: a status-line item, a
    notifier, and a remote control that is off by default, local-only and
    authenticated.
@@ -52,7 +52,8 @@ compaction/
   compaction/                 # the plugin's own Python (any layout)
   claude/                     # a Claude plugin directory: .claude-plugin/, hooks/, tests/
   skills/ commands/ workflows/   # catalog entries, laid out as in a universe
-  defaults/compaction.json    # files `mv2 plugins enable` installs when missing
+  settings.schema.json        # what its settings file may hold
+  defaults/settings.json      # the settings `mv2 plugins enable` installs when there are none
   tests/                      # the plugin's own tests
 ```
 
@@ -66,7 +67,7 @@ compaction/
   "description": "Tree compaction: per-turn summary trees in place of a harness's own summary",
   "api": "1.0",
   "module": "plugin",
-  "default": "on",
+  "default": "off",
   "extends": ["cli", "launch", "capabilities", "usage", "doctor", "statusline",
               "dashboard.key", "dashboard.screen"],
   "permissions": ["agents.read", "harness.claude", "process.spawn", "models.claude"],
@@ -75,8 +76,8 @@ compaction/
   "harnesses": {
     "claude": [{"dir": "claude", "min_version": "2.1.290", "needs_bridge": true}]
   },
-  "config": ["compaction.json"],
-  "defaults": {"compaction.json": "defaults/compaction.json"}
+  "settings": {"version": 2, "schema": "settings.schema.json", "defaults": "defaults/settings.json",
+               "legacy": "compaction.json"}
 }
 ```
 
@@ -91,7 +92,7 @@ compaction/
 | `permissions` | What it asks to do (see [Trust and safety](#trust-and-safety)). Shown on enable. The API object it receives has only these capabilities. |
 | `commands`, `statusline` | Declared up front, so `mv2 --help`, `statusline.json` and the typeahead know them without importing plugin code. |
 | `harnesses` | Harness extensions, each with the oldest (and optionally newest) harness version it runs on. |
-| `config`, `defaults` | Files at a universe root that the plugin reads, and the defaults `mv2 plugins enable` installs if they are missing. |
+| `settings` | Its settings file (see [Settings](#settings)): the version of its shape, a JSON Schema, the defaults `mv2 plugins enable` installs when a universe has none, and optionally a file it used before it was a plugin, which `mv2 plugins migrate` moves. |
 
 ## Discovery and enabling
 
@@ -99,13 +100,14 @@ compaction/
 
 | Source | Path | Trusted |
 | --- | --- | --- |
-| Bundled | `src/multiverse/plugins/builtin/NAME/` | Yes: it ships with mv2 and updates with `mv2 update`. |
+| Bundled | `src/multiverse/plugins/builtin/NAME/` (typeahead, samples' tests) | Yes: it ships with mv2 and updates with `mv2 update`. |
+| Checkout | `plugins/NAME/` at the root of the mv2 checkout: an optional Git submodule, such as compaction and remote (see [Plugins in their own repositories](#plugins-in-their-own-repositories)) | Yes: it is pinned by the mv2 repository and initialized by the user. |
 | Personal | `~/.multiverse/plugins/NAME/`, like `~/.multiverse/templates/` | Yes: the user put it there. |
 | Installed | Python entry points in the `multiverse.plugins` group (`pip install mv2-something`) | Yes: the user installed it. |
 | Universe | `<universe>/plugins/NAME/`, like `skills/` | Only once trusted (below). A template may ship one, and a repository can carry one. |
 
 If two sources have the same name, the universe's copy comes first, then the
-personal one, then the installed one, then the bundled one. `mv2 plugins` shows
+personal one, then the installed one, then the checkout's, then the bundled one. `mv2 plugins` shows
 which copy is in use and which ones it shadows. A universe plugin that shadows a
 bundled one, such as a local fork of compaction, needs trust like any universe
 plugin.
@@ -123,13 +125,17 @@ Each universe and subverse may have a `plugins.json` at its root:
 }
 ```
 
+- `plugins.json` is the **one** switch for whether a plugin is on in this
+  universe. A plugin's settings file never has a top-level `enabled` of its
+  own. It may still turn parts of itself off (compaction can be off for one
+  harness), but turning the plugin on or off is always here.
 - A plugin is on where `enabled` says `true`. Where the file says nothing, its
-  manifest's `default` applies. Only bundled plugins can default to `on`, so
-  installing a plugin never turns it on anywhere.
-- A missing `plugins.json` means every plugin is at its default. Today that is
-  only `compaction`, which does nothing until `compaction.json` enables it. That
-  keeps current behaviour with no migration.
-- There is no live inheritance, the same rule as `compaction.json` and views. A
+  manifest's `default` applies. Only bundled plugins can default to `on` (today
+  only typeahead), so installing a plugin never turns it on anywhere.
+- A `plugins.json` naming a plugin that is not installed is not an error for
+  launches: they go on without it, and `mv2 plugins` and `doctor` say it is
+  missing and how to get it.
+- There is no live inheritance, the same rule as settings and views. A
   subverse made from a template gets the template's `plugins.json`. Otherwise
   it has its own file or the defaults.
 - `theme` picks one theme plugin. `keys` remaps or frees a dashboard key when
@@ -138,7 +144,9 @@ Each universe and subverse may have a `plugins.json` at its root:
 ```sh
 mv2 plugins                       # every plugin found: source, version, on/off here, problems
 mv2 plugins info compaction       # manifest, permissions, what it registered, last errors
-mv2 plugins enable notifier       # writes plugins.json; installs missing defaults; shows permissions
+mv2 plugins enable notifier       # writes plugins.json; installs default settings if none; shows permissions
+mv2 plugins settings compaction   # where its settings file is, whether it is usable, and its values
+mv2 plugins migrate               # move pre-plugin settings (compaction.json) to their plugin files
 mv2 plugins disable notifier
 mv2 plugins enable remote -u .multiverse/subverses/ops
 mv2 plugins trust my-plugin       # trust a universe plugin at its current content (below)
@@ -149,7 +157,7 @@ mv2 plugins host start|stop|status
 Output is short readable text, with `--json` for scripts, as for the other
 commands agents run.
 
-### Which universe's settings apply
+### Which universe decides
 
 Extension points act at three scopes. Each scope says whose `plugins.json`
 decides:
@@ -160,13 +168,56 @@ decides:
 | **Dashboard** | theme, keys, screens, columns, panels, inspector lines | The dashboard loads every plugin that is on anywhere in the tree it shows. A key or screen acting on a scope (`c` on a subverse) works only where that scope enables the plugin, and otherwise says so. A column a view names shows `—` for agents whose universe has the plugin off. The theme and global keys come from the top scope the dashboard opened. |
 | **Host** | services, event handlers | The top-level universe the host runs for. A handler receives events from every scope where its plugin is on. |
 
+### Settings
+
+Every plugin's files have a fixed place, so a person or an agent always knows
+where to look, and core can check, edit and refresh them the same way:
+
+```text
+<universe>/
+  plugins.json                      which plugins are on here; theme, keys, event retention
+  plugin-settings/NAME.json         each plugin's settings for this universe (definition file)
+  plugins/NAME/                     this universe's own plugin code, if any (trusted per content)
+  state/plugins/NAME/               the plugin's universe-wide state: logs, cursors, tokens (ignored by Git)
+  state/agents/<id>/NAME/           the plugin's state for one agent, including per-agent settings
+```
+
+- **One file per plugin per universe,** `plugin-settings/NAME.json`, never
+  inside `plugins.json`. It is a definition file: templates ship it,
+  `mv2 refresh` manages it, and a diff touches one plugin. A subverse has its
+  own, with no live inheritance.
+- **Versioned.** The file starts with `"schema": N`, the plugin's own settings
+  version from its manifest. A plugin that changes the shape provides
+  `migrate(old) -> new`, which `mv2 plugins migrate` applies (the old file goes
+  to trash). Core never guesses.
+- **Checked.** The manifest names a JSON Schema. Core validates against it, and
+  the plugin may add its own checks (`check(settings)`, like compaction's
+  harness builder checks). An unusable file never stops a launch: the plugin
+  runs as if off for that universe, and `mv2 plugins`, `doctor` and the
+  inspector say why, as `compaction.json` does today.
+- **Edited safely.** `mv.settings(universe)` returns the parsed, defaulted
+  settings and a `problem`. `mv.settings.edit(universe, changes)` writes the file
+  as it was with only the changed keys, the rule `ui/settings.py` already
+  follows, after the schema and the plugin's checks accept the whole result.
+- **Shown.** A dashboard Plugins screen (command palette, and a key if the user
+  binds one) lists plugins with an on/off toggle per scope. Enter opens a
+  plugin's settings: its own screen if it registered one (compaction's `c`
+  screens), or otherwise a `FieldScreen` generated from its schema, for plain
+  strings, numbers, booleans and enums.
+- **Per-agent settings** (compaction's agent scheduler) are agent state, in
+  `state/agents/<id>/NAME/`, set through the plugin's own command or screen.
+- **Reserved names.** A plugin may not be named after something an agent
+  directory already holds (`launches`, `claude-asks`, `claude-receipts`,
+  `status-items`, `events`, …), so `state/agents/<id>/NAME/` never collides.
+  Compaction's existing `state/agents/<id>/compaction/` already fits this rule,
+  so it needs no move.
+
 ### Templates and `mv2 refresh`
 
-- `plugins.json` and a universe's `plugins/` directory are definition files.
-  Templates ship them, and `mv2 refresh` manages them like `statusline.json`:
-  local edits are kept, conflicts need `--take`, and replaced files go to trash.
-- A plugin's own config (`compaction.json`) stays a definition file of its own,
-  as today.
+- `plugins.json`, `plugin-settings/` and a universe's `plugins/` directory are
+  definition files. Templates ship them, and `mv2 refresh` manages them like
+  `statusline.json`: local edits are kept, conflicts need `--take`, and
+  replaced files go to trash.
 - Refresh never updates bundled, personal or installed plugins. They follow mv2,
   the user's directory or pip. Refresh reports a `plugins.json` naming a plugin
   that is not found, or one whose API mv2 cannot load.
@@ -207,10 +258,11 @@ the dashboard, a status change in the mod's `runtime_update` subprocess, an exit
 in the runner, a delivery in whichever process sent. So events are **recorded
 where they happen and delivered where plugins run**:
 
-- Core appends each event to the universe's journal,
-  `state/events/events.jsonl`. It has a sequence number from a lock-protected
-  counter and rotates at 4 MiB, keeping two files. Appending is best effort: a
-  failed append is logged and never fails the operation that caused it.
+- Core appends each event to the universe's journal under `state/events/`. It
+  has a sequence number from a lock-protected counter. Appending is best
+  effort: a failed append is logged and never fails the operation that caused
+  it. A universe writes a journal only while a plugin that is on there has event
+  handlers, so a universe that uses none writes nothing.
 - The plugin host tails the journals of every scope in its tree and calls each
   handler in order. It keeps each plugin's cursor in
   `state/plugins/NAME/events.cursor`, so a handler sees each event at least once
@@ -251,6 +303,40 @@ Message text is never put in the journal. A handler that needs it reads it with
 `messages.read` permission through the API. Events tell plugins what happened.
 They cannot change what core does. Changing behaviour goes through the
 synchronous extension points below, each of which has a fixed contract.
+
+### Keeping the journal small
+
+The journal is a series of segment files, so cleaning up deletes whole files
+and never rewrites one that a reader may have open:
+
+```text
+state/events/
+  000000001041.jsonl     closed segment, named by its first sequence number
+  000000002388.jsonl     the segment being written
+  seq                    the next sequence number
+```
+
+- **Rolling.** The writer starts a new segment when the current one reaches
+  1 MiB or a new UTC day begins. A day's events are then never split across
+  more files than they need, and a whole day can be deleted at once.
+- **Retention.** `plugins.json` sets it per universe, with defaults:
+  `"events": {"retain_days": 7, "max_mb": 32}`. A closed segment is deleted once
+  its newest event is older than `retain_days`. While the closed segments
+  together exceed `max_mb`, the oldest is deleted. The segment being written is
+  never deleted.
+- **Who cleans.** Each writer prunes when it starts a new segment, under the
+  lock it already holds. That is at most a few times a day, and it needs no
+  host. The host also prunes once an hour. `mv2 plugins events --prune` does it
+  by hand, and `mv2 plugins events` shows the size, the oldest event and each
+  plugin's cursor. `doctor` flags a journal over its limit, which means pruning
+  is failing.
+- **Readers that fall behind.** Pruning never waits for a cursor, so a stopped
+  host or a disabled plugin cannot make the journal grow without bound. A
+  handler whose cursor points into a deleted segment gets one `events.gap` event
+  (how many events and what time span it missed), then continues from the
+  oldest kept event. Uninstalling a plugin deletes its cursor.
+- **Removal.** A subverse's journal is part of its state, so `mv2 remove` and
+  `move` carry it along like the rest.
 
 ### The plugin host
 
@@ -440,7 +526,10 @@ validate` on each Claude directory a plugin has.
   PATH` beside mv2's own `extension.ts` when the bridge is on. A Pi extension
   can do what mv2's does, and it reaches mv2 the same way, through the CLI and
   the helper.
-- **Codex:** Codex has no extension mechanism mv2 can load into the TUI.
+- **Codex:** `plugins-codex` is checking what the installed Codex offers
+  (config keys, its `notify` program, hooks, MCP, app-server notifications)
+  and will replace this paragraph with a contract backed by evidence. For now:
+  Codex has no extension mechanism mv2 can load into the TUI.
   Codex-side behaviour is limited to `codex_config` (`-c key=value`), and the
   user's explicit harness `args` still win, as for `check_for_update_on_startup`.
   Events cover the rest: status comes from the app-server through the runner
@@ -488,8 +577,8 @@ are. mv2 does not sandbox Python, and this design does not pretend to. The model
 is about consent and blast radius:
 
 1. **Nothing runs unless the user chose it.** Installing a plugin enables it
-   nowhere. Only bundled plugins can default to `on`: compaction, which is
-   inert until `compaction.json` enables it, and typeahead.
+   nowhere. Only bundled plugins can default to `on`, and today that is only
+   typeahead.
 2. **Universe plugins need trust.** A repository can carry `.multiverse/plugins/`,
    and opening the dashboard in a fresh clone must not run its code.
    `mv2 plugins trust NAME` records the plugin's path and a SHA-256 of its files
@@ -520,9 +609,11 @@ is about consent and blast radius:
 
 ### What the remote control must do
 
-The remote control is the riskiest sample. It is a bundled plugin that is off
-by default, because maintaining it inside mv2 keeps its security tested. These
-rules are requirements, and its tests check each one:
+The remote control is the riskiest sample. It lives in its own repository,
+included in mv2's as an optional submodule (see
+[Plugins in their own repositories](#plugins-in-their-own-repositories)), and it
+is off by default even when present. These rules are requirements, and its
+tests check each one:
 
 - **Off unless enabled,** per universe, by the user. `enable` prints what it
   exposes and the address. It runs only in the host.
@@ -539,7 +630,7 @@ rules are requirements, and its tests check each one:
   against DNS rebinding.
 - **Least power by default.** The token's scopes are `read` (list, inspect
   summary) and `send` (steer, follow-up, inbox-only). `spawn`, `resume`, `kill`
-  and `ask` are off unless `remote.json` turns them on. It never runs shell
+  and `ask` are off unless `plugin-settings/remote.json` turns them on. It never runs shell
   commands or `mv2 command`.
 - **Bounded.** JSON only. Messages are at most 64 KiB, and requests are rate
   limited.
@@ -550,10 +641,42 @@ rules are requirements, and its tests check each one:
 ## Moving compaction into a plugin
 
 `compaction` listed everything that knows about compaction today, and checked
-the plan. The target is a bundled plugin at
-`src/multiverse/plugins/builtin/compaction/` that uses only `api`, with its
-state at `state/agents/<id>/compaction/` and its config in `compaction.json`,
-both unchanged.
+the plan. The target is a plugin in its own repository, checked out at
+`plugins/compaction/` in mv2's as an optional submodule. It uses only `api`.
+Its state stays at `state/agents/<id>/compaction/`, which already fits the
+[settings layout](#settings).
+
+### Turning it on, and its settings
+
+Compaction follows the general rule: `plugins.json` turns it on, and its
+settings file only configures it.
+
+| Today, `compaction.json` | As a plugin |
+| --- | --- |
+| Top-level `enabled` | `plugins.json` `"enabled": {"compaction": true}` |
+| `harnesses.<name>.enabled` | Kept, and only as an opt-out: `false` turns compaction off for that harness. When the plugin is on, it applies to every harness that supports it (today only Claude). |
+| `default` (scheduler, budget, image mode), `harnesses.<name>.default`, `harnesses.<name>.builder` | Unchanged, in `plugin-settings/compaction.json` with `"schema": 2` |
+| A missing file means off | A missing settings file means the defaults. Off is decided by `plugins.json`. |
+| An agent's own scheduler, `state/agents/<id>/compaction/config.json` | Unchanged |
+
+`mv2 plugins migrate` (and `mv2 refresh --apply`, which offers it) converts each
+universe's `compaction.json`. It turns the plugin on in `plugins.json` exactly
+where the old file left compaction on for Claude, writes the rest to
+`plugin-settings/compaction.json` without the `enabled` keys, and moves the old
+file to trash. Until a universe is migrated, the plugin reads `compaction.json`
+where there is no new file, and an `enabled` there counts while `plugins.json`
+says nothing. So no universe changes behaviour before it is migrated, and
+`doctor` reminds the user to migrate. The base template ships compaction off,
+with its builder settings written out in `plugin-settings/compaction.json`. The
+development template turns it on in `plugins.json`.
+
+A universe that turns compaction on without the plugin installed (its
+submodule not initialized) launches as if it were off: Claude's own `/compact`
+works, and `mv2 plugins` and `doctor` say how to install it. That is safe
+because the `PreCompact` guard is the plugin's own launch contribution, so it
+is absent too.
+
+### What moves where
 
 | Today | Becomes |
 | --- | --- |
@@ -569,7 +692,10 @@ both unchanged.
 | `tools/compaction.py`, `cli.py`'s `compaction` | `mv.cli.command("compaction", …)`, with the same arguments and output |
 | `tools/doctor.py` `_compaction` | `mv.doctor.check` |
 | `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | `mv.dashboard.key("c", …)` and `mv.dashboard.screen`. The screens are unchanged, on `FieldScreen`. |
-| Templates' `compaction.json`, the `statusline.json` item, the mv2-help skill, the Claude README | Unchanged files. The skill and README text say compaction is a plugin. |
+| Templates' `compaction.json` | `plugins.json` and `plugin-settings/compaction.json` (above) |
+| `tools/doctor.py`'s check of `compaction.json` | The plugin's `check(settings)`, which core's settings validation runs |
+| The `statusline.json` item, the mv2-help skill, the Claude README | The item is unchanged. The skill and README text say compaction is a plugin and how to install it. |
+| `tests/test_compaction.py`, `test_claude_compaction.py`, `test_tui_compaction.py`, `mod/tests/compaction.test.ts` | The plugin repository's `tests/`, on `multiverse.plugins.testing` |
 
 Stays in core: the Claude transcript usage rule that a row stored again with
 zero usage never replaces its response's usage. It applies to Claude's own
@@ -609,19 +735,29 @@ import paths changing in tests:
      time of writing) before it is written to the checkout.
    - Once `mv2 doctor` reports no agent launched before the split (it can tell
      from `runtime.json`'s `plugins` record), the mod's copy is removed.
-5. **Move the files** into `plugins/builtin/compaction/`. Old module paths stay
+5. **Settings.** `plugins.json` becomes the switch, `plugin-settings/compaction.json`
+   the settings, and `mv2 plugins migrate` converts universes, with the legacy
+   file still read until it does (above).
+6. **Move the files** into `src/multiverse/plugins/builtin/compaction/` while it
+   is still in this repository. Old module paths stay
    as forwarding stubs, as `runner.py` and `statusline.py` did after PR #16:
    `python -m multiverse.compaction install|background|status|worker|guard` is
    called by running mods, by the `PreCompact` command in their settings, and
    by the worker spawn. The stubs go once no agent from before the move is
    left.
-6. **Use only `api`.** The plugin stops importing internals: it finds its
+7. **Use only `api`.** The plugin stops importing internals: it finds its
    agent through `mv.universe().agent()` and the session through the agent, and
    uses `api.files` for writes and locks. Anything it still needs is added to
    the API, or the plugin keeps a marked exception that is removed before
    API 1.0 is final.
-7. **Docs:** `docs/compaction.md` becomes the plugin's documentation, and the
-   README, `harness-adapters.md` and `views.md` point to it.
+8. **Its own repository.** Once it uses only `api` and its tests run on
+   `multiverse.plugins.testing`, its directory is split into the new repository
+   with its history, and mv2's copy is replaced by the `plugins/compaction`
+   submodule (see below). `docs/compaction.md` goes with it, and the README,
+   `harness-adapters.md` and `views.md` link to it.
+
+Steps 1 to 7 happen in this repository so each is one commit that is easy to
+bisect. Only the finished plugin moves out.
 
 Everything in [compaction.md](compaction.md) is kept, and these points
 specifically. `compaction` called them out, and each one has a test:
@@ -629,7 +765,7 @@ specifically. `compaction` called them out, and each one has a test:
 - It never falls back to Claude's own summary while tree compaction is enabled
   and usable. The hook skips with a reason, the `.catch` skips, and the guard
   exits 2.
-- An unusable `compaction.json` never blocks a launch. The launch runs without
+- An unusable settings file (or legacy `compaction.json`) never blocks a launch. The launch runs without
   the guard and records why.
 - The hook stays within its 10 s budget, with the heavy work in a spawned
   Python process. A subagent's compaction and `precompute` are left alone.
@@ -644,6 +780,65 @@ specifically. `compaction` called them out, and each one has a test:
 - The install lock and per-turn tree locks are shared by the worker and the
   install.
 
+## Plugins in their own repositories
+
+Compaction and the remote control each get their own repository, versioned on
+their own, and mv2's repository includes them as optional Git submodules:
+
+```text
+multiverse-v2/
+  .gitmodules
+  plugins/
+    compaction/    -> github.com/OWNER/mv2-compaction   (submodule, pinned commit)
+    remote/        -> github.com/OWNER/mv2-remote       (submodule, pinned commit)
+  src/multiverse/plugins/builtin/typeahead/   (stays in mv2: it is part of the mod)
+```
+
+- **Optional.** A plain `git clone` leaves `plugins/compaction/` empty, and mv2
+  works without it. `git clone --recurse-submodules`, or
+  `git submodule update --init plugins/compaction` later, adds it.
+  `mv2 plugins install compaction` runs that for a checkout and says what it
+  did. An empty submodule directory is not a plugin and is not an error.
+- **Found as "checkout" plugins.** Discovery looks in `plugins/*/plugin.json` at
+  the root of the running mv2 checkout. That is outside `src/`, so the mv2
+  package itself is built and tested the same with or without submodules.
+  Checkout plugins are trusted: the mv2 repository pins their exact commit, and
+  the user chose to initialize them.
+- **Pinned together.** mv2's commit pins each submodule's commit, so a checkout
+  always has a combination that was tested together. Each plugin's manifest
+  still states its `api` version, and a plugin updated on its own (a newer
+  commit checked out in the submodule) is refused with a clear reason if it
+  needs a newer API than this mv2 has.
+- **Installed without a checkout.** Each plugin repository is also a Python
+  package with a `multiverse.plugins` entry point, so
+  `pip install git+https://github.com/OWNER/mv2-compaction` works for an mv2
+  installed with pip. Both routes load the same code.
+- **Updating.** `mv2 update` fetches without submodules today, and it must not
+  silently move code that running agents load. After its fast-forward it runs
+  `git submodule update` for the submodules that are already initialized, never
+  `--init`. It refuses, with the reason, when an initialized submodule has local
+  changes or commits that the new pin would drop, the same rules it applies to
+  the main checkout. `update.py` is `lifecycle`'s, so this is agreed with it.
+- **Hot reload.** A submodule's Claude directory is loaded from the checkout,
+  so a submodule update reloads it into running agents, exactly like the mod.
+  Changes to a plugin's Claude code follow the mod's rule: build in scratch,
+  validate on the oldest running Claude, then commit and update the pin.
+- **Tests.** Each plugin repository runs its own suite against mv2 (a
+  development dependency on mv2 by Git URL, or the enclosing checkout when it
+  is a submodule). mv2's suite runs the tests of initialized checkout plugins
+  too, and skips them with a note when they are absent, so a change to core that
+  breaks compaction is still caught in a full checkout. Core's own tests of the
+  extension points use small fake plugins, so they never depend on a
+  submodule.
+- **History.** The new repositories are made from mv2's history with
+  `git filter-repo` limited to the plugin's paths, both current and earlier
+  ones, so `blame` and `log` still explain the code. The remote control has no
+  history yet and starts fresh.
+- **Working on them.** Commits to a plugin are made in its repository (the
+  submodule directory is a checkout of it), and mv2 then commits the new pin.
+  An agent working on compaction commits in `plugins/compaction`, under the
+  same rules: only its own paths, no branch switches.
+
 ## Sample plugins
 
 | Plugin | Shows | Where |
@@ -651,9 +846,9 @@ specifically. `compaction` called them out, and each one has a test:
 | `hello-column` | The smallest plugin: a dashboard column (`uptime`, from `runtime.json`'s start time) and an inspector line. No permissions beyond `agents.read`. | `examples/plugins/hello-column/` |
 | `cost-item` | A status-line item for Claude and tmux (`$0.42` from usage), written by a host handler on `agent.status` | `examples/plugins/cost-item/` |
 | `notifier` | Events and a service: a desktop notification (`osascript` or `notify-send`) when an agent starts `waiting`, exits with an error, or reports `blocked` or `done`, debounced and skipping stale events | `examples/plugins/notifier/` |
-| `remote` | Send to and list agents from outside, under the rules above. Includes a tiny `mv2-remote` client script. | Bundled, off by default |
+| `remote` | Send to and list agents from outside, under the rules above. Includes a tiny `mv2-remote` client script. | Its own repository; optional submodule `plugins/remote`, off by default |
 | `typeahead` | A Claude harness extension with version gating | Bundled, on |
-| `compaction` | Everything: CLI, launch, capabilities, usage, status item, dashboard screens, a harness extension, helpers, state | Bundled, on and inert |
+| `compaction` | Everything: CLI, launch, capabilities, usage, settings and migration, status item, dashboard screens, a harness extension, helpers, state | Its own repository; optional submodule `plugins/compaction` |
 
 ### Testing your own plugin
 
@@ -682,8 +877,8 @@ specifically. `compaction` called them out, and each one has a test:
 | --- | --- | --- |
 | **1. Foundation** | `multiverse.plugins` (discovery, manifest, `plugins.json`, trust, loader, failure boundaries), `api` v1 client and utilities, `mv2 plugins` list/info/enable/disable/check/trust, extension points for CLI, catalog, doctor, dashboard columns/panels/inspector/theme/keys/screens/settings, `testing` helpers, `hello-column` | None without plugins. `cli.py`'s "no plugin discovery" note goes. |
 | **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, `runtime.json` `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
-| **3. Compaction** | Steps 2 to 7 above, with the transition period for running Claude agents | None. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
-| **4. Events and host** | Event journal and emitters, the plugin host, `notifier`, `cost-item`, `remote` (off by default) | The journal grows under `state/events/`. Nothing runs until a plugin with handlers is enabled. |
+| **3. Compaction** | Steps 2 to 8 above, with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
+| **4. Events and host** | Event journal with segments and retention, emitters, the plugin host, `notifier`, `cost-item`, and `remote` in its own repository (off by default) | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
 | **5. Distribution** | Entry points, `mv2 plugins new` scaffold, per-subverse UI with plugin panels in portals, API 1.0 frozen | None |
 
 Phases 1 to 3 are the ones that matter for the compaction goal. Phase 4 can run
@@ -699,26 +894,37 @@ emitters and a new host), if the user wants the remote control sooner.
 | `runtime/`, `tools/`, `universe/` emitters | `lifecycle` | Event emitters at the chokepoints; plugin commands in `cli.py`; doctor checks |
 | `ui/` | `claude-tui` | Registries opened to plugins, keys, the plugin error count in the header |
 | tmux bar | `codex-ui` | Status-item files in `terminal/statusline.py` |
-| README, template prompts | `mv2-lead` | `plugins.json` in templates, docs |
+| `tools/update.py`, `refresh` | `lifecycle` | Updating initialized submodules; refresh offering `mv2 plugins migrate` |
+| Codex side of harness extensions | `plugins-codex` | What a plugin may contribute to Codex launches, with evidence from Codex itself |
+| README, template prompts | `mv2-lead` | `plugins.json` and `plugin-settings/` in templates, docs |
 
-## Decisions wanted
+## Decisions
 
-1. **Universe plugins.** Allow `<universe>/plugins/` with per-user trust pinned
-   to content (recommended)? Or allow only bundled, personal and installed
-   plugins?
-2. **Plugin host.** Run it as a long-lived tmux-hosted process, started on
+Decided by the user on 2026-10-11:
+
+- **API, harness extensions, status lines:** as designed.
+- **Events:** the journal as designed, cleaned up periodically
+  ([Keeping the journal small](#keeping-the-journal-small)).
+- **Enabling and settings:** `plugins.json` is the only on/off switch. Each
+  plugin has its own settings file in a fixed layout ([Settings](#settings)),
+  and compaction moves from `compaction.json` to it with a migration.
+- **Separate repositories:** compaction and the remote control are versioned in
+  their own repositories, included as optional submodules.
+- **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
+  extensions.
+
+Still open (recommendation first):
+
+1. **Repositories.** Which GitHub owner (the same as mv2's,
+   `GoatedGoaterestGoat`?), which names (`mv2-compaction`, `mv2-remote`), private
+   or public, and whether to keep compaction's history (recommended)?
+2. **Universe plugins.** Allow `<universe>/plugins/` with per-user trust pinned
+   to content (recommended)? Or allow only bundled, checkout, personal and
+   installed plugins?
+3. **Plugin host.** Run it as a long-lived tmux-hosted process, started on
    demand (recommended, so the remote control and notifier work without the
    dashboard)? Or run handlers only while the dashboard is open?
-3. **Compaction default.** Make it a bundled plugin that is on by default and
-   inert until `compaction.json` enables it (recommended: no migration, no
-   behaviour change)? Or make it opt-in in `plugins.json`?
-4. **Claude status items.** Use files the mod polls, plus a plugin's own slot
-   for transient lines (recommended, and `compaction`'s preference)? Or use a
-   mod-exposed engine noun with plugin `dependencies`, which updates sooner but
-   is early access?
-5. **Order.** Foundation, then harness side, then compaction, then
+4. **Order.** Foundation, then harness side, then compaction, then
    events/host/remote (recommended)? Or bring the remote control forward?
-6. **Permissions.** Are declared permissions enforced at the API facade, with
+5. **Permissions.** Are declared permissions enforced at the API facade, with
    no sandbox, acceptable?
-7. **Remote control.** Ship it bundled but off (recommended, so it is
-   maintained and tested)? Or only as an example?
