@@ -17,11 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
 from multiverse.runtime import native
 from multiverse.universe import templates
-from multiverse.harnesses.claude import MOD, measured_usage, TYPEAHEAD, TYPEAHEAD_VERSION
+from multiverse.harnesses.claude import MOD, measured_usage
+from multiverse.plugins import loader as plugin_loader, manifest as plugin_manifest
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
 from multiverse.tools import runtime_update, send
 from test_multiverse import BaseTest
+
+# The typeahead is the bundled `typeahead` plugin; its manifest gates it on the Claude version.
+TYPEAHEAD = plugin_loader.BUNDLED / 'typeahead' / 'claude'
+TYPEAHEAD_VERSION = plugin_manifest.load(TYPEAHEAD.parent).harnesses['claude'][0].min_version
 
 TOKEN = '0123456789abcdef0123456789abcdef'
 

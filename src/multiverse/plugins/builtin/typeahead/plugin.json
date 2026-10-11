@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "typeahead",
+  "version": "1.0.0",
+  "description": "Suggests /multiverse subcommands, catalog entries and agent names while you type in Claude Code",
+  "api": "1.1",
+  "default": "on",
+  "permissions": ["harness.claude"],
+  "harnesses": {
+    "claude": [{"dir": "claude", "min_version": "2.1.292", "needs_bridge": true}]
+  }
+}

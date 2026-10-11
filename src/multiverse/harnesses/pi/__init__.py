@@ -3,6 +3,7 @@ from pathlib import Path
 import json
 from dataclasses import replace
 
+from ...plugins import harness
 from ..base import ConfiguredAdapter
 from ..types import SessionHandle, Message, Executor, Capability, NativeResult, NativeEndpoint
 from ..types import normalize_session_id
@@ -32,10 +33,19 @@ class PiAdapter(ConfiguredAdapter):
         return self._with_extension(command, context)
 
     def _with_extension(self, command, context):
-        if not self.settings.get('inbox_bridge'):
-            return command
+        bridge = bool(self.settings.get('inbox_bridge'))
+        # Extensions of plugins on in the agent's universe, plain or bridged: each entry says if it needs the bridge.
+        # Pi is asked its version only when a plugin here has something for Pi.
+        plan = harness.plan_for(context, 'pi', self.name, version=lambda: harness.version_of(command.argv[0]),
+                                bridge=bridge, base_environment=command.environment)
+        extensions = tuple(argument for path in (plan.pi_extensions if plan else ())
+                           for argument in ('--extension', path))
+        if plan is not None:
+            command = replace(command, environment=plan.environment, plugins=plan.record())
+        if not bridge:
+            return replace(command, argv=(command.argv[0], *extensions, *command.argv[1:])) if extensions else command
         return replace(command,
-            argv=(command.argv[0], '--extension', str(self.package / 'extension.ts'), *command.argv[1:]),
+            argv=(command.argv[0], '--extension', str(self.package / 'extension.ts'), *extensions, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-json', context.values['control_socket']))
 
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:

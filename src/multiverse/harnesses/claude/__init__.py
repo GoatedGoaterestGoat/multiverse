@@ -37,16 +37,17 @@ import threading
 import time
 from uuid import uuid4
 
+from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
 from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
 from ..types import Usage
 from ...store import read
 
 MOD = Path(__file__).parent / 'mod'
-# Typeahead for /multiverse, a plugin of its own: it hooks `prompt.autocomplete`, which Claude Code
-# 2.1.292 added and an older Claude refuses, so it is loaded only from that version on.
-TYPEAHEAD = Path(__file__).parent / 'typeahead'
-TYPEAHEAD_VERSION = (2, 1, 292)
+# Typeahead for /multiverse is now the bundled `typeahead` mv2 plugin (multiverse/plugins/builtin/typeahead),
+# loaded like any plugin's Claude directory from Claude Code 2.1.292. This copy stays, unchanged, only for
+# agents launched before the move: Claude reloads a plugin from the path it was given. Remove it once no
+# live launch's request.json names it.
 # The mod acts only on text between these tags and removes them. The opening
 # tag names the delivery mode, which the mod honors, and the message ID for its
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
@@ -354,12 +355,12 @@ class ClaudeAdapter(ConfiguredAdapter):
         policy = self.bridge_policy
         plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if policy == 'plain':
-            return plain
+            return self._with_plugins(plain, context)
         problem = bridge_problem(command.argv[0])
         if problem:
             if policy == 'required':
                 raise ValueError(problem)
-            return replace(plain, native_mode={**plain.native_mode, 'fallback_reason': problem})
+            return self._with_plugins(replace(plain, native_mode={**plain.native_mode, 'fallback_reason': problem}), context)
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
@@ -375,13 +376,27 @@ class ClaudeAdapter(ConfiguredAdapter):
             # An unusable compaction.json never stops a launch: this one runs without compaction.
             native_mode = {'policy': policy, 'mode': 'bridge without compaction',
                            'fallback_reason': f'Launched without compaction: {problem}'}
-        version = claude_version(command.argv[0])
-        typeahead = ('--plugin-dir', str(TYPEAHEAD)) if version is not None and version >= TYPEAHEAD_VERSION else ()
+        # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
+        # The adapter's own settings and environment never change; problems and modes join the launch's own.
+        plan = plugins.plan_for(context, 'claude', self.name, version=claude_version(command.argv[0]), bridge=True,
+                                base_settings=settings, base_environment=environment)
+        if plan.problems:
+            native_mode['fallback_reason'] = '; '.join(filter(None, [native_mode['fallback_reason'], *plan.problems]))
+        if plan.modes:
+            native_mode['mode'] = ' '.join([native_mode['mode'], *plan.modes])
+        directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', json.dumps(settings), *typeahead, *command.argv[1:]),
+                  '--settings', json.dumps(plan.claude_settings), *directories, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
-            environment=environment, native_mode=native_mode)
+            environment=plan.environment, native_mode=native_mode, plugins=plan.record())
+
+    def _with_plugins(self, command, context):
+        """A plain launch: plugins' environment only. It loads no Claude plugin directory (no mod, no function
+        hooks) and asks Claude for no version, so each directory is recorded as not fitting."""
+        plan = plugins.plan_for(context, 'claude', self.name, version=None, bridge=False,
+                                base_environment=command.environment)
+        return replace(command, environment=plan.environment, plugins=plan.record())
 
     @staticmethod
     def _universe(agent_dir):
