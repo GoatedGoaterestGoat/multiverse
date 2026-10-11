@@ -27,8 +27,9 @@ EXTENSION_POINTS = frozenset({
     "launch", "capabilities", "usage", "statusline", "helper",
 })
 FAMILIES = ("claude", "codex", "pi")
-# Status-line items core draws itself; a plugin's item takes another name.
-CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context"})
+# Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
+# `compaction` stays core until compaction itself is a plugin.
+CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context", "compaction"})
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 PERMISSIONS = {
     "agents.read": "read this universe's agents: names, state, reported work, terminal tails and usage",
@@ -263,7 +264,8 @@ def _harnesses(directory, value, permissions):
             unknown = set(entry) - {key, "min_version", "max_version", "needs_bridge"}
             if unknown:
                 raise ValueError(f"{where}: unknown fields: {', '.join(sorted(unknown))}")
-            needs_bridge = entry.get("needs_bridge", True)
+            # A Claude plugin's hooks load only with the bridge's function hooks; a Pi extension loads either way.
+            needs_bridge = entry.get("needs_bridge", family == "claude")
             if not isinstance(needs_bridge, bool):
                 raise ValueError(f"{where}.needs_bridge must be true or false")
             found.append(HarnessEntry(family, *bounds, _inside(directory, entry.get(key), f"{where}.{key}"), needs_bridge))

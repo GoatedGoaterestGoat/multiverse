@@ -119,6 +119,9 @@ class CommandSpec:
     native_mode: Mapping[str, Any] | None = None
     fallback: 'CommandSpec | None' = None
     attachment: AttachmentSpec | None = None
+    # What the plugins on in the agent's universe added to this launch, as the adapter applied them
+    # (multiverse.plugins.harness.LaunchPlan.record()); lifecycle stores it as runtime.json `plugins`.
+    plugins: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)

@@ -276,7 +276,37 @@ def stop(root, reference):
 
 def capabilities(root, reference, run_probe=False):
     _, adapter, session, executor = context(root, reference)
-    return {name: asdict(value) for name, value in adapter.capabilities(session, executor if run_probe else None).items()}
+    result = adapter.capabilities(session, executor if run_probe else None)
+    # The same runtime snapshot the session came from, never a newer launch's.
+    result.update(_plugin_capabilities(adapter, session, executor.facts, result))
+    return {name: asdict(value) for name, value in result.items()}
+
+
+def _plugin_info(adapter, session, facts):
+    from ..plugins import harness as plugin_harness
+    return plugin_harness, plugin_harness.session_info(session, getattr(adapter, 'family', ''), facts)
+
+
+def _plugin_capabilities(adapter, session, facts, taken):
+    """Capabilities plugins on in the agent's universe add; core's names always win. Never raises."""
+    from ..harnesses.types import Capability
+    try:
+        plugin_harness, info = _plugin_info(adapter, session, facts)
+        return {name: Capability(state, reason or '', mechanism)
+                for name, (state, reason, mechanism) in plugin_harness.capabilities(info, set(taken)).items()}
+    except Exception:
+        return {}
+
+
+def _adjusted_usage(adapter, session, facts, result):
+    """An adapter's usage result after plugins' adjustments, only when it is ok. A plugin failure leaves it as measured."""
+    if result.get('state') != 'ok' or not isinstance(result.get('value'), dict):
+        return result
+    try:
+        plugin_harness, info = _plugin_info(adapter, session, facts)
+        return {**result, 'value': plugin_harness.adjust_usage(info, result['value'])}
+    except Exception:
+        return result
 
 
 def usage_snapshot(root, properties, facts):
@@ -285,9 +315,10 @@ def usage_snapshot(root, properties, facts):
         adapter = harnesses.load(root, properties['harness'])
         directory = root / 'state' / 'agents' / properties['id']
         session = SessionHandle.from_records(properties, facts, directory)
-        return adapter.get_usage(session).to_dict()
+        result = adapter.get_usage(session).to_dict()
     except Exception as error:
         return NativeResult('error', str(error)).to_dict()
+    return _adjusted_usage(adapter, session, facts, result)
 
 
 def operation(root, reference, name, question=''):
@@ -298,9 +329,13 @@ def operation(root, reference, name, question=''):
         with lock(directory / '.launch.lock'):
             _, adapter, session, executor = context(root, directory.name)
             if name == 'get_usage':
-                return adapter.get_usage(session, executor).to_dict()
-            if name != 'ask':
+                result = adapter.get_usage(session, executor).to_dict()
+                facts = executor.facts  # the launch the measurement belongs to
+            elif name != 'ask':
                 return NativeResult('unavailable', f'Unknown operation: {name}').to_dict()
+        if name == 'get_usage':
+            # Plugins adjust it outside the launch lock, so they never hold sends or stop.
+            return _adjusted_usage(adapter, session, facts, result)
         # An answer can take a while: wait outside the launch lock so sends and
         # stop are not held. The question still targets this exact session.
         return adapter.ask(session, question, executor).to_dict()

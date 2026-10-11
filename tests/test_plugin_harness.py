@@ -132,6 +132,69 @@ class LaunchPlanTest(PluginTestCase):
         self.assertEqual(harness.status_items(self.root),
                          {"plugins": {}, "status_items": [{"name": "trees", "plugin": "guard", "claude": True, "tmux": False}]})
 
+    def test_malformed_contributions_leave_only_that_plugin_out(self):
+        cases = {"noenv": "environment=None", "badsettings": "claude_settings=[]", "object": "claude_settings={'x': object()}",
+                 "blank": "problem='  '", "number": "mode=3"}
+        for name, fields in cases.items():
+            self.write_plugin(name, {"module": "plugin", "extends": ["launch"]}, {
+                "plugin.py": "from multiverse.plugins import api\n"
+                             f"def register(mv): mv.launch.contribute('claude', lambda info: api.Contribution({fields}))\n"})
+            self.enable(name)
+        plan = harness.launch_plan(self.info())
+        self.assertEqual(plan.environment, {"GUARD_ON": "1"})
+        self.assertEqual({name: plan.plugins[name]["state"] for name in cases}, {name: "skipped" for name in cases})
+        self.assertIn("environment must be a dict", plan.plugins["noenv"]["reason"])
+        self.assertIn("claude_settings must be JSON", plan.plugins["object"]["reason"])
+
+    def test_usage_adjusters_never_change_what_they_were_given(self):
+        for name, body in (("amutate", "usage['context']['tokens'] = 999; raise RuntimeError('half done')"),
+                           ("bjunk", "return ['not', 'usage']"),
+                           ("cset", "return {**usage, 'context': {**usage['context'], 'estimated': True}}"),
+                           ("dnone", "return None")):
+            self.write_plugin(name, {"module": "plugin", "extends": ["usage"]}, {
+                "plugin.py": f"def adjust(info, usage):\n    {body}\ndef register(mv): mv.usage.adjust(adjust)\n"})
+            self.enable(name)
+        self.enable("guard", on=False)
+        measured = {"context": {"tokens": 5}}
+        info = harness.SessionInfo(self.root, "a", "claude", "claude")
+        self.assertEqual(harness.adjust_usage(info, measured), {"context": {"tokens": 5, "estimated": True}})
+        self.assertEqual(measured, {"context": {"tokens": 5}})
+        errors = loader.errors()
+        self.assertIn("usage: RuntimeError: half done", errors["amutate"])
+        self.assertIn("usage: TypeError: a usage adjustment returns the usage record (a dict) or None", errors["bjunk"])
+        self.enable("cset", on=False)
+        self.assertIs(harness.adjust_usage(info, measured), measured)
+
+    def test_a_plugin_may_set_only_its_own_mv2_variables(self):
+        self.assertTrue(harness.may_set("compaction", "MV2_COMPACTION"))
+        self.assertTrue(harness.may_set("cost-item", "MV2_COST_ITEM_FORMAT"))
+        self.assertTrue(harness.may_set("compaction", "CLAUDE_CODE_SOMETHING"))
+        for plugin, key in (("compaction", "MV2_COMPACTIONS"), ("compaction", "MV2_AGENT_ID"), ("agent", "MV2_AGENT_ID"),
+                            ("plugins", "MV2_PLUGINS"), ("x", "BAD-NAME"), ("x", ""), ("x", "HOME"), ("x", "PATH"),
+                            ("x", "CODEX_HOME"), ("x", "CODEX_SQLITE_HOME"), ("x", "CLAUDE_CONFIG_DIR")):
+            with self.subTest(plugin=plugin, key=key):
+                self.assertFalse(harness.may_set(plugin, key))
+
+    def test_version_of_follows_an_executable_replaced_in_place(self):
+        import os, time
+        tool = self.work / "bin" / "fake-pi"
+        tool.parent.mkdir()
+        def install(script):
+            tool.write_text("#!/bin/sh\n" + script + "\n")
+            tool.chmod(0o755)
+        install("echo 'pi 0.84.3'")
+        self.assertEqual(harness.version_of(str(tool)), (0, 84, 3))
+        install("echo 'pi 0.85.0 (new build)'")
+        os.utime(tool, ns=(time.time_ns(), time.time_ns() + 10**9))
+        self.assertEqual(harness.version_of(str(tool)), (0, 85, 0))
+        install("echo 'pi 9.9.9'; exit 3")
+        os.utime(tool, ns=(time.time_ns(), time.time_ns() + 2 * 10**9))
+        self.assertIsNone(harness.version_of(str(tool)))
+        install("echo 'no version here'")
+        os.utime(tool, ns=(time.time_ns(), time.time_ns() + 3 * 10**9))
+        self.assertIsNone(harness.version_of(str(tool)))
+        self.assertIsNone(harness.version_of(str(self.work / "missing")))
+
     def test_settings_merge_concatenates_hooks_and_refuses_clashes(self):
         merged = harness._merge_settings({"crossSessionInbound": "accept", "hooks": {"Stop": [1]}},
                                          {"hooks": {"Stop": [2], "PreCompact": [3]}})

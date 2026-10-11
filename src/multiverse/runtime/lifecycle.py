@@ -45,6 +45,25 @@ def listing(root, recursive=False):
     return rows
 
 
+def plugins_record(root, command):
+    """runtime.json `plugins` for a command: what the adapter's plugin plan recorded, or, for an adapter
+    that applies no plugins, the status-line items of the plugins on here. Always a JSON object of that
+    shape; anything else (or any failure) is the empty record. Never fails a launch."""
+    try:
+        if command.plugins is not None:
+            record = command.plugins
+        else:
+            from ..plugins import harness as plugin_harness
+            record = plugin_harness.status_items(root)
+        record = json.loads(json.dumps(record))
+        if (not isinstance(record, dict) or not isinstance(record.get("plugins"), dict)
+                or not isinstance(record.get("status_items"), list)):
+            raise ValueError("not a plugins record")
+        return record
+    except Exception:
+        return {"plugins": {}, "status_items": []}
+
+
 def plain_fallback(command, error):
     if command.fallback is None:
         raise error
@@ -100,8 +119,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
-        context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
-                                resume_prompt=resume_prompt)
+        cli_path = _cli_path()
+        # This launch's own identity, known before the adapter is asked, so a command prepared only once (plain)
+        # can name it, e.g. in a plugin's MCP server. It always wins over ambient or saved values, and the
+        # parent's MV2 identity never reaches the child. The tmux socket is added once the pane is owned.
+        target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
+                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
+                  "MV2_PYTHON": sys.executable, "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
+        saved = properties.get("native_environment", {}) if resume else {}
+        ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
+        context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
@@ -122,11 +149,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(resume_prompt if resume_prompt is not None else properties["task"])
-        cli_path = _cli_path()
-        env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
-               "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
+        env = {key: value for key, value in target.items() if key != "PATH"}
         if resume:
-            env.update(properties.get('native_environment', {}))
+            env.update(saved)
         # Persist adapter-selected storage so resume cannot accidentally switch
         # accounts/history when launched by a different monitor environment.
         if command.shared_service:
@@ -204,6 +229,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
                 raise ValueError('Native relay targets a different service endpoint')
             command = replace(command, attachment=native.launch_attachment(command))
+            if command.fallback is not None:
+                # The runner may still switch to the fallback; it records this, never the discarded plan.
+                command = replace(command, fallback=replace(command.fallback, plugins=plugins_record(root, command.fallback)))
             if command.attachment and command.attachment.readiness == 'binding':
                 if not command.rpc_proxy or not command.rpc_proxy.binds_session:
                     raise ValueError('Attachment requires an adapter protocol that validates binding')
@@ -214,7 +242,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
-                           native_mode=command.native_mode,
+                           native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,
                            attachment=asdict(command.attachment) if command.attachment else None,
                            startup_delivery='waiting' if endpoint else None)

@@ -147,12 +147,12 @@ class PluginsCommandTest(PluginTestCase):
         self.write_plugin("greeter", {"description": "Greets", "permissions": ["messages.send"],
                                       "settings": {"version": 1, "defaults": "defaults.json"}},
                           {"defaults.json": json.dumps({"schema": 1, "greeting": "hi"})})
-        self.assertIn("greeter  off", self.mv2("plugins"))
+        self.assertRegex(self.mv2("plugins"), r"(?m)^greeter +off ")  # beside the bundled ones
         enabled = self.mv2("plugins", "enable", "greeter")
         self.assertIn("Turned greeter on", enabled)
         self.assertIn("- send messages to any agent in this universe, as this plugin", enabled)
         self.assertIn("Installed its default settings: " + str(self.root / "plugin-settings" / "greeter.json"), enabled)
-        self.assertIn("greeter  on", self.mv2("plugins", "list"))
+        self.assertRegex(self.mv2("plugins", "list"), r"(?m)^greeter +on ")
         self.assertIn("not a sandbox", self.mv2("plugins", "info", "greeter"))
         changed = self.mv2("plugins", "settings", "greeter", "--set", "greeting=hello there", "--set", "count=3")
         self.assertIn("Changed: count, greeting", changed)
@@ -163,7 +163,7 @@ class PluginsCommandTest(PluginTestCase):
         self.assertIn("Turned greeter off", self.mv2("plugins", "disable", "greeter"))
         self.assertEqual(json.loads((self.root / "plugins.json").read_text())["enabled"], {"greeter": False})
         listed = json.loads(self.mv2("plugins", "--json"))
-        self.assertEqual(listed["plugins"][0]["name"], "greeter")
+        self.assertIn("greeter", [item["name"] for item in listed["plugins"]])
 
     def test_trust_and_check(self):
         directory = self.write_plugin("local", {"module": "plugin", "extends": ["bootstrap"]},

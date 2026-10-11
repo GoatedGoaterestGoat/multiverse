@@ -519,10 +519,20 @@ class Contribution:          # what it may return
     mode: str | None = None                        # e.g. "without compaction", shown in native_mode
 ```
 
-- **Merging.** An environment key set by two plugins is a conflict, and both
-  are left out of that launch. Core identity variables always win, as
-  adapter variables do today. Claude settings deep-merge, with the adapter's
-  `crossSessionInbound` first and hook arrays concatenated.
+- **Merging.** The adapter's own settings and environment never change: a
+  plugin that would change them, or set a variable another plugin already set,
+  is left out of that launch. A plugin may set `MV2_<ITS NAME>` and
+  `MV2_<ITS NAME>_*` (upper case, hyphens as underscores) and no other `MV2_`
+  variable, and no value may hold a NUL. Claude settings deep-merge, with
+  each plugin's hook entries after the adapter's own. Claude settings reach
+  only a bridged launch.
+- **Fitting.** Each manifest entry fits a launch (harness version, bridge) on
+  its own, and one that does not is recorded as `unfit`. A plugin none of
+  whose entries for that harness fit is left out entirely, its contributions
+  too, so a guard never comes without the hook it guards. An adapter asks its
+  harness for its version only when a plugin there has something for it.
+- **Failure.** If plugin discovery itself fails, the launch goes on exactly as
+  the adapter made it, and the record says why (`error`).
 - **Recording.** What each plugin contributed, and why one was left out, goes in
   `runtime.json` under `plugins`:
   `{"compaction": {"version": "1.0.0", "state": "loaded"}, "typeahead": {"state": "skipped", "reason": "needs Claude Code 2.1.292; this is 2.1.290"}}`.
@@ -544,8 +554,9 @@ one, the adapter's `_with_bridge` checks the following and then adds
   `TYPEAHEAD_VERSION`: an older Claude refuses a module that hooks an event it
   does not have, so such a directory is skipped and the plugin is recorded as
   skipped with the version.
-- `needs_bridge`: only when the mod is loaded. A plain launch skips it with the
-  reason.
+- `needs_bridge` (default true for Claude): only when the mod is loaded. A
+  plain launch loads no Claude plugin directory at all (it has no mod and no
+  function hooks) and asks Claude for no version.
 - The plugin is on for the agent's universe.
 
 Each directory is its own Claude plugin, with its own `$.ui.status` slot, its
@@ -572,9 +583,12 @@ validate` on each Claude directory a plugin has.
 
 ### Pi
 
-`harnesses.pi` entries are extension files, added as `--extension PATH` beside
-mv2's own `extension.ts` when the bridge is on. A Pi extension reaches mv2
-through the CLI and the helper.
+`harnesses.pi` entries are extension files, added as `--extension PATH` for
+plain and bridged launches alike (after mv2's own `extension.ts` when the
+bridge is on). `needs_bridge` defaults to false for Pi, since an extension loads
+either way. Version bounds are checked against `pi --version` of the selected
+executable, asked only when a plugin has something for Pi. A Pi extension
+reaches mv2 through the CLI and the helper.
 
 ### Codex
 

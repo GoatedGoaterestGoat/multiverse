@@ -382,7 +382,9 @@ def main():
                             backend.run('set-option', '-u', '-t', pane, 'mouse')
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
                                    startup_delivery=None, native_mode=selection, native_relay=None, error=None,
-                                   native_service=None, attachment=fallback.get('attachment'))
+                                   native_service=None, attachment=fallback.get('attachment'),
+                                   # Recorded by lifecycle for the fallback; no plugin code runs here.
+                                   plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
                     from multiverse.universe.mailbox import end_startup_messages
                     end_startup_messages(agent_dir, launch.name,
                         'Launch selected plain mode before delivery; message saved. '
