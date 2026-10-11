@@ -323,9 +323,11 @@ def interpret(returncode: int, stdout: str, stderr: str) -> Merge:
         raise MergeError('invalid', f'the reply lacked a usable start, end and summary: {error}') from error
 
 
-def environment(retries: int, unset=()) -> dict[str, str]:
+def environment(retries: int, unset=(), harness=None) -> dict[str, str]:
+    """The builder's Claude sees the harness's `env` too (its endpoint or account, say), never a scrubbed name."""
     env = {key: value for key, value in os.environ.items()
            if not key.startswith('MV2_') and key not in SCRUB and key not in unset}
+    env.update((key, value) for key, value in (harness or {}).items() if key not in SCRUB)
     env['CLAUDE_CODE_MAX_RETRIES'] = str(retries)
     return env
 
@@ -351,10 +353,10 @@ def run(source, turn, frontier, builder) -> Merge:
     path = projects / f'{session_id}.jsonl'
     path.write_text(''.join(json.dumps(row, ensure_ascii=False) + '\n' for row in rows))
     instruction = INSTRUCTION.format(n_entries=len(frontier), frontier_index=frontier_index(frontier))
+    env = environment(builder.options.get('claude_max_retries', 3), source.unset_env(), source.harness_env())
     try:
         returncode, stdout, stderr = source.call(command(source.executable(), instruction, session_id, builder),
-                                                 cwd=work, env=environment(builder.options.get('claude_max_retries', 3), source.unset_env()),
-                                                 timeout=TIMEOUT)
+                                                 cwd=work, env=env, timeout=TIMEOUT)
     finally:
         path.unlink(missing_ok=True)
     return interpret(returncode, stdout, stderr)

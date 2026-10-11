@@ -2,6 +2,7 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import re
 from string import Formatter
 
 from .types import CAPABILITIES, Capability, CommandSpec, LaunchContext, NativeResult, SessionHandle, Message, Executor
@@ -9,6 +10,11 @@ from .types import normalize_session_id
 
 FIELDS = {'name', 'agent_id', 'session_id', 'bootstrap', 'bootstrap_json', 'task', 'agent_dir',
           'harness_dir', 'session_file', 'bootstrap_file', 'task_file', 'workspace', 'model', 'adapter_dir'}
+# A bare TOML key as well, so Codex can forward the variable to its tools unquoted.
+ENV_NAME = re.compile(r'[A-Za-z_][A-Za-z0-9_]*')
+# mv2 sets PATH for every launch, always removes the parent markers, and resolves
+# native storage from HOME; a harness cannot replace them (nor any MV2_* name).
+RESERVED_ENV = frozenset({'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE'})
 
 
 def arguments(value, label, required=False):
@@ -32,19 +38,25 @@ class ConfiguredAdapter:
     # The built-in adapter a harness uses ('codex', 'claude', 'pi'); '' for a local definition.
     family = ''
     resume_prompt_args = None
+    # Variables mv2 itself reads to find this harness's native sessions; they come from mv2's environment.
+    storage_env = ()
 
     @classmethod
     def configured(cls, name, settings):
-        unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'inbox_bridge'}
+        unknown = set(settings) - {'executable', 'model', 'args', 'spawn_args', 'resume_args', 'unset_env', 'env',
+                                   'inbox_bridge'}
         if unknown:
             raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
         bridge = settings.get('inbox_bridge', False)
         if not isinstance(bridge, bool) or (bridge and not cls.supports_bridge):
             raise ValueError('inbox_bridge is not supported by this adapter')
         spec = json.loads((cls.package / 'defaults.json').read_text())
-        for key in ('model', 'unset_env'):
+        for key in ('model', 'unset_env', 'env'):
             if key in settings:
                 spec[key] = settings[key]
+        if isinstance(settings.get('env'), dict) and 'unset_env' not in settings:
+            # A variable the harness sets is no longer removed by default (NO_COLOR, say).
+            spec['unset_env'] = [key for key in spec.get('unset_env', []) if key not in settings['env']]
         executable = settings.get('executable', spec['spawn'][0])
         if not isinstance(executable, str) or not executable or '\0' in executable:
             raise ValueError('executable must be a nonempty string')
@@ -74,6 +86,7 @@ class ConfiguredAdapter:
         unset = spec.get('unset_env', [])
         if not isinstance(unset, list) or not all(isinstance(k, str) and k and '=' not in k and '\0' not in k for k in unset):
             raise ValueError('unset_env must contain environment variable names')
+        self.environment = self._environment(spec.get('env', {}), unset)
         self.session_mode = spec.get('session', 'file')
         if self.session_mode not in ('file', 'assigned', 'reported'):
             raise ValueError('Unsupported harness session mode')
@@ -81,6 +94,23 @@ class ConfiguredAdapter:
         self.default_model = spec.get('model')
         if not isinstance(self.bootstrap, str) or (self.default_model is not None and not isinstance(self.default_model, str)):
             raise ValueError('bootstrap and model must be strings')
+
+    def _environment(self, env, unset):
+        if not isinstance(env, dict) or not all(
+                isinstance(key, str) and ENV_NAME.fullmatch(key) and isinstance(value, str) and '\0' not in value
+                for key, value in env.items()):
+            raise ValueError('env must map environment variable names to strings without NUL characters')
+        managed = sorted(key for key in env if key.startswith('MV2_') or key in RESERVED_ENV)
+        if managed:
+            raise ValueError(f'env cannot set {", ".join(managed)}: mv2 manages these for every launch')
+        storage = sorted(key for key in env if key in self.storage_env)
+        if storage:
+            raise ValueError(f'env cannot set {", ".join(storage)}: mv2 reads these to find this harness\'s '
+                             'sessions, so set them in the environment mv2 runs in')
+        both = sorted(set(env) & set(unset))
+        if both:
+            raise ValueError(f'env and unset_env both name {", ".join(both)}')
+        return dict(env)
 
     def _launch_command(self, context: LaunchContext):
         if context.mode not in self.spec:
@@ -104,7 +134,7 @@ class ConfiguredAdapter:
             argv.extend(arg.format_map({**values, 'task': context.resume_prompt}) for arg in prompt_args)
         # Scrubbing parent identity is a core invariant, including legacy definitions.
         unset = tuple(dict.fromkeys(['CODEX_THREAD_ID', 'CLAUDECODE', *self.spec.get('unset_env', [])]))
-        return CommandSpec(tuple(argv), unset)
+        return CommandSpec(tuple(argv), unset, environment=dict(self.environment))
 
     def spawn(self, context: LaunchContext) -> CommandSpec:
         return self._launch_command(replace(context, mode='spawn'))

@@ -147,6 +147,29 @@ class LaunchIsolationTest(unittest.TestCase):
             self.assertIn(unittest.mock.call("/explicit/tmux.sock"), tmux.call_args_list)
             self.assertIn(unittest.mock.call("/inherited/tmux.sock"), tmux.call_args_list)
 
+    def test_harness_env_reaches_the_native_process_on_spawn_and_resume(self):
+        path = self.root / "harnesses/pi/harness.json"
+        definition = read(path)
+        definition["settings"]["env"] = {"IS_SANDBOX": "1", "INHERITED": "harness"}
+        write(path, definition)
+        backend = Mock()
+        backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}
+        with patch.object(lifecycle, "Tmux", return_value=backend), \
+                patch.object(lifecycle.shutil, "which", return_value="/fake/executable"), \
+                patch.object(lifecycle, "observe", return_value={"live": "dormant"}):
+            first = lifecycle.start(self.root, "worker", "task", "pi")
+            directory = agents.directory(self.root, first["id"])
+            (directory / "session.jsonl").write_text(json.dumps({"type": "session", "id": str(uuid4())}) + "\n")
+            for result in (first, lifecycle.start(self.root, resume=first["id"])):
+                request = read(directory / "launches" / result["runtime"]["launch_id"] / "request.json")
+                with self.subTest(launch=result["runtime"]["launch_id"]), \
+                        patch.dict(os.environ, {"INHERITED": "tmux server", "MV2_AGENT_ID": "parent"}):
+                    env = runner.launch_environment(request)
+                    # The harness's value replaces the inherited one; this launch's identity still wins.
+                    self.assertEqual(env["IS_SANDBOX"], "1")
+                    self.assertEqual(env["INHERITED"], "harness")
+                    self.assertEqual(env["MV2_AGENT_ID"], first["id"])
+
     def test_resume_preserves_agent_workspace_and_legacy_fallback(self):
         backend = Mock()
         backend.create.return_value = {"socket": "/fake/socket", "session": "$1", "pane": "%1"}

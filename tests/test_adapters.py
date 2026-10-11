@@ -132,6 +132,57 @@ class AdapterContractTest(BaseTest):
         legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom', '{name}']})
         self.assertEqual(legacy.capabilities(self.session('custom', values))['session_name'].state, 'unavailable')
 
+    def test_env_setting_reaches_every_launch(self):
+        values = self.values()
+        env = {'IS_SANDBOX': '1', 'NO_COLOR': '1', 'LITERAL': 'a "quoted" $(false) é'}
+        with patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 289)):
+            for provider, bridge in (('claude', False), ('claude', True), ('pi', False), ('codex', False)):
+                adapter = harnesses.BUILTINS[provider].configured(provider, {'inbox_bridge': bridge, 'env': env})
+                session = self.session(provider, values)
+                for mode in ('spawn', 'resume'):
+                    with self.subTest(provider=provider, bridge=bridge, mode=mode):
+                        context = LaunchContext(mode, values)
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                        self.assertEqual({key: command.environment.get(key) for key in env}, env)
+                        # A variable the harness sets is no longer removed by default; parent markers still are.
+                        self.assertNotIn('NO_COLOR', command.unset_env)
+                        self.assertIn('CLAUDECODE', command.unset_env)
+                        if provider == 'claude' and bridge:
+                            self.assertEqual(command.environment['CLAUDE_CODE_ENABLE_FUNCTION_HOOKS'], '1')
+        legacy = harnesses.LegacyAdapter('custom', {'spawn': ['custom'], 'env': {'CUSTOM': 'value'}})
+        self.assertEqual(legacy.spawn(LaunchContext('spawn', values)).environment, {'CUSTOM': 'value'})
+
+    def test_codex_bridge_forwards_env_to_the_tools_its_daemon_runs(self):
+        env = {'IS_SANDBOX': '1', 'LITERAL': 'a "quoted" é'}
+        adapter = harnesses.CodexAdapter.configured('codex', {'env': env})
+        executor = Mock()
+        executor.rpc.return_value = NativeResult('ok', value={'exclude': [], 'writable_roots': []})
+        environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current', 'PATH': '/tools'}
+        command = adapter.spawn(LaunchContext('spawn', self.values(), None, environment,
+                                             NativeEndpoint('unix-websocket', '/native/socket'), executor))
+        self.assertIn('--remote', command.argv)
+        self.assertEqual(command.environment, env)
+        self.assertIn('shell_environment_policy.set.IS_SANDBOX="1"', command.argv)
+        self.assertIn('shell_environment_policy.set.LITERAL="a \\"quoted\\" é"', command.argv)
+        # Automatic selection keeps the variables when it falls back to a plain launch.
+        self.assertEqual(command.fallback.environment, env)
+        self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.fallback.argv))
+
+    def test_env_rejects_names_mv2_manages_or_reads(self):
+        cases = [('codex', {'env': {'MV2_UNIVERSE': '/x'}}, 'mv2 manages these'),
+                 ('codex', {'env': {'PATH': '/x'}}, 'mv2 manages these'),
+                 ('claude', {'env': {'HOME': '/x'}}, 'mv2 manages these'),
+                 ('pi', {'env': {'CLAUDECODE': '1'}}, 'mv2 manages these'),
+                 ('codex', {'env': {'CODEX_HOME': '/x'}}, 'environment mv2 runs in'),
+                 ('claude', {'env': {'CLAUDE_CONFIG_DIR': '/x'}}, 'environment mv2 runs in'),
+                 ('codex', {'env': {'KEPT': '1'}, 'unset_env': ['KEPT']}, 'both name KEPT')]
+        for provider, settings, message in cases:
+            with self.subTest(provider=provider, settings=settings):
+                with self.assertRaisesRegex(ValueError, message):
+                    harnesses.BUILTINS[provider].configured(provider, settings)
+        # Each harness reserves only its own storage: Pi may point a tool at a Claude directory.
+        harnesses.PiAdapter.configured('pi', {'env': {'CLAUDE_CONFIG_DIR': '/x'}})
+
     def test_builtins_accept_empty_initial_prompt_without_empty_native_turn(self):
         for name in harnesses.BUILTINS:
             with self.subTest(name=name):
@@ -268,6 +319,12 @@ class AdapterContractTest(BaseTest):
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': '--bad'}},
                  {'schema': 2, 'adapter': 'codex', 'settings': {'args': ['{unknown}']}},
                  {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': 'yes'}},
+                 {'schema': 2, 'adapter': 'codex', 'settings': {'env': ['IS_SANDBOX=1']}},
+                 {'schema': 2, 'adapter': 'codex', 'settings': {'env': {'IS_SANDBOX': 1}}},
+                 {'schema': 2, 'adapter': 'codex', 'settings': {'env': {'BAD-NAME': '1'}}},
+                 {'schema': 2, 'adapter': 'codex', 'settings': {'env': {'1BAD': '1'}}},
+                 {'schema': 2, 'adapter': 'codex', 'settings': {'env': {'NUL': 'a\0b'}}},
+                 {'schema': 1, 'spawn': ['binary'], 'env': {'PATH': '/x'}},
                  {'schema': 1, 'spawn': []}, {'schema': 1, 'spawn': [22]},
                  {'schema': 1, 'spawn': ['binary'], 'bootstrap': []}]
         for data in cases:
