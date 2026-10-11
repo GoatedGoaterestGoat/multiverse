@@ -50,12 +50,12 @@ def describe(item):
 class PluginsScreen(ModalScreen):
     """Plugins in one scope: Space turns one on or off there, Enter opens its settings."""
     BINDINGS = [Binding("escape", "close", "Close"), Binding("space", "toggle", "On / off"),
-                Binding("enter", "settings", "Settings")]
+                Binding("enter", "settings", "Settings"), Binding("h", "host", "Host")]
 
     def __init__(self, root, name="", service=None):
         super().__init__()
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
-        self.items, self.problems = [], []
+        self.items, self.problems, self.host = [], [], None
         self.changed = self.busy = False
 
     def compose(self):
@@ -87,11 +87,12 @@ class PluginsScreen(ModalScreen):
         try:
             items = await asyncio.to_thread(self.service.listing, self.root)
             problems = await asyncio.to_thread(self.service.problems, self.root)
+            host = await asyncio.to_thread(self.service.host_state, self.root)
         except Exception as error:
             self.query_one("#plugin-details", Static).update("Plugins unavailable.")
             self.error(str(error))
             return
-        self.items, self.problems = items, problems
+        self.items, self.problems, self.host = items, problems, host
         self.fill(keep)
 
     def fill(self, keep=None):
@@ -109,6 +110,10 @@ class PluginsScreen(ModalScreen):
     def describe_selected(self):
         item = self.selected()
         text = describe(item) if item else "No plugins are installed here."
+        if self.host and (self.host["needed"] or self.host["running"]):
+            state = "running" if self.host["running"] else "off (h starts it)"
+            text = f"Plugin host: {state}" + "".join(f"\n  {clean(name)}: {clean(why)}" for name, why in self.host["stopped"].items()) \
+                + "\n\n" + text
         if self.problems:
             text += "\n\n" + "\n".join("• " + clean(problem) for problem in self.problems)
         self.query_one("#plugin-details", Static).update(text)
@@ -142,6 +147,38 @@ class PluginsScreen(ModalScreen):
         self.changed = True
         self.error("")
         self.load(keep=name)
+
+    def action_host(self):
+        """h: start the plugin host when it is off, stop it when it runs (it outlives the dashboard otherwise)."""
+        if self.busy:
+            return
+        if self.host is None:
+            self.error("The plugin host's state could not be read.")
+        elif self.host["running"]:
+            self.run_host(False)
+        elif self.host["needed"]:
+            self.run_host(True)
+        else:
+            self.error("No plugin here needs the plugin host.")
+
+    def run_host(self, start):
+        self.busy = True
+        self.error("Starting the plugin host…" if start else "Stopping the plugin host…")
+        self.change_host(start)
+
+    @work(group="plugins-host", exit_on_error=False)
+    async def change_host(self, start):
+        try:
+            await asyncio.to_thread(self.service.start_host if start else self.service.stop_host, self.root)
+        except Exception as error:
+            self.busy = False
+            self.error(f"The plugin host could not {'start' if start else 'stop'}: {error}")
+            self.load()
+            return
+        self.busy = False
+        self.changed = True
+        self.error("")
+        self.load()
 
     def action_settings(self):
         item = self.selected()

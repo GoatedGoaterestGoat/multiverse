@@ -29,6 +29,9 @@ from .tree import group_key, rate_limits
 from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
 
 
+HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
+
+
 class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     CSS_PATH = "app.tcss"
     TITLE = "Multiverse"
@@ -49,6 +52,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         super().__init__()
         self.plugin_service = plugin_service or PluginService()
         self.plugin_keys, self.plugin_screens, self.plugin_clashes = {}, {}, []
+        self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
+        self.host_failed = False
         self.root = Path(root)
         self.backend = backend or LocalBackend()
         self.theme = "catppuccin-mocha"
@@ -97,8 +102,10 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.apply_size(self.size.width, self.size.height)
         self.refresh_snapshot()
         self.load_plugin_registry()
+        self.check_host()
         if self.refresh_interval:
             self.set_interval(self.refresh_interval, self.refresh_snapshot)
+            self.set_interval(HOST_REFRESH, lambda: self.check_host(start=False))
         self.query_one("#agents", DataTable).focus()
 
     def apply_size(self, width, height):
@@ -156,13 +163,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             breadcrumb = self.query_one("#breadcrumb", Breadcrumb)
             breadcrumb.display = bool(self.history)
             breadcrumb.update("‹ Back · " + " / ".join(trail))
-            totals = self.snapshot["counts"]
-            limits = rate_limits(snapshot["agents"])
-            failures = self.plugin_service.error_count()
-            self.query_one("#totals", Static).update(
-                (limits + " · " if limits else "")
-                + f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents'
-                + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
+            self.show_totals()
             try:
                 await self.query_one("#local-view", LocalView).show_view(root, snapshot.get("widgets", []))
             except Exception as error:
@@ -181,6 +182,43 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             self.scanning = False
             if generation != self._scope_generation:
                 self.refresh_snapshot()
+
+    def show_totals(self):
+        """The header counts: agents, the account's rate limits, plugin errors and a plugin host that is needed but off."""
+        if not self.snapshot:
+            return
+        totals = self.snapshot["counts"]
+        limits = rate_limits(self.snapshot["agents"])
+        failures = self.plugin_service.error_count() + len((self.host or {}).get("stopped") or ())
+        line = Text((limits + " · " if limits else "")
+                    + f'{totals["alive"]} live · {totals["waiting"]} waiting · {totals["blocked"]} blocked · {totals["total"]} agents'
+                    + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
+        if self.host and self.host.get("needed") and not self.host.get("running"):
+            line.append(" · host off", style=theme.PEACH)
+        self.query_one("#totals", Static).update(line)
+
+    @work(group="plugin-host", exclusive=True, exit_on_error=False)
+    async def check_host(self, start=True):
+        """Read the plugin host's state and, when plugins need it and it is not running, start it (once per change)."""
+        if self.backend.demo:
+            return
+        root = self.root
+        try:
+            state = await asyncio.to_thread(self.plugin_service.host_state, root)
+            if state and start and state["needed"] and not state["running"] and not self.host_failed:
+                self.set_status("Starting the plugin host…")
+                try:
+                    await asyncio.to_thread(self.plugin_service.start_host, root)
+                    self.set_status("")
+                except Exception as error:
+                    self.host_failed = True  # not retried until something changes
+                    self.set_status(f"The plugin host could not start: {error}", error=True)
+                state = await asyncio.to_thread(self.plugin_service.host_state, root)
+        except Exception as error:
+            self.set_status(f"The plugin host could not be checked: {error}", error=True)
+            return
+        self.host = state
+        self.show_totals()
 
     def restore_scroll(self, scroll):
         self.query_one("#agents", DataTable).scroll_to(x=scroll[0], y=scroll[1], animate=False)
@@ -385,6 +423,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     def plugins_changed(self, changed):
         if changed:
             columns.reset_plugin_caches()  # resolved plugin columns and panels may be out of date
+            self.host_failed = False
+            self.check_host()
             self.refresh_snapshot()
             self.load_plugin_registry()
 

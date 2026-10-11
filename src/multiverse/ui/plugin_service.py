@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .. import plugins, universe
-from ..plugins import loader
+from ..plugins import host, loader
 
 ACTION_TIMEOUT = 30.0
 FAILED = object()
@@ -26,6 +26,33 @@ class PluginService:
 
     def edit_settings(self, root, name, changes):
         return plugins.edit_settings(Path(root), name, changes)
+
+    def host_top(self, root):
+        """The top-level universe the plugin host runs for."""
+        top = Path(root)
+        while (parent := universe.parent(top)) is not None:
+            top = parent
+        return top
+
+    def host_state(self, root):
+        """{needed, running, stopped: {plugin: reason}, pid, workers} for this tree's host, or None when unreadable."""
+        try:
+            info = host.status(self.host_top(root))
+        except Exception:
+            return None
+        return {"needed": bool(info.get("needed")), "running": bool(info.get("running")),
+                "stopped": dict(info.get("stopped") or {}), "pid": info.get("pid"),
+                "workers": sorted(info.get("workers") or ())}
+
+    def start_host(self, root):
+        """Start the host unless one runs; raises with the reason when it does not come up."""
+        info = host.start(self.host_top(root))
+        if not info.get("running"):
+            raise RuntimeError("it did not take its lock within 10 s; see state/plugins/host.log")
+        return info
+
+    def stop_host(self, root):
+        return host.stop(self.host_top(root))
 
     def on_here(self, root):
         return plugins.on_here(Path(root))

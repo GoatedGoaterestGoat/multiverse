@@ -55,6 +55,22 @@ class FakeService:
         self.core_keys_seen = None
         self.key_result = "alpha did it"
         self.off = set()
+        self.host = {"needed": False, "running": False, "stopped": {}, "pid": None, "workers": []}
+        self.host_start_error = None
+
+    def host_state(self, root):
+        self.calls.append(("host_state", Path(root)))
+        return dict(self.host) if self.host is not None else None
+
+    def start_host(self, root):
+        self.calls.append(("start_host", Path(root)))
+        if self.host_start_error:
+            raise RuntimeError(self.host_start_error)
+        self.host["running"] = True
+
+    def stop_host(self, root):
+        self.calls.append(("stop_host", Path(root)))
+        self.host["running"] = False
 
     def listing(self, root):
         return [dict(entry) for entry in self.items]
@@ -144,6 +160,87 @@ class DashboardCase(unittest.IsolatedAsyncioTestCase):
 
     def text(self, selector):
         return str(self.app.query_one(selector, Static).render())
+
+
+class LiveDemo(DemoBackend):
+    """The demo agents, but not in demo mode, which never starts anything."""
+    demo = False
+
+
+class HostTests(DashboardCase):
+    def setUp(self):
+        super().setUp()
+        self.backend = LiveDemo()
+        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=self.service)
+
+    def called(self, name):
+        return [call for call in self.service.calls if call[0] == name]
+
+    async def test_nothing_is_started_or_shown_when_no_plugin_needs_the_host(self):
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: self.called("host_state"), "the host check")
+            self.assertEqual(self.called("start_host"), [])
+            self.assertNotIn("host off", self.text("#totals"))
+
+    async def test_the_host_starts_on_open_when_needed_and_is_left_running_on_quit(self):
+        self.service.host = {"needed": True, "running": False, "stopped": {}, "pid": None, "workers": []}
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: self.called("start_host"), "the host to start")
+            await self.until(pilot, lambda: not self.app.query_one("#status", Static).display or "Starting" not in self.text("#status"),
+                             "the status line to clear")
+            self.assertNotIn("host off", self.text("#totals"))
+            self.assertEqual(len(self.called("start_host")), 1)
+            await pilot.press("q")
+        self.assertEqual(self.called("stop_host"), [])
+
+    async def test_a_host_that_will_not_start_is_reported_once_and_shown_in_the_header(self):
+        self.service.host = {"needed": True, "running": False, "stopped": {}, "pid": None, "workers": []}
+        self.service.host_start_error = "no tmux"
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: "could not start: no tmux" in self.text("#status"), "the failure")
+            await self.until(pilot, lambda: "host off" in self.text("#totals"), "host off in the header")
+            self.app.check_host()  # a later check does not try again until something changes
+            await self.app.workers.wait_for_complete()
+            self.assertEqual(len(self.called("start_host")), 1)
+            self.assertTrue(self.app.is_running)
+
+    async def test_stopped_workers_count_as_plugin_errors(self):
+        self.service.host = {"needed": True, "running": True, "stopped": {"loud": "its worker exited 4 times in 5 minutes"},
+                             "pid": 7, "workers": []}
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: "1 plugin error" in self.text("#totals"), "the stopped worker")
+            self.assertNotIn("host off", self.text("#totals"))
+
+    async def test_the_plugins_screen_starts_and_stops_the_host_and_the_dashboard_rechecks(self):
+        self.service.host = {"needed": True, "running": True, "stopped": {}, "pid": 7, "workers": ["loud"]}
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            await self.start(pilot)
+            self.app.action_plugins()
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.host, "the screen")
+            screen = self.app.screen
+            self.assertIn("Plugin host: running", str(screen.query_one("#plugin-details", Static).render()))
+            await pilot.press("h")
+            await self.until(pilot, lambda: self.called("stop_host") and not screen.busy, "the host to stop")
+            self.assertIn("Plugin host: off (h starts it)", str(screen.query_one("#plugin-details", Static).render()))
+            await pilot.press("h")
+            await self.until(pilot, lambda: self.called("start_host") and not screen.busy, "the host to start again")
+            self.assertTrue(screen.changed)
+
+    async def test_start_failure_on_the_screen_shows_the_reason(self):
+        self.service.host = {"needed": True, "running": False, "stopped": {}, "pid": None, "workers": []}
+        self.service.host_start_error = "no tmux"
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: "host off" in self.text("#totals"), "the failed start")
+            self.app.action_plugins()
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.host, "the screen")
+            screen = self.app.screen
+            await pilot.press("h")
+            await self.until(pilot, lambda: "could not start: no tmux" in str(screen.query_one(".cerror", Static).render()), "the reason")
 
 
 class PluginDashboardTests(DashboardCase):
