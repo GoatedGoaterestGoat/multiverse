@@ -301,6 +301,18 @@ class SettingsAccess:
         self._loaded.registrations.settings_check = function
         return function
 
+    def migrate(self, function):
+        """function(data, source) brings older settings to this version, for `mv2 plugins migrate`.
+
+        `source` is the settings version the file was written for (a number), or
+        "legacy" for the pre-plugin file plugin.json names (settings.legacy). It
+        returns the new settings (with "schema" set to the current version). For
+        "legacy" it may return (settings, on): on (true or false) also turns the
+        plugin on or off in that universe's plugins.json, where it says nothing
+        yet. Usable as a decorator."""
+        self._loaded.registrations.settings_migrate = function
+        return function
+
     def screen(self, reference):
         """This plugin's own settings screen, "module:Class", in place of the one built from its schema.
 

@@ -6,6 +6,7 @@ counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
 answer goes on without it. See docs/plugins.md.
 """
+import json
 from pathlib import Path
 
 from . import config, loader, settings as settings_files
@@ -100,8 +101,18 @@ def problems(root, reserved=()):
     settings_problem = config.load(root).problem
     if settings_problem:
         found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
+    pending = None
     for found in entries(root):
-        if found.on and found.state not in ("on", "loaded", "safe-mode"):
+        if found.on and found.state == "missing":
+            if pending is None:
+                try:
+                    pending = submodules()
+                except Exception:
+                    pending = {}
+            hint = f"; it is a submodule of this mv2 checkout: run mv2 plugins install {found.name}" \
+                if found.name in pending else ""
+            found_problems.append(found.problem + hint)
+        elif found.on and found.state not in ("on", "loaded", "safe-mode"):
             found_problems.append(found.problem or f"{found.name} is {found.state}")
         elif found.on and found.state in ("on", "loaded"):
             usable.append(found)
@@ -174,6 +185,102 @@ def listing(root):
                                 "screen": (found.loaded.registrations.settings_screen if found.loaded else None)}
         result.append(item)
     return result
+
+
+def migrations(root):
+    """What `mv2 plugins migrate` would do here: [{plugin, kind, from, to, problem?}]. Imports a plugin only to ask."""
+    planned = []
+    for found in entries(root):
+        manifest = found.manifest
+        if manifest is None or manifest.settings is None or found.state not in ("off", "on", "loaded", "unusable"):
+            continue
+        target = settings_files.path(root, found.name)
+        legacy = Path(root) / manifest.settings.legacy if manifest.settings.legacy else None
+        if not target.is_file() and legacy is not None and legacy.is_file():
+            planned.append({"plugin": found.name, "kind": "legacy", "from": str(legacy), "to": str(target)})
+        elif target.is_file():
+            try:
+                version = json.loads(target.read_text()).get("schema")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(version, int) and not isinstance(version, bool) and version < manifest.settings.version:
+                planned.append({"plugin": found.name, "kind": "version", "from": str(target), "to": str(target),
+                                "version": version})
+    for item in planned:
+        try:
+            loaded = loader.load(entry(root, item["plugin"]), off=True)
+            if loaded.registrations.settings_migrate is None:
+                item["problem"] = f"{item['plugin']} offers no migration; edit {item['to']} by hand"
+        except PluginError as error:
+            item["problem"] = str(error)
+    return planned
+
+
+def migrate(root, item):
+    """Apply one planned migration: the new settings are checked, then written; the old file goes to trash."""
+    from ..store import write
+    from ..universe import trash
+    found = entry(root, item["plugin"])
+    loaded = loader.load(found, off=True)
+    function = loaded.registrations.settings_migrate
+    if function is None:
+        raise PluginError(f"{found.name} offers no migration")
+    source = Path(item["from"])
+    old = json.loads(source.read_text())
+    try:
+        answer = function(old, "legacy" if item["kind"] == "legacy" else item["version"])
+    except Exception as error:
+        raise PluginError(f"{found.name}'s migration failed: {loader.record(loaded, 'migrate', error, root)}") from error
+    data, on = answer if isinstance(answer, tuple) and len(answer) == 2 else (answer, None)
+    if not isinstance(data, dict) or (on is not None and not isinstance(on, bool)):
+        raise PluginError(f"{found.name}'s migration returned something other than settings")
+    settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"])
+    backup = trash.entry(Path(root), "plugins-migrate") / source.name
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_bytes(source.read_bytes())
+    write(Path(item["to"]), data)
+    if item["kind"] == "legacy":
+        source.unlink()
+        if on is not None and found.name not in config.load(root).enabled:
+            config.set_enabled(root, found.name, on)
+    return {**item, "on": on, "backup": str(backup)}
+
+
+def submodules():
+    """{plugin name: checkout path} of the mv2 checkout's plugin submodules (.gitmodules), initialized or not."""
+    import subprocess
+    if loader.CHECKOUT is None:
+        return {}
+    repository = loader.CHECKOUT.parent
+    if not (repository / ".gitmodules").is_file():
+        return {}
+    result = subprocess.run(["git", "-C", str(repository), "config", "-f", ".gitmodules", "--get-regexp", r"\.path$"],
+                            capture_output=True, text=True, timeout=30)
+    found = {}
+    for line in result.stdout.splitlines():
+        _, _, path = line.partition(" ")
+        parts = Path(path.strip()).parts
+        if len(parts) == 2 and parts[0] == "plugins":
+            found[parts[1]] = repository / path.strip()
+    return found
+
+
+def install(name):
+    """Initialize the checkout's submodule for plugin `name` (git submodule update --init); never prompts."""
+    import os
+    import subprocess
+    if loader.CHECKOUT is None:
+        raise PluginError("This mv2 runs from an installed package, not a checkout: install plugins with pip")
+    known = submodules()
+    if name not in known:
+        raise PluginError(f"No plugin named {name} among this checkout's submodules (.gitmodules)")
+    repository = loader.CHECKOUT.parent
+    result = subprocess.run(["git", "-C", str(repository), "submodule", "update", "--init", "--",
+                             str(known[name].relative_to(repository))],
+                            capture_output=True, text=True, timeout=600, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    if result.returncode != 0:
+        raise PluginError(f"git could not fetch {name}: {(result.stderr or result.stdout).strip()}")
+    return {"name": name, "path": str(known[name]), "installed": (known[name] / "plugin.json").is_file()}
 
 
 def set_enabled(root, name, on):

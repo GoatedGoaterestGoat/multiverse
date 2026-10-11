@@ -146,7 +146,10 @@ mv2 plugins                       # every plugin found: source, version, on/off 
 mv2 plugins info compaction       # manifest, permissions, what it registered, last errors
 mv2 plugins enable notifier       # writes plugins.json; installs default settings if none; shows permissions
 mv2 plugins settings compaction   # where its settings file is, whether it is usable, and its values
-mv2 plugins migrate               # move pre-plugin settings (compaction.json) to their plugin files
+mv2 plugins migrate [--apply]     # pre-plugin or older settings to the current version (dry run by default)
+mv2 plugins install compaction    # initialize a checkout plugin's submodule (git submodule update --init)
+mv2 plugins new my-plugin         # a starter plugin: plugin.json, plugin.py and a test
+mv2 plugins events [--prune]      # the event journal: size, oldest event, cursors
 mv2 plugins disable notifier
 mv2 plugins enable remote -u .multiverse/subverses/ops
 mv2 plugins trust my-plugin       # trust a universe plugin at its current content (below)
@@ -187,9 +190,14 @@ where to look, and core can check, edit and refresh them the same way:
   `mv2 refresh` manages it, and a diff touches one plugin. A subverse has its
   own, with no live inheritance.
 - **Versioned.** The file starts with `"schema": N`, the plugin's own settings
-  version from its manifest. A plugin that changes the shape provides
-  `migrate(old) -> new`, which `mv2 plugins migrate` applies (the old file goes
-  to trash). Core never guesses.
+  version from its manifest. A plugin that changes the shape registers
+  `mv.settings.migrate(fn)`: `fn(data, source)` gets the older settings and
+  either their version number or `"legacy"` (the pre-plugin file the manifest
+  names), and returns the new settings. For `"legacy"` it may return
+  `(settings, on)`, which also turns the plugin on or off in that universe's
+  `plugins.json` where it says nothing yet. `mv2 plugins migrate` shows what
+  would change, and `--apply` does it, checking the result first and keeping
+  the old file in the universe's trash. Core never guesses a migration.
 - **Checked.** The manifest names a JSON Schema. Core validates against it, and
   the plugin may add its own checks (`check(settings)`, like compaction's
   harness builder checks). An unusable file never stops a launch: the plugin
@@ -1187,6 +1195,9 @@ multiverse-v2/
 
 ### Testing your own plugin
 
+- `mv2 plugins new NAME` writes a starter plugin (a column and its test) to
+  begin from, and says how to use it while you work on it
+  (`MV2_PLUGIN_PATH`).
 - `mv2 plugins check PATH` validates the manifest, the API version,
   `extends` against what `register` actually registers, imports in a CLI-like
   process (no Textual), name conflicts with core and with plugins that are on,

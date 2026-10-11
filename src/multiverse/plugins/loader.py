@@ -6,6 +6,10 @@ Sources, first match by name wins:
              developer points at; trusted, like any code they run
   universe   <universe>/plugins/NAME/, loaded only once trusted at its content
   personal   ~/.multiverse/plugins/NAME/
+  installed  Python packages that name their plugin directory in the
+             `multiverse.plugins` entry point group (pip install ...)
+  checkout   plugins/NAME/ at the root of the mv2 checkout this code runs from:
+             optional Git submodules, pinned by the mv2 repository
   bundled    multiverse/plugins/builtin/NAME/
 
 A plugin's Python is imported only when something needs what it registers, into
@@ -31,10 +35,14 @@ from . import config, manifest as manifests, settings as settings_files, trust
 
 API_VERSION = (1, 2)
 BUNDLED = Path(__file__).parent / "builtin"
+# plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
+_REPOSITORY = Path(__file__).resolve().parents[3]
+CHECKOUT = _REPOSITORY / "plugins" if (_REPOSITORY / "src" / "multiverse" / "plugins").is_dir() else None
+ENTRY_POINTS = "multiverse.plugins"
 PACKAGE = "mv2_plugins"
 SAFE_MODE = "MV2_PLUGINS"  # "off" loads no plugin at all
 ERRORS_KEPT = 20
-SOURCES = ("path", "universe", "personal", "bundled")
+SOURCES = ("path", "universe", "personal", "installed", "checkout", "bundled")
 
 # The process plugins are loaded into: cli, dashboard, host or helper.
 process = "cli"
@@ -89,6 +97,7 @@ class Registrations:
     keys: list = field(default_factory=list)
     screens: dict = field(default_factory=dict)  # name -> "module:Class"
     settings_check: object = None
+    settings_migrate: object = None  # fn(data, source) -> data, or (data, on) for pre-plugin settings
     settings_screen: str | None = None  # "module:Class"
     launch: dict = field(default_factory=dict)  # family -> [fn(LaunchInfo) -> Contribution | None]
     capabilities: dict = field(default_factory=dict)  # name -> fn(SessionInfo) -> api.Capability
@@ -180,8 +189,42 @@ def _source_directories(root):
     if root is not None:
         found.extend(("universe", directory) for directory in _plugin_directories(Path(root) / "plugins"))
     found.extend(("personal", directory) for directory in _plugin_directories(trust.user_directory() / "plugins"))
+    found.extend(("installed", directory) for directory in installed_directories())
+    if CHECKOUT is not None:
+        # An uninitialized submodule is an empty directory: no plugin.json, so nothing is found there.
+        found.extend(("checkout", directory) for directory in _plugin_directories(CHECKOUT))
     found.extend(("bundled", directory) for directory in _plugin_directories(BUNDLED))
     return found
+
+
+_installed = None
+
+
+def installed_directories():
+    """Plugin directories that installed packages name in the multiverse.plugins entry point group.
+
+    An entry point's value is a top-level package whose directory holds
+    plugin.json (`compaction = "mv2_compaction"`). It is located, never
+    imported. Read once per process: installing a package needs a restart.
+    """
+    global _installed
+    if _installed is None:
+        found = []
+        try:
+            from importlib.metadata import entry_points
+            for point in sorted(entry_points(group=ENTRY_POINTS), key=lambda point: point.name):
+                try:
+                    spec = importlib.util.find_spec(point.module)
+                except (ImportError, ValueError):
+                    continue
+                locations = list(spec.submodule_search_locations or []) if spec else []
+                directory = Path(locations[0]) if locations else (Path(spec.origin).parent if spec and spec.origin else None)
+                if directory is not None and (directory / manifests.FILE).is_file():
+                    found.append(directory)
+        except Exception:
+            found = []
+        _installed = found
+    return list(_installed)
 
 
 def compatible(manifest):
@@ -319,14 +362,16 @@ def _make_package(name, directory):
     return package
 
 
-def load(found):
+def load(found, off=False):
     """The Loaded plugin for an Entry that is usable, importing and registering it once per process.
 
-    Raises PluginError when it cannot be loaded; the failure is kept, so later
-    callers get the same answer without importing again.
+    A plugin whose settings here are unusable still loads, so its screens can fix
+    them. `off` also loads a plugin that is off here (still trusted and
+    compatible), for what acts before it is turned on, such as migrating its
+    pre-plugin settings. Raises PluginError when it cannot be loaded; the failure
+    is kept, so later callers get the same answer without importing again.
     """
-    # A plugin whose settings here are unusable still loads, so its screens can fix them.
-    if not (found.on and found.state in ("on", "loaded", "unusable")):
+    if not (found.on and found.state in ("on", "loaded", "unusable")) and not (off and found.state == "off"):
         raise PluginError(found.problem or f"{found.name} is off here")
     from . import api  # the API imports this module
     directory = Path(found.directory).resolve()

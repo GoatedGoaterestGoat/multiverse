@@ -32,8 +32,8 @@ CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV
 class PluginTestCase(unittest.TestCase):
     # The plugin under test: a directory with plugin.json, or None to write plugins in the test.
     plugin = None
-    # Whether mv2's bundled plugins (such as typeahead, on by default) are found too. Off, a test sees only
-    # its own plugins, whatever mv2 bundles.
+    # Whether mv2's bundled plugins (such as typeahead, on by default), the checkout's submodule plugins and
+    # pip-installed plugins are found too. Off, a test sees only its own plugins, whatever is installed.
     bundled = False
 
     def setUp(self):
@@ -56,9 +56,10 @@ class PluginTestCase(unittest.TestCase):
         if not self.bundled:
             empty = self.work / "no-bundled-plugins"
             empty.mkdir()
-            bundled = mock.patch.object(loader, "BUNDLED", empty)
-            bundled.start()
-            self.addCleanup(bundled.stop)
+            for patcher in (mock.patch.object(loader, "BUNDLED", empty), mock.patch.object(loader, "CHECKOUT", None),
+                            mock.patch.object(loader, "_installed", [])):
+                patcher.start()
+                self.addCleanup(patcher.stop)
         previous = loader.process
         self.addCleanup(setattr, loader, "process", previous)
         loader.process = "cli"

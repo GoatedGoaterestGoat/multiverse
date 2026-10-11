@@ -6,20 +6,26 @@ from pathlib import Path
 from .. import plugins, universe
 from ..plugins import loader, manifest as manifests, settings as settings_files, trust
 
-ACTIONS = ("list", "info", "enable", "disable", "settings", "trust", "untrust", "check", "host", "events")
+ACTIONS = ("list", "info", "enable", "disable", "settings", "trust", "untrust", "check", "host", "events",
+           "install", "migrate", "new")
 HOST_ACTIONS = ("status", "start", "stop")
 NAMED = ("info", "enable", "disable", "settings", "trust", "untrust")
 
 
 def configure(parser):
     parser.add_argument("plugin_action", nargs="?", default="list", choices=ACTIONS, metavar="ACTION",
-                        help="list (default), info, enable, disable, settings, trust, untrust, check, host or events")
-    parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status)")
+                        help="list (default), info, enable, disable, settings, trust, untrust, check, host, events, "
+                             "install, migrate or new")
+    parser.add_argument("name", nargs="?", help="The plugin (for check: its directory; for host: start, stop or status; "
+                                               "for new: the new plugin's name)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", dest="assignments",
                         help="settings: change one setting (VALUE is JSON, or else text); repeatable")
     parser.add_argument("--unset", action="append", default=[], metavar="KEY", dest="removals",
                         help="settings: remove one setting, back to its default; repeatable")
     parser.add_argument("--prune", action="store_true", help="events: delete journal segments past retention now")
+    parser.add_argument("--apply", action="store_true", help="migrate: make the changes (otherwise only show them)")
+    parser.add_argument("--recursive", action="store_true", help="migrate: this universe and every subverse")
+    parser.add_argument("--dir", dest="directory", help="new: where to create it (default: the current directory)")
     parser.add_argument("--json", action="store_true", help="Print the full result as JSON")
 
 
@@ -47,13 +53,26 @@ def _changes(assignments, removals):
     return changes
 
 
-def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, json=False):
+def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
+        recursive=False, directory=None, json=False):
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
+    if (apply or recursive) and plugin_action != "migrate":
+        raise ValueError("--apply and --recursive belong to mv2 plugins migrate")
+    if directory and plugin_action != "new":
+        raise ValueError("--dir belongs to mv2 plugins new")
     if plugin_action == "check":
         if not name:
             raise ValueError("mv2 plugins check takes the plugin's directory")
         return check(Path(name))
+    if plugin_action == "new":
+        if not name:
+            raise ValueError("mv2 plugins new takes the new plugin's name")
+        return scaffold(name, Path(directory or ".").expanduser())
+    if plugin_action == "install":
+        if not name:
+            raise ValueError("mv2 plugins install takes a plugin's name")
+        return plugins.install(name)
     root = universe.resolve(root)
     if plugin_action in NAMED and not name:
         raise ValueError(f"mv2 plugins {plugin_action} takes a plugin's name")
@@ -70,6 +89,19 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         if action not in HOST_ACTIONS:
             raise ValueError(f"mv2 plugins host takes {', '.join(HOST_ACTIONS)}")
         return {"action": action, "universe": str(top), **getattr(host, action)(top)}
+    if plugin_action == "migrate":
+        scopes = list(universe.tree(root)) if recursive else [root]
+        planned = [{**item, "universe": str(scope)} for scope in scopes for item in plugins.migrations(scope)]
+        done = []
+        if apply:
+            for item in planned:
+                if item.get("problem"):
+                    continue
+                try:
+                    done.append(plugins.migrate(Path(item["universe"]), item))
+                except (OSError, ValueError) as error:
+                    item["problem"] = str(error)
+        return {"universe": str(root), "planned": planned, "applied": done, "apply": apply}
     if plugin_action == "events":
         from ..plugins import events
         removed = [str(path) for path in events.prune(root)] if prune else []
@@ -105,6 +137,51 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     if plugin_action == "trust":
         return {"name": name, "directory": str(found.directory), "fingerprint": trust.trust(found.directory)}
     return {"name": name, "directory": str(found.directory), "forgotten": trust.forget(found.directory)}
+
+
+TEMPLATE = '''"""{name}: what it does, in a sentence. See docs/plugins.md for the API."""
+
+
+def shout(row):
+    """An example column value: the agent's name in capitals. Column functions must be quick."""
+    return str(row.get("name", "")).upper()
+
+
+def register(mv):
+    # Each call below needs its extension point in plugin.json "extends".
+    mv.dashboard.column("shout", "Shout", 12, shout)
+'''
+
+TEST = '''"""Run with: python -m unittest discover -s tests (from the plugin directory)"""
+from pathlib import Path
+
+from multiverse.plugins.testing import PluginTestCase
+
+
+class {cls}Test(PluginTestCase):
+    plugin = Path(__file__).resolve().parents[1]
+
+    def test_column(self):
+        column = self.loaded().registrations.columns["shout"]
+        self.assertEqual(column.value({{"name": "worker"}}), "WORKER")
+'''
+
+
+def scaffold(name, parent):
+    """A new plugin directory: plugin.json, plugin.py with one example, and a test."""
+    manifests.check_name(name)
+    directory = (parent / name).resolve()
+    if directory.exists():
+        raise ValueError(f"{directory} already exists")
+    (directory / "tests").mkdir(parents=True)
+    (directory / "plugin.json").write_text(json.dumps({
+        "schema": 1, "name": name, "version": "0.1.0", "description": "",
+        "api": ".".join(map(str, loader.API_VERSION)), "module": "plugin", "extends": ["dashboard.column"],
+        "permissions": []}, indent=2) + "\n")
+    (directory / "plugin.py").write_text(TEMPLATE.format(name=name))
+    cls = "".join(part.capitalize() for part in name.split("-"))
+    (directory / "tests" / f"test_{name.replace('-', '_')}.py").write_text(TEST.format(cls=cls))
+    return {"name": name, "directory": str(directory)}
 
 
 def check(directory):
@@ -160,8 +237,10 @@ def check(directory):
             "ok": not problems, "problems": problems, "notes": notes}
 
 
-def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, json=False):
-    result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune)
+def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
+            recursive=False, directory=None, json=False):
+    result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
+                 apply=apply, recursive=recursive, directory=directory)
     if json:
         return result
     if plugin_action == "check" and not result["ok"]:
@@ -241,6 +320,31 @@ def text(action, result):
         return f'Trusted {result["name"]} at its current content ({result["fingerprint"][:19]}…). Any change needs trust again.'
     if action == "untrust":
         return f'{result["name"]} is no longer trusted.' if result["forgotten"] else f'{result["name"]} was not trusted.'
+    if action == "install":
+        return (f'Installed {result["name"]} at {result["path"]}. Turn it on with mv2 plugins enable {result["name"]}.'
+                if result["installed"] else f'Fetched {result["path"]}, but it holds no plugin.json.')
+    if action == "new":
+        return "\n".join([f'Created {result["name"]} at {result["directory"]}.',
+                          f'Use it here while you work on it: export MV2_PLUGIN_PATH={result["directory"]}',
+                          f'Then: mv2 plugins check {result["directory"]}, mv2 plugins enable {result["name"]}, and its tests:',
+                          f'  python -m unittest discover -s {Path(result["directory"]) / "tests"}'])
+    if action == "migrate":
+        if not result["planned"]:
+            return "Nothing to migrate."
+        lines = []
+        applied = {(item["plugin"], item["universe"]) for item in result["applied"]}
+        for item in result["planned"]:
+            what = (f'{item["from"]} -> {item["to"]}' if item["kind"] == "legacy"
+                    else f'{item["to"]} from settings version {item["version"]}')
+            if (item["plugin"], item["universe"]) in applied:
+                lines.append(f'Migrated {item["plugin"]}: {what}')
+            elif item.get("problem"):
+                lines.append(f'! {item["plugin"]}: {what}: {item["problem"]}')
+            else:
+                lines.append(f'Would migrate {item["plugin"]}: {what}')
+        if not result["apply"] and any(not item.get("problem") for item in result["planned"]):
+            lines.append("Run with --apply to make these changes; old files go to the universe's trash.")
+        return "\n".join(lines)
     if action == "host":
         state = "running" if result["running"] else "not running"
         lines = [f'The plugin host for {result["universe"]} is {state}' + (f' (pid {result["pid"]}).' if result["running"] and result.get("pid") else ".")]
