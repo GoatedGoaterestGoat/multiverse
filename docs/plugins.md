@@ -17,8 +17,8 @@ without editing it:
   became ready, changed status or exited; a message was saved, delivered or read;
   an agent reported.
 - **What a harness does:** a plugin can add to each launch of a harness, such
-  as a Claude mod of its own, a `--settings` hook, environment, a Pi extension or
-  Codex config. It is gated on the harness's version.
+  as a Claude mod of its own, a `--settings` hook, environment, a Pi extension, or
+  Codex config, instructions and MCP servers. It is gated on the harness's version.
 
 The design has two goals that test it:
 
@@ -36,7 +36,7 @@ The design has two goals that test it:
 | --- | --- |
 | **plugin** | An mv2 plugin: a directory with `plugin.json`. |
 | **extension point** | A named registry a plugin adds to, such as `dashboard.column` or `launch`. PR #16's `COLUMNS`, `PANELS`, `AGENT_FACTS`, theme and `FieldScreen` become extension points. |
-| **harness extension** | The part of a plugin that runs inside or alongside a harness: a Claude plugin directory (a "mod"), a Pi extension, Codex config. |
+| **harness extension** | The part of a plugin that runs inside or alongside a harness: a Claude plugin directory (a "mod"), a Pi extension, Codex config, instructions and MCP servers. |
 | **plugin host** | An optional long-lived mv2 process that runs plugins' services and event handlers. |
 | **API** | `multiverse.plugins.api`, the only mv2 module a plugin imports. It is versioned. |
 
@@ -464,7 +464,7 @@ class Contribution:          # what it may return
     claude_settings: Mapping = {}                  # deep-merged into --settings; hook lists concatenated
     claude_plugin_dirs: tuple[str, ...] = ()       # usually from the manifest instead
     pi_extensions: tuple[str, ...] = ()
-    codex_config: Mapping[str, str] = {}           # -c key=value
+    codex: CodexContribution | None = None         # allowlisted config, instructions, MCP servers (see Codex)
     problem: str | None = None                     # "Launched without compaction: …"
     mode: str | None = None                        # e.g. "without compaction", shown in native_mode
 ```
@@ -520,21 +520,271 @@ plugin directory: build changes in a scratch copy, validate them on the oldest
 running Claude, then write them. `mv2 plugins check` runs `claude plugin
 validate` on each Claude directory a plugin has.
 
-### Pi and Codex
+### Pi
 
-- **Pi:** `harnesses.pi` entries are extension files, added as `--extension
-  PATH` beside mv2's own `extension.ts` when the bridge is on. A Pi extension
-  can do what mv2's does, and it reaches mv2 the same way, through the CLI and
-  the helper.
-- **Codex:** `plugins-codex` is checking what the installed Codex offers
-  (config keys, its `notify` program, hooks, MCP, app-server notifications)
-  and will replace this paragraph with a contract backed by evidence. For now:
-  Codex has no extension mechanism mv2 can load into the TUI.
-  Codex-side behaviour is limited to `codex_config` (`-c key=value`), and the
-  user's explicit harness `args` still win, as for `check_for_update_on_startup`.
-  Events cover the rest: status comes from the app-server through the runner
-  and reaches plugins as `agent.status`. Hooks into the relay protocol are not
-  part of v1.
+`harnesses.pi` entries are extension files, added as `--extension PATH` beside
+mv2's own `extension.ts` when the bridge is on. A Pi extension reaches mv2
+through the CLI and the helper.
+
+### Codex
+
+Written by `plugins-codex`. Its evidence and the full inventory of config keys
+are in [lab-notes/plugins-codex.md](../lab-notes/plugins-codex.md).
+
+Codex has native plugins, skills, MCP servers and lifecycle hooks. The checked
+CLI has no Pi-style extension and no Claude-style `--plugin-dir`. mv2's first
+Codex integration is a declarative launch contribution that handles plain TUI
+launches and remote app-server (bridge) launches explicitly. Installing native
+plugins and trusting native hooks stay operations Codex owns.
+
+The adapter's documented baseline is 0.159.3, and 0.162.1 is installed. The
+pinned source of both versions has everything below, but only 0.162.1 was run.
+A field in the config schema shows that Codex recognizes a shape. It does not
+prove that the TUI forwards it, or that every shape works.
+
+#### What Codex offers
+
+| Mechanism | What Codex does, and what it means for mv2 |
+| --- | --- |
+| Launch config | `-c` / `--config key=value` takes dotted paths and TOML values, with a raw-string fallback: model, effort and verbosity, TUI presentation, developer instructions, MCP, hooks, skill selectors, plugin enablement and environment policy. mv2 accepts a small typed allowlist and does not let a plugin change arbitrary config. |
+| `notify` | One command argv. After each agent turn, Codex spawns it with one JSON argument: `type: agent-turn-complete`, thread and turn IDs, cwd, the input messages and the last assistant message. It is fire-and-forget: output is discarded, and a spawn error does not fail the turn. It is no general lifecycle API, replaces neither approvals nor compaction, and passes conversation text to its command. The user's notifier is kept. v1 plugins use mv2 events and do not claim this single slot. |
+| Lifecycle hooks | `SessionStart`, `SessionEnd`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`, `Stop`, `Interrupt`. They come from config TOML, `.codex/hooks.json` layers and native plugin bundles. Command and MCP tool handlers exist; `prompt` and `agent` handlers appear in the schema, which does not mean they run. Hooks that are not managed need native review against their current hash, and mv2's trust does not satisfy Codex's. mv2 never writes `hooks.state.*.trusted_hash`, weakens native policy or adds `--dangerously-bypass-hook-trust` for a plugin. |
+| MCP | `mcp_servers.NAME`: local stdio (`command`, `args`, `cwd`, `env`/`env_vars`) and HTTP (`url`, headers, environment and auth settings), tool allow and deny lists, timeouts. Native plugin bundles can add servers too. A plugin's own MCP server is the practical way to give the Codex model tools, and it needs no relay callbacks to run them. Authentication stays the user's. |
+| Skills and instructions | Native skills are found under the repository's `.agents/skills`, a trusted project's `.codex/skills`, the user's `.agents/skills`, the older `$CODEX_HOME/skills`, system roots and native plugin skills. `skills.config` turns found skills on or off; it cannot register another skill root. `AGENTS.override.md`, `AGENTS.md` and fallback names make up project instructions. `developer_instructions` adds developer text. `model_instructions_file` replaces the built-in model instructions, so it is wrong for plugin defaults. mv2's catalog skills stay available through the bootstrap and the CLI, with no files installed in the user's home or repository. Custom prompts are deprecated in favor of skills and are not a v1 target. |
+| Native plugin packages | The checked CLI has `codex plugin add/list/remove` and marketplace management. A package can use `.codex-plugin/plugin.json`, skills, `.mcp.json` and hooks, or the portable Agent Plugins layout. `plugins.<name@marketplace>.enabled` selects a package Codex can resolve; it is not a directory loader. v1 does not install marketplaces or packages, write `.agents` or `.codex` in a workspace, or change `$CODEX_HOME`. A later package contribution must handle installation identity, refresh, trust and exact resume before `dir` is offered. |
+| Profiles | `--profile NAME` layers `$CODEX_HOME/NAME.config.toml`. The 0.159.3 loader rejects the older `profile = "NAME"`, although the schema still has `profile`/`profiles`. Profiles belong to the user: plugins neither create nor select them. mv2's bridge resume already rejects profile overrides (auto picks plain, required fails). |
+
+Sources: [0.159.3 config schema](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/config.schema.json),
+[notify implementation](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/hooks/src/legacy_notify.rs),
+[hook discovery and trust](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/hooks/src/engine/discovery.rs),
+[native plugin loader](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core-plugins/src/loader.rs),
+[skill roots](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/ext/skills/src/host_roots.rs),
+[profile loader](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/config/mod.rs),
+[hooks guide](https://learn.chatgpt.com/docs/hooks),
+[native package guide](https://developers.openai.com/plugins/build/plugins),
+[deprecated prompts](https://learn.chatgpt.com/docs/custom-prompts).
+
+#### The v1 launch contract
+
+A `harnesses.codex` entry:
+
+```json
+{
+  "min_version": "0.162.1",
+  "max_version": "0.162.1",
+  "instructions": "codex/instructions.md",
+  "config": {"model_verbosity": "low"},
+  "mcp_servers": {
+    "tools": {
+      "command": "python3",
+      "args": ["{plugin_dir}/codex/server.py"],
+      "enabled_tools": ["lookup"],
+      "startup_timeout_sec": 10
+    }
+  }
+}
+```
+
+The example pins the version that was run, not the first version with the
+mechanism. Lower bounds widen once native tests pass on those releases. An
+entry needs the `harness.codex` permission, and a local MCP command also
+`process.spawn`. Relative instruction paths resolve inside the trusted plugin
+root. Only documented placeholders are expanded, as whole argv elements, with
+no shell. The instruction text and the plugin's provenance are snapshotted at
+launch.
+
+- **`config`:** typed values, not argument fragments. At first:
+  `model_reasoning_effort`, `model_reasoning_summary`, `model_verbosity`, and a
+  versioned set of TUI presentation keys such as `tui.animations`,
+  `tui.alternate_screen`, `tui.notifications`, `tui.notification_method` and
+  `tui.status_line`. Each key needs a known version, type and value. A plugin
+  that sets an array such as `tui.status_line` supplies the whole array: it is
+  not a native status-item API. Reserved to core and the user: model,
+  provider and service tier; credentials and endpoints;
+  permissions, sandbox and approvals; environment policy; persistence and
+  history; project trust; updates; compaction thresholds; features; profile
+  selection; and global skill, plugin and hook settings. No plugin gets
+  arbitrary extra CLI arguments.
+- **`instructions`:** an optional UTF-8 file added to mv2's generated bootstrap,
+  in plugin-name order, wrapped with the plugin's name. A user's explicit
+  `developer_instructions` still replaces it, as today, and the launch records
+  that it did. AGENTS files and model instructions are never replaced. This
+  reuses the bootstrap path, so it works in both modes.
+- **`mcp_servers`:** servers under adapter-made names, `mv2_<plugin>_<name>`
+  (hyphens normalized the same way everywhere; collisions refused). Transport
+  fields, timeouts and tool lists are checked against the supported version.
+  Startup is optional by default (`required = false`), and approvals and
+  authentication stay native. Manifests may not hold inline bearer tokens or
+  OAuth client secrets, only references to the user's environment. A stdio
+  server that needs the agent's identity gets it passed explicitly, since a
+  shared daemon does not inherit the TUI's environment. This is the only v1 way
+  for a plugin to add MCP config, and `config.mcp_servers` is refused.
+
+**Plain and bridge launches must mean the same.** Plain mode encodes
+contributions as `-c` overrides. Bridge mode needs a narrow transform owned by
+the adapter that merges the approved session config into the exact
+`thread/start` or `thread/resume` request, not into daemon config. The remote
+TUI forwards only some keys: `notify`, `mcp_servers`, `hooks`, `skills` and
+`plugins` are missing from its forwarding function in both 0.159.3 and 0.162.1
+([0.159.3](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/tui/src/app_server_session.rs),
+[0.162.1](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/tui/src/app_server_session.rs)),
+so `-c mcp_servers…` alone does nothing in a bridge launch. The transform
+belongs to the harness-side phase. It is not plugin middleware, and it imports
+no plugin Python into the runner.
+
+Evidence, from isolated 0.162.1 probes without a model turn:
+
+- A namespaced local MCP server passed in `thread/start.config` connected:
+  `mcpServerStatus/list` reported `runtimeStatus=connected` with its `ping`
+  tool.
+- A thread given a harmless item with `thread/inject_items`, then resumed with a
+  new MCP server in `config`, resumed fine, but that server was absent from its
+  MCP inventory.
+
+So v1 promises a new MCP server on spawn only. On resume it can observe the
+servers that were kept, but it cannot promise an added or changed one took
+effect. Widening that needs its own native proof. The launch records what was
+requested against what was observed, and mv2 never restarts or unloads a user's
+shared service to force plugin config through.
+
+**Merging and precedence.**
+
+- **Core settings** are resolved separately.
+- **Conflicts:** when two plugins give conflicting defaults that can't be
+  combined, the conflicting contribution is left out with a diagnostic.
+  Plugin-name order never silently picks a winner. Distinct MCP namespaces
+  combine.
+- **Placement:** the remaining plugin defaults go before the user's `args` and
+  `spawn_args`/`resume_args`, never after `--`, and the user's arguments are
+  never reordered.
+- **User overrides:** mv2 recognizes `-c KEY=VALUE`, `-cKEY=VALUE`,
+  `--config KEY=VALUE`, `--config=KEY=VALUE` and native feature aliases. A user
+  override of the same key, an ancestor or a descendant suppresses the
+  overlapping plugin default.
+- **Paths** are read the way that Codex version reads them (0.159.3 splits on
+  literal dots), with no invented quoting.
+- **Explicit flags** such as `--model` and `--profile` keep their behaviour.
+- **Bridge forwarding:** the user's session overrides of a contributed
+  namespace are carried as the top layer too, since the TUI may drop them.
+- **Precedence in the request:** values in the native request beat plugin
+  defaults, and the user's retained explicit values beat both.
+- **What stays:** the `check_for_update_on_startup` scan stays authoritative,
+  and plugins cannot undo it. Codex still enforces native managed requirements.
+
+**Gating and evidence.**
+
+- **Versions:** `min_version` and `max_version` are inclusive semantic-version
+  bounds. An unknown or prerelease version needs explicit support, never a
+  string comparison. The selected executable is checked, not a hardcoded
+  `codex`.
+- **CLI and daemon:** CLI settings gate on the CLI's version, and bridge
+  settings also on the daemon's, which mv2 records separately and which may
+  differ. A compatible version does not replace protocol validation.
+- **Failures:** an unsupported entry is skipped with a reason, and a broken
+  plugin never stops the launch. A plain fallback stays valid, and
+  contributions are reported again once the mode is chosen.
+
+`runtime.json`'s `plugins` record says, for each plugin:
+
+- its name, version, fingerprint and entry;
+- the CLI and daemon versions and the selected mode;
+- the accepted instruction snapshot and its hash;
+- the config **key names** applied and the MCP server names;
+- fields the user's settings suppressed, and why each skip, conflict or version
+  failure happened.
+
+It tells `prepared` and `requested` apart from natively `confirmed`: a rendered
+argv or a successful thread reply alone proves neither an MCP connection nor a
+trusted hook running. Fallback and resume limits are recorded against the
+launch. Credentials, hook payloads, conversation text and raw merged config
+never go in it.
+
+Native hooks and package directories are **known future integration points**,
+not fields v1 silently forwards. A later `hooks` field must combine native hook
+sources without erasing the user's handlers, keep native trust and policy, and
+show hooks that were skipped, untrusted or disabled. Even then, an mv2-enabled
+hook cannot promise enforcement until native execution is verified. A notifier
+that only observes already has mv2 events.
+
+#### Relay observations and later requests
+
+Today `runtime/rpc.py`'s `LaunchProxy` forwards native requests, notifications
+and replies both ways, with the adapter's launch preparation, exact binding,
+naming and usage observation. Separate control RPCs start with experimental API
+support and act on the saved thread and workspace. `status.py` reads
+server-wide `thread/status/changed` broadcasts, and `usage.py` reads
+exact-thread `thread/tokenUsage/updated` on the TUI stream. There is no plugin
+subscription or generic RPC API.
+
+| Native surface | Possible plugin use, and who owns it |
+| --- | --- |
+| `turn/started`, `turn/completed`; `item/started`, `item/completed`; `thread/queue/changed`; `hook/started`, `hook/completed`; `thread/compacted` | Future passive events. They must be observed on the bound TUI connection, since a passive server-wide observer gets no turn or item events. Emitted only after exact binding, filtered by thread, with launch, thread, turn and item identity. A completed turn may have failed or been interrupted. |
+| `thread/status/changed`, `thread/tokenUsage/updated` | mv2's existing status and context paths feed the event journal, with normalized metadata, never raw frames. |
+| `thread/read`, `thread/turns/list`, `thread/items/list`, `thread/queue/list`, `thread/backgroundTerminals/list` | A later bounded read API for the exact agent: paginated, revalidating the native ID and workspace, enforcing permissions, and never loading or resuming a thread just to look. |
+| `thread/queue/add`, `thread/queue/start`, `turn/steer`, `turn/interrupt`, queue deletion, background terminal cleanup | Already owned by send and stop. Plugins use the public agent API, which keeps durable message IDs and the acceptance and receipt rules. No raw way around them. |
+| `item/commandExecution/requestApproval`, `item/fileChange/requestApproval`, `item/permissions/requestApproval`, `item/tool/requestUserInput`, `mcpServer/elicitation/request` | Server **requests** with an `id`, not notifications. The TUI answers them. Observers neither answer nor swallow them. |
+| `item/tool/call`, `dynamicTools` | Dynamic tools need a client that answers on the owning connection, which a passive observer cannot be. v1 model tools use MCP. |
+| `skills/extraRoots/set`, `plugin/install`, config writes | Real native APIs but not per-agent plugin operations: extra skill roots replace those of the shared skills service, and install and config change native global state. Never exposed through a blanket relay permission. |
+
+The installed `generate-json-schema --experimental` output and the
+[0.159.3 method definitions](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server-protocol/src/protocol/common.rs)
+list the protocol. The relay already carries these messages but does not hand
+them to plugin code.
+
+A later passive observer would have the following, and no plugin imports in the
+runner:
+
+- **Isolation:** bounded queues with drop counts, so a slow host cannot stall
+  the TUI or an approval.
+- **Attribution:** account, skill and MCP notifications without a thread ID are
+  never credited to whichever agent has a connection.
+- **Content:** conversation and tool payloads need their own read permission
+  and stay out of the ordinary journal.
+
+Native `thread/start.selectedCapabilityRoots` (0.159.3 source, 0.162.1 schema)
+selects package roots, and its local MCP path has native tests. It may serve a
+future bridge-only package loader. It is not a CLI flag, though, and resume has
+no matching field. Skill and hook loading, persistence, exact resume and client
+feature gating need proof before `harnesses.codex.dir` is offered.
+
+#### Tree compaction for Codex: analysis only
+
+Codex could implement `CompactionSource` one day, but lifecycle signals are not
+enough. It needs:
+
+- stable completed-turn IDs from `turn/completed`;
+- a whole-conversation reader over paginated native turns and items, including
+  tool calls, results and images;
+- consistent filtering of earlier install rows;
+- a cancellable builder with typed error and rate-limit mapping;
+- a renderer that produces a valid Codex conversation with the protocol's
+  `messages` and `count`.
+
+Modern threads can have `path=null`, so a guessed rollout JSONL path is not a
+transcript contract.
+
+Above all, it needs an atomic native **replacement** of the model-visible
+history of the same thread, persisted, with ownership and idle locking. None
+exists:
+
+- `thread/compact/start` runs Codex's own compaction, not a tree install.
+- `thread/inject_items` appends items; it does not replace them.
+- The unstable, Cloud-only `thread/resume.history` is not a general install
+  contract.
+- Editing SQLite or rollouts behind a loaded daemon, or swapping to a fork,
+  would break exact identity and persistence.
+
+Native `PreCompact` can stop a compaction with `continue: false` (a
+Claude-style `decision: block` is not accepted for this event). That is useful
+but carries no replacement. Native hook trust, disabling, policy and failure
+handling must give a verified fail-closed guard for automatic and manual
+compaction before mv2 offers tree compaction. Untrusted or missing hooks do not
+run and cannot enforce it. Codex's compaction capability stays unavailable.
+
+Sources: [PreCompact implementation and tests](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/hooks/src/events/compact.rs),
+[history injection](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/codex_thread.rs),
+[thread resume fields](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server-protocol/src/protocol/v2/thread.rs),
+and `src/multiverse/compaction/protocol.py`.
 
 ### Status lines
 
@@ -876,7 +1126,7 @@ multiverse-v2/
 | Phase | Lands | Behaviour change |
 | --- | --- | --- |
 | **1. Foundation** | `multiverse.plugins` (discovery, manifest, `plugins.json`, trust, loader, failure boundaries), `api` v1 client and utilities, `mv2 plugins` list/info/enable/disable/check/trust, extension points for CLI, catalog, doctor, dashboard columns/panels/inspector/theme/keys/screens/settings, `testing` helpers, `hello-column` | None without plugins. `cli.py`'s "no plugin discovery" note goes. |
-| **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, `runtime.json` `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
+| **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, the Codex contract (allowlisted config, instructions, MCP servers on spawn, with the bridge's `thread/start` transform), `runtime.json` `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
 | **3. Compaction** | Steps 2 to 8 above, with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
 | **4. Events and host** | Event journal with segments and retention, emitters, the plugin host, `notifier`, `cost-item`, and `remote` in its own repository (off by default) | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
 | **5. Distribution** | Entry points, `mv2 plugins new` scaffold, per-subverse UI with plugin panels in portals, API 1.0 frozen | None |
@@ -911,7 +1161,7 @@ Decided by the user on 2026-10-11:
 - **Separate repositories:** compaction and the remote control are versioned in
   their own repositories, included as optional submodules.
 - **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
-  extensions.
+  extensions. Its contract is in [Codex](#codex).
 
 Still open (recommendation first):
 
