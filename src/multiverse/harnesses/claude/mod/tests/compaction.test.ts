@@ -4,7 +4,7 @@
 // builder it runs, and the status line, notices and toasts it shows.
 import type { On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
-import { describeCompaction, oneOff, parseStatus } from '../hooks/compaction'
+import { oneOff, parseStatus } from '../hooks/compaction'
 
 type Spawned = { argv: readonly string[]; input?: string }
 
@@ -154,18 +154,6 @@ describe('one-off scheduler', () => {
 })
 
 describe('status line', () => {
-  test('the compaction item shows built trees out of all turns', () => {
-    expect(describeCompaction(false, undefined, false)).toBeUndefined()
-    expect(describeCompaction(true, undefined, false)).toBe('compaction on')
-    expect(describeCompaction(true, { enabled: false, trees: 3 }, false)).toBeUndefined()
-    expect(describeCompaction(true, { enabled: true, trees: 76, turns: 76, missing: 0 }, false)).toBe('trees 76/76')
-    expect(describeCompaction(true, { enabled: true, trees: 70, turns: 76, missing: 2, building: true }, false))
-      .toBe('trees 70/76 · building')
-    expect(describeCompaction(true, { enabled: true, trees: 1, turns: 3, missing: 2, failed: 1 }, true))
-      .toBe('trees 1/3 · 1 failed · /compact failed')
-    expect(describeCompaction(true, { enabled: true, trees: 4 }, false)).toBe('trees 4')
-  })
-
   test('a status is the last status line a process printed', () => {
     expect(parseStatus('noise\n{"event":"status","trees":1}\n{"event":"status","trees":2}\n')).toEqual({ event: 'status', trees: 2 })
     expect(parseStatus('{"event":"log"}\nnot json\n')).toBeUndefined()

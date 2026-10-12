@@ -47,11 +47,16 @@ def _agent(directory: str):
 
 
 def install(directory: str, request: dict, emit) -> int:
+    agent = None
+
     def fail(message):
         emit({'event': 'failed', 'message': message})
         try:
             Store(directory).log(f'compaction failed: {message}')
-        except OSError:
+            Store(directory).set_compact_failed(True)
+            if agent is not None:
+                status(agent, emit=lambda event: None)
+        except Exception:  # the failure is reported above; the status line is best effort
             pass
         return 1
 
@@ -101,6 +106,11 @@ def install(directory: str, request: dict, emit) -> int:
     for message in payload.get('messages', []):
         emit({'event': 'message', 'message': message})
     emit({'event': 'result', 'path': str(path), 'install_id': install_id, 'count': payload.get('count'), 'stats': stats})
+    store.set_compact_failed(False)
+    try:
+        status(agent, emit=lambda event: None)
+    except Exception:  # the compaction is done; the status line is best effort
+        pass
     return 0
 
 
@@ -127,6 +137,30 @@ def background(directory: str, marker: str | None = None, emit=None) -> int:
                                  stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True, close_fds=True)
             started = True
     return status(agent, emit, building=started, marker=marker)
+
+
+def line(facts: dict, compact_failed: bool = False) -> str:
+    """The status-line item: "trees 51/52 · building", failed turns and a failed compaction; '' while off."""
+    if not facts.get('enabled'):
+        return ''
+    trees, turns = facts.get('trees'), facts.get('turns')
+    parts = [f'trees {trees}' if turns is None else f'trees {trees}/{turns}']
+    if facts.get('building'):
+        parts.append('building')
+    if facts.get('failed'):
+        parts.append(f"{facts['failed']} failed")
+    if compact_failed:
+        parts.append('/compact failed')
+    return ' · '.join(parts)
+
+
+def show(agent, facts: dict):
+    """Write the agent's `compaction` status-line item (state/agents/<id>/status-items/compaction.txt)."""
+    from ..plugins import harness as plugin_harness
+    try:
+        plugin_harness.write_item(agent.directory, 'compaction', line(facts, agent.store.status().get('compact_failed', False)))
+    except OSError:
+        pass
 
 
 def status(agent, emit=None, building=False, marker=None) -> int:
@@ -156,6 +190,7 @@ def status(agent, emit=None, building=False, marker=None) -> int:
             facts['turns'] = len(completed)
         except (OSError, ValueError, KeyError) as error:
             facts['problem'] = str(error)
+    show(agent, facts)
     emit(facts)
     return 0
 

@@ -519,6 +519,8 @@ class AdapterTest(Fixture):
         # The bundled compaction plugin contributes it; compaction.json alone turns the plugin on.
         self.assertEqual(on.plugins['plugins']['compaction']['state'], 'loaded')
         self.assertEqual(on.plugins['plugins']['compaction']['added'], ['claude_settings', 'environment'])
+        # Its status-line item, which the mod reads from status-items/compaction.txt.
+        self.assertIn({'name': 'compaction', 'plugin': 'compaction', 'claude': True, 'tmux': False}, on.plugins['status_items'])
         write(self.root / 'compaction.json', {'enabled': True, 'harnesses': {'claude': {'enabled': False}}})
         self.assertNotIn('hooks', self.settings(self.adapter.spawn(LaunchContext('spawn', self.values()))))
 

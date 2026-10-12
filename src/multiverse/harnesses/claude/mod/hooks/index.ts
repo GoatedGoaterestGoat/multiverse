@@ -1,7 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { compactionLine, registerCompaction } from './compaction'
+import { registerCompaction } from './compaction'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
-import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
+import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, withCompaction } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
 import { registerUsage } from './usage'
 
@@ -114,7 +114,8 @@ async function refreshStatus($: EngineInterface) {
       // Status reports rewrite runtime.json often; the items it declares rarely change.
       let items: PluginItem[] | undefined
       try {
-        items = parseItems(JSON.parse((await readFile($, `${directory}/runtime.json`)) ?? ""))
+        items = withCompaction(parseItems(JSON.parse((await readFile($, `${directory}/runtime.json`)) ?? "")),
+          (await $.env.get("MV2_COMPACTION")) === "1")
       } catch { /* mid-write: the next change reads it */ }
       if (items !== undefined && JSON.stringify(items) !== JSON.stringify(declared)) {
         declared = items
@@ -164,8 +165,6 @@ async function refreshStatus($: EngineInterface) {
         if (Array.isArray(messages)) statusFacts.inbox = Math.min(messages.length, INBOX_LIMIT)
       } catch { /* keep the last count */ }
     }
-    // compactionLine() is undefined unless this launch enabled compaction (MV2_COMPACTION=1).
-    statusFacts.compaction = compactionLine()
     setBase(render(statusConfig, statusFacts))
     const line = currentLine()
     if (line !== shown) {

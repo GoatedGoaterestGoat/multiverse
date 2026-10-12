@@ -58,6 +58,8 @@ class PluginLaunchTest(NativeBackendTest):
         self.addCleanup(loader.reset)
         super().setUp()
         config.set_enabled(self.root, "guard", True)
+        # The base template's compaction.json turns the bundled compaction plugin on; these tests are about guard alone.
+        config.set_enabled(self.root, "compaction", False)
 
     def launched(self, name, command=None, fallback=None):
         original = self.adapter.command

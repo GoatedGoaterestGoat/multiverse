@@ -149,6 +149,8 @@ describe('status line', () => {
     })
     on('session.compact', async () => ({ messages: [] }))
     w.disk(`${AGENT}/properties.json`, properties('working'))
+    // A launch from before the compaction plugin declared its item: runtime.json does not list it.
+    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running' }))
     await start($)
     await w.clock.settle()
     expect(w.lines.at(-1)).toBe('working')
@@ -159,18 +161,23 @@ describe('status line', () => {
     w.disk(`${AGENT}/properties.json`, properties('blocked'))
     await w.clock.advance(2000)
     expect(w.lines.at(-1)).toContain('compacting')
+    // The compaction writes its item's file (python -m multiverse.compaction does, after the install).
+    w.disk(`${AGENT}/status-items/compaction.txt`, 'trees 1/1\n')
     release()
     await compacting
     await w.clock.settle()
-    // The normal line is back, as of the tick during compaction, now with compaction's own item.
-    expect(w.lines.at(-1)).toBe('blocked · compaction on')
+    await w.clock.advance(2000)
+    // The normal line is back, with compaction's item read from its file.
+    expect(w.lines.at(-1)).toBe('blocked · trees 1/1')
   })
 
-  // compaction.ts takes "enabled" from the launch's MV2_COMPACTION, which cannot change in a running
-  // process, so an agent launched without it has no compaction state to show.
+  // An agent launched without compaction neither declares the item nor has MV2_COMPACTION, so even a
+  // leftover file shows nothing.
   test('an agent launched without compaction shows no compaction item, even when the config asks for it', async ($, on) => {
     const w = session(on)  // no MV2_COMPACTION in this launch
     w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running' }))
+    w.disk(`${AGENT}/status-items/compaction.txt`, 'trees 9/9\n')
     w.disk(`${UNIVERSE}/statusline.json`, '{"schema": 1, "items": {"compaction": true}}')
     await start($)
     await w.clock.settle()

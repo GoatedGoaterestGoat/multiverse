@@ -572,6 +572,25 @@ class EntryPointTest(BaseTest):
         self.assertIn('already running', events.items[-1]['message'])
         held.release()
 
+    def test_the_status_line_item_is_written_where_the_status_is_learned(self):
+        item = self.directory / 'status-items' / 'compaction.txt'
+        self.assertEqual(entry.line({'enabled': True, 'trees': 70, 'turns': 76, 'building': True, 'failed': 2}, True),
+                         'trees 70/76 · building · 2 failed · /compact failed')
+        self.assertEqual(entry.line({'enabled': True, 'trees': 3}), 'trees 3')
+        self.assertEqual(entry.line({'enabled': False, 'trees': 3}), '')
+        with self.patched(FakeSource([turn('t0', 3), turn('t1', 3)])):
+            entry.status(entry._agent(str(self.directory)), Events(), marker='all')
+            self.assertEqual(item.read_text(), 'trees 0/2\n')
+            # A compaction that fails says so until one succeeds.
+            self.assertEqual(entry.install(str(self.directory), {'instructions': 'keep the plan'}, Events()), 1)
+            # (no turn end recorded here, so the newest turn does not count yet)
+            self.assertEqual(item.read_text(), 'trees 0/1 · /compact failed\n')
+            self.assertEqual(entry.install(str(self.directory), {'trigger': 'manual'}, Events()), 0)
+            self.assertNotIn('/compact failed', item.read_text())
+        with self.patched(FakeSource([turn('t0', 3)]), enabled=False):
+            entry.status(entry._agent(str(self.directory)), Events())
+        self.assertFalse(item.exists())  # off: no item
+
     def test_status_counts_completed_turns_and_those_with_their_tree(self):
         events = Events()
         with self.patched(FakeSource([turn('t0', 3), turn('t1', 3), turn('t2', 3)])):

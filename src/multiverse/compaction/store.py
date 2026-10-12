@@ -204,6 +204,11 @@ class Store:
         with self._status() as status:
             status['errors'] = [*status.get('errors', []), {**entry, 'at': now()}][-RECENT_ERRORS:]
 
+    def set_compact_failed(self, failed: bool):
+        """Whether the session's last compaction failed (the status line says so until one succeeds)."""
+        with self._status() as status:
+            status['compact_failed'] = bool(failed)
+
     def set_failure(self, turn_id: str, reason: str | None):
         with self._status() as status:
             failures = status.setdefault('failures', {})

@@ -13,13 +13,20 @@
     "doctor",
     "cli",
     "dashboard.key",
-    "dashboard.screen"
+    "dashboard.screen",
+    "statusline"
   ],
   "permissions": [
     "harness.claude"
   ],
   "commands": {
     "compaction": "Show or set an agent's compaction: scheduler, summary trees, recent errors"
+  },
+  "statusline": {
+    "compaction": {
+      "claude": true,
+      "tmux": false
+    }
   },
   "settings": {
     "version": 1,

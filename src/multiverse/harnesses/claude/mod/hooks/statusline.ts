@@ -10,6 +10,7 @@
 // every template, managed by `mv2 refresh`):
 //   {"schema": 1, "items": {"agent": false, "phase": true, "summary": false,
 //                           "inbox": true, "compaction": true}}
+// (`compaction` is the compaction plugin's item.)
 // The order of the keys is the order on screen. A key that is missing keeps
 // its default, an unknown key is ignored, and an unreadable file means the
 // defaults.
@@ -21,11 +22,11 @@
 // core ones: `items` names it to place it or turn it on or off; one it does not
 // name shows by its `claude` default, after everything else.
 
-export const ITEMS = ["agent", "phase", "summary", "inbox", "compaction"] as const
+export const ITEMS = ["agent", "phase", "summary", "inbox"] as const
 export type Item = (typeof ITEMS)[number]
 
 export const DEFAULTS: Readonly<Record<Item, boolean>> =
-  { agent: false, phase: true, summary: false, inbox: true, compaction: true }
+  { agent: false, phase: true, summary: false, inbox: true }
 
 export type Config = { order: readonly string[]; on: Readonly<Record<string, boolean>> }
 
@@ -35,7 +36,7 @@ export type PluginItem = { name: string; plugin: string; claude: boolean; tmux: 
 // The manifest's rule for item names, and the names core keeps for itself (on either line).
 const ITEM_NAME = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const ITEM_NAME_LENGTH = 40
-const CORE_NAMES = new Set(["agent", "harness", "status", "phase", "summary", "inbox", "context", "compaction"])
+const CORE_NAMES = new Set(["agent", "harness", "status", "phase", "summary", "inbox", "context"])
 
 // What the line shows. `inbox` counts unread inbox-only messages.
 export type Facts = {
@@ -44,7 +45,6 @@ export type Facts = {
   phase?: string
   summary?: string
   inbox: number
-  compaction?: string
   // Each plugin item's text, by item name, as its file holds it.
   plugins?: Readonly<Record<string, string>>
 }
@@ -82,6 +82,15 @@ export function parseItems(runtime: unknown): PluginItem[] {
     items.push({ name, plugin, claude, tmux })
   }
   return items
+}
+
+// The compaction plugin's item, for a launch that enabled compaction
+// (MV2_COMPACTION=1) before the plugin declared it: such a launch's runtime.json
+// does not list it. Remove once no agent launched before the declaration is left.
+export const COMPACTION_ITEM: PluginItem = { name: "compaction", plugin: "compaction", claude: true, tmux: false }
+
+export function withCompaction(items: readonly PluginItem[], compactionOn: boolean): PluginItem[] {
+  return compactionOn && !items.some((item) => item.name === "compaction") ? [...items, COMPACTION_ITEM] : [...items]
 }
 
 // `text` is the file's content, or undefined when there is no file: the
@@ -155,9 +164,6 @@ export function render(config: Config, facts: Facts): string | undefined {
       if (text) parts.push(text)
     } else if (item === "inbox") {
       if (facts.inbox > 0) parts.push(`inbox ${facts.inbox >= INBOX_LIMIT ? `${INBOX_LIMIT}+` : facts.inbox}`)
-    } else if (item === "compaction") {
-      const text = clean(facts.compaction ?? "")
-      if (text) parts.push(text)
     } else {
       // A plugin's item: the first line of its file, cleaned and shortened like a summary.
       const text = clean((facts.plugins?.[item] ?? "").split(/\r?\n/, 1)[0] ?? "", SUMMARY_LENGTH)

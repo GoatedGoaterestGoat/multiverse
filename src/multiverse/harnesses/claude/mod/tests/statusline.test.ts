@@ -1,28 +1,31 @@
 // The status line's pure logic: config parsing, rendering and the shared slot.
 import { describe, expect, test } from 'claude-code/testing'
-import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, setProgress } from '../hooks/statusline'
+import { COMPACTION_ITEM, DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, setProgress, withCompaction } from '../hooks/statusline'
 
-const FACTS = { agent: 'reviewer', universe: 'pr-review', phase: 'working', summary: 'reading the diff', inbox: 2, compaction: 'trees 3 · prepared' }
+// `compaction` is the compaction plugin's item, read from its file like any plugin's.
+const FACTS = { agent: 'reviewer', universe: 'pr-review', phase: 'working', summary: 'reading the diff', inbox: 2,
+  plugins: { compaction: 'trees 3 · prepared' } }
+const COMPACTION = [COMPACTION_ITEM]
 
 describe('statusline config', () => {
   test('no file means the defaults, with nothing to report', async () => {
     expect(parseConfig(undefined)).toEqual({ config: defaultConfig() })
     expect(defaultConfig().on).toEqual(DEFAULTS)
-    expect(DEFAULTS).toEqual({ agent: false, phase: true, summary: false, inbox: true, compaction: true })
+    expect(DEFAULTS).toEqual({ agent: false, phase: true, summary: false, inbox: true })
   })
 
   test('the order of the keys is the display order and a missing key keeps its default', async () => {
     const { config, problem } = parseConfig('{"schema": 1, "items": {"inbox": true, "agent": true, "phase": false}}')
     expect(problem).toBeUndefined()
-    expect(config.order).toEqual(['inbox', 'agent', 'phase', 'summary', 'compaction'])
-    expect(config.on).toEqual({ agent: true, phase: false, summary: false, inbox: true, compaction: true })
+    expect(config.order).toEqual(['inbox', 'agent', 'phase', 'summary'])
+    expect(config.on).toEqual({ agent: true, phase: false, summary: false, inbox: true })
   })
 
   test('unknown keys are ignored', async () => {
     const { config, problem } = parseConfig('{"schema": 1, "items": {"colour": true, "phase": true}, "extra": 1}')
     expect(problem).toBeUndefined()
     expect(config.on).toEqual(DEFAULTS)
-    expect(config.order).toEqual(['phase', 'agent', 'summary', 'inbox', 'compaction'])  // only known keys, listed first
+    expect(config.order).toEqual(['phase', 'agent', 'summary', 'inbox'])  // only known keys, listed first
   })
 
   test('a tmux block for the tmux status bar is ignored, whatever it holds', async () => {
@@ -62,11 +65,11 @@ describe('statusline config', () => {
 
 describe('statusline render', () => {
   test('the defaults show the phase, the unread count and the compaction state', async () => {
-    expect(render(defaultConfig(), FACTS)).toBe('working · inbox 2 · trees 3 · prepared')
+    expect(render(defaultConfig(COMPACTION), FACTS)).toBe('working · inbox 2 · trees 3 · prepared')
   })
 
   test('the agent item names the agent and its universe', async () => {
-    const on = { ...DEFAULTS, agent: true }
+    const on = { ...DEFAULTS, compaction: true, agent: true }
     expect(render({ order: ['agent', 'phase', 'summary', 'inbox', 'compaction'], on }, FACTS))
       .toBe('reviewer (pr-review) · working · inbox 2 · trees 3 · prepared')
     expect(render({ order: ['agent'], on }, { ...FACTS, universe: undefined })).toBe('reviewer')
@@ -74,13 +77,14 @@ describe('statusline render', () => {
 
   test('phase and summary join into one segment, or stand alone', async () => {
     const order = ['phase', 'summary', 'inbox', 'compaction', 'agent'] as const
-    expect(render({ order, on: { ...DEFAULTS, summary: true } }, FACTS)).toBe('working: reading the diff · inbox 2 · trees 3 · prepared')
-    expect(render({ order, on: { ...DEFAULTS, phase: false, summary: true } }, FACTS)).toBe('reading the diff · inbox 2 · trees 3 · prepared')
-    expect(render({ order, on: { ...DEFAULTS, summary: true } }, { ...FACTS, summary: '' })).toBe('working · inbox 2 · trees 3 · prepared')
+    const on = { ...DEFAULTS, compaction: true }
+    expect(render({ order, on: { ...on, summary: true } }, FACTS)).toBe('working: reading the diff · inbox 2 · trees 3 · prepared')
+    expect(render({ order, on: { ...on, phase: false, summary: true } }, FACTS)).toBe('reading the diff · inbox 2 · trees 3 · prepared')
+    expect(render({ order, on: { ...on, summary: true } }, { ...FACTS, summary: '' })).toBe('working · inbox 2 · trees 3 · prepared')
   })
 
   test('the inbox shows only when something is unread, and caps at 50', async () => {
-    expect(render(defaultConfig(), { ...FACTS, inbox: 0 })).toBe('working · trees 3 · prepared')
+    expect(render(defaultConfig(COMPACTION), { ...FACTS, inbox: 0 })).toBe('working · trees 3 · prepared')
     expect(render(defaultConfig(), { ...FACTS, inbox: 50 })).toContain('inbox 50+')
     expect(render(defaultConfig(), { ...FACTS, inbox: 49 })).toContain('inbox 49')
   })
@@ -135,6 +139,17 @@ describe('plugin items', () => {
   const TESTS = { name: 'test-runs', plugin: 'ci', claude: false, tmux: true }
   const runtime = (status_items: unknown) => ({ state: 'running', plugins: { plugins: {}, status_items } })
 
+  test('compaction is a plugin item; a launch that enabled it before the plugin declared it still shows it', async () => {
+    expect(parseItems(runtime([COMPACTION_ITEM]))).toEqual([COMPACTION_ITEM])
+    expect(withCompaction([COST], true)).toEqual([COST, COMPACTION_ITEM])
+    expect(withCompaction([COST, COMPACTION_ITEM], true)).toEqual([COST, COMPACTION_ITEM])
+    expect(withCompaction([COST], false)).toEqual([COST])
+    // The key every template's statusline.json already has places it as before.
+    const { config } = parseConfig('{"items": {"agent": false, "phase": true, "summary": false, "inbox": true, "compaction": true}}', COMPACTION)
+    expect(config.order).toEqual(['agent', 'phase', 'summary', 'inbox', 'compaction'])
+    expect(render(config, FACTS)).toBe('working · inbox 2 · trees 3 · prepared')
+  })
+
   test('a launch declares its items in runtime.json; a malformed record declares none', async () => {
     expect(parseItems(runtime([COST, TESTS]))).toEqual([COST, TESTS])
     for (const bad of [undefined, null, 'x', [], { plugins: null }, { plugins: { status_items: {} } }, { plugins: [] }]) {
@@ -147,7 +162,7 @@ describe('plugin items', () => {
       COST, { ...COST, plugin: 'other' },                       // the same name again
       { ...COST, name: 'Cost' }, { ...COST, name: 'a--b' }, { ...COST, name: '-a' }, { ...COST, name: 'a/b' },
       { ...COST, name: '../x' }, { ...COST, name: 'x'.repeat(41) },  // the name rule
-      ...['agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'context', 'compaction'].map((name) => ({ ...COST, name })),
+      ...['agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'context'].map((name) => ({ ...COST, name })),
       { ...COST, name: 'n1', claude: 'yes' }, { ...COST, name: 'n2', plugin: 3 }, { name: 'n3' }, null, 'cost',
       TESTS, { ...TESTS, name: 'x'.repeat(40) },
     ]))
@@ -157,7 +172,7 @@ describe('plugin items', () => {
   test('an item the file does not name shows by its claude default, after everything else', async () => {
     const { config, problem } = parseConfig('{"items": {"inbox": true, "phase": true}}', [COST, TESTS])
     expect(problem).toBeUndefined()
-    expect(config.order).toEqual(['inbox', 'phase', 'agent', 'summary', 'compaction', 'cost', 'test-runs'])
+    expect(config.order).toEqual(['inbox', 'phase', 'agent', 'summary', 'cost', 'test-runs'])
     expect([config.on.cost, config.on['test-runs']]).toEqual([true, false])
     expect(parseConfig(undefined, [COST]).config).toEqual(defaultConfig([COST]))
     expect(parseConfig('not json', [COST]).config.on.cost).toBe(true)  // an unusable file still keeps the defaults
@@ -166,7 +181,7 @@ describe('plugin items', () => {
   test('the file places an item and turns it on or off like a core one', async () => {
     const { config, problem } = parseConfig('{"items": {"cost": false, "test-runs": true, "phase": true, "nobody": true, "agent": "yes"}}', [COST, TESTS])
     // In the file's order (an item turned off still keeps its place); `agent` is malformed, so it falls back to its default place.
-    expect(config.order).toEqual(['cost', 'test-runs', 'phase', 'agent', 'summary', 'inbox', 'compaction'])
+    expect(config.order).toEqual(['cost', 'test-runs', 'phase', 'agent', 'summary', 'inbox'])
     expect([config.on.cost, config.on['test-runs']]).toEqual([false, true])
     expect(config.on.nobody).toBeUndefined()  // a key no launch declared is ignored, as before
     expect(problem).toBe('statusline.json items agent must be true or false')

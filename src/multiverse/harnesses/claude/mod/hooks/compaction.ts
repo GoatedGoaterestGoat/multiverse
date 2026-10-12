@@ -22,13 +22,13 @@ import { currentLine, setProgress } from './statusline'
 //   left (a reload, a turn that ended in an error, a restart), when background
 //   building is on.
 //
-// The status line's compaction item is `compactionLine()`: pure, from what
-// these hooks last learned (`python -m multiverse.compaction status`, which
-// `background` also prints): completed turns with their tree out of all
-// completed turns (the turn in progress never counts), whether a builder runs,
-// and failures. They learn it when the session starts, when a turn ends, every
-// 15 s while a builder runs, and after each /compact. The progress of a
-// running /compact shares the plugin's one status slot (statusline.ts).
+// The status line's compaction item is a file: `python -m multiverse.compaction`
+// writes status-items/compaction.txt whenever it learns where compaction
+// stands (`status`, which `background` also runs, and each install), and the
+// status line reads it like any plugin's item. These hooks have it learn that
+// when the session starts, when a turn ends, every 15 s while a builder runs
+// and after each /compact. The progress of a running /compact shares the
+// plugin's one status slot (statusline.ts).
 //
 // The rows an install adds are found later from the transcript: they follow
 // the compaction's boundary, as many as the install returned.
@@ -37,30 +37,9 @@ type Event = { event: string; [key: string]: unknown }
 // What `python -m multiverse.compaction status` reports.
 export type Status = { enabled?: boolean; trees?: number; turns?: number; missing?: number; building?: boolean; failed?: number }
 
-// What the status line's compaction item knows; its hooks keep it up to date.
-const known: { enabled: boolean; status?: Status; failed: boolean; following: boolean } =
-  { enabled: false, failed: false, following: false }
+// What the hooks last learned: whether a builder runs, so they keep looking while it does.
+const known: { status?: Status; following: boolean } = { following: false }
 const FOLLOW_MS = 15000, FOLLOW_ROUNDS = 40
-
-// The status line's compaction item, from what the hooks below last learned.
-export function compactionLine(): string | undefined {
-  return describeCompaction(known.enabled, known.status, known.failed)
-}
-
-// The item's text: undefined while compaction is off for this session.
-export function describeCompaction(enabled: boolean, status: Status | undefined, compactFailed: boolean): string | undefined {
-  if (!enabled || status?.enabled === false) return undefined
-  const parts: string[] = []
-  if (status?.trees === undefined) {
-    parts.push("compaction on")
-  } else {
-    parts.push(status.turns === undefined ? `trees ${status.trees}` : `trees ${status.trees}/${status.turns}`)
-    if (status.building) parts.push("building")
-    if (status.failed) parts.push(`${status.failed} failed`)
-  }
-  if (compactFailed) parts.push("/compact failed")
-  return parts.join(" · ")
-}
 
 // The last status a process printed, if it printed one.
 export function parseStatus(stdout: string): Status | undefined {
@@ -89,7 +68,6 @@ type Message = { keep: string } | { role: 'user' | 'assistant'; text: string; to
 async function config($: EngineInterface) {
   const [enabled, python, directory] = await Promise.all(
     [$.env.get("MV2_COMPACTION"), $.env.get("MV2_PYTHON"), $.env.get("MV2_AGENT_DIR")])
-  known.enabled = enabled === "1"
   return { enabled: enabled === "1", python: python ?? "", directory: directory ?? "" }
 }
 
@@ -280,7 +258,6 @@ export function registerCompaction(on: On) {
     } finally {
       showProgress($, undefined)
     }
-    known.failed = "skip" in answer && answer.skip !== undefined
     $.clock.after(0, () => { refresh($).catch(() => undefined) })
     return answer
   }).catch(($, e, next) => {
@@ -293,7 +270,6 @@ export function registerCompaction(on: On) {
   on("classic.SessionStart", async ($, e, next) => {
     const result = await next(e)
     known.status = undefined
-    known.failed = false
     $.clock.after(0, () => {
       background($).catch((error) => $.ui.log(`mv2 compaction: background build failed: ${String(error)}`))
     })
