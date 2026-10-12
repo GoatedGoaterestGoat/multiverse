@@ -139,6 +139,11 @@ def problems(root, reserved=()):
             loader.load(found)
         except PluginError as error:
             found_problems.append(str(error))
+    try:
+        from .harness import item_conflicts
+        found_problems.extend(item_conflicts(root))
+    except Exception:
+        pass
     return found_problems
 
 

@@ -141,13 +141,11 @@ def _launch_plan(info, plan):
         except Exception:
             version = None
         info = replace(info, version=version)
+    plan.status_items = declared_items(info.universe, active)
     for loaded in active:
         manifest = loaded.manifest
         entries = manifest.harnesses.get(info.family, ())
         contributors = loaded.registrations.launch.get(info.family, [])
-        items = [{"name": item.name, "plugin": loaded.name, "claude": item.claude, "tmux": item.tmux}
-                 for item in manifest.statusline]
-        plan.status_items.extend(items)
         if not entries and not contributors:
             continue
         record = plan.plugins.setdefault(loaded.name, {"version": manifest.version, "state": "loaded"})
@@ -351,11 +349,43 @@ def capabilities(info, taken):
     return result
 
 
+def declared_items(root, active):
+    """The status-line items of the plugins on here: [{"name", "plugin", "claude", "tmux"}].
+
+    An item named after a plugin belongs to that plugin alone (compaction's
+    `compaction`), and a name two plugins declare is shown for neither; both are
+    in item_conflicts(), for doctor."""
+    names = {found.name for found in loader.entries(root)} if root is not None else {loaded.name for loaded in active}
+    owners = {}
+    for loaded in active:
+        for item in loaded.manifest.statusline:
+            if item.name in names and item.name != loaded.name:
+                continue
+            owners.setdefault(item.name, []).append((loaded, item))
+    return [{"name": item.name, "plugin": loaded.name, "claude": item.claude, "tmux": item.tmux}
+            for found in owners.values() if len(found) == 1 for loaded, item in found]
+
+
+def item_conflicts(root):
+    """Sentences for status-line items that are not shown because of their name."""
+    active = loader.active(root)
+    names = {found.name for found in loader.entries(root)}
+    problems, owners = [], {}
+    for loaded in active:
+        for item in loaded.manifest.statusline:
+            if item.name in names and item.name != loaded.name:
+                problems.append(f"{loaded.name}'s status-line item {item.name!r} is not shown: "
+                                f"that name belongs to the {item.name} plugin")
+            else:
+                owners.setdefault(item.name, []).append(loaded.name)
+    problems.extend(f"{' and '.join(plugins)} both declare the status-line item {name!r}; neither is shown"
+                    for name, plugins in sorted(owners.items()) if len(plugins) > 1)
+    return problems
+
+
 def status_items(root):
     """The runtime.json `plugins` record of a launch whose adapter applies no plugins: its status-line items only."""
-    items = [] if loader.safe_mode() else [
-        {"name": item.name, "plugin": loaded.name, "claude": item.claude, "tmux": item.tmux}
-        for loaded in loader.active(root) for item in loaded.manifest.statusline]
+    items = [] if loader.safe_mode() else declared_items(root, loader.active(root))
     return {"plugins": {}, "status_items": items}
 
 

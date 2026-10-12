@@ -94,6 +94,9 @@ class ClaudePluginTest(PluginTestCase):
         self.write_plugin("guard", {"module": "plugin", "extends": ["launch"], "permissions": ["harness.claude"],
                                     "harnesses": {"claude": [{"dir": "claude", "min_version": "2.1.290"}]}},
                           {"plugin.py": GUARD})
+        # The base template's compaction.json turns the bundled compaction plugin on; these tests are about
+        # typeahead and guard.
+        self.enable("compaction", on=False)
 
     def launch(self, bridge=None, version=(2, 1, 296)):
         from unittest.mock import patch

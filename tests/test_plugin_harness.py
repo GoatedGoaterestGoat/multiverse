@@ -198,6 +198,20 @@ class LaunchPlanTest(PluginTestCase):
         self.assertIsNone(harness.version_of(str(tool)))
         self.assertIsNone(harness.version_of(str(self.work / "missing")))
 
+    def test_status_item_names_belong_to_their_plugin_and_clashes_show_neither(self):
+        from multiverse import plugins
+        for name, item in (("squatter", "guard"), ("twin-a", "shared"), ("twin-b", "shared")):
+            self.write_plugin(name, {"extends": ["statusline"], "statusline": {item: {"claude": True}}})
+            self.enable(name)
+        self.write_plugin("guardian", {"extends": ["statusline"], "statusline": {"guardian": {}}})
+        self.enable("guardian")
+        names = [(item["name"], item["plugin"]) for item in harness.launch_plan(self.info()).status_items]
+        self.assertEqual(sorted(names), [("guardian", "guardian"), ("trees", "guard")])
+        problems = plugins.problems(self.root)
+        self.assertIn("squatter's status-line item 'guard' is not shown: that name belongs to the guard plugin", problems)
+        self.assertIn("twin-a and twin-b both declare the status-line item 'shared'; neither is shown", problems)
+        self.assertEqual(harness.status_items(self.root)["status_items"], harness.launch_plan(self.info()).status_items)
+
     def test_settings_merge_concatenates_hooks_and_refuses_clashes(self):
         merged = harness._merge_settings({"crossSessionInbound": "accept", "hooks": {"Stop": [1]}},
                                          {"hooks": {"Stop": [2], "PreCompact": [3]}})

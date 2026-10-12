@@ -923,6 +923,9 @@ state/agents/<id>/status-items/<item>.txt      one line, at most 200 characters
 - **Reading.** The mod adds a declared item's file to the files its timer
   watches. The tmux script reads it only when the item is on for that harness.
   Both clean control characters and shorten the text, as they do for summaries.
+- **Names.** An item named after a plugin belongs to that plugin alone, as
+  compaction's `compaction` does. A name two plugins declare is shown for
+  neither. `mv2 doctor` names both cases.
 - **Configuring.** `statusline.json` is unchanged. A plugin item is a key in
   `items` (Claude) or `tmux.items`, and the order of keys is the order on
   screen. Manifests declare item names, so an item a plugin declares is known
