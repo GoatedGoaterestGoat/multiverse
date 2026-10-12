@@ -450,24 +450,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             result['ask'] = Capability('supported', mechanism='claude-model-fork')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
-        result['compaction'] = self._compaction_capability(session)
         return result
-
-    def _compaction_capability(self, session):
-        if not getattr(self, 'settings', {}).get('inbox_bridge'):
-            return Capability('unavailable', 'Needs the multiverse mod: remove "inbox_bridge": false from harness.json')
-        root = self._universe(Path(session.session_file).parent if session.session_file else None)
-        if root is None:
-            return Capability('unavailable', 'Not an agent of a universe')
-        settings, problem = self.compaction_state(root)
-        if problem:
-            return Capability('error', f'{problem}; launches run without compaction')
-        if not settings.enabled:
-            return Capability('unavailable', f'Off for {self.name} in compaction.json')
-        fallback = (session.native_mode or {}).get('fallback_reason')
-        if session.state == 'running' and fallback:
-            return Capability('error', f'{fallback}; restart the agent to use compaction')
-        return Capability('supported', mechanism='claude-mod-session-compact')
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""

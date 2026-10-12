@@ -68,5 +68,23 @@ def launch(info):
                             claude_settings={'hooks': {'PreCompact': [{'hooks': [{'type': 'command', 'command': GUARD}]}]}})
 
 
+def capability(mv, info):
+    """Whether this session compacts with trees, and why not; every harness answers, as core's own capabilities do."""
+    if builder_support(info.family) is None:
+        return api.Capability('unavailable', 'This harness has no tree compaction')
+    if not mv.harness_info(info.universe, info.harness).bridge:
+        return api.Capability('unavailable', 'Needs the multiverse mod: remove "inbox_bridge": false from harness.json')
+    settings, problem = state(info.universe, info.harness, info.family)
+    if problem:
+        return api.Capability('error', f'{problem}; launches run without compaction')
+    if not settings.enabled:
+        return api.Capability('unavailable', f'Off for {info.harness} in compaction.json')
+    fallback = (info.native_mode or {}).get('fallback_reason')
+    if info.state == 'running' and fallback:
+        return api.Capability('error', f'{fallback}; restart the agent to use compaction')
+    return api.Capability('supported', mechanism='claude-mod-session-compact')
+
+
 def register(mv: api.Plugin):
     mv.launch.contribute('claude', launch)
+    mv.capabilities.add('compaction', lambda info: capability(mv, info))

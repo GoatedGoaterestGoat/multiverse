@@ -62,6 +62,14 @@ def claude_builder(**changes):
     return replace(config.Config().for_harness('claude', ClaudeCompaction.builder_defaults).builder, **changes)
 
 
+def compaction_capability(session):
+    """The `compaction` capability as `mv2 capabilities` reports it: the bundled plugin answers it, where it is on."""
+    from multiverse.harnesses.types import Capability
+    from multiverse.plugins import harness as plugin_harness
+    found = plugin_harness.capabilities(plugin_harness.session_info(session, 'claude'), set())
+    return Capability(*found['compaction']) if 'compaction' in found else None
+
+
 class Rows:
     """A Claude transcript under construction: rows chained by parentUuid with rising timestamps."""
 
@@ -529,7 +537,7 @@ class AdapterTest(Fixture):
                 self.assertNotIn('MV2_COMPACTION', command.environment)
                 self.assertEqual(command.native_mode['mode'], 'bridge without compaction')
                 self.assertIn(expected, command.native_mode['fallback_reason'])
-                capability = self.adapter.capabilities(session)['compaction']
+                capability = compaction_capability(session)
                 self.assertEqual(capability.state, 'error')
                 self.assertIn(expected, capability.reason)
                 self.assertTrue(any(expected in problem for problem in doctor.run(self.root)['problems']))
@@ -539,14 +547,14 @@ class AdapterTest(Fixture):
         session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id,
                                 session_file=str(self.agent_dir / 'session.jsonl'))
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
-        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'supported')
+        self.assertEqual(compaction_capability(session).state, 'supported')
         fell_back = replace(session, state='running', native_mode={'fallback_reason': 'Launched without compaction: x'})
-        capability = self.adapter.capabilities(fell_back)['compaction']
+        capability = compaction_capability(fell_back)
         self.assertEqual((capability.state, 'restart' in capability.reason), ('error', True))
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': False}}})
-        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'unavailable')
+        self.assertEqual(compaction_capability(session).state, 'unavailable')
         write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': False}})
-        capability = harnesses.load(self.root, 'claude').capabilities(session)['compaction']
+        capability = compaction_capability(session)
         self.assertEqual(capability.state, 'unavailable')
         self.assertIn('inbox_bridge', capability.reason)
 
@@ -572,8 +580,11 @@ class AdapterTest(Fixture):
         write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': False}})
         self.adapter = harnesses.load(self.root, 'claude')
         self.assertIn('inbox_bridge', self.source().unavailable())
-        session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id)
-        self.assertEqual(self.adapter.capabilities(session)['compaction'].state, 'unavailable')
+        session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id,
+                                session_file=str(self.agent_dir / 'session.jsonl'))
+        capability = compaction_capability(session)
+        self.assertEqual(capability.state, 'unavailable')
+        self.assertIn('inbox_bridge', capability.reason)
 
     def test_kept_rows_stored_again_never_replace_their_responses_usage(self):
         r = Rows()

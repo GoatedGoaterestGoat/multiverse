@@ -164,8 +164,7 @@ class ClaudeBoundaryTest(BoundaryBase, BaseTest):
 
     def test_readiness_does_not_build_the_capability_set(self):
         adapter = self.adapter(None)
-        with patch.object(type(adapter), 'capabilities', side_effect=AssertionError('readiness built capabilities')), \
-                patch.object(type(adapter), '_compaction_capability', side_effect=AssertionError('read compaction')):
+        with patch.object(type(adapter), 'capabilities', side_effect=AssertionError('readiness built capabilities')):
             self.assertTrue(adapter.attachment_ready(self.session()))
             self.assertFalse(adapter.attachment_ready(self.session(bridge=None)))
             self.assertTrue(adapter.attachment_ready(self.session(endpoint=None, bridge=None)))
