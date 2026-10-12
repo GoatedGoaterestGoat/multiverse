@@ -510,6 +510,7 @@ class AdapterTest(Fixture):
         off = self.adapter.spawn(LaunchContext('spawn', self.values()))
         self.assertNotIn('hooks', self.settings(off))
         self.assertNotIn('MV2_COMPACTION', off.environment)
+        self.assertNotIn('MV2_COMPACTION_PLUGIN', off.environment)
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
         on = self.adapter.spawn(LaunchContext('spawn', self.values()))
         hooks = self.settings(on)['hooks']['PreCompact'][0]['hooks'][0]
@@ -518,7 +519,11 @@ class AdapterTest(Fixture):
         self.assertEqual(self.settings(on)['crossSessionInbound'], 'accept')
         # The bundled compaction plugin contributes it; compaction.json alone turns the plugin on.
         self.assertEqual(on.plugins['plugins']['compaction']['state'], 'loaded')
-        self.assertEqual(on.plugins['plugins']['compaction']['added'], ['claude_settings', 'environment'])
+        self.assertEqual(on.plugins['plugins']['compaction']['added'], ['claude_plugin_dirs', 'claude_settings', 'environment'])
+        # Its own Claude directory answers /compact; the mod's transition copy stands aside.
+        directories = [on.argv[i + 1] for i, value in enumerate(on.argv) if value == '--plugin-dir']
+        self.assertTrue(any(directory.endswith('plugins/builtin/compaction/claude') for directory in directories))
+        self.assertEqual(on.environment['MV2_COMPACTION_PLUGIN'], '1')
         # Its status-line item, which the mod reads from status-items/compaction.txt.
         self.assertIn({'name': 'compaction', 'plugin': 'compaction', 'claude': True, 'tmux': False}, on.plugins['status_items'])
         write(self.root / 'compaction.json', {'enabled': True, 'harnesses': {'claude': {'enabled': False}}})
@@ -561,6 +566,23 @@ class AdapterTest(Fixture):
         capability = compaction_capability(session)
         self.assertEqual(capability.state, 'unavailable')
         self.assertIn('inbox_bridge', capability.reason)
+
+    def test_every_bundled_plugins_claude_manifest_is_packaged(self):
+        # Without its hidden .claude-plugin/plugin.json an installed copy's Claude directory is refused, while the
+        # launch still tells the mod to stand aside: nothing would answer /compact. `**` does not reach hidden
+        # directories in package-data, so only an explicit pattern counts.
+        import tomllib
+        from pathlib import PurePosixPath
+        import multiverse
+        package = Path(multiverse.__file__).parent
+        pyproject = tomllib.loads((package.parent.parent / 'pyproject.toml').read_text())
+        patterns = [pattern for pattern in pyproject['tool']['setuptools']['package-data']['multiverse'] if '**' not in pattern]
+        manifests = sorted(package.glob('plugins/builtin/*/claude/.claude-plugin/plugin.json'))
+        self.assertIn('compaction', [manifest.parts[-4] for manifest in manifests])
+        for manifest in manifests:
+            relative = PurePosixPath(manifest.relative_to(package).as_posix())
+            with self.subTest(manifest=str(relative)):
+                self.assertTrue(any(relative.match(pattern) for pattern in patterns))
 
     def test_mv2_compaction_is_the_compaction_plugins_command(self):
         from multiverse import cli

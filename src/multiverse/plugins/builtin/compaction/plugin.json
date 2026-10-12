@@ -28,6 +28,14 @@
       "tmux": false
     }
   },
+  "harnesses": {
+    "claude": [
+      {
+        "dir": "claude",
+        "needs_bridge": true
+      }
+    ]
+  },
   "settings": {
     "version": 1,
     "legacy": "compaction.json"

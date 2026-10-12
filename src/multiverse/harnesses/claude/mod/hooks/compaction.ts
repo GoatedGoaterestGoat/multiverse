@@ -1,6 +1,11 @@
 import type { EngineInterface, On, SessionCompactResult, SessionMessage } from 'claude-code'
 import { currentLine, setProgress } from './statusline'
 
+// Transition copy: the compaction plugin's own Claude directory now holds these
+// hooks (plugins/builtin/compaction/claude). A launch that loads it sets
+// MV2_COMPACTION_PLUGIN=1 and these stand aside; they answer only for launches
+// from before it existed. Remove once mv2 doctor shows no such launch is left.
+//
 // Multiverse tree compaction for this session, when its universe enables it
 // for the Claude harness (the launch sets MV2_COMPACTION=1).
 //
@@ -66,9 +71,10 @@ function showProgress($: EngineInterface, line: string | undefined) {
 type Message = { keep: string } | { role: 'user' | 'assistant'; text: string; toolUses: unknown[]; toolResults?: unknown[] }
 
 async function config($: EngineInterface) {
-  const [enabled, python, directory] = await Promise.all(
-    [$.env.get("MV2_COMPACTION"), $.env.get("MV2_PYTHON"), $.env.get("MV2_AGENT_DIR")])
-  return { enabled: enabled === "1", python: python ?? "", directory: directory ?? "" }
+  const [enabled, plugin, python, directory] = await Promise.all(
+    [$.env.get("MV2_COMPACTION"), $.env.get("MV2_COMPACTION_PLUGIN"), $.env.get("MV2_PYTHON"), $.env.get("MV2_AGENT_DIR")])
+  // A launch that loads the compaction plugin's own Claude directory has it answer instead.
+  return { enabled: enabled === "1" && plugin !== "1", python: python ?? "", directory: directory ?? "" }
 }
 
 async function refresh($: EngineInterface) {

@@ -1,0 +1,6 @@
+{
+  "name": "multiverse-compaction",
+  "version": "0.1.0",
+  "description": "Answers this Claude session's /compact with Multiverse tree compaction",
+  "author": {"name": "Multiverse"}
+}

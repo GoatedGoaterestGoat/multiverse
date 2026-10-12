@@ -8,11 +8,12 @@ import { oneOff, parseStatus } from '../hooks/compaction'
 
 type Spawned = { argv: readonly string[]; input?: string }
 
-type Options = { enabled?: boolean; exit?: number | null; statuses?: object[] }
+type Options = { enabled?: boolean; plugin?: boolean; exit?: number | null; statuses?: object[] }
 
 // `statuses` answer the status and background runs in turn, the last one repeating.
 function world(on: On, events: object[], options: Options = {}) {
-  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', ...(options.enabled === false ? {} : { MV2_COMPACTION: '1' }) })
+  mock.env(on, { MV2_PYTHON: '/python', MV2_AGENT_DIR: '/agent', ...(options.enabled === false ? {} : { MV2_COMPACTION: '1' }),
+    ...(options.plugin ? { MV2_COMPACTION_PLUGIN: '1' } : {}) })
   const clock = mock.clock(on)
   const spawned: Spawned[] = []
   on('process.spawn', async function* ($, e) {
@@ -109,6 +110,16 @@ describe('session.compact', () => {
     await $.session.compact({ trigger: 'manual', messages: offered })
     expect(w.core).toEqual(['manual'])
     expect(w.spawned).toEqual([])
+  })
+
+  test("stands aside for a launch that loads the compaction plugin's own Claude directory", async ($, on) => {
+    const w = world(on, success, { plugin: true })
+    await $.session.compact({ trigger: 'manual', messages: offered })
+    expect(w.core).toEqual(['manual'])  // what lies beneath: there, the plugin's own hook answers
+    expect(w.spawned).toEqual([])
+    await $.classic.Stop({ stop_hook_active: false })
+    await w.clock.settle()
+    expect(w.runs).toEqual([])
   })
 
   test("leaves a subagent's compaction to Claude and refuses precompute", async ($, on) => {

@@ -22,4 +22,4 @@ where = ["src"]
 multiverse = ["templates/**/*", "templates/**/.gitignore", "ui/*.tcss", "harnesses/**/*.json", "harnesses/**/*.ts",
               "harnesses/claude/mod/.claude-plugin/plugin.json",
               "harnesses/claude/typeahead/.claude-plugin/plugin.json",
-              "plugins/builtin/**/*", "plugins/builtin/typeahead/claude/.claude-plugin/plugin.json"]
+              "plugins/builtin/**/*", "plugins/builtin/*/claude/.claude-plugin/plugin.json"]

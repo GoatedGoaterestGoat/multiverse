@@ -67,7 +67,9 @@ def launch(info):
         return api.Contribution(problem=f'Launched without compaction: {problem}', mode='without compaction')
     if settings is None or not settings.enabled:
         return None
-    return api.Contribution(environment={'MV2_COMPACTION': '1'},
+    # MV2_COMPACTION_PLUGIN: this launch loads the plugin's own Claude directory (claude/), so the
+    # multiverse mod's transition copy of the hooks stands aside.
+    return api.Contribution(environment={'MV2_COMPACTION': '1', 'MV2_COMPACTION_PLUGIN': '1'},
                             claude_settings={'hooks': {'PreCompact': [{'hooks': [{'type': 'command', 'command': GUARD}]}]}})
 
 
