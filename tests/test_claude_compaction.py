@@ -540,7 +540,9 @@ class AdapterTest(Fixture):
                 capability = compaction_capability(session)
                 self.assertEqual(capability.state, 'error')
                 self.assertIn(expected, capability.reason)
-                self.assertTrue(any(expected in problem for problem in doctor.run(self.root)['problems']))
+                # The compaction plugin's own doctor check reports it.
+                self.assertTrue(any(problem.startswith('Plugin compaction: ') and expected in problem
+                                    for problem in doctor.run(self.root)['problems']))
 
     def test_the_compaction_capability_says_whether_this_session_compacts(self):
         from dataclasses import replace

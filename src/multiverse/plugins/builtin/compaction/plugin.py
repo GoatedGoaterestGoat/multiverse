@@ -155,7 +155,28 @@ def usage(info, value):
     return {**value, 'context': context}
 
 
+def doctor(mv, universe):
+    """Why this universe's compaction.json cannot be used, by the file or by a harness that compacts."""
+    from multiverse.compaction import config
+    root = universe.path
+    try:
+        config.load(root)
+    except ValueError as error:
+        return [str(error)]
+    found = []
+    for manifest in sorted((root / 'harnesses').glob('*/harness.json')):
+        try:
+            info = mv.harness_info(root, manifest.parent.name)
+        except api.Error:
+            continue
+        problem = state(root, info.name, info.family)[1]
+        if problem:
+            found.append(problem)
+    return found
+
+
 def register(mv: api.Plugin):
     mv.launch.contribute('claude', launch)
     mv.capabilities.add('compaction', lambda info: capability(mv, info))
     mv.usage.adjust(usage)
+    mv.doctor.check(lambda universe: doctor(mv, universe))

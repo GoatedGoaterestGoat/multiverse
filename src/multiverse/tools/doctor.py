@@ -2,7 +2,7 @@
 import sys
 
 from ..runtime import lifecycle
-from .. import harnesses, universe
+from .. import universe
 from ..universe import catalog
 from ..universe.mailbox import inbox
 
@@ -36,7 +36,6 @@ def check(root, notes=None):
                 elif item.get('recovery_note') and notes is not None:
                     notes.append(f"{item['name']} reconnected automatically.")
                 inbox(scope / "state" / "agents" / item["id"], all_messages=True)
-            found.extend((problem, problem) for problem in _compaction(scope))
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
         found.extend((problem, problem) for problem in _plugins(scope))
@@ -70,26 +69,6 @@ def cli_run(root=None, *, json=False):
         print('Note: ' + note)
     if found:
         sys.exit(1)
-
-
-def _compaction(scope):
-    """Why this universe's compaction.json cannot be used, by the file or by a harness that compacts."""
-    from ..compaction import config
-    try:
-        config.load(scope)
-    except ValueError as error:
-        return [str(error)]
-    found = []
-    for manifest in sorted((scope / "harnesses").glob("*/harness.json")):
-        try:
-            adapter = harnesses.load(scope, manifest.parent.name)
-        except (OSError, ValueError, KeyError):
-            continue
-        state = getattr(adapter, "compaction_state", None)
-        problem = state(scope)[1] if state else None
-        if problem:
-            found.append(problem)
-    return found
 
 
 def _plugins(scope):
