@@ -103,6 +103,15 @@ def problems(root, reserved=()):
         found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
     pending = None
     for found in entries(root):
+        legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
+                  else None)
+        if legacy and (Path(root) / legacy).is_file() and (not found.on or found.state == "safe-mode"):
+            # Its pre-plugin file says to use it, but it is not used: say so rather than run quietly without it.
+            why = (f"{loader.SAFE_MODE}=off loads no plugins" if found.state == "safe-mode"
+                   else f"{config.path(root).name} turns it off")
+            found_problems.append(f"{legacy} is still here, but the {found.name} plugin is not used: {why}. "
+                                  f"Turn it on with mv2 plugins enable {found.name}, or move {legacy} away.")
+            continue
         if found.on and found.state == "missing":
             if pending is None:
                 try:

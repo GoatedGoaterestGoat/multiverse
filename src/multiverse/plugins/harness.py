@@ -170,7 +170,7 @@ def _launch_plan(info, plan):
             if unfit and not added:
                 # Nothing of it fits this launch: its contributions stay out too, so a guard never
                 # comes without the hook it guards.
-                raise _Skip("; ".join(dict.fromkeys(unfit)))
+                raise _Skip("; ".join(dict.fromkeys(unfit)), failure=False)
             contributions = []
             for function in contributors:
                 result = loader.guard(loaded, f"launch {info.family}", function, info, root=info.universe,
@@ -192,13 +192,18 @@ def _launch_plan(info, plan):
                     environment[key] = value
                 if contribution.claude_settings:
                     if info.family != "claude" or not info.bridge:
-                        raise _Skip("it sets Claude settings, which only a bridged Claude launch takes")
+                        raise _Skip("it sets Claude settings, which only a bridged Claude launch takes",
+                                    failure=info.family != "claude")
                     try:
                         settings = _merge_settings(settings, contribution.claude_settings)
                     except ValueError as error:
                         raise _Skip(str(error)) from None
         except _Skip as skip:
             plan.skip(loaded.name, str(skip))
+            if skip.failure:
+                # Shown where the launch's own problems are (native_mode.fallback_reason for Claude),
+                # not only in runtime.json: a session that runs without a plugin it relies on says so.
+                plan.problems.append(f"plugin {loaded.name} was left out: {skip}")
             continue
         if unfit:
             record["unfit"] = list(dict.fromkeys(unfit))
@@ -277,7 +282,11 @@ def plan_for(context, family, harness, version=None, bridge=False, base_settings
 
 
 class _Skip(Exception):
-    pass
+    """A plugin left out of one launch. `failure`: it broke (raised, timed out, returned something unusable,
+    conflicted), rather than not fitting this launch (version, bridge, a plain launch)."""
+    def __init__(self, reason, failure=True):
+        super().__init__(reason)
+        self.failure = failure
 
 
 def _check_contribution(contribution):

@@ -98,7 +98,7 @@ class LaunchPlanTest(PluginTestCase):
         for info, reason in ((self.info(version=(2, 1, 280)), "needs claude 2.1.290 or newer; this is 2.1.280"),
                              (self.info(bridge=False), "needs mv2's bridge, which this launch does not use")):
             plan = harness.launch_plan(info)
-            self.assertEqual((plan.claude_plugin_dirs, plan.environment), ([], {}))
+            self.assertEqual((plan.claude_plugin_dirs, plan.environment, plan.problems), ([], {}, []))
             self.assertEqual(plan.plugins["guard"], {"version": "0.1.0", "state": "skipped", "reason": reason})
         self.assertEqual(harness.launch_plan(self.info(family="codex")).plugins, {})
 
@@ -118,6 +118,9 @@ class LaunchPlanTest(PluginTestCase):
         plan = harness.launch_plan(self.info())
         self.assertEqual(plan.environment, {"GUARD_ON": "1"})
         self.assertEqual(plan.plugins["rival"]["reason"], "guard already sets GUARD_ON")
+        # A plugin that broke is a problem of the launch too, where the inspector shows it.
+        self.assertEqual(sorted(problem.split(":")[0] for problem in plan.problems),
+                         ["plugin rival was left out", "plugin slowpoke was left out", "plugin thief was left out"])
         self.assertEqual(plan.plugins["thief"]["reason"], "it may not set the environment variable 'MV2_AGENT_ID'")
         self.assertIn("ZeroDivisionError", plan.plugins["slowpoke"]["reason"])
 

@@ -75,6 +75,17 @@ class MigrateTest(PluginTestCase):
         child = self.subverse("child")
         self.assertFalse(self.entry("tree", child).on)  # no legacy file there
 
+    def test_a_legacy_file_with_its_plugin_off_is_reported(self):
+        (self.root / "tree.json").write_text("{}")
+        self.assertEqual(plugins.problems(self.root), [])
+        self.enable("tree", on=False)
+        [problem] = plugins.problems(self.root)
+        self.assertIn("tree.json is still here, but the tree plugin is not used: plugins.json turns it off", problem)
+        self.enable("tree")
+        with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
+            [problem] = plugins.problems(self.root)
+        self.assertIn("MV2_PLUGINS=off loads no plugins", problem)
+
     def test_legacy_settings_move_to_the_plugin_and_turn_it_on(self):
         from multiverse.tools import plugins as tool
         (self.root / "tree.json").write_text(json.dumps({"enabled": True, "budget": 5}))

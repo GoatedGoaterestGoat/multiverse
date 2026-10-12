@@ -529,7 +529,6 @@ for several plugins using it at once.
 | `events` in the manifest, and `mv.events.on(type, fn)` | `fn(api.Event)` run in the plugin's host worker for each event of a type or pattern (`agent.*`) the manifest's `events` subscribes to. The subscription is what makes core record that type at all. | All handlers for a type run, each in its own error boundary, with a 60 s budget. An `events.gap` event says what was pruned before it could be read. |
 | `mv.events.emit(kind, data, universe=, agent=)` | A `PLUGIN.kind` event in a universe's journal | Namespaced to the plugin. |
 | `mv.service(start, stop=None)` | `start(api.ServiceContext)` runs in a thread of the plugin's worker until it returns or `context.stopping` is set; `stop()` runs when the host stops it | Each plugin has its own worker process. A worker whose service crashes is restarted at most 3 times in 5 minutes. |
-| `mv.harness.extension(family, key, factory)` | A harness-specific object that the plugin's own code looks up, such as compaction's `CompactionSource` for Claude | Private to the plugin. Other plugins cannot see it. |
 | `mv.helper.action(name, fn)` | `fn(arguments)` returns an exit code, for `python -m multiverse.plugins run PLUGIN NAME ARGS…`, which a plugin's harness code runs with `$MV2_PYTHON` | Private to the plugin. |
 
 Every call into a plugin is wrapped. An exception drops that contribution for
@@ -581,7 +580,13 @@ class Contribution:          # what it may return
   too, so a guard never comes without the hook it guards. An adapter asks its
   harness for its version only when a plugin there has something for it.
 - **Failure.** If plugin discovery itself fails, the launch goes on exactly as
-  the adapter made it, and the record says why (`error`).
+  the adapter made it, and the record says why (`error`). A plugin left out
+  because it broke (its contribution raised, timed out, returned something
+  unusable or conflicted) is also a problem of the launch, which Claude shows as
+  its fallback reason in the inspector and capabilities. A plugin that merely
+  does not fit (version, bridge, a plain launch) is recorded only. `mv2 doctor`
+  says when a plugin's pre-plugin settings file is still in a universe but the
+  plugin is off there or in safe mode.
 - **Recording.** What each plugin contributed, and why one was left out, goes in
   `runtime.json` under `plugins`:
   `{"compaction": {"version": "1.0.0", "state": "loaded"}, "typeahead": {"state": "skipped", "reason": "needs Claude Code 2.1.292; this is 2.1.290"}}`.
@@ -1044,7 +1049,7 @@ is absent too.
 | Today | Becomes |
 | --- | --- |
 | `compaction/` (model, config, schedule, store, build, pipeline, protocol, `__main__`) | The plugin's own package, unchanged. `__main__` actions become `mv.helper` actions. |
-| `harnesses/claude/compaction/` (transcript, merge, render, images, `ClaudeCompaction`) | The plugin's Claude source, registered with `mv.harness.extension("claude", "compaction", …)`. |
+| `harnesses/claude/compaction/` (transcript, merge, render, images, `ClaudeCompaction`) | The plugin's Claude source. The plugin picks the source by the agent's harness family; `CompactionSource` stays its internal seam. |
 | `mod/hooks/compaction.ts` (`session.compact`, `classic.Stop`, `classic.SessionStart`, `session.start`) | The plugin's `claude/` directory, a Claude plugin of its own. `/compact` progress uses its own status slot. |
 | The mod's `compaction` status item, read through `compactionLine()` | `status-items/compaction.txt`, written by the plugin, read by the mod like any item |
 | Adapter `_with_bridge`: `MV2_COMPACTION=1`, the `PreCompact` guard in `--settings`, `bridge without compaction` | A launch contribution: environment, `claude_settings` with the guard, `problem` and `mode` |
