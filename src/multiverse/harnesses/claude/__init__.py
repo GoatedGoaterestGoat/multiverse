@@ -17,12 +17,11 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-With the bridge, a universe can opt this harness into tree compaction
-(`compaction.json`; see multiverse.compaction). The launch then tells the mod
-to answer the session's `/compact` with mv2's compacted conversation, and adds
-a PreCompact hook that refuses Claude's own compaction should the mod ever fail
-to answer. `compaction(session)` returns the protocol implementation in
-`compaction/`.
+Tree compaction is the bundled `compaction` plugin: its launch contribution
+tells the mod to answer the session's `/compact` with mv2's compacted
+conversation and adds a PreCompact hook that refuses Claude's own compaction
+should the mod ever fail to answer. `compaction(session)` returns the protocol
+implementation in `compaction/`.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -59,9 +58,6 @@ BRIDGE = 'claude-mod-v1'
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
-# Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
-# it). Runs with the agent's Python, like the mod's reports; a missing one blocks too.
-COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
 def claude_home(environment=None):
@@ -367,15 +363,6 @@ class ClaudeAdapter(ConfiguredAdapter):
         settings = {'crossSessionInbound': 'accept'}
         environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
-        root = self._universe(context.values.get('agent_dir'))
-        compaction, problem = self.compaction_state(root) if root else (None, None)
-        if compaction is not None and compaction.enabled:
-            settings['hooks'] = {'PreCompact': [{'hooks': [{'type': 'command', 'command': COMPACTION_GUARD}]}]}
-            environment['MV2_COMPACTION'] = '1'
-        elif problem:
-            # An unusable compaction.json never stops a launch: this one runs without compaction.
-            native_mode = {'policy': policy, 'mode': 'bridge without compaction',
-                           'fallback_reason': f'Launched without compaction: {problem}'}
         # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
         # The adapter's own settings and environment never change; problems and modes join the launch's own.
         plan = plugins.plan_for(context, 'claude', self.name, version=claude_version(command.argv[0]), bridge=True,

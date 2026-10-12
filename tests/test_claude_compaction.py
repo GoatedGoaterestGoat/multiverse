@@ -508,6 +508,9 @@ class AdapterTest(Fixture):
         self.assertIn('-m multiverse.compaction guard', hooks['command'])
         self.assertEqual(on.environment['MV2_COMPACTION'], '1')
         self.assertEqual(self.settings(on)['crossSessionInbound'], 'accept')
+        # The bundled compaction plugin contributes it; compaction.json alone turns the plugin on.
+        self.assertEqual(on.plugins['plugins']['compaction']['state'], 'loaded')
+        self.assertEqual(on.plugins['plugins']['compaction']['added'], ['claude_settings', 'environment'])
         write(self.root / 'compaction.json', {'enabled': True, 'harnesses': {'claude': {'enabled': False}}})
         self.assertNotIn('hooks', self.settings(self.adapter.spawn(LaunchContext('spawn', self.values()))))
 
