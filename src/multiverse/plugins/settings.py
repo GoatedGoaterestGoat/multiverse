@@ -164,7 +164,18 @@ def defaults_of(manifest):
     return _json(manifest.directory / manifest.settings.defaults)
 
 
-def _accept(manifest, data, check, where):
+def run_check(check, data, root):
+    """A plugin's settings check: check(settings), or check(settings, universe directory) when it takes two."""
+    import inspect
+    try:
+        parameters = [parameter for parameter in inspect.signature(check).parameters.values()
+                      if parameter.kind in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)]
+    except (TypeError, ValueError):
+        parameters = []
+    return check(data, Path(root) if root is not None else None) if len(parameters) >= 2 else check(data)
+
+
+def _accept(manifest, data, check, where, root=None):
     """Raise ValueError when `data` cannot be this plugin's settings."""
     expected = manifest.settings.version
     found = data.get("schema")
@@ -179,7 +190,7 @@ def _accept(manifest, data, check, where):
         except ValueError as error:
             raise ValueError(f"{where}: {error}") from None
     if check is not None:
-        check(data)
+        run_check(check, data, root)
 
 
 def read(root, manifest, check=None):
@@ -200,7 +211,7 @@ def read(root, manifest, check=None):
             return Settings(_json(legacy), legacy, "legacy")
         else:
             data, source, where = defaults_of(manifest), "defaults", f"{manifest.name} default settings"
-        _accept(manifest, data, check, where)
+        _accept(manifest, data, check, where, root)
         return Settings(data, file, source)
     except ValueError as error:
         return Settings({}, file, "file" if file.is_file() else "defaults", str(error))
@@ -247,7 +258,7 @@ def edit(root, manifest, changes, check=None):
                         child = target[part] = {}
                     target = child
                 target[keys[-1]] = value
-        _accept(manifest, data, check, str(file))
+        _accept(manifest, data, check, str(file), root)
         write(file, data)
     return read(root, manifest, check)
 

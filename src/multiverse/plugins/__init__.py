@@ -234,7 +234,7 @@ def migrate(root, item):
     data, on = answer if isinstance(answer, tuple) and len(answer) == 2 else (answer, None)
     if not isinstance(data, dict) or (on is not None and not isinstance(on, bool)):
         raise PluginError(f"{found.name}'s migration returned something other than settings")
-    settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"])
+    settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"], root)
     backup = trash.entry(Path(root), "plugins-migrate") / source.name
     backup.parent.mkdir(parents=True, exist_ok=True)
     backup.write_bytes(source.read_bytes())

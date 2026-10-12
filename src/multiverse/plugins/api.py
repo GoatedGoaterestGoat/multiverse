@@ -255,6 +255,14 @@ class ServiceContext:
 
 
 class Helpers(_Points):
+    def command(self, name, *arguments, universe=None):
+        """The argv that runs this plugin's helper action `name` (to start a sibling, e.g. a detached worker)."""
+        import sys
+        if name not in self._loaded.registrations.helpers:
+            raise Error(f"{self._loaded.name} has no helper action {name!r}")
+        scope = ["-u", str(_root(universe))] if universe is not None else []
+        return [sys.executable, "-m", "multiverse.plugins", *scope, "run", self._loaded.name, name, *map(str, arguments)]
+
     def action(self, name, function=None):
         """`python -m multiverse.plugins run PLUGIN NAME ARGS...` runs function(ARGS) -> exit code.
         Harness extensions call mv2 this way. Usable as a decorator factory."""
@@ -271,6 +279,48 @@ def _reference(value):
     if not isinstance(value, str) or ":" not in value:
         raise Error('Name dashboard code as "module:Class" inside the plugin')
     return value
+
+
+class Files:
+    """mv2's own file protocol, for a plugin's state: whole-file JSON writes and exclusive locks."""
+
+    @staticmethod
+    def read_json(path):
+        """A JSON file's value; raises Error when it is missing or not JSON."""
+        from ..store import read
+        return _call(read, path)
+
+    @staticmethod
+    def write_json(path, value):
+        """Write JSON so a reader sees the old or the new file, never part of one (parents are created)."""
+        from ..store import write
+        return _call(write, path, value)
+
+    @staticmethod
+    def lock(path):
+        """An exclusive lock on `path` while the `with` block runs, across processes (it waits)."""
+        from ..store import lock
+        return lock(path)
+
+    @staticmethod
+    def now():
+        """The time now, as mv2 records it (ISO 8601, UTC)."""
+        from ..store import now
+        return now()
+
+
+files = Files()
+
+
+@dataclass(frozen=True)
+class HarnessInfo:
+    """A harness configured in a universe, as its launches see it."""
+    name: str
+    family: str          # claude, codex, pi, or "" for a custom command harness
+    executable: str      # what a launch runs (harness.json's executable, else the default)
+    unset_env: tuple     # variables a launch removes from its environment
+    bridge: bool         # whether launches use mv2's bridge (an auto setting counts as on)
+    settings: dict       # harness.json's settings, as written
 
 
 class SettingsAccess:
@@ -297,7 +347,8 @@ class SettingsAccess:
         return found.values
 
     def check(self, function):
-        """function(settings) raises ValueError naming what is wrong. Usable as a decorator."""
+        """function(settings), or function(settings, universe directory), raises ValueError naming what is
+        wrong. It sees the whole file. Usable as a decorator."""
         self._loaded.registrations.settings_check = function
         return function
 
@@ -363,6 +414,32 @@ class Plugin:
     def universe(self, path=None):
         """A universe: `path`, else the one this process works in (MV2_UNIVERSE, else the current directory)."""
         return Universe(_root(path), self)
+
+    def agent_at(self, directory):
+        """The agent whose directory (state/agents/<id>) this is, in whichever universe holds it (needs agents.read)."""
+        directory = Path(directory).resolve()
+        root = directory.parent.parent.parent
+        if directory.parent.name != "agents" or not (root / "universe.json").is_file():
+            raise Error(f"{directory} is not an agent's directory")
+        return self.universe(root).agent(directory.name)
+
+    def current_agent(self):
+        """The agent this process runs for (MV2_AGENT_DIR, else MV2_AGENT_ID), or None outside an agent."""
+        if os.environ.get("MV2_AGENT_DIR"):
+            return self.agent_at(os.environ["MV2_AGENT_DIR"])
+        identity = os.environ.get("MV2_AGENT_ID")
+        return self.universe().agent(identity) if identity else None
+
+    def harness_info(self, universe, harness):
+        """HarnessInfo for a harness configured in a universe (its harnesses/NAME/harness.json)."""
+        from .. import harnesses
+        root = _root(universe)
+        adapter = _call(harnesses.load, root, harness)
+        spec = getattr(adapter, "spec", {}) or {}
+        settings = getattr(adapter, "settings", {}) or {}
+        executable = (spec.get("spawn") or [None])[0]
+        return HarnessInfo(harness, getattr(adapter, "family", "") or "", executable,
+                           tuple(spec.get("unset_env", ())), bool(settings.get("inbox_bridge")), dict(settings))
 
     def state_dir(self, universe=None):
         """state/plugins/NAME/ of a universe, created on first use."""
@@ -506,6 +583,18 @@ class Agent:
     def reload(self):
         return self.universe.agent(self.id)
 
+    def session(self):
+        """This agent's session as the harness side sees it: native ID, launch, state, native mode and plugins."""
+        family = ""
+        try:
+            family = self._plugin.harness_info(self.universe, self.harness).family
+        except Error:
+            pass
+        runtime = self.record.get("runtime") or {}
+        return SessionInfo(self.universe.path, self.id, self.harness or "", family,
+                           self.record.get("native_session_id"), runtime.get("launch_id"),
+                           runtime.get("state", "unknown"), runtime.get("native_mode"), runtime.get("plugins"))
+
     def terminal(self, lines=30):
         """The last `lines` lines of the agent's terminal, or why there is none (needs agents.read)."""
         self._plugin._need("agents.read")
@@ -572,6 +661,5 @@ class Agent:
 
 
 def current_agent(plugin):
-    """The agent this process runs for (MV2_AGENT_ID), or None outside an agent."""
-    identity = os.environ.get("MV2_AGENT_ID")
-    return plugin.universe().agent(identity) if identity else None
+    """The agent this process runs for, or None outside an agent (kept for API 1.0 callers)."""
+    return plugin.current_agent()

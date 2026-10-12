@@ -351,3 +351,73 @@ class DashboardKeysTest(PluginTestCase):
         keys, _ = plugins.dashboard_keys(self.root, core_keys={"m"})
         self.assertEqual({name: owner.name for name, (owner, _) in keys.items()}, {"u": "two", "tx": "two"})
         self.assertEqual([fact(None) for _, fact in plugins.inspector_facts(self.root)], ["one", "two"])
+
+
+class ApiOneThreeTest(PluginTestCase):
+    def make(self):
+        self.write_plugin("probe", {"module": "plugin", "extends": ["helper"], "permissions": ["agents.read"],
+                                    "settings": {"version": 1, "schema": "schema.json"}},
+                          {"plugin.py": "def register(mv):\n    mv.helper.action('status', lambda arguments: 0)\n"
+                                        "    @mv.settings.check\n    def check(values, universe):\n"
+                                        "        if values.get('needs') and not (universe / values['needs']).exists():\n"
+                                        "            raise ValueError('needs ' + values['needs'])\n",
+                           "schema.json": '{"type": "object"}'})
+        self.enable("probe")
+        return api.Plugin(loader.load(self.entry("probe")))
+
+    def test_agents_sessions_and_harnesses(self):
+        mv = self.make()
+        directory = self.agent("worker", native_id="1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+                               runtime={"native_mode": {"mode": "bridge"}})
+        agent = mv.agent_at(directory)
+        self.assertEqual(agent.name, "worker")
+        session = agent.session()
+        self.assertEqual((session.family, session.native_id, session.launch_id, session.native_mode),
+                         ("claude", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "launch-1", {"mode": "bridge"}))
+        with mock.patch.dict(os.environ, {"MV2_AGENT_DIR": str(directory)}):
+            self.assertEqual(mv.current_agent().id, agent.id)
+        info = mv.harness_info(self.root, "claude")
+        self.assertEqual((info.family, info.executable, info.bridge), ("claude", "claude", True))
+        with self.assertRaisesRegex(api.Error, "not an agent's directory"):
+            mv.agent_at(self.root)
+
+    def test_files_helper_command_and_a_check_that_sees_the_universe(self):
+        mv = self.make()
+        path = self.work / "state.json"
+        api.files.write_json(path, {"a": 1})
+        self.assertEqual(api.files.read_json(path), {"a": 1})
+        with api.files.lock(self.work / "x.lock"):
+            pass
+        self.assertIn("T", api.files.now())
+        self.assertEqual(mv.helper.command("status", "--fast", universe=self.root)[-6:],
+                         ["-u", str(self.root), "run", "probe", "status", "--fast"])
+        with self.assertRaisesRegex(ValueError, "needs marker"):
+            plugins.edit_settings(self.root, "probe", {"needs": "marker"})
+        (self.root / "marker").write_text("")
+        plugins.edit_settings(self.root, "probe", {"needs": "marker"})
+
+    def test_testing_helpers(self):
+        self.executable("fake-claude", "echo 2.1.296")
+        import subprocess
+        self.assertEqual(subprocess.run(["fake-claude"], capture_output=True, text=True).stdout.strip(), "2.1.296")
+        path = self.claude_transcript("abc", [{"type": "user"}])
+        self.assertTrue(path.is_relative_to(self.claude_config))
+
+    def test_a_helper_owns_stdin_stdout_and_its_exit_code(self):
+        import subprocess, sys as system
+        self.write_plugin("pipe", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": (
+            "import json, sys\n"
+            "def register(mv):\n"
+            "    @mv.helper.action('guard')\n"
+            "    def guard(arguments):\n"
+            "        request = json.load(sys.stdin)\n"
+            "        for n in range(3):\n"
+            "            print(json.dumps({'event': 'progress', 'n': n}), flush=True)\n"
+            "        return 2 if request.get('refuse') else 0\n")})
+        self.enable("pipe")
+        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                       "MV2_UNIVERSE": str(self.root)}
+        result = subprocess.run([system.executable, "-m", "multiverse.plugins", "run", "pipe", "guard"],
+                                input='{"refuse": true}', env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual([json.loads(line)["n"] for line in result.stdout.splitlines()], [0, 1, 2])

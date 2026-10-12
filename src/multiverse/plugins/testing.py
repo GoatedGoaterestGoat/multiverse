@@ -10,9 +10,11 @@
             self.assertEqual(column.value({"name": "worker"}), "—")
 
 Each test gets a temporary universe made from the base template, a temporary
-home (so ~/.multiverse is never the developer's), no inherited agent identity,
-and `plugin` found through MV2_PLUGIN_PATH and turned on. Nothing here starts an
-agent, tmux or a native harness.
+home (so ~/.multiverse is never the developer's), a temporary Claude config
+directory (CLAUDE_CONFIG_DIR), a bin/ directory first on PATH for fake
+executables, no inherited agent identity, and `plugin` found through
+MV2_PLUGIN_PATH and turned on. Nothing here starts an agent, tmux or a native
+harness: `agent()` writes an agent's records and `executable()` a fake program.
 """
 import json
 import os
@@ -26,7 +28,7 @@ from .. import plugins
 from ..universe import templates
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
-           "MV2_PLUGIN_PATH", loader.SAFE_MODE)
+           "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
 
 
 class PluginTestCase(unittest.TestCase):
@@ -46,8 +48,14 @@ class PluginTestCase(unittest.TestCase):
         self.plugins_dir = self.work / "plugins"
         self.plugins_dir.mkdir()
         environment = {key: value for key, value in os.environ.items() if key not in CLEARED}
-        environment.update(HOME=str(self.home), MV2_PLUGIN_PATH=os.pathsep.join(
-            str(path) for path in (self.plugin, self.plugins_dir) if path is not None))
+        self.bin = self.work / "bin"
+        self.bin.mkdir()
+        self.claude_config = self.work / "claude-config"
+        self.claude_config.mkdir()
+        environment.update(HOME=str(self.home), CLAUDE_CONFIG_DIR=str(self.claude_config),
+                           PATH=os.pathsep.join([str(self.bin), environment.get("PATH", "")]),
+                           MV2_PLUGIN_PATH=os.pathsep.join(
+                               str(path) for path in (self.plugin, self.plugins_dir) if path is not None))
         patcher = mock.patch.dict(os.environ, environment, clear=True)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -94,3 +102,32 @@ class PluginTestCase(unittest.TestCase):
         if name is None:
             name = json.loads((Path(self.plugin) / "plugin.json").read_text())["name"]
         return loader.load(self.entry(name, root))
+
+    def agent(self, name, harness="claude", root=None, native_id=None, runtime=None, **properties):
+        """Write an agent's records (properties.json, runtime.json) and return its directory. No process starts."""
+        from uuid import uuid4
+        from ..store import read, write
+        root = Path(root or self.root)
+        identity = str(uuid4())
+        directory = root / "state" / "agents" / identity
+        write(directory / "properties.json", {
+            "id": identity, "name": name, "harness": harness, "task": "", "phase": "working", "summary": "",
+            "universe_id": read(root / "universe.json")["id"], "workspace": str(self.work / "project"),
+            **({"native_session_id": native_id} if native_id else {}), **properties})
+        write(directory / "runtime.json", {"launch_id": "launch-1", "state": "running", "status": "idle",
+                                           **(runtime or {})})
+        return directory
+
+    def claude_transcript(self, native_id, records, project="project"):
+        """Write a Claude session transcript (JSON lines) where Claude keeps it, under CLAUDE_CONFIG_DIR."""
+        path = self.claude_config / "projects" / project / f"{native_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("".join(json.dumps(record) + "\n" for record in records))
+        return path
+
+    def executable(self, name, script):
+        """A fake program on PATH: `script` is its shell body (#!/bin/sh is added)."""
+        path = self.bin / name
+        path.write_text("#!/bin/sh\n" + script + "\n")
+        path.chmod(0o755)
+        return path

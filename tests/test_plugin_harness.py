@@ -177,7 +177,7 @@ class LaunchPlanTest(PluginTestCase):
 
     def test_version_of_follows_an_executable_replaced_in_place(self):
         import os, time
-        tool = self.work / "bin" / "fake-pi"
+        tool = self.work / "tools" / "fake-pi"
         tool.parent.mkdir()
         def install(script):
             tool.write_text("#!/bin/sh\n" + script + "\n")

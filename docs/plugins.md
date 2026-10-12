@@ -481,12 +481,28 @@ def register(mv: api.Plugin):
 call raises `api.Error` with a readable message, as tools raise `ValueError`
 today, and nothing exits the process.
 
-Plugin utilities: `mv.state_dir` (`state/plugins/NAME/` of the universe in
-scope), `mv.agent_state_dir(agent)` (`state/agents/<id>/NAME/` by default; a
-plugin may claim a different name with the `state` manifest field, which is how
-compaction keeps `state/agents/<id>/compaction/`), `api.files.write_json` and
-`api.files.lock` (the store's atomic writes and locks), and `mv.log` (to
-`state/plugins/NAME/plugin.log`).
+Plugin utilities:
+
+- `mv.state_dir(universe)`: `state/plugins/NAME/` of a universe.
+- `mv.agent_state_dir(agent)`: `state/agents/<id>/NAME/`. Compaction's existing
+  `state/agents/<id>/compaction/` already fits.
+- `mv.agent_at(directory)` and `mv.current_agent()` (from `MV2_AGENT_DIR`, else
+  `MV2_AGENT_ID`) find an agent from a helper or a hook.
+- `Agent.session()` gives the `SessionInfo` that capability and usage
+  contributions receive (native ID, launch, state, native mode, the launch's
+  plugins record).
+- `mv.harness_info(universe, harness)` gives a harness's family, executable,
+  `unset_env`, whether its bridge is on, and its settings.
+- `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
+  processes) and `now`.
+- `mv.helper.command(name, *args, universe=)` is the argv that runs one of the
+  plugin's helper actions, for example to start a detached worker. A helper
+  action owns its stdin and stdout, and its return value is the exit code.
+- `mv.log(text, universe)` writes to `state/plugins/NAME/plugin.log`.
+
+Dashboard screens run in the dashboard process, where the plugin is loaded:
+they call the plugin's own functions directly, off the event loop with
+Textual's thread workers, as the dashboard's own screens do.
 
 ### Extension points
 

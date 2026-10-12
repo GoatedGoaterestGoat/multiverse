@@ -33,7 +33,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 2)
+API_VERSION = (1, 3)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
