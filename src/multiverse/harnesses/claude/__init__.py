@@ -167,48 +167,6 @@ def moment(text):
         return None
 
 
-_compactions = {}
-
-
-def latest_compaction(agent_dir):
-    """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
-
-    The estimate is the compaction's own count of the conversation it left
-    (`stats.tokens_after`: prompts, summaries and raw leaves at about four
-    characters a token, so no system prompt or tools, and well under the real
-    count); read again only when the install log changes.
-    """
-    directory = Path(agent_dir) / 'compaction'
-    try:
-        log = directory / 'installed.jsonl'
-        status = log.stat()
-        key = (status.st_mtime_ns, status.st_size)
-        cached = _compactions.get(log)
-        if cached and cached[0] == key:
-            return cached[1]
-        record = None
-        for line in log.read_text().splitlines():
-            try:
-                found = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(found, dict) and re.fullmatch(r'[0-9a-f-]{36}', str(found.get('install', ''))) and found.get('at'):
-                record = found
-        result = None
-        if record:
-            # installed.jsonl's `at` is when the record was derived from the transcript, possibly much later;
-            # the install file is written just before the rows are handed to Claude.
-            payload = json.loads((directory / 'installs' / f"{record['install']}.json").read_text())
-            tokens, created = payload.get('stats', {}).get('tokens_after'), payload.get('created_at')
-            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 and created:
-                result = {'install': record['install'], 'at': created, 'tokens': tokens}
-        _compactions[log] = (key, result)
-        return result
-    except (OSError, ValueError, AttributeError):
-        return None
-
-
-
 def measured_usage(native_id):
     """Cumulative usage of the session and its subagents, from their transcripts."""
     projects = claude_home() / 'projects'
@@ -471,20 +429,13 @@ class ClaudeAdapter(ConfiguredAdapter):
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
         responded = moment(reading[1]) if reading else None
         reported_at = moment(reported.get('context_reported_at'))
-        try:
-            compaction = latest_compaction(Path(session.session_file).parent)
-        except TypeError:
-            compaction = None
-        installed_at = moment(compaction['at']) if compaction else None
-        if installed_at and not (responded and responded > installed_at):
-            # No response has come since our compaction: its count of the conversation stands in until one does.
-            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
-            context.update(tokens=compaction['tokens'], estimated=True, estimated_at=compaction['at'],
-                           estimated_from=compaction['install'])
-        elif reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
+        if reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
             # No report from the mod yet, or a response newer than it: the transcript has the real request size.
             context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
             context['tokens'] = reading[0]
+        if reading and reading[1]:
+            # When the latest main-thread response came: a plugin's estimate (compaction's) stands only until one does.
+            context['responded_at'] = reading[1]
         if context:
             reported['context'] = context
         if usage is None:

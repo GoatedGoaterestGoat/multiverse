@@ -6,8 +6,11 @@ calls are replaced one extension point at a time. The plugin is on wherever
 the universe's compaction.json is (the manifest's settings.legacy), so a
 universe behaves as before until it is migrated.
 """
+from datetime import datetime
 from importlib import import_module
+import json
 from pathlib import Path
+import re
 
 from multiverse.plugins import api
 
@@ -85,6 +88,74 @@ def capability(mv, info):
     return api.Capability('supported', mechanism='claude-mod-session-compact')
 
 
+_compactions = {}
+
+
+def latest_compaction(agent_dir):
+    """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
+
+    The estimate is the compaction's own count of the conversation it left
+    (`stats.tokens_after`: prompts, summaries and raw leaves at about four
+    characters a token, so no system prompt or tools, and well under the real
+    count); read again only when the install log changes.
+    """
+    directory = Path(agent_dir) / 'compaction'
+    try:
+        log = directory / 'installed.jsonl'
+        status = log.stat()
+        key = (status.st_mtime_ns, status.st_size)
+        cached = _compactions.get(log)
+        if cached and cached[0] == key:
+            return cached[1]
+        record = None
+        for line in log.read_text().splitlines():
+            try:
+                found = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(found, dict) and re.fullmatch(r'[0-9a-f-]{36}', str(found.get('install', ''))) and found.get('at'):
+                record = found
+        result = None
+        if record:
+            # installed.jsonl's `at` is when the record was derived from the transcript, possibly much later;
+            # the install file is written just before the rows are handed to the harness.
+            payload = json.loads((directory / 'installs' / f"{record['install']}.json").read_text())
+            tokens, created = payload.get('stats', {}).get('tokens_after'), payload.get('created_at')
+            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 and created:
+                result = {'install': record['install'], 'at': created, 'tokens': tokens}
+        _compactions[log] = (key, result)
+        return result
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _moment(text):
+    try:
+        return datetime.fromisoformat(text.replace('Z', '+00:00')) if isinstance(text, str) else None
+    except ValueError:
+        return None
+
+
+def usage(info, value):
+    """After our compaction, its own count of the conversation stands in for the context until a response comes.
+
+    The harness's `context.responded_at` says when its latest main-thread
+    response came; a response newer than the compaction has the real size.
+    """
+    compaction = latest_compaction(info.directory)
+    if compaction is None:
+        return None
+    context = value.get('context') if isinstance(value.get('context'), dict) else {}
+    responded, installed = _moment(context.get('responded_at')), _moment(compaction['at'])
+    if installed is None or (responded and responded > installed):
+        return None
+    context = {key: item for key, item in context.items() if key not in ('tokens', 'percent')}
+    context.update(tokens=compaction['tokens'], estimated=True, estimated_reason='after compaction: conversation only',
+                   estimated_at=compaction['at'], estimated_from=compaction['install'])
+    return {**value, 'context': context}
+
+
 def register(mv: api.Plugin):
     mv.launch.contribute('claude', launch)
     mv.capabilities.add('compaction', lambda info: capability(mv, info))
+    mv.usage.adjust(usage)

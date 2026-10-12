@@ -66,11 +66,12 @@ class ClaudeUsageTest(BaseTest):
                                 session_file=str(directory / 'session.jsonl'))
         value = adapter.get_usage(session).value
         self.assertEqual(value['total_tokens'], 15)
-        self.assertEqual(value['context'], REPORT['context'])
+        # The mod's report, plus when the transcript's latest response came (what compaction's estimate is checked against).
+        self.assertEqual(value['context'], {**REPORT['context'], 'responded_at': '2026-09-30T00:00:00Z'})
         self.assertEqual(value['cost_usd'], 1.25)
         stale = SessionHandle(agent, 'claude', str(self.work), launch_id='previous', native_id=native_id,
                               session_file=str(directory / 'session.jsonl'))
-        self.assertEqual(adapter.get_usage(stale).value['context'], {'tokens': 10})
+        self.assertEqual(adapter.get_usage(stale).value['context'], {'tokens': 10, 'responded_at': '2026-09-30T00:00:00Z'})
         self.assertNotIn('cost_usd', adapter.get_usage(stale).value)
         self.assertEqual(adapter.get_usage(stale).value['total_tokens'], 15)
 
@@ -136,8 +137,13 @@ class ClaudeUsageTest(BaseTest):
         facts = read(directory / 'runtime.json')
         write(directory / 'runtime.json', {**facts, 'usage': {'context': context, 'rate_limits': [], 'reported_at': at}})
 
+    def value(self, adapter, session):
+        """The usage record as mv2 reports it: the adapter's, after plugins' adjustments (compaction's estimate)."""
+        from multiverse.plugins import harness as plugin_harness
+        return plugin_harness.adjust_usage(plugin_harness.session_info(session, 'claude'), adapter.get_usage(session).value)
+
     def context(self, adapter, session):
-        return adapter.get_usage(session).value['context']
+        return self.value(adapter, session)['context']
 
     def test_after_our_compaction_the_estimate_stands_in_until_a_real_response_arrives(self):
         adapter, session, project, native_id, install = self.compacted()
@@ -145,16 +151,22 @@ class ClaudeUsageTest(BaseTest):
         self.assertEqual((context['tokens'], context['window'], context['estimated'], context['estimated_from']),
                          (22000, 200000, True, install))
         self.assertNotIn('percent', context)
-        value = adapter.get_usage(session).value
+        value = self.value(adapter, session)
         self.assertEqual(display.context_display({'state': 'ok', 'value': value}), '~22k/200k')
         self.assertIn('11%, estimated after compaction: conversation only', display.context_line({'state': 'ok', 'value': value}))
+        # The display says whatever the estimate's maker set; records from before it set one read as compaction's.
+        other = {'state': 'ok', 'value': {'context': {'tokens': 5000, 'estimated': True, 'estimated_reason': 'by a plugin'}}}
+        self.assertEqual(display.context_line(other).split(' · ')[0], 'Context: ~5.0k (estimated by a plugin)')
+        other['value']['context']['estimated_reason'] = 'by\na plugin ' + 'x' * 200
+        self.assertEqual(len(display.usage_context(other)['estimated_reason']), 80)
+        self.assertNotIn('\n', display.context_line(other))
         with (project / f'{native_id}.jsonl').open('a') as handle:
             handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
         context = self.context(adapter, session)
         # The mod's report predates the new response, so the transcript has the real request size.
         self.assertEqual(context['tokens'], 32005)
         self.assertNotIn('estimated', context)
-        self.assertEqual(display.context_display({'state': 'ok', 'value': adapter.get_usage(session).value}), '32k/200k')
+        self.assertEqual(display.context_display({'state': 'ok', 'value': self.value(adapter, session)}), '32k/200k')
 
     def test_the_mods_newer_report_wins_once_it_follows_the_response(self):
         adapter, session, project, native_id, install = self.compacted()
