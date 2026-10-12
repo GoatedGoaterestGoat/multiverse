@@ -123,17 +123,26 @@ class Dashboard(_Points):
             raise Error("A theme maps color names to #rrggbb values")
         registrations.theme = dict(colors)
 
-    def key(self, key, label, action):
-        """A dashboard key. action(context) runs off the screen's event loop and may return a status line.
+    def key(self, key, label, action=None, *, screen=None):
+        """A dashboard key, with either an action or a screen.
 
-        context.row is a copy of the selected row (or None), context.scope the
-        selected universe's Path. It runs only where the plugin is on.
+        action(context) runs off the screen's event loop and may return a status
+        line; context.row is a copy of the selected row (or None), context.scope
+        the selected universe's Path. screen="module:Class" (API 1.4) opens that
+        screen for the selected universe, built as Class(root=scope,
+        backend=app.backend), and a string it dismisses with becomes the status
+        line. Either works only where the plugin is on.
 
         Core keys always win; plugins.json `keys` settles two plugins wanting one key."""
         registrations = self._allow("dashboard.key")
-        if not isinstance(key, str) or not key or not callable(action):
-            raise Error("A key needs its name and an action function")
-        registrations.keys.append(loader.Key(key, str(label), action))
+        if not isinstance(key, str) or not key or (action is None) == (screen is None):
+            raise Error("A key needs its name and either an action function or a screen")
+        if action is not None and not callable(action):
+            raise Error("A key's action must be a function")
+        if screen is not None:
+            self._allow("dashboard.screen")
+            screen = _reference(screen)
+        registrations.keys.append(loader.Key(key, str(label), action, screen))
 
     def screen(self, name, reference):
         """A Textual screen by "module:Class", opened from the command palette as "PLUGIN: NAME".

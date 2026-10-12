@@ -421,3 +421,27 @@ class ApiOneThreeTest(PluginTestCase):
                                 input='{"refuse": true}', env=environment, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertEqual([json.loads(line)["n"] for line in result.stdout.splitlines()], [0, 1, 2])
+
+
+class ScreenKeyTest(PluginTestCase):
+    def test_a_key_can_open_a_screen(self):
+        self.write_plugin("screens", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen"]}, {
+            "plugin.py": "def register(mv):\n    mv.dashboard.key('c', 'Compaction', screen='ui:Settings')\n"})
+        self.enable("screens")
+        [key] = loader.load(self.entry("screens")).registrations.keys
+        self.assertEqual((key.key, key.action, key.screen), ("c", None, "ui:Settings"))
+        for body, expected in (("mv.dashboard.key('x', 'X')", "either an action function or a screen"),
+                               ("mv.dashboard.key('x', 'X', lambda c: 1, screen='a:B')", "either an action"),
+                               ("mv.dashboard.key('x', 'X', screen='nocolon')", "module:Class")):
+            with self.subTest(body):
+                self.write_plugin("bad", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen"]},
+                                  {"plugin.py": f"def register(mv):\n    {body}\n"})
+                self.enable("bad")
+                loader.reset()
+                self.assertIn(expected, self.entry("bad").problem or str(self._load("bad")))
+
+    def _load(self, name):
+        try:
+            loader.load(self.entry(name))
+        except plugins.PluginError as error:
+            return error
