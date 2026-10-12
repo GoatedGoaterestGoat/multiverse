@@ -181,7 +181,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | K or s | Kill after confirmation (`s` is an alias) |
 | r | Resume a stopped or dormant agent |
 | v / p | Full details / show or hide inspector |
-| c | Compaction settings of the selected group's or agent's universe (Enter on an agent opens its scheduler and plan preview) |
+| c | Compaction settings of the selected group's or agent's universe (Enter on an agent opens its scheduler and plan preview); a key of the compaction plugin, so it works where that plugin is on and is listed under PLUGINS in `?` |
 | ? / q | Keyboard help / quit dashboard |
 | F5 / Ctrl-p | Refresh / command palette |
 | Tab / Shift-Tab | Move between inline draft fields or form fields |

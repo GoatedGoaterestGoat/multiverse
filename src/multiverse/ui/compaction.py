@@ -16,10 +16,12 @@ from textual.widgets import DataTable, Footer, Label, Static
 
 from ..compaction import config
 from ..display import clean, tokens
+from ..store import read
 from .settings import BOOL_OPTIONS, MISSING, Field, FieldScreen, convert, delete, field, lookup, put
 
 GENERIC = config.describe(config.Settings())['builder']
 SCHEDULER_NAMES = tuple(config.SCHEDULERS)
+SAVED = "Compaction settings saved. Restart agents for a changed enabled setting to apply."  # the status line after a save
 REFRESH = 3.0  # seconds between refreshes of what the build process changes
 
 
@@ -154,12 +156,20 @@ class SchedulerScreen(FieldScreen):
         return visible(item, values)
 
 
+def universe_name(root):
+    """The universe's own name from universe.json, else its directory's."""
+    try:
+        return str(read(Path(root) / "universe.json").get("name") or Path(root).name)
+    except (OSError, ValueError, AttributeError):
+        return Path(root).name
+
+
 class CompactionScreen(SchedulerScreen):
     """A scope's compaction.json, section by section, and its agents."""
 
     def __init__(self, root, backend, name=""):
         super().__init__(root, backend)
-        self.scope_name = name or Path(root).name
+        self.scope_name = name or universe_name(root)
         self.overview = None
         self.reloading = False
 
@@ -263,13 +273,13 @@ class CompactionScreen(SchedulerScreen):
     @work(group="compaction-save", exit_on_error=False)
     async def persist(self, file):
         try:
-            overview = await asyncio.to_thread(self.backend.save_compaction, self.root, file)
+            await asyncio.to_thread(self.backend.save_compaction, self.root, file)
         except Exception as error:
             self.saving = False
             self.error(str(error))
             return
         self.saving = False
-        self.dismiss(overview)
+        self.dismiss(SAVED)
 
 
 def scheduler_summary(agent):

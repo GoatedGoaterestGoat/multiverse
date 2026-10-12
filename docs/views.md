@@ -113,7 +113,7 @@ error with the default hierarchy columns. Missing configuration uses defaults.
 
 ## Compaction settings
 
-`c` opens the tree-compaction settings of the selected scope: the `compaction.json` at
+`c` (a key of the compaction plugin, listed under PLUGINS in `?` help, and working in scopes where that plugin is on) opens the tree-compaction settings of the selected scope: the `compaction.json` at
 its root, and the scope's agents. One screen edits the shared settings (`enabled`, the
 default scheduler with its budget, image mode and parameters) and a section per
 harness (`enabled` and its default scheduler either follow the universe settings or

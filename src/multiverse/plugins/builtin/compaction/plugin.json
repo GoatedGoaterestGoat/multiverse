@@ -3,7 +3,7 @@
   "name": "compaction",
   "version": "1.0.0",
   "description": "Tree compaction: per-turn summary trees in place of a harness's own summary",
-  "api": "1.3",
+  "api": "1.4",
   "module": "plugin",
   "default": "off",
   "extends": [
@@ -11,7 +11,9 @@
     "capabilities",
     "usage",
     "doctor",
-    "cli"
+    "cli",
+    "dashboard.key",
+    "dashboard.screen"
   ],
   "permissions": [
     "harness.claude"

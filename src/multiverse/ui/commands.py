@@ -1,10 +1,9 @@
-"""Commands on an agent (message, kill, resume, attach, compaction) and the runner that keeps backend calls off the event loop."""
+"""Commands on an agent (message, kill, resume, attach) and the runner that keeps backend calls off the event loop."""
 import asyncio
 from pathlib import Path
 
 from textual import work
 
-from .compaction import CompactionScreen
 from .screens import Form
 
 
@@ -39,15 +38,6 @@ class AgentCommands:
         if succeeded and after:
             after(result)
         self.refresh_snapshot()
-
-    def action_compaction(self):
-        if self.ready():
-            root = self.target_scope()
-            self.push_screen(CompactionScreen(root, self.backend, self.scope_name(root)), self.compaction_saved)
-
-    def compaction_saved(self, overview):
-        if overview:
-            self.set_status("Compaction settings saved. Restart agents for a changed enabled setting to apply.")
 
     def action_message(self):
         if self.ready() and self.selected:

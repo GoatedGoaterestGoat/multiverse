@@ -44,7 +44,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), 
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
-        Binding("r", "resume", "Resume", show=False), Binding("c", "compaction", "Compaction", show=False),
+        Binding("r", "resume", "Resume", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 

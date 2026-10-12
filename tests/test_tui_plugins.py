@@ -284,7 +284,8 @@ class PluginDashboardTests(DashboardCase):
             self.assertEqual(self.app.screen.content, KEYS)
             self.assertNotIn("plugin_key", " ".join(b.action for items in self.app._bindings.key_to_bindings.values() for b in items))
             # The dashboard told the registry which keys are its own, so a plugin cannot take them.
-            self.assertTrue({"c", "p", "n", "enter", "question_mark", "j"} <= self.service.core_keys_seen)
+            self.assertTrue({"p", "n", "enter", "question_mark", "j"} <= self.service.core_keys_seen)
+            self.assertNotIn("c", self.service.core_keys_seen)  # compaction's key is a plugin's now
 
     async def test_plugin_error_count_shows_in_the_header(self):
         self.service.errors = 1

@@ -26,7 +26,6 @@ K / s          Kill (with confirmation); s is an alias
 r              Resume a stopped or dormant agent
 v              Full agent details or group configuration
 p              Show / hide the inspector (opens only with this key)
-c              Compaction settings for the selected scope; Enter on an agent opens its plan
 g              New subverse inside the selected group (inline, name only)
 x              Move the selected agent or subverse: choose a group, then Enter or x
 d              Delete the selected agent or subverse (to trash, with confirmation)
