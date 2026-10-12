@@ -180,3 +180,5 @@ def register(mv: api.Plugin):
     mv.capabilities.add('compaction', lambda info: capability(mv, info))
     mv.usage.adjust(usage)
     mv.doctor.check(lambda universe: doctor(mv, universe))
+    from multiverse.tools import compaction as command
+    mv.cli.command('compaction', command.configure, command.run)

@@ -6,7 +6,21 @@
   "api": "1.3",
   "module": "plugin",
   "default": "off",
-  "extends": ["launch", "capabilities", "usage", "doctor"],
-  "permissions": ["harness.claude"],
-  "settings": {"version": 1, "legacy": "compaction.json"}
+  "extends": [
+    "launch",
+    "capabilities",
+    "usage",
+    "doctor",
+    "cli"
+  ],
+  "permissions": [
+    "harness.claude"
+  ],
+  "commands": {
+    "compaction": "Show or set an agent's compaction: scheduler, summary trees, recent errors"
+  },
+  "settings": {
+    "version": 1,
+    "legacy": "compaction.json"
+  }
 }

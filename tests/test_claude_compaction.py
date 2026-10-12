@@ -560,6 +560,19 @@ class AdapterTest(Fixture):
         self.assertEqual(capability.state, 'unavailable')
         self.assertIn('inbox_bridge', capability.reason)
 
+    def test_mv2_compaction_is_the_compaction_plugins_command(self):
+        from multiverse import cli
+        from multiverse.tools import compaction as command
+        write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
+        self.assertFalse(cli.builtin('compaction'))
+        found = cli.tool('compaction', self.root)
+        # The plugin's configure and run are the tool's, behind the loader's guard.
+        import argparse
+        parser = argparse.ArgumentParser()
+        found.configure(parser)
+        self.assertIn('--scheduler', parser.format_help())
+        self.assertEqual(found.run(self.root, agent=self.agent_dir.name), command.run(self.root, agent=self.agent_dir.name))
+
     def test_claude_supplies_its_builder_defaults_and_checks_its_own_settings(self):
         builder = claude_builder()
         self.assertEqual((builder.model, builder.fallback_model, builder.effort, builder.options),
