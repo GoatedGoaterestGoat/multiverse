@@ -5,6 +5,7 @@ with a fake, so they need no plugin code, no filesystem and no tmux.
 """
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 import sys
 import threading
 import time
@@ -121,6 +122,15 @@ class FakeService:
     def settings_screen(self, root, name, reference):
         return OwnScreen
 
+    def screen_class(self, loaded, reference):
+        self.calls.append(("screen_class", reference))
+        if reference == "broken:Screen":
+            raise ImportError("no module named broken")
+        return DismissingScreen
+
+    def record(self, loaded, what, error, root):
+        self.calls.append(("record", what, str(error)))
+
 
 from textual.screen import ModalScreen  # noqa: E402
 
@@ -132,6 +142,24 @@ class OwnScreen(ModalScreen):
 
     def compose(self):
         yield Static("own settings", id="own")
+
+
+class DismissingScreen(ModalScreen):
+    """A plugin screen opened by a key; Enter closes it with a status line."""
+    BINDINGS = [("enter", "done", "Done"), ("escape", "nothing", "Nothing")]
+
+    def __init__(self, root, backend):
+        super().__init__()
+        self.scope = root
+
+    def compose(self):
+        yield Static("screen of " + self.scope.name, id="keyscreen")
+
+    def action_done(self):
+        self.dismiss("saved by the plugin")
+
+    def action_nothing(self):
+        self.dismiss(None)
 
 
 class DashboardCase(unittest.IsolatedAsyncioTestCase):
@@ -296,6 +324,42 @@ class PluginDashboardTests(DashboardCase):
             await self.until(pilot, lambda: "failed; see mv2 plugins" in self.text("#status"), "the failure message")
             self.assertFalse(self.app.operating)
             await pilot.press("j")
+            self.assertTrue(self.app.is_running)
+
+    async def test_a_key_can_open_a_plugin_screen_built_from_the_scope_and_its_result_is_the_status(self):
+        key = SimpleNamespace(key="c", label="Compaction", action=None, screen="screens:Board")
+        self.service.keys = {"z": ("alpha", "Compaction", None, key)}
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin key")
+            await pilot.press("z")
+            await self.until(pilot, lambda: isinstance(self.app.screen, DismissingScreen), "the plugin's screen")
+            self.assertEqual(self.app.screen.scope, self.app.target_scope())
+            self.assertEqual([call for call in self.service.calls if call[0] == "key"], [])  # no action ran
+            self.assertFalse(self.app.operating)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: not isinstance(self.app.screen, DismissingScreen), "the screen to close")
+            self.assertIn("saved by the plugin", self.text("#status"))
+            await pilot.press("z")
+            await self.until(pilot, lambda: isinstance(self.app.screen, DismissingScreen), "the screen again")
+            await pilot.press("escape")
+            await self.until(pilot, lambda: not isinstance(self.app.screen, DismissingScreen), "the screen to close")
+
+    async def test_a_screen_key_says_when_the_plugin_is_off_and_reports_a_broken_screen(self):
+        good = SimpleNamespace(key="c", label="Compaction", action=None, screen="screens:Board")
+        bad = SimpleNamespace(key="d", label="Broken", action=None, screen="broken:Screen")
+        self.service.keys = {"z": ("alpha", "Compaction", None, good), "y": ("alpha", "Broken", None, bad)}
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin keys")
+            self.service.off = {"alpha"}
+            await pilot.press("z")
+            await self.until(pilot, lambda: "alpha is off in" in self.text("#status"), "the off message")
+            self.assertNotIsInstance(self.app.screen, DismissingScreen)
+            self.service.off = set()
+            await pilot.press("y")
+            await self.until(pilot, lambda: "screen failed: no module named broken" in self.text("#status"), "the failure")
+            self.assertIn(("record", "screen broken:Screen", "no module named broken"), self.service.calls)
             self.assertTrue(self.app.is_running)
 
     async def test_plugin_keys_are_ignored_while_typing_or_in_a_dialog(self):
@@ -619,6 +683,38 @@ class RealPluginTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     break
                 await pilot.pause(0.02)
             self.assertIn("board of", str(app.screen.query_one("#board", Static).render()))
+
+    async def test_a_real_plugin_key_opens_its_screen(self):
+        self.write_plugin("opener", {"module": "plugin", "api": "1.4", "extends": ["dashboard.key", "dashboard.screen"]},
+                          {"plugin.py": "def register(mv):\n    mv.dashboard.key('o', 'Open board', screen='screens:Board')\n"
+                                        "    mv.dashboard.screen('board', 'screens:Board')\n",
+                           "screens.py": SCREENS.replace('BINDINGS = [("escape", "app.pop_screen", "Close")]',
+                                                         'BINDINGS = [("enter", "done", "Done")]\n'
+                                                         '    def action_done(self):\n        self.dismiss("board closed")')})
+        self.enable("opener")
+        app = MultiverseApp(self.root, LocalBackend(), refresh_interval=0, plugin_service=PluginService())
+        async with app.run_test(size=(120, 30)) as pilot:
+            for _ in range(200):
+                await app.workers.wait_for_complete()
+                if "o" in app.plugin_keys:
+                    break
+                await pilot.pause(0.02)
+            self.assertEqual(app.plugin_keys["o"][1], "Open board")
+            await pilot.press("o")
+            for _ in range(200):
+                await app.workers.wait_for_complete()
+                if app.screen.query("#board"):
+                    break
+                await pilot.pause(0.02)
+            self.assertIn("board of", str(app.screen.query_one("#board", Static).render()))
+            await pilot.press("enter")
+            for _ in range(200):
+                await app.workers.wait_for_complete()
+                if "board closed" in str(app.query_one("#status", Static).render()):
+                    break
+                await pilot.pause(0.02)
+            self.assertIn("board closed", str(app.query_one("#status", Static).render()))
+            self.assertIn("o              opener: Open board", app.plugin_help())
 
 
 if __name__ == "__main__":

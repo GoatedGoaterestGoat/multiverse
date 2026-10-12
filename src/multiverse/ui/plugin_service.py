@@ -121,6 +121,13 @@ class PluginService:
             raise RuntimeError(f"{name}: {label} failed; see mv2 plugins")
         return None if result is None else str(result)
 
+    def record(self, loaded, what, error, root):
+        """Count a failure of plugin code against its plugin (the header shows the total)."""
+        try:
+            loader.record(loaded, what, error, Path(root))
+        except Exception:
+            pass
+
     def screen_class(self, loaded, reference):
         return loaded.resolve(reference)
 

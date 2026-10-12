@@ -402,6 +402,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         entry = self.plugin_keys.get(key)
         if entry is None or not self.ready():
             return
+        if getattr(entry[3], "screen", None):  # a key that opens a screen instead of running an action
+            self.open_plugin_screen(entry[0], entry[2], entry[3].screen)
+            return
         scope, row = self.target_scope(), self.visible_rows.get(self.selected_key)
         row = dict(row) if row else None
         label = f"{entry[0]}: {entry[1]}"
@@ -438,9 +441,15 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             if plugin not in await asyncio.to_thread(self.plugin_service.on_here, root):
                 self.set_status(f"{plugin} is off in {root.name}: turn it on from the Plugins screen", error=True)
                 return
-            self.push_screen(screen(root=root, backend=self.backend))
+            self.push_screen(screen(root=root, backend=self.backend), self.plugin_screen_closed)
         except Exception as error:
+            await asyncio.to_thread(self.plugin_service.record, loaded, f"screen {reference}", error, root)
             self.set_status(f"{plugin}: screen failed: {error}", error=True)
+
+    def plugin_screen_closed(self, result):
+        """A plugin screen may leave a status line by dismissing with text."""
+        if isinstance(result, str) and result:
+            self.set_status(result)
 
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
