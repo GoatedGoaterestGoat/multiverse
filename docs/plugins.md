@@ -131,7 +131,11 @@ Each universe and subverse may have a `plugins.json` at its root:
   harness), but turning the plugin on or off is always here.
 - A plugin is on where `enabled` says `true`. Where the file says nothing, its
   manifest's `default` applies. Only bundled plugins can default to `on` (today
-  only typeahead), so installing a plugin never turns it on anywhere.
+  only typeahead), so installing a plugin never turns it on anywhere. One
+  exception keeps upgrades invisible: a plugin whose pre-plugin settings file
+  (its manifest's `settings.legacy`, such as `compaction.json`) is still in a
+  universe is on there until `plugins.json` says otherwise. Its settings then
+  decide what it does, exactly as that file did before.
 - A `plugins.json` naming a plugin that is not installed is not an error for
   launches: they go on without it, and `mv2 plugins` and `doctor` say it is
   missing and how to get it.
@@ -1006,10 +1010,10 @@ settings file only configures it.
 universe's `compaction.json`. It turns the plugin on in `plugins.json` exactly
 where the old file left compaction on for Claude, writes the rest to
 `plugin-settings/compaction.json` without the `enabled` keys, and moves the old
-file to trash. Until a universe is migrated, the plugin reads `compaction.json`
-where there is no new file, and an `enabled` there counts while `plugins.json`
-says nothing. So no universe changes behaviour before it is migrated, and
-`doctor` reminds the user to migrate. The base template ships compaction off,
+file to trash. Until a universe is migrated, the plugin counts as on wherever
+`compaction.json` exists and `plugins.json` says nothing, and reads its
+settings, `enabled` included, from that file. So no universe changes behaviour
+before it is migrated, and `doctor` reminds the user to migrate. The base template ships compaction off,
 with its builder settings written out in `plugin-settings/compaction.json`. The
 development template turns it on in `plugins.json`.
 

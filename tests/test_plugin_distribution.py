@@ -66,6 +66,15 @@ class MigrateTest(PluginTestCase):
         self.write_plugin("tree", {"module": "plugin", "settings": {"version": 2, "legacy": "tree.json"}},
                           {"plugin.py": MIGRATING})
 
+    def test_a_legacy_settings_file_keeps_the_plugin_on_until_plugins_json_says(self):
+        self.assertFalse(self.entry("tree").on)
+        (self.root / "tree.json").write_text(json.dumps({"enabled": False}))
+        self.assertTrue(self.entry("tree").on)  # the plugin's own settings decide what it does
+        self.enable("tree", on=False)
+        self.assertFalse(self.entry("tree").on)
+        child = self.subverse("child")
+        self.assertFalse(self.entry("tree", child).on)  # no legacy file there
+
     def test_legacy_settings_move_to_the_plugin_and_turn_it_on(self):
         from multiverse.tools import plugins as tool
         (self.root / "tree.json").write_text(json.dumps({"enabled": True, "budget": 5}))
