@@ -44,7 +44,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         Binding("escape", "clear_filter", "Clear search", show=False),
         Binding("v", "details", "Details", show=False), 
         Binding("d", "remove", "Delete", show=False), Binding("s", "stop", "Kill", show=False),
-        Binding("r", "resume", "Resume", show=False),
+        Binding("r", "resume", "Resume", show=False), Binding("P", "plugins", "Plugins", show=False),
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
@@ -55,6 +55,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
         self.root = Path(root)
+        self.home = self.root  # where the dashboard was opened: the navigation boundary and where plugin screens come from
         self.backend = backend or LocalBackend()
         self.theme = "catppuccin-mocha"
         self.refresh_interval = refresh_interval
@@ -288,7 +289,6 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.query_one("#empty").display = True
         self.set_status("")
         self.refresh_snapshot()
-        self.load_plugin_registry()
 
     def action_fold(self):
         if not self.navigable():
@@ -372,13 +372,13 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     @work(group="plugin-registry", exclusive=True, exit_on_error=False)
     async def load_plugin_registry(self):
         """Find the keys and screens of the plugins on in this tree, off the event loop."""
-        root, generation = self.root, self._scope_generation
+        # From the opened root, not the portal being shown: plugin screens and keys stay the same as you move
+        # between subverses, and each says "<plugin> is off in <scope>" where it is off.
+        root = self.home
         try:
             registry = await asyncio.to_thread(self.plugin_service.registry, root, self.core_keys())
         except Exception as error:
             self.set_status(f"Plugins could not be read: {error}", error=True)
-            return
-        if generation != self._scope_generation:
             return
         # Only plugin bindings are replaced; the app's own stay untouched.
         bindings = self._bindings.key_to_bindings

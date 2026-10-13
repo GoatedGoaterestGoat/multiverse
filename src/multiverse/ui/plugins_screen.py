@@ -29,6 +29,25 @@ def state_text(item):
     return STATES.get(item.get("state"), clean(item.get("state") or "unknown"))
 
 
+PROVIDES = (("columns", "columns"), ("panels", "widgets"), ("screens", "screens"), ("actions", "palette actions"),
+            ("keys", "keys"), ("commands", "mv2 commands"), ("statusline", "status-line items"), ("events", "events"),
+            ("services", "services"))
+
+
+def provided(provides):
+    """What a plugin adds, as `columns a, b · widgets c`; empty when nothing is known or it adds nothing."""
+    if not isinstance(provides, dict):
+        return ""
+    shown = []
+    for key, label in PROVIDES:
+        value = provides.get(key)
+        if isinstance(value, (list, tuple)) and value:
+            shown.append(f"{label} {', '.join(clean(str(name)) for name in value)}")
+        elif isinstance(value, int) and not isinstance(value, bool) and value:
+            shown.append(f"{value} {label}")  # a count, e.g. services
+    return " · ".join(shown)
+
+
 def describe(item):
     """The selected plugin in a few lines: what it is, why it is not working and what it last did wrong."""
     lines = [f"{clean(item['name'])} {clean(item.get('version') or '')} · {clean(item.get('source') or '')}".rstrip()]
@@ -36,6 +55,9 @@ def describe(item):
         lines.append(clean(item["description"]))
     if item.get("problem"):
         lines.append("Problem: " + clean(item["problem"]))
+    adds = provided(item.get("provides"))
+    if adds:
+        lines.append("Adds here: " + adds)
     if item.get("permissions"):
         lines.append("Allowed to: " + "; ".join(clean(text) for text in item["permissions"]))
     for shadow in item.get("shadowed") or ():
@@ -50,7 +72,7 @@ def describe(item):
 class PluginsScreen(ModalScreen):
     """Plugins in one scope: Space turns one on or off there, Enter opens its settings."""
     BINDINGS = [Binding("escape", "close", "Close"), Binding("space", "toggle", "On / off"),
-                Binding("enter", "settings", "Settings"), Binding("h", "host", "Host")]
+                Binding("enter", "settings", "Configure"), Binding("h", "host", "Host")]
 
     def __init__(self, root, name="", service=None):
         super().__init__()

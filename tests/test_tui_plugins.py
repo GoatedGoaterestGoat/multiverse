@@ -83,6 +83,7 @@ class FakeService:
         return self.errors
 
     def registry(self, root, core_keys):
+        self.calls.append(("registry", Path(root)))
         self.core_keys_seen = set(core_keys)
         return {"keys": dict(self.keys), "screens": dict(self.screens), "clashes": list(self.clashes)}
 
@@ -287,6 +288,36 @@ class PluginDashboardTests(DashboardCase):
             self.assertTrue({"p", "n", "enter", "question_mark", "j"} <= self.service.core_keys_seen)
             self.assertNotIn("c", self.service.core_keys_seen)  # compaction's key is a plugin's now
 
+    async def test_keys_and_screens_come_from_the_opened_root_and_stay_while_moving_between_subverses(self):
+        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
+        self.service.screens = {("alpha", "board"): (None, "x:Board")}
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            await self.until(pilot, lambda: self.app.plugin_keys, "the registry")
+            review = self.backend.root / "subverses/pr-review"
+            self.app.enter_scope(review)
+            await self.until(pilot, lambda: self.app.root == review and self.app.snapshot and self.app.snapshot["name"], "the portal")
+            await pilot.pause(0.3)
+            await self.app.workers.wait_for_complete()
+            self.assertEqual([call[1] for call in self.service.calls if call[0] == "registry"], [self.backend.root])
+            self.assertEqual(sorted(self.app.plugin_keys), ["z"])
+            self.assertEqual(sorted(self.app.plugin_screens), [("alpha", "board")])
+            self.app.action_back()
+            await self.until(pilot, lambda: self.app.root == self.backend.root, "back at the opened root")
+            self.assertEqual(self.app.home, self.backend.root)
+
+    async def test_shift_p_opens_the_plugins_screen_and_help_says_so(self):
+        self.service.items[0]["provides"] = {"columns": ["shout"], "panels": ["counter"], "screens": [], "keys": [], "commands": ["hello"], "services": 2, "events": None}
+        async with self.app.run_test(size=(140, 40)) as pilot:
+            await self.start(pilot)
+            self.assertIn("P              Plugins", KEYS)
+            await pilot.press("P")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen)
+                             and self.app.screen.query_one("#plugins-table", DataTable).row_count == 2, "the Plugins screen")
+            text = str(self.app.screen.query_one("#plugin-details", Static).render())
+            self.assertIn("Adds here: columns shout · widgets counter · mv2 commands hello · 2 services", text)
+            self.assertIn("Configure", [b.description for b in self.app.screen.BINDINGS])
+
     async def test_plugin_error_count_shows_in_the_header(self):
         self.service.errors = 1
         async with self.app.run_test(size=(140, 32)) as pilot:
@@ -424,7 +455,7 @@ class PluginDashboardTests(DashboardCase):
             self.service.gate.set()
             await self.until(pilot, lambda: self.app.query_one("#inspect-plugins").display, "the plugin lines")
             self.assertEqual(self.text("#inspect-plugins"), "alpha: 3 open\nbeta: unavailable")
-            self.assertEqual(self.service.calls[0][:2], ("facts", Path(agent["universe"])))
+            self.assertEqual([call[:2] for call in self.service.calls if call[0] == "facts"][0], ("facts", Path(agent["universe"])))
 
     async def test_a_stuck_plugin_fact_times_out_into_one_line(self):
         self.service.fact_delay = 2.0
