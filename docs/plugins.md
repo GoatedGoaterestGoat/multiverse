@@ -1010,16 +1010,21 @@ included in mv2's as an optional submodule (see
 is off by default even when present. These rules are requirements, and its
 tests check each one:
 
-- **Off unless enabled,** per universe, by the user. `enable` prints what it
-  exposes and the address. It runs only in the host.
-- **Loopback only.** It binds `127.0.0.1` (or a Unix socket under
-  `state/plugins/remote/`, mode 0600). It refuses any other address in v1. Remote
-  access is the user's own SSH tunnel (`ssh -L`), as the docs explain.
-- **A token for every request.** 32 random bytes from `secrets`, made on enable,
-  stored at `state/plugins/remote/token` (0600; `state/` is already
-  Git-ignored), sent as `Authorization: Bearer …` and compared in constant time.
-  `mv2 remote token --rotate` (the plugin's own command) replaces it. Failed attempts are delayed
-  and counted in the log.
+- **Off unless enabled,** per universe, by the user. `mv2 plugins enable`
+  lists what it may do, and `mv2 remote` shows its address, what it allows and
+  where its token is. It runs only in the host, with one endpoint per universe
+  where it is on.
+- **Loopback only.** By default it listens on a Unix socket at
+  `state/plugins/remote/remote.sock` (mode 0600, in a 0700 directory). It uses
+  `127.0.0.1:PORT` when the settings name one, which is needed where the
+  universe's socket path is too long for a Unix socket. It refuses any other
+  address. Remote access is the user's own SSH tunnel (`ssh -L`).
+- **A token for every request.** 32 random bytes from `secrets`, made when the
+  endpoint first starts (or by `mv2 remote token`), stored at
+  `state/plugins/remote/token` (0600; `state/` is already Git-ignored), sent as
+  `Authorization: Bearer …` and compared in constant time. `mv2 remote token
+  --rotate` replaces it, and the old one stops working at once. A failed
+  attempt waits a second and is audited.
 - **No browser attacks.** It rejects requests carrying `Origin` or `Cookie` and
   sends no CORS headers. A `Host` header other than its own address is refused,
   against DNS rebinding.
@@ -1030,8 +1035,11 @@ tests check each one:
 - **Bounded.** JSON only. Messages are at most 64 KiB, and requests are rate
   limited.
 - **Auditable.** Every request (time, peer, route, agent, outcome, never message
-  text) goes to `state/plugins/remote/audit.jsonl`. Messages arrive as `Message
-  from remote`, so agents and people can tell.
+  text) goes to `state/plugins/remote/audit.jsonl` (0600). Messages arrive as
+  `Message from plugin remote`, so agents and people can tell.
+
+Built in the `mv2-remote-control` repository (0c8bc8f, local for now), with a
+test for each rule above and a run through the real plugin host.
 
 ## Moving compaction into a plugin
 
