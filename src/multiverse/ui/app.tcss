@@ -87,14 +87,6 @@ Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background
 .detail-title { text-style: bold; height: 2; }
 #full-details { height: 1fr; scrollbar-size: 1 1; }
 #full-details Static { height: auto; }
-#compaction-dialog { width: 92%; max-width: 100; height: 92%; border: round $mv-teal; background: $mv-base; padding: 0 1; }
-#compaction-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
-#compaction-body { height: 1fr; scrollbar-size: 1 1; }
-#compaction-agents { height: auto; max-height: 12; }
-#agent-top { height: auto; max-height: 60%; scrollbar-size: 1 1; }
-#plan { height: 1fr; min-height: 4; }
-#plan-summary, #agent-follows, #agent-status { height: auto; color: $mv-subtext0; }
-#compaction-dialog .detail-title { height: 1; }
 #plugins-dialog { width: 92%; max-width: 100; height: 92%; border: round $mv-teal; background: $mv-base; padding: 0 1; }
 #plugins-dialog .detail-title { height: 1; }
 #plugins-table { height: auto; max-height: 50%; }
