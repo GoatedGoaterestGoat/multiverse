@@ -109,6 +109,15 @@ def _awaiting_migration(root):
         return {}
 
 
+def _plugins_here(root):
+    """Names of the plugins found for this universe (manifests only), or None when they cannot be read."""
+    try:
+        from ..plugins import entries
+        return {found.name for found in entries(root)}
+    except Exception:  # refresh never fails over plugins
+        return None
+
+
 def refresh_plan(root, template=None, take=()):
     """Compare a universe's definition files with its template; change nothing.
 
@@ -117,9 +126,11 @@ def refresh_plan(root, template=None, take=()):
     edited file is kept, and a conflict when both changed. Without a manifest
     (universes installed before refresh existed), a file that differs from the
     template is `unknown` and changes only when named in `take`. A template's
-    `plugin-settings/NAME.json` is `deferred` while the universe still has that
-    plugin's pre-plugin settings file (until `mv2 plugins migrate`), and one the
-    universe wrote itself is `local`.
+    `plugin-settings/NAME.json` is `deferred` while plugin NAME is not here (a
+    checkout without its submodule: only its manifest knows its pre-plugin
+    settings file) and while the universe still has that plugin's pre-plugin
+    settings file (until `mv2 plugins migrate`); one the universe wrote itself
+    is `local`.
     """
     root = Path(root)
     meta = read(root / "universe.json")
@@ -134,6 +145,7 @@ def refresh_plan(root, template=None, take=()):
     upstream, local = definition_files(source), definition_files(root)
     recorded = (manifest or {}).get("files", {})
     awaiting = _awaiting_migration(root)
+    here = _plugins_here(root)
     take = set(take)
     unknown_take = take - set(upstream)
     if unknown_take:
@@ -149,6 +161,12 @@ def refresh_plan(root, template=None, take=()):
             continue
         if mine == theirs:
             current += 1
+            continue
+        plugin = path[len("plugin-settings/"):-len(".json")] if path.startswith("plugin-settings/") and path.endswith(".json") else None
+        if plugin and here is not None and plugin not in here and mine is None and path not in take:
+            # Without the plugin nothing says whether a pre-plugin file here holds its real settings.
+            changes.append({"path": path, "action": "deferred",
+                            "reason": f"the {plugin} plugin is not here: run mv2 plugins install {plugin} first"})
             continue
         if path in awaiting and mine is None and path not in take:
             # A template's plugin settings must not go in front of this universe's real, unmigrated ones.

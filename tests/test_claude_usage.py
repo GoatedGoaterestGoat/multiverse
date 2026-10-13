@@ -2,6 +2,7 @@
 import json
 import os
 from unittest.mock import patch
+import unittest
 from uuid import uuid4
 
 from multiverse.harnesses.types import SessionHandle
@@ -14,6 +15,20 @@ from test_multiverse import BaseTest
 REPORT = {'context': {'tokens': 82000, 'window': 200000, 'percent': 41}, 'cost_usd': 1.25,
           'rate_limits': [{'window': 'five_hour', 'percent_used': 34.5, 'resets_at': '2026-09-30T20:00:00Z'},
                           {'window': 'bad', 'percent_used': 'x'}]}
+
+
+def compaction_here():
+    """Whether this checkout has the compaction plugin (the plugins/compaction submodule), which makes the estimate."""
+    from multiverse.plugins import entry
+    from multiverse.plugins.loader import PluginError
+    try:
+        entry(None, 'compaction')  # raises only when no plugin by that name is found
+    except PluginError:
+        return False
+    return True
+
+
+NEEDS_COMPACTION = unittest.skipUnless(compaction_here(), 'needs the compaction plugin: mv2 plugins install compaction')
 
 
 class ClaudeUsageTest(BaseTest):
@@ -148,6 +163,7 @@ class ClaudeUsageTest(BaseTest):
     def context(self, adapter, session):
         return self.value(adapter, session)['context']
 
+    @NEEDS_COMPACTION
     def test_after_our_compaction_the_estimate_stands_in_until_a_real_response_arrives(self):
         adapter, session, project, native_id, install = self.compacted()
         context = self.context(adapter, session)
@@ -188,6 +204,7 @@ class ClaudeUsageTest(BaseTest):
         adapter, session, *_ = self.compacted(installed_at='not a time')
         self.assertNotIn('estimated', self.context(adapter, session))
 
+    @NEEDS_COMPACTION
     def test_without_the_mod_the_estimate_still_replaces_the_stale_transcript_reading(self):
         adapter, session, project, native_id, install = self.compacted()
         stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,

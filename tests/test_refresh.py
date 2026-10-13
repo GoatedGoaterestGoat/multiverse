@@ -1,8 +1,10 @@
 """Refresh updates unedited definition files from the template and never overwrites local edits."""
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import cli
@@ -97,20 +99,42 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(self.actions(take=["bootstrap.md"], apply=True)["bootstrap.md"], "update")
         self.assertEqual((self.root / "bootstrap.md").read_text(), "Bootstrap v2\n")
 
+    def plugin(self, name, legacy=None):
+        """A plugin named NAME found first (MV2_PLUGIN_PATH), whose pre-plugin settings file is `legacy`."""
+        directory = self.work / "plugins" / name
+        manifest = {"schema": 1, "name": name, "version": "0.1.0", "api": "1.0", "module": "plugin"}
+        if legacy:
+            manifest["settings"] = {"version": 2, "legacy": legacy}
+        write(directory / "plugin.json", manifest)
+        (directory / "plugin.py").write_text("def register(mv):\n    pass\n")
+        self.enterContext(patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(directory.parent)}))
+
+    def reason(self, path, **options):
+        return {change["path"]: change["reason"] for change in self.plan(**options)["changes"]}[path]
+
     def test_plugin_settings_wait_for_the_migration_of_a_legacy_file(self):
-        # A universe from before compaction became a plugin: its compaction.json, and the template's new settings file.
-        write(self.root / "compaction.json", {"schema": 1, "harnesses": {"claude": {"enabled": True}}})
-        self.put("plugin-settings/compaction.json", '{"schema": 2}\n')
-        self.assertEqual(self.actions()["plugin-settings/compaction.json"], "deferred")
-        reason = {c["path"]: c["reason"] for c in self.plan()["changes"]}["plugin-settings/compaction.json"]
-        self.assertIn("run mv2 plugins migrate", reason)
+        # A universe from before the plugin existed: its notes.json, and the template's new settings file.
+        self.plugin("notes", legacy="notes.json")
+        write(self.root / "notes.json", {"schema": 1, "enabled": True})
+        self.put("plugin-settings/notes.json", '{"schema": 2}\n')
+        self.assertEqual(self.actions()["plugin-settings/notes.json"], "deferred")
+        self.assertIn("run mv2 plugins migrate", self.reason("plugin-settings/notes.json"))
         refresh.run(self.root, apply=True)
-        self.assertFalse((self.root / "plugin-settings/compaction.json").exists())  # nothing in front of the real settings
+        self.assertFalse((self.root / "plugin-settings/notes.json").exists())  # nothing in front of the real settings
         # After mv2 plugins migrate wrote the universe's own settings, they are kept.
-        write(self.root / "plugin-settings/compaction.json", {"schema": 2, "default": {"budget": 200000}})
-        (self.root / "compaction.json").unlink()
-        self.assertEqual(self.actions()["plugin-settings/compaction.json"], "local")
-        self.assertEqual(self.actions(take=["plugin-settings/compaction.json"])["plugin-settings/compaction.json"], "update")
+        write(self.root / "plugin-settings/notes.json", {"schema": 2, "default": {"budget": 200000}})
+        (self.root / "notes.json").unlink()
+        self.assertEqual(self.actions()["plugin-settings/notes.json"], "local")
+        self.assertEqual(self.actions(take=["plugin-settings/notes.json"])["plugin-settings/notes.json"], "update")
+
+    def test_plugin_settings_wait_for_a_plugin_that_is_not_here(self):
+        # A checkout without the plugin's submodule cannot tell whether a pre-plugin file here holds its settings.
+        self.put("plugin-settings/absent.json", '{"schema": 2}\n')
+        self.assertEqual(self.actions()["plugin-settings/absent.json"], "deferred")
+        self.assertIn("mv2 plugins install absent", self.reason("plugin-settings/absent.json"))
+        refresh.run(self.root, apply=True)
+        self.assertFalse((self.root / "plugin-settings/absent.json").exists())
+        self.assertEqual(self.actions(take=["plugin-settings/absent.json"])["plugin-settings/absent.json"], "add")
 
     def test_take_rejects_paths_outside_the_template(self):
         with self.assertRaises(ValueError):

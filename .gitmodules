@@ -1,3 +1,6 @@
 [submodule "plugins/remote"]
 	path = plugins/remote
 	url = https://github.com/GoatedGoaterestGoat/mv2-remote-control.git
+[submodule "plugins/compaction"]
+	path = plugins/compaction
+	url = https://github.com/GoatedGoaterestGoat/GOAT.git

@@ -1,6 +1,6 @@
 """Forwarding stub: `python -m multiverse.compaction ACTION [--agent-dir DIR] ...`.
 
-Tree compaction is the bundled `compaction` plugin, whose helper actions run as
+Tree compaction is the `compaction` checkout plugin, whose helper actions run as
 `python -m multiverse.plugins run compaction ACTION ...`; its own Claude
 directory and new launches' PreCompact guard call that. This path is still
 called by the multiverse mod's transition copy of the compaction hooks and by
