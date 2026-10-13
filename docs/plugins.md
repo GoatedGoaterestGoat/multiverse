@@ -1040,8 +1040,9 @@ tests check each one:
   text) goes to `state/plugins/remote/audit.jsonl` (0600). Messages arrive as
   `Message from plugin remote`, so agents and people can tell.
 
-Built in the `mv2-remote-control` repository (0c8bc8f, local for now), with a
-test for each rule above and a run through the real plugin host.
+Built in the `mv2-remote-control` repository, mv2's `plugins/remote`
+submodule, with a test for each rule above (mv2's suite runs them when the
+submodule is initialized) and a run through the real plugin host.
 
 ## Moving compaction into a plugin
 
@@ -1361,9 +1362,10 @@ Decided by the user on 2026-10-11:
 - **Separate repositories:** compaction and the remote control are versioned in
   their own private repositories under `GoatedGoaterestGoat`, included as
   optional submodules: `GOAT` (compaction, keeping its Git history) and
-  `mv2-remote-control`. For now both are local repositories only, beside the mv2
-  checkout. Nothing is pushed until the user signs in as `GoatedGoaterestGoat`
-  and says so.
+  `mv2-remote-control`. Both are on GitHub, private, with `Silicon23` as a
+  collaborator. `plugins/remote` is a submodule; `plugins/compaction` follows
+  with compaction's switch, after which the user restarts every Claude agent
+  (there is no transition copy of compaction's Claude directory).
 - **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
   extensions. Its contract is in [Codex](#codex).
 - **Universe plugins:** allowed, loaded only once trusted at their exact

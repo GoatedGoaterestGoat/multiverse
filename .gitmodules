@@ -1,0 +1,3 @@
+[submodule "plugins/remote"]
+	path = plugins/remote
+	url = https://github.com/GoatedGoaterestGoat/mv2-remote-control.git
