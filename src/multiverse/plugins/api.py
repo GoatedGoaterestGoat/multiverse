@@ -450,6 +450,25 @@ class Files:
 files = Files()
 
 
+class Text:
+    """How mv2 shows text and numbers to people, so a plugin's screens and lines look like the rest (API 1.7)."""
+
+    @staticmethod
+    def clean(value):
+        """Printable text only: terminal control characters become spaces."""
+        from .. import display
+        return display.clean(value)
+
+    @staticmethod
+    def tokens(value):
+        """A token count as mv2 shows it: '82k', '8.2k', '1.0m' or a plain number."""
+        from .. import display
+        return display.tokens(value)
+
+
+text = Text()
+
+
 @dataclass(frozen=True)
 class HarnessInfo:
     """A harness configured in a universe, as its launches see it."""
@@ -459,6 +478,22 @@ class HarnessInfo:
     unset_env: tuple     # variables a launch removes from its environment
     bridge: bool         # whether launches use mv2's bridge (an auto setting counts as on)
     settings: dict       # harness.json's settings, as written
+    home: Path | None = None  # the harness's own data directory, where mv2 knows it (API 1.7):
+                              # Claude's CLAUDE_CONFIG_DIR or ~/.claude, Codex's CODEX_HOME or ~/.codex,
+                              # Pi's PI_CODING_AGENT_DIR when set; None otherwise
+
+
+def _harness_home(family, environment=None):
+    """A harness family's data directory as this process's environment names it, or None."""
+    source = os.environ if environment is None else environment
+    if family == "claude":
+        from ..harnesses.claude import claude_home
+        return claude_home(source)
+    if family == "codex":
+        return Path(source.get("CODEX_HOME") or "~/.codex").expanduser()
+    if family == "pi" and source.get("PI_CODING_AGENT_DIR"):
+        return Path(source["PI_CODING_AGENT_DIR"]).expanduser()
+    return None
 
 
 class SettingsAccess:
@@ -570,8 +605,9 @@ class Plugin:
         spec = getattr(adapter, "spec", {}) or {}
         settings = getattr(adapter, "settings", {}) or {}
         executable = (spec.get("spawn") or [None])[0]
-        return HarnessInfo(harness, getattr(adapter, "family", "") or "", executable,
-                           tuple(spec.get("unset_env", ())), bool(settings.get("inbox_bridge")), dict(settings))
+        family = getattr(adapter, "family", "") or ""
+        return HarnessInfo(harness, family, executable, tuple(spec.get("unset_env", ())),
+                           bool(settings.get("inbox_bridge")), dict(settings), _harness_home(family))
 
     def state_dir(self, universe=None):
         """state/plugins/NAME/ of a universe, created on first use."""

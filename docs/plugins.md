@@ -437,7 +437,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 6)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 7)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - **Stability.** mv2 promises stability for 1.x once compaction uses nothing
   but `api` (step 7 of [Moving compaction](#moving-compaction-into-a-plugin)).
@@ -497,13 +497,22 @@ Plugin utilities:
   contributions receive (native ID, launch, state, native mode, the launch's
   plugins record).
 - `mv.harness_info(universe, harness)` gives a harness's family, executable,
-  `unset_env`, whether its bridge is on, and its settings.
+  `unset_env`, whether its bridge is on, its settings, and `home`: its own data
+  directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
+  Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
   processes) and `now`.
+- `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
+  the way the rest of mv2 does.
 - `mv.helper.command(name, *args, universe=)` is the argv that runs one of the
   plugin's helper actions, for example to start a detached worker. A helper
   action owns its stdin and stdout, and its return value is the exit code.
 - `mv.log(text, universe)` writes to `state/plugins/NAME/plugin.log`.
+- Code that mv2 calls without the API object, such as a plugin command's
+  `run(root, ...)` or a screen built as `Class(root=, backend=)`, reaches it
+  through the plugin's own module: `register(mv)` runs once in every process
+  that loads the plugin, before anything calls into it, so keeping `mv` in a
+  module variable there is the intended pattern.
 
 Dashboard screens run in the dashboard process, where the plugin is loaded:
 they call the plugin's own functions directly, off the event loop with

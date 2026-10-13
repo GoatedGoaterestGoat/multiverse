@@ -368,8 +368,18 @@ class ApiOneThreeTest(PluginTestCase):
             self.assertEqual(mv.current_agent().id, agent.id)
         info = mv.harness_info(self.root, "claude")
         self.assertEqual((info.family, info.executable, info.bridge), ("claude", "claude", True))
+        self.assertEqual(info.home, Path(os.environ["CLAUDE_CONFIG_DIR"]))  # PluginTestCase's temporary one
         with self.assertRaisesRegex(api.Error, "not an agent's directory"):
             mv.agent_at(self.root)
+
+    def test_harness_homes_and_text(self):
+        self.assertEqual(api._harness_home("claude", {"CLAUDE_CONFIG_DIR": "/c"}), Path("/c"))
+        self.assertEqual(api._harness_home("claude", {"HOME": "/h"}), Path("/h/.claude"))
+        self.assertEqual(api._harness_home("codex", {"CODEX_HOME": "/x"}), Path("/x"))
+        self.assertEqual(api._harness_home("pi", {}), None)
+        self.assertEqual(api._harness_home("pi", {"PI_CODING_AGENT_DIR": "/p"}), Path("/p"))
+        self.assertEqual(api._harness_home("", {}), None)
+        self.assertEqual((api.text.tokens(82400), api.text.tokens(8200), api.text.clean("a\x1bb")), ("82k", "8.2k", "a b"))
 
     def test_files_helper_command_and_a_check_that_sees_the_universe(self):
         mv = self.make()
