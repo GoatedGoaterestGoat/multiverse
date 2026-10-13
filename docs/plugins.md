@@ -439,12 +439,22 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 - `api.VERSION` is `(1, 8)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
-- **Stability.** mv2 promises stability for 1.x once compaction uses nothing
-  but `api` (step 7 of [Moving compaction](#moving-compaction-into-a-plugin)).
-  From then on, every new version stays backward compatible: a plugin written
-  against the last promised stable version keeps working on every newer one.
-  Additions raise the minor; anything else needs a new major. Until that
-  promise, 1.x may still change where compaction's move shows a need.
+- **Stability.** 1.x is promised stable from 1.8, the version compaction uses
+  with nothing but the API (step 7 of
+  [Moving compaction](#moving-compaction-into-a-plugin), 4f6701d). Every newer
+  version stays backward compatible with it: a plugin written against 1.8, or
+  any later 1.x it names in `api`, keeps working. Additions raise the minor;
+  anything else needs a new major. The promise covers:
+  - the public names of `multiverse.plugins.api` and `multiverse.plugins.ui`
+    (that module's docstring lists what it promises), and
+    `multiverse.plugins.testing`'s `PluginTestCase`;
+  - the manifest fields, `plugins.json`, `plugin-settings/NAME.json`, the
+    status-item files and the event record;
+  - `python -m multiverse.plugins run NAME ACTION`.
+
+  It does not cover names starting with `_`, a result's `.record` (the tool's
+  full record), or anything else in `multiverse`, which a plugin does not
+  import.
 - mv2 supports the current major and the one before it for at least one
   release. A plugin on the old major loads with a deprecation note in
   `mv2 plugins`.
@@ -1091,10 +1101,10 @@ compaction too.
 
 ### Steps
 
-Progress: steps 1 to 6 are done on `plugin-system`. Step 2 is 4c8aaa3, b52eac2,
+Progress: steps 1 to 7 are done on `plugin-system`. Step 2 is 4c8aaa3, b52eac2,
 e2f5966, d0a29d1, 6371e15 and ba97471; step 3 86aa026; step 4 6706189;
-step 5 f82f2bb, 42f9bf0 and f7b2ca4; step 6 f1d60ff. Step 7 is next; step 8
-waits for it.
+step 5 f82f2bb, 42f9bf0 and f7b2ca4; step 6 f1d60ff; step 7 4f6701d. Step 8
+is next.
 
 Each step keeps the full suite, `test_compaction.py`,
 `test_claude_compaction.py` (with `DashboardBackendTest`),
@@ -1259,17 +1269,28 @@ multiverse-v2/
   `extends` against what `register` actually registers, imports in a CLI-like
   process (no Textual), name conflicts with core and with plugins that are on,
   and `claude plugin validate` for Claude directories.
-- `multiverse.plugins.testing` gives `unittest` helpers on mv2's own test
-  harness:
-  - `PluginTestCase` makes a temporary universe with the plugin enabled, an
-    isolated tmux socket and fake harness executables. It never touches the
-    user's Codex daemon or config, under the same guard as the main suite.
-  - `self.emit(event)` delivers an event to the plugin's handlers in process.
-  - `self.launch("claude")` returns the merged command a launch would run, with
-    no process started.
-  - `self.dashboard()` runs the dashboard with `App.run_test()` and the plugin
-    loaded, for Pilot tests of its columns, keys and screens.
-  - `self.status_item(agent, name)` reads an item as the tmux bar would.
+- `multiverse.plugins.testing.PluginTestCase` gives each test a temporary
+  universe made from the base template with the plugin (its `plugin`
+  directory) found and turned on. It also gives a temporary home, a temporary
+  `CLAUDE_CONFIG_DIR`, a `bin/` directory first on `PATH` and no inherited
+  agent identity. Nothing in it starts an agent, tmux or a harness. Its
+  helpers:
+  - `loaded()`: the plugin loaded and registered, as a process that needs it
+    would load it. Its `registrations` hold what `register` added, such as
+    columns, handlers, launch contributions and helpers, to call directly.
+  - `agent(name, harness=, native_id=, runtime=)`: an agent's records, written
+    without starting anything.
+  - `claude_transcript(native_id, records)`: a Claude transcript where Claude
+    keeps it.
+  - `executable(name, script)`: a fake program on `PATH`.
+  - `write_plugin`, `enable`, `subverse` and `entry`, for tests that need
+    other plugins or scopes.
+  - Dashboard tests run the app with Textual's `App.run_test()`, as mv2's own
+    do.
+- `PluginTestCase` loads plugins afresh for each test, so a module of a
+  previous test's load is gone. Keep a plugin's relative imports at module
+  level: one inside a function (`from .engine import x`) fails when an old
+  module object runs it after the reset.
 - Claude directories are tested with `claude plugin test DIR`, like the mod.
 - The bundled plugins are tested this way in mv2's own suite, so the helpers
   are kept working.
@@ -1328,10 +1349,9 @@ Decided by the user on 2026-10-11:
 - **Order:** the whole mv2 side first; compaction and the remote control last
   ([Phases](#phases)).
 - **Permissions:** declared and enforced at the API, with no sandbox.
-- **API stability:** 1.x is promised stable once compaction's step 7 is done
-  (compaction uses only `api`); after that, a plugin written against the last
-  promised stable version keeps working on every newer version
-  ([Versioning](#versioning)).
+- **API stability:** 1.x is promised stable from 1.8, as of compaction's step 7
+  (4f6701d), where compaction uses only the API. A plugin written against 1.8
+  keeps working on every newer 1.x ([Versioning](#versioning)).
 - **Per-subverse dashboard:** the per-subverse UI (plugin panels in a
   subverse's portal) is `claude-tui`'s to design; it asks for any API it
   needs.

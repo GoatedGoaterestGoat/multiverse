@@ -332,6 +332,18 @@ def _provides(found):
             "services": len(registered.services)}
 
 
+def panel_context(loaded, root, widget, rows, plugins_on):
+    """The api.PanelContext a data panel of `loaded` renders with in the scope at `root`."""
+    from . import api
+    return api._panel_context(loaded, root, widget, rows, plugins_on)
+
+
+def panel_blocks(result, title):
+    """A data panel's render result as the dashboard's widget objects; api.Error names what cannot be drawn."""
+    from . import api
+    return api._blocks(result, title)
+
+
 def dashboard_actions(root):
     """[(Loaded, name, function)] of the command palette actions plugins on here register, in plugin-name order."""
     return [(loaded, name, function) for loaded in loader.active(root)

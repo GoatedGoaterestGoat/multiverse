@@ -36,14 +36,14 @@ def placeholder(loaded, spec, widget, title):
 
 def render(root, loaded, spec, widget, title, rows):
     """The widget dicts one data panel gives right now: its blocks, or one line saying why not."""
-    context = api.panel_context(loaded, root, widget, rows, plugins.on_here(root))
+    context = plugins.panel_context(loaded, root, widget, rows, plugins.on_here(root))
     result = loader.guard(loaded, f"panel {spec.kind}", spec.render, context, root=root, default=FAILED,
                           timeout=loader.SYNCHRONOUS_BUDGET)
     if result is FAILED:
         return [{**error_widget(title, f"{loaded.name}: panel {spec.kind} could not be shown (see mv2 plugins)"),
                  "plugin": loaded.name}]
     try:
-        blocks = api.blocks(result, title)
+        blocks = plugins.panel_blocks(result, title)
         shown = []
         for index, block in enumerate(blocks[:8]):
             parsed = PANELS[block["type"]].parse(block, title if index == 0 else "")

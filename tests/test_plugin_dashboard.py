@@ -221,22 +221,23 @@ class DataPanelTest(PluginTestCase):
         self.assertEqual((spec.title, spec.auto), ("Board", True))
         rows = [{"id": "a1", "name": "worker", "universe": str(self.root), "live": "alive"}]
         boards = next(loaded for loaded, kind, _ in plugins.dashboard_panels(self.root) if loaded.name == "boards")
-        context = api.panel_context(boards, self.root, {"heading": "Crew"}, rows, plugins.on_here(self.root))
+        context = plugins.panel_context(boards, self.root, {"heading": "Crew"}, rows, plugins.on_here(self.root))
         self.assertEqual([agent.name for agent in context.agents], ["worker"])
-        widgets = api.blocks(spec.render(context), spec.title)
+        widgets = plugins.panel_blocks(spec.render(context), spec.title)
         self.assertEqual(widgets[0], {"type": "markdown", "title": "Board", "text": "**Crew**: worker"})
         self.assertEqual(widgets[1]["rows"], [["blind"], ["boards"]])
         self.assertEqual([item["label"] for item in widgets[2]["items"]], ["Report", "Log"])
         blind = next(loaded for loaded, _, _ in plugins.dashboard_panels(self.root) if loaded.name == "blind")
-        self.assertEqual(api.panel_context(blind, self.root, {}, rows, set()).agents, ())  # no agents.read
+        self.assertEqual(plugins.panel_context(blind, self.root, {}, rows, set()).agents, ())  # no agents.read
 
     def test_unusable_results_are_refused(self):
+        from multiverse import plugins
         from multiverse.plugins import api
         for result, expected in ((api.Table(("a", "b"), (("1",),)), "same length"), ("text", "not str"),
                                  (api.Artifacts(("x",)), "Artifact")):
             with self.subTest(result=result):
                 with self.assertRaisesRegex(api.Error, expected):
-                    api.blocks(result, "T")
+                    plugins.panel_blocks(result, "T")
 
     def test_listing_says_what_a_plugin_provides(self):
         from multiverse import plugins

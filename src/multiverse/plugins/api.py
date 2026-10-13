@@ -348,8 +348,8 @@ class PanelContext:
     plugins: frozenset
 
 
-def blocks(result, title):
-    """A render's result as the dashboard's widget objects ({"type": "markdown"|"table"|"artifacts", ...}).
+def _blocks(result, title):
+    """For core (plugins.panel_blocks), not plugins: a render's result as the dashboard's widget objects ({"type": "markdown"|"table"|"artifacts", ...}).
     Raises Error naming what cannot be drawn."""
     items = result if isinstance(result, (list, tuple)) else [result]
     found = []
@@ -376,8 +376,8 @@ def blocks(result, title):
     return found
 
 
-def panel_context(loaded, root, widget, rows, plugins_on):
-    """The PanelContext a data panel of `loaded` gets in the scope at `root`."""
+def _panel_context(loaded, root, widget, rows, plugins_on):
+    """For core (plugins.panel_context), not plugins: the PanelContext a data panel of `loaded` gets at `root`."""
     mv = Plugin(loaded)
     agents = tuple(Agent(dict(row), mv) for row in rows if "id" in row and "name" in row and "universe" in row) \
         if mv.can("agents.read") else ()
@@ -826,8 +826,3 @@ class Agent:
         found = _call(mailbox.inbox, self.directory, limit=None, all_messages=True, peek=True)
         return [{key: message[key] for key in ("at", "from", "text", "delivery") if key in message}
                 for message in found["messages"][-last:]]
-
-
-def current_agent(plugin):
-    """The agent this process runs for, or None outside an agent (kept for API 1.0 callers)."""
-    return plugin.current_agent()
