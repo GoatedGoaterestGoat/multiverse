@@ -33,7 +33,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 5)
+API_VERSION = (1, 6)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -87,14 +87,6 @@ class DataPanel:
 
 
 @dataclass
-class Key:
-    key: str
-    label: str
-    action: object = None  # action(context) -> str | None, the status line
-    screen: str | None = None  # or "module:Class": a screen to open, built as Class(root=scope, backend=...)
-
-
-@dataclass
 class Registrations:
     """What one plugin's register(mv) added, by extension point."""
     commands: dict = field(default_factory=dict)
@@ -105,7 +97,6 @@ class Registrations:
     data_panels: dict = field(default_factory=dict)  # type -> DataPanel: render(PanelContext) -> blocks
     inspector: list = field(default_factory=list)
     theme: dict | None = None
-    keys: list = field(default_factory=list)
     screens: dict = field(default_factory=dict)  # name -> "module:Class"
     settings_check: object = None
     settings_migrate: object = None  # fn(data, source) -> data, or (data, on) for pre-plugin settings

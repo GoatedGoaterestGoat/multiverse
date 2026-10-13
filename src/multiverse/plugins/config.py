@@ -1,6 +1,6 @@
-"""A universe's `plugins.json`: which plugins are on there, the dashboard theme and key choices.
+"""A universe's `plugins.json`: which plugins are on there, the dashboard theme and event retention.
 
-    {"schema": 1, "enabled": {"compaction": true}, "theme": null, "keys": {}}
+    {"schema": 1, "enabled": {"compaction": true}, "theme": null}
 
 It is the only on/off switch for a plugin. A missing file, or a plugin it does
 not name, means the plugin's manifest default. There is no inheritance between
@@ -15,6 +15,7 @@ from ..store import lock, write
 from .manifest import check_name
 
 FILE = "plugins.json"
+# "keys" chose between plugins' dashboard keys, which are gone; a file that still has it reads as before.
 KNOWN_FIELDS = {"schema", "enabled", "theme", "keys", "events"}
 
 
@@ -22,8 +23,6 @@ KNOWN_FIELDS = {"schema", "enabled", "theme", "keys", "events"}
 class Config:
     enabled: dict = field(default_factory=dict)
     theme: str | None = None
-    # A dashboard key and the plugin that gets it, or None to give it to no plugin.
-    keys: dict = field(default_factory=dict)
     problem: str | None = None
     events: dict = field(default_factory=dict)  # journal retention: retain_days, max_mb
     exists: bool = False
@@ -71,21 +70,13 @@ def parse(data, where=FILE):
     theme = data.get("theme")
     if theme is not None:
         check_name(theme, "theme")
-    keys = data.get("keys", {})
-    if not isinstance(keys, dict):
-        raise ValueError(f"{where}: keys must map dashboard keys to a plugin name or null")
-    for key, owner in keys.items():
-        if not isinstance(key, str) or not key or len(key) > 32:
-            raise ValueError(f"{where}: keys has an invalid key name {key!r}")
-        if owner is not None:
-            check_name(owner, f"keys.{key}")
     events = data.get("events", {})
     if not isinstance(events, dict) or set(events) - {"retain_days", "max_mb"}:
         raise ValueError(f"{where}: events takes retain_days and max_mb")
     for key, value in events.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 100000:
             raise ValueError(f"{where}: events.{key} must be a positive number")
-    return Config(enabled=dict(enabled), theme=theme, keys=dict(keys), events=dict(events), exists=True)
+    return Config(enabled=dict(enabled), theme=theme, events=dict(events), exists=True)
 
 
 def load(root):

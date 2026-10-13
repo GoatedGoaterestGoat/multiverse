@@ -324,12 +324,11 @@ def _provides(found):
     known = {"commands": sorted(manifest.commands), "statusline": [item.name for item in manifest.statusline],
              "events": list(manifest.events)}
     if found.loaded is None:
-        return {**known, "columns": None, "actions": None, "panels": None, "keys": None, "screens": None,
-                "services": None}
+        return {**known, "columns": None, "actions": None, "panels": None, "screens": None, "services": None}
     registered = found.loaded.registrations
     return {**known, "columns": sorted(registered.columns), "actions": sorted(registered.actions),
             "panels": sorted({*registered.panels, *registered.data_panels}),
-            "keys": sorted(key.key for key in registered.keys), "screens": sorted(registered.screens),
+            "screens": sorted(registered.screens),
             "services": len(registered.services)}
 
 
@@ -448,34 +447,6 @@ def theme_colors(root):
         if loaded.name == chosen:
             return loaded, dict(loaded.registrations.theme or {})
     return None
-
-
-def dashboard_keys(root, core_keys=()):
-    """({key: (Loaded, loader.Key)}, [clash sentences]) for plugins on here.
-
-    Core keys always win. When two plugins want one key, plugins.json `keys`
-    names the one that gets it (null gives it to none); otherwise neither does.
-    """
-    chosen = config.load(root).keys
-    wanted = {}
-    for loaded in loader.active(root):
-        for key in loaded.registrations.keys:
-            wanted.setdefault(key.key, []).append((loaded, key))
-    result, clashes = {}, []
-    for name, owners in sorted(wanted.items()):
-        if name in core_keys:
-            clashes.append(f"{', '.join(o.name for o, _ in owners)} wants the {name} key, which the dashboard uses")
-            continue
-        if name in chosen:
-            pick = [owner for owner in owners if owner[0].name == chosen[name]]
-            if pick:
-                result[name] = pick[0]
-            continue
-        if len(owners) == 1:
-            result[name] = owners[0]
-        else:
-            clashes.append(f"{' and '.join(o.name for o, _ in owners)} both want the {name} key; set it in plugins.json keys")
-    return result, clashes
 
 
 def inspector_facts(root):

@@ -6,7 +6,7 @@
         mv.dashboard.column("uptime", "Up", 8, lambda row: ...)
 
 `register(mv)` runs once in each process that loads the plugin (`mv.process`:
-cli, dashboard, host or helper). It only declares: commands, columns, keys and
+cli, dashboard, host or helper). It only declares: commands, columns, settings and
 the rest are called later, each inside an error boundary, so a failing plugin
 loses its own contribution and nothing else. Name dashboard screens and panels
 by "module:Class" inside the plugin, so the command line never imports Textual.
@@ -178,30 +178,6 @@ class Dashboard(_Points):
             raise Error("action(name, function) needs a name and a function")
         registrations.actions[name.strip()] = function
         return function
-
-    def key(self, key, label, action=None, *, screen=None):
-        """Deprecated: plugins get no dashboard keys. Use settings() for a settings screen (under P) and
-        action() for the command palette. Goes before the 1.x stability promise.
-
-        A dashboard key, with either an action or a screen.
-
-        action(context) runs off the screen's event loop and may return a status
-        line; context.row is a copy of the selected row (or None), context.scope
-        the selected universe's Path. screen="module:Class" (API 1.4) opens that
-        screen for the selected universe, built as Class(root=scope,
-        backend=app.backend), and a string it dismisses with becomes the status
-        line. Either works only where the plugin is on.
-
-        Core keys always win; plugins.json `keys` settles two plugins wanting one key."""
-        registrations = self._allow("dashboard.key")
-        if not isinstance(key, str) or not key or (action is None) == (screen is None):
-            raise Error("A key needs its name and either an action function or a screen")
-        if action is not None and not callable(action):
-            raise Error("A key's action must be a function")
-        if screen is not None:
-            self._allow("dashboard.screen")
-            screen = _reference(screen)
-        registrations.keys.append(loader.Key(key, str(label), action, screen))
 
     def screen(self, name, reference):
         """A Textual screen by "module:Class", opened from the command palette as "PLUGIN: NAME".
@@ -525,10 +501,6 @@ class SettingsAccess:
         yet. Usable as a decorator."""
         self._loaded.registrations.settings_migrate = function
         return function
-
-    def screen(self, reference):
-        """Deprecated alias of mv.dashboard.settings(screen=...)."""
-        self._loaded.registrations.settings_screen = _reference(reference)
 
 
 def _root(universe):

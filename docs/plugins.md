@@ -65,11 +65,11 @@ compaction/
   "name": "compaction",
   "version": "1.0.0",
   "description": "Tree compaction: per-turn summary trees in place of a harness's own summary",
-  "api": "1.0",
+  "api": "1.6",
   "module": "plugin",
   "default": "off",
   "extends": ["cli", "launch", "capabilities", "usage", "doctor", "statusline",
-              "dashboard.key", "dashboard.screen"],
+              "dashboard.settings"],
   "permissions": ["agents.read", "harness.claude", "process.spawn", "models.claude"],
   "commands": {"compaction": "Show or set an agent's compaction: scheduler, summary trees, recent errors"},
   "statusline": {"compaction": {"claude": true, "tmux": false}},
@@ -141,8 +141,8 @@ Each universe and subverse may have a `plugins.json` at its root:
 - There is no live inheritance, the same rule as settings and views. A
   subverse made from a template gets the template's `plugins.json`. Otherwise
   it has its own file or the defaults.
-- `theme` picks one theme plugin. `keys` settled plugin dashboard keys, which
-  are deprecated; it goes with them.
+- `theme` picks one theme plugin. A `keys` field, from before plugins lost
+  their dashboard keys, is still read and ignored.
 
 ```sh
 mv2 plugins                       # every plugin found: source, version, on/off here, problems
@@ -437,7 +437,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 4)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 6)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - **Stability.** mv2 promises stability for 1.x once compaction uses nothing
   but `api` (step 7 of [Moving compaction](#moving-compaction-into-a-plugin)).
@@ -1085,7 +1085,7 @@ Each step keeps the full suite, `test_compaction.py`,
 import paths changing in tests:
 
 1. **Extension points first, each with a core user.** Launch contributions,
-   capabilities, usage, doctor, CLI commands, dashboard keys and screens, and
+   capabilities, usage, doctor, CLI commands, dashboard settings and screens, and
    status-item files land with no plugin using them. Typeahead moves to a
    bundled plugin to prove Claude version gating.
 2. **Register compaction in place.** A bundled `compaction` plugin whose
@@ -1333,9 +1333,8 @@ Decided by the user on 2026-10-13:
   as declared fields or its own screen (`mv.dashboard.settings`). Plugin
   actions that are not settings go in the command palette under the plugin's
   name (`mv.dashboard.action`), never on a key, and `c` becomes free.
-  `mv.dashboard.key` and `mv.settings.screen` are deprecated in API 1.5 and are
-  removed before the 1.x stability promise, once compaction no longer uses
-  them.
+  `mv.dashboard.key` and `mv.settings.screen` were removed in API 1.6, once
+  compaction had moved to `mv.dashboard.settings(screen=...)`.
 - **Per-subverse dashboard** (`claude-tui`'s design):
   - Palette entries and screens are built once from the opened root, and say
     "<plugin> is off in <scope>" where it is off.

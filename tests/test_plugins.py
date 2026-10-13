@@ -131,11 +131,13 @@ class DiscoveryTest(PluginTestCase):
 
 class ConfigTest(PluginTestCase):
     def test_enabling_keeps_the_rest_of_the_file(self):
+        # "keys" is from before plugins lost their dashboard keys: still read, and kept.
         config.path(self.root).write_text(json.dumps({"schema": 1, "theme": "dusk", "keys": {"u": None},
                                                       "enabled": {"a": True}}, indent=1))
         config.set_enabled(self.root, "b", True)
         data = json.loads(config.path(self.root).read_text())
         self.assertEqual(data, {"schema": 1, "theme": "dusk", "keys": {"u": None}, "enabled": {"a": True, "b": True}})
+        self.assertIsNone(config.load(self.root).problem)
 
     def test_an_unusable_file_reads_as_defaults_and_is_never_rewritten(self):
         config.path(self.root).write_text('{"enabled": {"a": "yes"}}')
@@ -332,24 +334,12 @@ class ListingTest(PluginTestCase):
         self.assertFalse(plugins.listing(self.root)[0]["on"])
 
 
-class DashboardKeysTest(PluginTestCase):
-    def test_core_keys_win_and_plugins_json_settles_clashes(self):
-        for name in ("one", "two"):
-            self.write_plugin(name, {"module": "plugin", "extends": ["dashboard.key", "dashboard.inspector"]}, {
-                "plugin.py": "def register(mv):\n"
-                             "    mv.dashboard.key('u', 'Up', lambda context: 'up')\n"
-                             "    mv.dashboard.key('m', 'Mine', lambda context: 'mine')\n"
-                             f"    mv.dashboard.key('{name[0]}x', 'Own', lambda context: 'own')\n"
-                             f"    mv.dashboard.inspector(lambda row: '{name}')\n"})
+class InspectorFactsTest(PluginTestCase):
+    def test_facts_come_in_plugin_name_order(self):
+        for name in ("two", "one"):
+            self.write_plugin(name, {"module": "plugin", "extends": ["dashboard.inspector"]}, {
+                "plugin.py": f"def register(mv):\n    mv.dashboard.inspector(lambda row: '{name}')\n"})
             self.enable(name)
-        keys, clashes = plugins.dashboard_keys(self.root, core_keys={"m"})
-        self.assertEqual(sorted(keys), ["ox", "tx"])
-        self.assertEqual(clashes, ["one, two wants the m key, which the dashboard uses",
-                                   "one and two both want the u key; set it in plugins.json keys"])
-        data = json.loads(config.path(self.root).read_text())
-        config.path(self.root).write_text(json.dumps({**data, "keys": {"u": "two", "ox": None}}))
-        keys, _ = plugins.dashboard_keys(self.root, core_keys={"m"})
-        self.assertEqual({name: owner.name for name, (owner, _) in keys.items()}, {"u": "two", "tx": "two"})
         self.assertEqual([fact(None) for _, fact in plugins.inspector_facts(self.root)], ["one", "two"])
 
 
@@ -423,22 +413,17 @@ class ApiOneThreeTest(PluginTestCase):
         self.assertEqual([json.loads(line)["n"] for line in result.stdout.splitlines()], [0, 1, 2])
 
 
-class ScreenKeyTest(PluginTestCase):
-    def test_a_key_can_open_a_screen(self):
-        self.write_plugin("screens", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen"]}, {
-            "plugin.py": "def register(mv):\n    mv.dashboard.key('c', 'Compaction', screen='ui:Settings')\n"})
-        self.enable("screens")
-        [key] = loader.load(self.entry("screens")).registrations.keys
-        self.assertEqual((key.key, key.action, key.screen), ("c", None, "ui:Settings"))
-        for body, expected in (("mv.dashboard.key('x', 'X')", "either an action function or a screen"),
-                               ("mv.dashboard.key('x', 'X', lambda c: 1, screen='a:B')", "either an action"),
-                               ("mv.dashboard.key('x', 'X', screen='nocolon')", "module:Class")):
-            with self.subTest(body):
-                self.write_plugin("bad", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen"]},
-                                  {"plugin.py": f"def register(mv):\n    {body}\n"})
-                self.enable("bad")
-                loader.reset()
-                self.assertIn(expected, self.entry("bad").problem or str(self._load("bad")))
+class NoDashboardKeysTest(PluginTestCase):
+    def test_plugins_get_no_dashboard_keys(self):
+        """API 1.6: a plugin's way into the dashboard is its settings (under P) and the command palette."""
+        self.write_plugin("old", {"module": "plugin", "extends": ["dashboard.key"]},
+                          {"plugin.py": "def register(mv): pass\n"})
+        self.assertIn("extension points this mv2 does not have: dashboard.key", self.entry("old").problem or "")
+        self.write_plugin("caller", {"module": "plugin", "extends": ["dashboard.screen"]},
+                          {"plugin.py": "def register(mv):\n    mv.dashboard.key('c', 'C', screen='ui:S')\n"})
+        self.enable("caller")
+        self.assertIn("has no attribute 'key'", str(self._load("caller")))
+        self.assertFalse(hasattr(api.SettingsAccess, "screen"))
 
     def _load(self, name):
         try:

@@ -223,7 +223,7 @@ def check(directory):
         used = {"cli": registered.commands, "bootstrap": registered.bootstrap, "doctor": registered.doctor,
                 "dashboard.column": registered.columns, "dashboard.panel": {**registered.panels, **registered.data_panels},
                 "dashboard.inspector": registered.inspector, "dashboard.theme": registered.theme,
-                "dashboard.key": registered.keys, "dashboard.screen": registered.screens,
+                "dashboard.screen": registered.screens,
                 "dashboard.settings": registered.settings_screen or registered.settings_fields,
                 "dashboard.action": registered.actions,
                 "launch": registered.launch or found.harnesses, "capabilities": registered.capabilities,

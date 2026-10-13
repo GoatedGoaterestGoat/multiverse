@@ -22,9 +22,9 @@ RESERVED_NAMES = frozenset({
 EXTENSION_POINTS = frozenset({
     "cli", "catalog", "bootstrap", "doctor",
     "dashboard.column", "dashboard.panel", "dashboard.inspector", "dashboard.theme",
-    "dashboard.key", "dashboard.screen",
-    # API 1.5: a plugin's way into the dashboard is its settings (under P) and palette actions;
-    # dashboard.key is deprecated and goes before the 1.x stability promise.
+    "dashboard.screen",
+    # API 1.5: a plugin's way into the dashboard is its settings (under P) and palette actions.
+    # Plugins get no dashboard keys (dashboard.key went in API 1.6).
     "dashboard.settings", "dashboard.action",
     # API 1.1: the harness side.
     "launch", "capabilities", "usage", "statusline", "helper",
