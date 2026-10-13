@@ -197,7 +197,8 @@ accepted, before any work; the conversation stays as it was. Tree compaction
 cannot follow free-text instructions: its summaries are written ahead of time,
 per turn. The result line names the settings used, e.g. `(this time:
 proportional, budget 60000)`; image mode is left out of it. To change an agent's scheduler for good, use `mv2
-compaction AGENT --scheduler ...` or the dashboard's `c` screen.
+compaction AGENT --scheduler ...` or the dashboard (`P`, then compaction's
+Configure: its settings screen, where Enter on an agent opens that agent's).
 
 ## Claude Code
 

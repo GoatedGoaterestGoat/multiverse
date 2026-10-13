@@ -229,4 +229,5 @@ def register(mv: api.Plugin):
     mv.settings.migrate(migrate)
     from multiverse.tools import compaction as command
     mv.cli.command('compaction', command.configure, command.run)
-    mv.dashboard.key('c', 'Compaction', screen='screens:CompactionScreen')
+    # Its settings under the dashboard's P screen: its own screen, which also opens each agent's scheduler.
+    mv.dashboard.settings(screen='screens:CompactionScreen')
