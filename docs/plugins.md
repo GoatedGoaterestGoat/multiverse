@@ -424,7 +424,9 @@ So the host is a general **supervisor** for plugins' long-running work:
 - **Events.** The supervisor tails the journals (see above) and hands each
   worker the events its plugin subscribed to, keeping each plugin's cursor.
 - Disabling one plugin stops only its worker. Turning it off and on again gives
-  a worker that was left stopped a fresh start.
+  a worker that was left stopped a fresh start. Turning a plugin on or off in
+  one more universe, while it stays on elsewhere, restarts its services with
+  the new set of universes within about five seconds.
 
 Most plugins never touch the host: a column, a command, a status item, a launch
 contribution, a settings screen or a harness extension need none of this.

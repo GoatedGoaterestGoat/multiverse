@@ -11,7 +11,8 @@ and exits once no plugin needs it.
 
 A worker loads its plugin once, starts its services in threads, and tails the
 journal of every universe in the tree where the plugin is on, calling the
-handlers that match each event. Its cursor per universe is
+handlers that match each event. When the plugin is turned on or off in a
+universe, its services stop and start again with the new set of universes. Its cursor per universe is
 state/plugins/NAME/events.cursor, so after a restart a handler sees events at
 least once; a worker that starts with no cursor begins at the journal's end.
 
@@ -280,40 +281,67 @@ def work(root, name):
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, lambda *_: stopping.set())
     failed = threading.Event()
-    threads = []
-    for start_service, _ in loaded.registrations.services:
-        context = api.ServiceContext([mv.universe(scope) for scope in scopes], stopping,
-                                     lambda text, scope=scopes[0]: mv.log(text, scope))
-
-        def run(start_service=start_service, context=context):
-            try:
-                start_service(context)
-            except Exception as error:
-                loader.record(loaded, "service", error, root)
-                failed.set()
-        thread = threading.Thread(target=run, name=f"{name} service", daemon=True)
-        thread.start()
-        threads.append(thread)
+    services = _Services(loaded, mv, root, name, failed)
+    services.start(scopes)
     refreshed = 0.0
     try:
         while not stopping.is_set() and not failed.is_set():
             if time.monotonic() - refreshed > 5:
                 refreshed = time.monotonic()
-                scopes = needed(root).get(name, [])
-                if not scopes:
+                current = needed(root).get(name, [])
+                if not current:
                     break
+                if current != scopes:
+                    # Turned on or off in a universe: its services start again with the new set.
+                    scopes = current
+                    services.stop()
+                    services.start(scopes)
             if loaded.registrations.handlers:
                 for scope in scopes:
                     _deliver(loaded, mv, scope, name)
             stopping.wait(WORKER_POLL_SECONDS)
     finally:
         stopping.set()
-        for _, stop_service in loaded.registrations.services:
-            if stop_service is not None:
-                loader.guard(loaded, "service stop", stop_service, root=root)
-        for thread in threads:
-            thread.join(5)
+        services.stop()
     return 1 if failed.is_set() else 0
+
+
+class _Services:
+    """One plugin's services in its worker: started for a set of universes, stopped, started again."""
+
+    def __init__(self, loaded, mv, root, name, failed):
+        self.loaded, self.mv, self.root, self.name, self.failed = loaded, mv, root, name, failed
+        self.stopping, self.threads = None, []
+
+    def start(self, scopes):
+        if not self.loaded.registrations.services:
+            return
+        self.stopping, self.threads = threading.Event(), []
+        _log(self.root, f"{self.name}: services start for {', '.join(str(scope) for scope in scopes)}")
+        for start_service, _ in self.loaded.registrations.services:
+            context = api.ServiceContext([self.mv.universe(scope) for scope in scopes], self.stopping,
+                                         lambda text, scope=scopes[0]: self.mv.log(text, scope))
+
+            def run(start_service=start_service, context=context):
+                try:
+                    start_service(context)
+                except Exception as error:
+                    loader.record(self.loaded, "service", error, self.root)
+                    self.failed.set()
+            thread = threading.Thread(target=run, name=f"{self.name} service", daemon=True)
+            thread.start()
+            self.threads.append(thread)
+
+    def stop(self):
+        if self.stopping is None:
+            return
+        self.stopping.set()
+        for _, stop_service in self.loaded.registrations.services:
+            if stop_service is not None:
+                loader.guard(self.loaded, "service stop", stop_service, root=self.root)
+        for thread in self.threads:
+            thread.join(5)
+        self.stopping, self.threads = None, []
 
 
 def _deliver(loaded, mv, scope, name):

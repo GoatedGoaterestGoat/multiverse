@@ -269,6 +269,20 @@ class HostTest(PluginTestCase):
         self.assertFalse(host.running(self.root))
 
 
+    def test_services_start_again_when_the_plugin_is_turned_on_in_another_universe(self):
+        self.write_plugin("server", {"module": "plugin", "extends": ["service"]}, {"plugin.py": SERVICE})
+        self.enable("server")
+        child = self.subverse("child")
+        stopping, thread = self.run_host()
+        out = self.work / "service.out"
+        self.until(lambda: out.exists() and out.read_text().startswith("started test"))
+        self.enable("server", root=child)
+        self.until(lambda: "started child,test" in out.read_text(), timeout=30)
+        self.assertEqual(out.read_text().splitlines()[:3], ["started test", "stopped", "started child,test"])
+        stopping.set()
+        thread.join(30)
+
+
 class HostCommandTest(PluginTestCase):
     def test_status_and_events_from_the_command(self):
         from multiverse.tools import plugins as tool
