@@ -89,14 +89,45 @@ class Events:
 
 
 class SettingsTest(BaseTest):
-    def test_missing_file_means_compaction_is_off(self):
+    def test_without_a_settings_file_the_defaults_apply_and_the_plugin_switch_decides(self):
         (self.root / 'compaction.json').unlink(missing_ok=True)
+        self.assertEqual(config.path(self.root), self.root / 'plugin-settings' / 'compaction.json')
         settings = config.load(self.root).for_harness('claude')
-        self.assertFalse(settings.enabled)
+        self.assertTrue(settings.enabled)  # read only where the plugin is on
         self.assertEqual(settings.default, config.Schedule('last_k_raw', 0, 2))
         self.assertEqual((settings.builder.model, settings.builder.effort, settings.builder.options), (None, None, {}))
         built = config.load(self.root).for_harness('x', {'model': 'm', 'fallback_model': 'f', 'effort': 'e', 'own': 1}).builder
         self.assertEqual((built.model, built.fallback_model, built.effort, built.options), ('m', 'f', 'e', {'own': 1}))
+
+    def test_plugin_settings_are_schema_2_and_win_over_an_unmigrated_compaction_json(self):
+        write(self.root / 'compaction.json', {'enabled': False, 'default': {'budget': 7}})
+        self.assertEqual(config.path(self.root), self.root / 'compaction.json')  # read until it is migrated
+        self.assertFalse(config.load(self.root).for_harness('claude').enabled)
+        write(self.root / 'plugin-settings' / 'compaction.json',
+              {'schema': 2, 'default': {'budget': 9}, 'harnesses': {'codex': {'enabled': False}}})
+        loaded = config.load(self.root)
+        self.assertEqual((config.path(self.root).parent.name, loaded.schema), ('plugin-settings', 2))
+        self.assertEqual((loaded.for_harness('claude').enabled, loaded.for_harness('claude').default.budget), (True, 9))
+        self.assertFalse(loaded.for_harness('codex').enabled)  # one harness opted out
+        write(self.root / 'plugin-settings' / 'compaction.json', {'schema': 2, 'enabled': True})
+        with self.assertRaisesRegex(ValueError, 'plugins.json turns compaction on or off'):
+            config.load(self.root)
+        with self.assertRaisesRegex(ValueError, 'Unsupported'):
+            config.parse({'schema': 3})
+
+    def test_saving_writes_where_the_settings_are(self):
+        from multiverse.tools import compaction as command
+        (self.root / 'compaction.json').unlink(missing_ok=True)
+        command.save_settings(self.root, {'default': {'budget': 5}})
+        written = json.loads((self.root / 'plugin-settings' / 'compaction.json').read_text())
+        self.assertEqual(written, {'schema': 2, 'default': {'budget': 5}})
+        with self.assertRaisesRegex(ValueError, 'plugins.json'):
+            command.save_settings(self.root, {'enabled': True})
+        write(self.root / 'compaction.json', {'enabled': True})
+        (self.root / 'plugin-settings' / 'compaction.json').unlink()
+        command.save_settings(self.root, {'enabled': True, 'default': {'budget': 6}})  # an unmigrated file stays one
+        self.assertEqual(json.loads((self.root / 'compaction.json').read_text())['default'], {'budget': 6})
+        self.assertFalse((self.root / 'plugin-settings' / 'compaction.json').exists())
 
     def test_the_templates_give_claude_its_builder_and_nothing_shared(self):
         from multiverse.harnesses.claude.compaction import ClaudeCompaction

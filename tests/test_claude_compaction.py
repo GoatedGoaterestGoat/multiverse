@@ -19,7 +19,7 @@ from multiverse.compaction.store import Store
 from multiverse.harnesses.claude import Transcript
 from multiverse.harnesses.claude.compaction import ClaudeCompaction, TranscriptError, merge, render, transcript
 from multiverse.harnesses.types import LaunchContext, SessionHandle
-from multiverse.store import write
+from multiverse.store import read, write
 from test_multiverse import BaseTest
 
 START = datetime(2026, 9, 1, tzinfo=timezone.utc)
@@ -583,6 +583,38 @@ class AdapterTest(Fixture):
             relative = PurePosixPath(manifest.relative_to(package).as_posix())
             with self.subTest(manifest=str(relative)):
                 self.assertTrue(any(relative.match(pattern) for pattern in patterns))
+
+    def test_mv2_plugins_migrate_turns_compaction_json_into_the_plugins_settings(self):
+        from multiverse import plugins
+        from multiverse.compaction import config
+        from multiverse.harnesses.claude.compaction import BUILDER_DEFAULTS
+        old = {'schema': 1, 'enabled': False, 'default': {'scheduler': 'last_k_raw', 'k': 2, 'budget': 0},
+               'harnesses': {'claude': {'enabled': True, 'default': {'budget': 200000}, 'builder': {'effort': 'high'}}}}
+        write(self.root / 'compaction.json', old)
+        before = config.load(self.root).for_harness('claude', BUILDER_DEFAULTS)
+        planned = [item for item in plugins.migrations(self.root) if item['plugin'] == 'compaction']
+        self.assertEqual([(item['kind'], 'problem' in item) for item in planned], [('legacy', False)])
+        done = plugins.migrate(self.root, planned[0])
+        self.assertIs(done['on'], True)
+        self.assertFalse((self.root / 'compaction.json').exists())
+        self.assertTrue(Path(done['backup']).is_file())
+        written = read(self.root / 'plugin-settings' / 'compaction.json')
+        self.assertEqual(written, {'schema': 2, 'default': old['default'],
+                                   'harnesses': {'claude': {'default': {'budget': 200000}, 'builder': {'effort': 'high'}}}})
+        self.assertIs(read(self.root / 'plugins.json')['enabled']['compaction'], True)
+        self.assertEqual(config.load(self.root).for_harness('claude', BUILDER_DEFAULTS), before)  # nothing changed
+        # Still on, now through plugins.json: the launch still gets the guard.
+        on = self.adapter.spawn(LaunchContext('spawn', self.values()))
+        self.assertEqual(on.environment['MV2_COMPACTION'], '1')
+        # The plugin's own check refuses what schema 2 does not allow.
+        from multiverse.plugins import settings as plugin_settings
+        found = plugins.entry(self.root, 'compaction')
+        write(self.root / 'plugin-settings' / 'compaction.json', {'schema': 2, 'enabled': True})
+        self.assertIn('plugins.json', plugin_settings.read(self.root, found.manifest, self.check(found)).problem)
+
+    def check(self, found):
+        from multiverse.plugins import loader
+        return loader.load(found).registrations.settings_check
 
     def test_mv2_compaction_is_the_compaction_plugins_command(self):
         from multiverse import cli

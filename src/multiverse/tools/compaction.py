@@ -125,7 +125,7 @@ def _activity(store):
 def overview(root=None):
     """The universe's compaction settings as written and in effect, its harnesses and its agents."""
     root = universe.resolve(root)
-    path = root / settings_file.FILE
+    path = settings_file.path(root)
     written, problem = {}, None
     if path.exists():
         try:
@@ -135,7 +135,7 @@ def overview(root=None):
         except (OSError, ValueError) as error:
             problem = f'{path}: {error}'
     try:
-        loaded = settings_file.parse(written)
+        loaded = settings_file.parse(written if path.exists() else settings_file.blank(path))
     except ValueError as error:
         loaded, problem = settings_file.Config(), problem or f'{path}: {error}'
     adapters = _adapters(root)
@@ -165,20 +165,30 @@ def overview(root=None):
                         'scheduler': schedule.settings(), 'scheduler_from': origin, 'trees_cached': store.tree_count(),
                         'activity': _activity(store), 'failed_turns': len(status.get('failures', {})),
                         'last_error': errors[-1].get('message') if errors else None})
-    return {'universe': str(root), 'path': str(path), 'exists': path.exists(), 'problem': problem, 'file': written,
+    return {'universe': str(root), 'path': str(path), 'exists': path.exists(), 'schema': loaded.schema,
+            'problem': problem, 'file': written,
             'enabled': shared.enabled, 'default': shared.default.settings(), 'harnesses': rows, 'agents': members,
             'schedulers': {name: list(fields) for name, fields in SCHEDULERS.items()}, 'image_modes': list(IMAGE_MODES)}
 
 
 def save_settings(root=None, value=None):
-    """Write compaction.json once the whole file and every harness's own checks accept it; returns the new overview."""
+    """Write the settings file once the whole file and every harness's own checks accept it; returns the new overview.
+
+    It goes where the universe's settings are (settings_file.path): an unmigrated
+    compaction.json stays one; plugin-settings/compaction.json is schema 2.
+    """
     root = universe.resolve(root)
+    path = settings_file.path(root)
+    if not settings_file.legacy(path) and isinstance(value, dict) and 'schema' not in value:
+        value = {'schema': 2, **value}
     loaded = settings_file.parse(value)
+    if not settings_file.legacy(path) and loaded.schema != 2:
+        raise ValueError(f'{path} holds schema 2 settings')
     for adapter in _adapters(root).values():
         problem = adapter.compaction_state(root, loaded)[1]
         if problem:
             raise ValueError(problem)
-    write(root / settings_file.FILE, value)
+    write(path, value)
     return overview(root)
 
 

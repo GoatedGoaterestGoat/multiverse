@@ -37,7 +37,8 @@
     ]
   },
   "settings": {
-    "version": 1,
+    "version": 2,
+    "defaults": "defaults/settings.json",
     "legacy": "compaction.json"
   }
 }

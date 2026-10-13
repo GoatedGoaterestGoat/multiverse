@@ -59,7 +59,7 @@ def open_agent(root, directory, adapter, session) -> Agent:
     try:
         source.check_builder(settings.builder)
     except ValueError as error:
-        raise ValueError(f'{settings_file.FILE}: harnesses.{session.harness}.builder: {error}') from error
+        raise ValueError(f'{settings_file.path(root)}: harnesses.{session.harness}.builder: {error}') from error
     return Agent(root, directory, session.harness, settings, source)
 
 

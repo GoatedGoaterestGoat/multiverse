@@ -1,29 +1,35 @@
-"""Compaction settings: the universe's `compaction.json` and each agent's own scheduler.
+"""Compaction settings: the universe's settings file and each agent's own scheduler.
 
-A universe or subverse opts in with `compaction.json` at its root:
+Compaction is the `compaction` plugin: `plugins.json` turns it on or off for a
+universe or subverse, and `plugin-settings/compaction.json` configures it:
 
-    {"schema": 1,
-     "enabled": false,
+    {"schema": 2,
      "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
      "harnesses": {
        "claude": {
-         "enabled": true,
          "builder": {"model": "sonnet", "fallback_model": "claude-sonnet-4-6", "effort": "medium",
                      "claude_max_retries": 3,
                      "background": true, "concurrency": 1, "turn_retries": 3,
                      "rate_limit": {"retries": 10, "wait_seconds": {"first": 20, "multiplier": 2, "max": 300}}}}}}
 
-`enabled` and the `default` scheduler are shared by every harness, and
-`harnesses.<name>` (by its directory under `harnesses/`) may replace either.
-Tree building belongs to one harness, so `builder` exists only under
-`harnesses.<name>`: its model, fallback model and effort name that harness's
-own, and any field not listed above is an option of that harness (Claude's
-`claude_max_retries`). The harness supplies their defaults and checks them
-(CompactionSource.builder_defaults and check_builder); the other fields mean
-the same for every harness. Every field is optional; a missing file means
-compaction is off everywhere. An agent may have its own scheduler in
-`state/agents/<id>/compaction/config.json`; without one it follows its
-harness's default as it is now.
+While the plugin is on it applies to every harness that supports it;
+`harnesses.<name>.enabled: false` turns one harness off. The `default`
+scheduler is shared by every harness, and `harnesses.<name>.default` may
+replace it. Tree building belongs to one harness, so `builder` exists only
+under `harnesses.<name>`: its model, fallback model and effort name that
+harness's own, and any field not listed above is an option of that harness
+(Claude's `claude_max_retries`). The harness supplies their defaults and
+checks them (CompactionSource.builder_defaults and check_builder); the other
+fields mean the same for every harness. Every field is optional, and a
+missing file means the defaults.
+
+Until `mv2 plugins migrate` converts it, a universe's pre-plugin
+`compaction.json` (schema 1) is read in its place, as it always was: its
+top-level `enabled` (off by default) and `harnesses.<name>.enabled` decide
+which harnesses compact.
+
+An agent may have its own scheduler in `state/agents/<id>/compaction/config.json`;
+without one it follows its harness's default as it is now.
 """
 from dataclasses import dataclass, field, replace
 import json
@@ -32,7 +38,9 @@ import re
 
 from ..store import write
 
-FILE = 'compaction.json'
+SETTINGS = 'plugin-settings/compaction.json'  # the plugin's settings (schema 2)
+LEGACY = 'compaction.json'                    # the pre-plugin file (schema 1), read until it is migrated
+FILE = LEGACY
 # Each scheduler and the parameters it takes besides `budget`.
 SCHEDULERS = {'last_k_raw': ('k',), 'proportional': (), 'uniform': (), 'recency_boosted': ('recency_ratio', 'recency_half_life')}
 IMAGE_MODES = ('budget_fit', 'keep_all', 'drop_all')
@@ -115,13 +123,14 @@ class Config:
     """The whole file: shared settings and each harness's own, as written."""
     shared: dict = field(default_factory=dict)
     harnesses: dict = field(default_factory=dict)
+    schema: int = 1
 
     def for_harness(self, name: str, defaults: dict | None = None) -> Settings:
         """One harness's settings; `defaults` are its builder defaults (CompactionSource.builder_defaults)."""
         override = self.harnesses.get(name, {})
         merged = {**self.shared, **{key: override[key] for key in SHARED if key in override}}
         merged['builder'] = _merge(defaults or {}, override.get('builder', {}))
-        return _settings(merged, f'harnesses.{name}' if name in self.harnesses else FILE)
+        return _settings(merged, f'harnesses.{name}' if name in self.harnesses else 'compaction settings')
 
 
 def _merge(base, override):
@@ -294,33 +303,58 @@ def _settings(value, where) -> Settings:
 
 
 def parse(value) -> Config:
+    """Settings as written: schema 2 (plugin-settings/compaction.json) or schema 1 (compaction.json, the default)."""
     if isinstance(value, dict) and 'builder' in value:
         raise ValueError('builder settings belong to one harness: move them to harnesses.<name>.builder')
-    value = _fields(value, ('schema', *SHARED, 'harnesses'), FILE)
-    if value.get('schema', 1) != 1:
-        raise ValueError(f'Unsupported {FILE} schema')
+    value = _fields(value, ('schema', *SHARED, 'harnesses'), 'compaction settings')
+    schema = value.get('schema', 1)
+    if schema not in (1, 2):
+        raise ValueError(f'Unsupported compaction settings schema {schema!r}')
+    if schema == 2 and 'enabled' in value:
+        raise ValueError('"enabled" is not a setting: plugins.json turns compaction on or off (mv2 plugins enable '
+                         'or disable compaction); harnesses.<name>.enabled: false turns one harness off')
     harnesses = value.get('harnesses', {})
     if not isinstance(harnesses, dict):
         raise ValueError('harnesses must map harness names to settings')
     for name, override in harnesses.items():
         _fields(override, SECTION, f'harnesses.{name}')
-    config = Config({key: value[key] for key in SHARED if key in value}, dict(harnesses))
+    shared = {key: value[key] for key in SHARED if key in value}
+    if schema == 2:
+        shared['enabled'] = True  # the plugin is on wherever these settings are read
+    config = Config(shared, dict(harnesses), schema)
     # Report a mistake in any section now, not when that harness first compacts.
-    _settings(config.shared, FILE)
+    _settings(config.shared, 'compaction settings')
     for name in harnesses:
         config.for_harness(name)
     return config
 
 
+def path(root) -> Path:
+    """The universe's settings file: plugin-settings/compaction.json, or compaction.json until it is migrated.
+
+    Settings written to a universe that has neither go to the former.
+    """
+    settings, legacy = Path(root) / SETTINGS, Path(root) / LEGACY
+    return legacy if legacy.exists() and not settings.exists() else settings
+
+
+def legacy(file) -> bool:
+    """Whether a settings file is the pre-plugin compaction.json at a universe's root."""
+    return Path(file).parent.name != Path(SETTINGS).parent.name
+
+
+def blank(file) -> dict:
+    """What a missing settings file means: the defaults of plugin-settings/compaction.json."""
+    return {} if legacy(file) else {'schema': 2}
+
+
 def load(root) -> Config:
-    """The universe's settings; compaction is off everywhere when it has no compaction.json."""
-    path = Path(root) / FILE
-    if not path.exists():
-        return Config()
+    """The universe's settings (see path); a missing file means the defaults."""
+    file = path(root)
     try:
-        return parse(json.loads(path.read_text()))
+        return parse(json.loads(file.read_text()) if file.exists() else blank(file))
     except ValueError as error:
-        raise ValueError(f'{path}: {error}') from error
+        raise ValueError(f'{file}: {error}') from error
 
 
 def agent_file(agent_dir) -> Path:

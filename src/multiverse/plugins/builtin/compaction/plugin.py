@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 import re
 
+from multiverse.compaction import config
 from multiverse.plugins import api
 
 # Each harness family with a compaction source: the module with its builder defaults and checks.
@@ -38,7 +39,6 @@ def state(root, harness, family, loaded=None):
     Launches, capabilities and `mv2 doctor` use it; `mv2 compaction` refuses
     loudly instead.
     """
-    from multiverse.compaction import config
     support = builder_support(family)
     if support is None:
         return None, None
@@ -50,7 +50,7 @@ def state(root, harness, family, loaded=None):
     try:
         check(settings.builder)
     except ValueError as error:
-        return None, f'{Path(root) / config.FILE}: harnesses.{harness}.builder: {error}'
+        return None, f'{config.path(root)}: harnesses.{harness}.builder: {error}'
     return settings, None
 
 
@@ -83,7 +83,7 @@ def capability(mv, info):
     if problem:
         return api.Capability('error', f'{problem}; launches run without compaction')
     if not settings.enabled:
-        return api.Capability('unavailable', f'Off for {info.harness} in compaction.json')
+        return api.Capability('unavailable', f'Off for {info.harness} in {config.path(info.universe).relative_to(info.universe)}')
     fallback = (info.native_mode or {}).get('fallback_reason')
     if info.state == 'running' and fallback:
         return api.Capability('error', f'{fallback}; restart the agent to use compaction')
@@ -159,7 +159,6 @@ def usage(info, value):
 
 def doctor(mv, universe):
     """Why this universe's compaction.json cannot be used, by the file or by a harness that compacts."""
-    from multiverse.compaction import config
     root = universe.path
     try:
         config.load(root)
@@ -177,11 +176,57 @@ def doctor(mv, universe):
     return found
 
 
+def check_settings(mv, settings, root):
+    """plugin-settings/compaction.json: schema 2, every section valid, and each harness's builder settings its own checks accept."""
+    loaded = config.parse(settings)
+    if loaded.schema != 2:
+        raise ValueError('plugin-settings/compaction.json is "schema": 2')
+    for manifest in sorted((Path(root) / 'harnesses').glob('*/harness.json')):
+        try:
+            info = mv.harness_info(root, manifest.parent.name)
+        except api.Error:
+            continue
+        problem = state(root, info.name, info.family, loaded)[1]
+        if problem:
+            raise ValueError(problem)
+
+
+def migrate(data, source):
+    """compaction.json (schema 1) as plugin-settings/compaction.json, and whether the plugin is on.
+
+    It is on where the old file left compaction on for some harness; the
+    settings keep everything but `enabled`, except `harnesses.<name>.enabled:
+    false` for a harness that was off while another was on. A harness the old
+    file did not name follows the plugin's switch from now on.
+    """
+    if source != 'legacy':
+        raise ValueError(f'no migration from compaction settings version {source}')
+    old = config.parse(data)
+    names = sorted({'claude', *old.harnesses})
+    enabled = {name: old.for_harness(name).enabled for name in names}
+    on = any(enabled.values())
+    settings = {'schema': 2}
+    if 'default' in data:
+        settings['default'] = data['default']
+    harnesses = {}
+    for name, section in (data.get('harnesses') or {}).items():
+        kept = {key: value for key, value in section.items() if key != 'enabled'}
+        if on and not enabled[name]:
+            kept = {'enabled': False, **kept}
+        if kept:
+            harnesses[name] = kept
+    if harnesses:
+        settings['harnesses'] = harnesses
+    return settings, on
+
+
 def register(mv: api.Plugin):
     mv.launch.contribute('claude', launch)
     mv.capabilities.add('compaction', lambda info: capability(mv, info))
     mv.usage.adjust(usage)
     mv.doctor.check(lambda universe: doctor(mv, universe))
+    mv.settings.check(lambda settings, root: check_settings(mv, settings, root))
+    mv.settings.migrate(migrate)
     from multiverse.tools import compaction as command
     mv.cli.command('compaction', command.configure, command.run)
     mv.dashboard.key('c', 'Compaction', screen='screens:CompactionScreen')

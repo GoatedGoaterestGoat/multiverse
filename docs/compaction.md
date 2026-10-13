@@ -61,21 +61,23 @@ is the first harness that supports it.
 
 ## Configuration
 
-A universe or subverse opts in with `compaction.json` at its root. `enabled` and
-the scheduler `default` are shared by every harness, and `harnesses.<name>` (by
-its directory under `harnesses/`) may replace either. Tree building belongs to
-one harness, since its transcripts and models are its own: `builder` exists only
-under `harnesses.<name>`. The harness supplies the defaults of its model,
-fallback model, effort and own options, and checks them.
+Compaction is the bundled `compaction` plugin. `plugins.json` turns it on or off
+for a universe or subverse (`mv2 plugins enable compaction`, or the dashboard's
+Plugins screen), and `plugin-settings/compaction.json` configures it. While it
+is on it applies to every harness that supports it (today Claude), and
+`harnesses.<name>.enabled: false` turns one harness off. The scheduler
+`default` is shared by every harness, and `harnesses.<name>` (by its directory
+under `harnesses/`) may replace it. Tree building belongs to one harness, since
+its transcripts and models are its own: `builder` exists only under
+`harnesses.<name>`. The harness supplies the defaults of its model, fallback
+model, effort and own options, and checks them.
 
 ```json
 {
-  "schema": 1,
-  "enabled": false,
+  "schema": 2,
   "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
   "harnesses": {
     "claude": {
-      "enabled": true,
       "builder": {
         "model": "sonnet",
         "fallback_model": "claude-sonnet-4-6",
@@ -93,7 +95,7 @@ fallback model, effort and own options, and checks them.
 
 | Field | Meaning |
 | --- | --- |
-| `enabled` | Use tree compaction for this harness's sessions. Read at launch: restart an agent after changing it. |
+| `harnesses.<name>.enabled` | `false` keeps this harness's sessions on their own compaction while the plugin is on. Read at launch, as the plugin switch is: restart an agent after changing either. |
 | `default` | The scheduler of every agent that has none of its own, its budget and `image_mode`. |
 | `builder.model`, `builder.effort` | The harness's model that writes summaries, and its effort. Claude: default `sonnet`, efforts `low` to `max` (default `medium`). |
 | `builder.fallback_model` | Takes over a turn that `model` still refuses after `turn_retries`, from the merges already made; `null` fails the turn instead. Claude: default `claude-sonnet-4-6`. Sonnet 5.5's safeguards refused some short turns when merges still showed thinking, and one turn that cannot be built stops the whole compaction. Sonnet 4.6 refused nothing in testing but builds nearly flat trees (a 22-leaf turn in 2 merges, where Sonnet 5.5 made 6 nested ones), so it serves only as the fallback. |
@@ -103,9 +105,20 @@ fallback model, effort and own options, and checks them.
 | `builder.turn_retries` | Immediate retries of a turn whose build failed (a refusal, an unusable reply, a crash), resuming from the merges that succeeded. |
 | `builder.rate_limit.retries`, `wait_seconds` | Retries of one merge call that was rate limited, overloaded or failed in the API, waiting `first` seconds, multiplied by `multiplier` each time up to `max`. |
 
-The base template ships the file with compaction off and Claude's builder
-settings written out; the development template also enables it for Claude. A
-missing file means compaction is off.
+A missing settings file means the defaults above. A top-level `enabled` is
+refused: `plugins.json` is the switch.
+
+**Before the plugin: `compaction.json`.** Universes made before compaction
+became a plugin have `compaction.json` at their root (`"schema": 1`), with a
+top-level `enabled` (off by default) and `harnesses.<name>.enabled` deciding
+which harnesses compact. While that file is there and `plugins.json` says
+nothing about compaction, the plugin is on and reads it exactly as before.
+`mv2 plugins migrate` shows the conversion and `--apply` makes it: the plugin is
+turned on in `plugins.json` where the old file left compaction on for some
+harness; `plugin-settings/compaction.json` gets everything but `enabled` (keeping
+`harnesses.<name>.enabled: false` for a harness that was off while another was
+on); and the old file goes to the universe's trash. A harness the old file did
+not name follows the plugin's switch from then on.
 
 Each agent can have its own scheduler; without one it follows the current
 default:
@@ -216,9 +229,9 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   enabled, the hook answers every main-session compaction, or skips it with the
   reason; if it ever cannot answer (the mod failed to load, the hook ran out of
   time), the `PreCompact` hook refuses Claude's own compaction with a message.
-  A subagent's own compaction is left to Claude. With compaction off, or no
-  `compaction.json`, there is no guard and Claude compacts as usual.
-- **An unusable `compaction.json`** (invalid, or builder settings Claude rejects)
+  A subagent's own compaction is left to Claude. With the plugin off, or the
+  harness opted out, there is no guard and Claude compacts as usual.
+- **An unusable settings file** (invalid, or builder settings Claude rejects)
   never stops a launch or resume: the session starts as if compaction were off,
   so Claude's own `/compact` works until the file is fixed and the agent
   restarted. The reason shows in the inspector (as the launch's
