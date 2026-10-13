@@ -310,7 +310,7 @@ class PluginDashboardTests(DashboardCase):
             self.assertEqual(self.app.home, self.backend.root)
 
     async def test_shift_p_opens_the_plugins_screen_and_help_says_so(self):
-        self.service.items[0]["provides"] = {"columns": ["shout"], "panels": ["counter"], "screens": [], "keys": [], "commands": ["hello"], "services": 2, "events": None}
+        self.service.items[0]["provides"] = {"columns": ["shout"], "panels": ["counter"], "screens": [], "commands": ["hello"], "services": 2, "events": None}
         async with self.app.run_test(size=(140, 40)) as pilot:
             await self.start(pilot)
             self.assertIn("P              Plugins", KEYS)
@@ -320,6 +320,14 @@ class PluginDashboardTests(DashboardCase):
             text = str(self.app.screen.query_one("#plugin-details", Static).render())
             self.assertIn("Adds here: columns shout · widgets counter · mv2 commands hello · 2 services", text)
             self.assertIn("Configure", [b.description for b in self.app.screen.BINDINGS])
+
+    async def test_a_row_highlighted_while_the_dashboard_shuts_down_is_not_an_error(self):
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.start(pilot)
+            key = next(iter(self.app.visible_agents))
+        # The screen is gone, as when a highlight event is still queued at shutdown.
+        self.app.show_selection(key)
+        self.assertEqual(self.app.selected_key, key)
 
     async def test_plugin_error_count_shows_in_the_header(self):
         self.service.errors = 1

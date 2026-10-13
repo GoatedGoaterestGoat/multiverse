@@ -30,7 +30,7 @@ def state_text(item):
 
 
 PROVIDES = (("columns", "columns"), ("panels", "widgets"), ("screens", "screens"), ("actions", "palette actions"),
-            ("keys", "keys"), ("commands", "mv2 commands"), ("statusline", "status-line items"), ("events", "events"),
+            ("commands", "mv2 commands"), ("statusline", "status-line items"), ("events", "events"),
             ("services", "services"))
 
 

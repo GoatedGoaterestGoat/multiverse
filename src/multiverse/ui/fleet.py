@@ -2,6 +2,7 @@
 from pathlib import Path
 
 from rich.text import Text
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Input, Static
 
 from ..display import clean
@@ -126,6 +127,13 @@ class FleetView:
         menu.styles.offset = (x, y)
         menu.scroll_to_highlight()
 
+    def update_selection(self, content):
+        """Show the selected row's line; a row highlighted while the dashboard is shutting down has nowhere to show it."""
+        try:
+            self.query_one("#selection", Static).update(content)
+        except NoMatches:
+            pass
+
     def show_selection(self, key):
         row = self.visible_rows.get(key)
         self.selected_key = key
@@ -134,7 +142,7 @@ class FleetView:
             if self.draft.active == "harness":
                 value = clean(self.draft.values["harness"])
                 hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
-                self.query_one("#selection", Static).update(f"Harness: {value} ▾ · {hint}")
+                self.update_selection(f"Harness: {value} ▾ · {hint}")
                 return
             label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
             value = self.draft.cell(self.draft.active)
@@ -142,14 +150,14 @@ class FleetView:
             budget = max(8, self.size.width - len(label.plain) - 4)
             start = max(0, self.draft.cursor - budget + 1)
             label.append_text(value[start:start + budget])
-            self.query_one("#selection", Static).update(label)
+            self.update_selection(label)
             return
         if row:
             content = self.scope_trail(row)
             content += " · " + clean(row.get("summary") or row.get("description") or "n new agent · g new subverse")
-            self.query_one("#selection", Static).update(content)
+            self.update_selection(content)
         else:
-            self.query_one("#selection", Static).update("/ search · n new agent · g new subverse · ? keys")
+            self.update_selection("/ search · n new agent · g new subverse · ? keys")
 
     def scope_trail(self, row):
         path = Path(row["path"] if row["kind"] == "group" else row["universe"])
