@@ -298,6 +298,25 @@ def submodules():
     return found
 
 
+def _submodule_url(repository, relative):
+    """The URL .gitmodules gives the submodule at `relative`, or None."""
+    import subprocess
+    result = subprocess.run(["git", "-C", str(repository), "config", "-f", ".gitmodules", "-z", "--get-regexp",
+                             r"^submodule\..*\.path$"], capture_output=True, text=True, timeout=30)
+    for record in result.stdout.split("\0"):
+        key, _, value = record.partition("\n")
+        if value == relative and key.endswith(".path"):
+            url = subprocess.run(["git", "-C", str(repository), "config", "-f", ".gitmodules", "--get",
+                                  key[:-len(".path")] + ".url"], capture_output=True, text=True, timeout=30)
+            return url.stdout.strip() or None
+    return None
+
+
+def _local_url(url):
+    """Whether a submodule URL is a path on this machine rather than a remote."""
+    return bool(url) and (url.startswith(("/", "./", "../", "~", "file:")))
+
+
 def install(name):
     """Initialize the checkout's submodule for plugin `name` (git submodule update --init); never prompts."""
     import os
@@ -308,8 +327,11 @@ def install(name):
     if name not in known:
         raise PluginError(f"No plugin named {name} among this checkout's submodules (.gitmodules)")
     repository = loader.CHECKOUT.parent
-    result = subprocess.run(["git", "-C", str(repository), "submodule", "update", "--init", "--",
-                             str(known[name].relative_to(repository))],
+    relative = str(known[name].relative_to(repository))
+    # A submodule whose URL is a path on this machine (a plugin repository not hosted yet) needs Git's file
+    # protocol, which current Git refuses for submodules by default: allowed for this one command only.
+    allow = ["-c", "protocol.file.allow=always"] if _local_url(_submodule_url(repository, relative)) else []
+    result = subprocess.run(["git", "-C", str(repository), *allow, "submodule", "update", "--init", "--", relative],
                             capture_output=True, text=True, timeout=600, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
     if result.returncode != 0:
         raise PluginError(f"git could not fetch {name}: {(result.stderr or result.stdout).strip()}")

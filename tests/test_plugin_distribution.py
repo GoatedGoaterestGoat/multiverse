@@ -130,13 +130,13 @@ class MigrateTest(PluginTestCase):
 
 
 class InstallTest(PluginTestCase):
-    def git(self, *args, cwd):
+    def git(self, *args, cwd, check=True):
         import subprocess
         environment = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
                        "GIT_COMMITTER_EMAIL": "t@t", "HOME": str(self.home), "PATH": os.environ["PATH"],
                        "GIT_CONFIG_NOSYSTEM": "1"}
         return subprocess.run(["git", "-c", "protocol.file.allow=always", *args], cwd=cwd, env=environment,
-                              capture_output=True, text=True, check=True)
+                              capture_output=True, text=True, check=check)
 
     def test_a_checkout_submodule_is_listed_and_installed(self):
         upstream = self.write_plugin("compaction", where=self.work / "upstream")
@@ -150,7 +150,8 @@ class InstallTest(PluginTestCase):
         self.git("commit", "-qm", "pin", cwd=checkout)
         self.git("submodule", "deinit", "-f", "plugins/compaction", cwd=checkout)
         self.assertFalse((checkout / "plugins/compaction/plugin.json").exists())
-        os.environ["GIT_CONFIG_PARAMETERS"] = "'protocol.file.allow=always'"
+        # A local path URL (no hosted copy yet): install allows Git's file protocol itself, for that command only.
+        os.environ.pop("GIT_CONFIG_PARAMETERS", None)
         with mock.patch.object(loader, "CHECKOUT", checkout / "plugins"):
             self.assertEqual(list(plugins.submodules()), ["compaction"])
             self.enable("compaction")
@@ -162,3 +163,10 @@ class InstallTest(PluginTestCase):
                 plugins.install("ghost")
         with mock.patch.object(loader, "CHECKOUT", None), self.assertRaisesRegex(plugins.PluginError, "with pip"):
             plugins.install("compaction")
+        self.assertNotIn("protocol", (checkout / ".git" / "config").read_text())  # never written to config
+
+    def test_which_submodule_urls_are_local(self):
+        for url, local in (("/Users/me/GOAT", True), ("../GOAT", True), ("file:///x", True), ("~/GOAT", True),
+                           ("https://github.com/o/GOAT.git", False), ("git@github.com:o/GOAT.git", False), (None, False)):
+            with self.subTest(url):
+                self.assertEqual(plugins._local_url(url), local)
