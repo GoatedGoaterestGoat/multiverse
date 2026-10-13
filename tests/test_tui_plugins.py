@@ -16,8 +16,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
 from multiverse.plugins.settings import DELETE
+from multiverse.store import write
 from multiverse.ui.app import MultiverseApp
-from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, schema_fields
+from multiverse.ui.plugins_screen import PluginSettingsScreen, PluginsScreen, declared_fields, describe, schema_fields
 from multiverse.ui.screens import KEYS
 from multiverse.ui.tree import agent_key
 from multiverse.plugins.testing import PluginTestCase
@@ -46,14 +47,13 @@ class FakeService:
 
     def __init__(self):
         self.items = [item("alpha"), item("beta", on=False, state="off")]
-        self.keys, self.screens, self.clashes = {}, {}, []
+        self.actions, self.screens = {}, {}
         self.errors = 0
         self.fact_lines = []
         self.fact_delay = 0.0
         self.gate = None
         self.calls = []
         self.fail = None
-        self.core_keys_seen = None
         self.key_result = "alpha did it"
         self.off = set()
         self.host = {"needed": False, "running": False, "stopped": {}, "pid": None, "workers": []}
@@ -82,10 +82,9 @@ class FakeService:
     def error_count(self):
         return self.errors
 
-    def registry(self, root, core_keys):
+    def registry(self, root):
         self.calls.append(("registry", Path(root)))
-        self.core_keys_seen = set(core_keys)
-        return {"keys": dict(self.keys), "screens": dict(self.screens), "clashes": list(self.clashes)}
+        return {"actions": dict(self.actions), "screens": dict(self.screens)}
 
     def on_here(self, root):
         return {entry["name"] for entry in self.items if entry["on"]} - self.off
@@ -97,8 +96,8 @@ class FakeService:
             self.gate.wait(5)
         return list(self.fact_lines)
 
-    def run_key(self, scope, entry, row):
-        self.calls.append(("key", Path(scope), entry[0], row and row["id"], row and dict(row) is not row))
+    def run_action(self, scope, entry, row):
+        self.calls.append(("action", Path(scope), entry[0], entry[1], row and row["id"], bool(row) and dict(row) is not row))
         if self.fail:
             raise RuntimeError(self.fail)
         if entry[0] in self.off:
@@ -273,34 +272,38 @@ class HostTests(DashboardCase):
 
 
 class PluginDashboardTests(DashboardCase):
+    def command(self, title):
+        return next((c for c in self.app.get_system_commands(self.app.screen) if c.title == title), None)
+
     async def test_without_plugins_nothing_changes(self):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            self.assertEqual(self.app.plugin_keys, {})
+            await self.until(pilot, lambda: any(call[0] == "registry" for call in self.service.calls), "the registry")
+            self.assertEqual((self.app.plugin_actions, self.app.plugin_screens), ({}, {}))
             self.assertEqual(self.app.plugin_help(), "")
             self.assertNotIn("plugin error", self.text("#totals"))
             self.assertFalse(self.app.query_one("#inspect-plugins").display)
             self.app.action_help()
             await pilot.pause(0.1)
             self.assertEqual(self.app.screen.content, KEYS)
-            self.assertNotIn("plugin_key", " ".join(b.action for items in self.app._bindings.key_to_bindings.values() for b in items))
-            # The dashboard told the registry which keys are its own, so a plugin cannot take them.
-            self.assertTrue({"p", "n", "enter", "question_mark", "j"} <= self.service.core_keys_seen)
-            self.assertNotIn("c", self.service.core_keys_seen)  # compaction's key is a plugin's now
+            self.assertEqual([c.title for c in self.app.get_system_commands(self.app.screen) if c.title.startswith("alpha")], [])
+            # Plugins have no keys: nothing binds to a plugin.
+            self.assertFalse([b for items in self.app._bindings.key_to_bindings.values() for b in items
+                              if "plugin" in b.action and b.action != "plugins"])
 
-    async def test_keys_and_screens_come_from_the_opened_root_and_stay_while_moving_between_subverses(self):
-        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
+    async def test_palette_entries_come_from_the_opened_root_and_stay_while_moving_between_subverses(self):
+        self.service.actions = {("alpha", "Say hello"): ("alpha", "Say hello", None, None)}
         self.service.screens = {("alpha", "board"): (None, "x:Board")}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: self.app.plugin_keys, "the registry")
+            await self.until(pilot, lambda: self.app.plugin_actions, "the registry")
             review = self.backend.root / "subverses/pr-review"
             self.app.enter_scope(review)
             await self.until(pilot, lambda: self.app.root == review and self.app.snapshot and self.app.snapshot["name"], "the portal")
             await pilot.pause(0.3)
             await self.app.workers.wait_for_complete()
             self.assertEqual([call[1] for call in self.service.calls if call[0] == "registry"], [self.backend.root])
-            self.assertEqual(sorted(self.app.plugin_keys), ["z"])
+            self.assertEqual(sorted(self.app.plugin_actions), [("alpha", "Say hello")])
             self.assertEqual(sorted(self.app.plugin_screens), [("alpha", "board")])
             self.app.action_back()
             await self.until(pilot, lambda: self.app.root == self.backend.root, "back at the opened root")
@@ -327,104 +330,81 @@ class PluginDashboardTests(DashboardCase):
             self.app.refresh_snapshot()
             await self.until(pilot, lambda: self.text("#totals").endswith("· 3 plugin errors"), "the new count")
 
-    async def test_a_plugin_key_runs_with_a_copy_of_the_row_and_its_scope_and_reports_back(self):
-        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
+    async def test_a_palette_action_runs_with_a_copy_of_the_row_and_its_scope_and_reports_back(self):
+        self.service.actions = {("alpha", "Say hello"): ("alpha", "Say hello", None, None)}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin key")
+            await self.until(pilot, lambda: self.app.plugin_actions, "the registry")
             agent = next(a for a in self.backend.agents if a["name"] == "kernel-worker")
             self.app.select_key(agent_key(agent))
-            await pilot.press("z")
-            await self.until(pilot, lambda: any(call[0] == "key" for call in self.service.calls), "the key action")
-            call = next(call for call in self.service.calls if call[0] == "key")
-            self.assertEqual(call[1:4], (Path(agent["universe"]), "alpha", agent["id"]))
-            self.assertTrue(call[4])
+            self.command("alpha: Say hello").callback()
+            await self.until(pilot, lambda: any(call[0] == "action" for call in self.service.calls), "the action")
+            call = next(call for call in self.service.calls if call[0] == "action")
+            self.assertEqual(call[1:5], (Path(agent["universe"]), "alpha", "Say hello", agent["id"]))
+            self.assertTrue(call[5])
             await self.until(pilot, lambda: "alpha did it" in self.text("#status"), "the action's status line")
             self.assertFalse(self.app.operating)
 
-    async def test_a_plugin_key_that_fails_or_is_off_says_so_and_never_stops_the_dashboard(self):
-        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
+    async def test_a_palette_action_that_fails_or_is_off_says_so_and_never_stops_the_dashboard(self):
+        self.service.actions = {("alpha", "Say hello"): ("alpha", "Say hello", None, None)}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin key")
+            await self.until(pilot, lambda: self.app.plugin_actions, "the registry")
             self.service.off = {"alpha"}
-            await pilot.press("z")
+            self.command("alpha: Say hello").callback()
             await self.until(pilot, lambda: "alpha is off in" in self.text("#status"), "the off message")
             self.service.off = set()
             self.service.fail = "alpha: Say hello failed; see mv2 plugins"
-            await pilot.press("z")
+            self.command("alpha: Say hello").callback()
             await self.until(pilot, lambda: "failed; see mv2 plugins" in self.text("#status"), "the failure message")
             self.assertFalse(self.app.operating)
             await pilot.press("j")
             self.assertTrue(self.app.is_running)
 
-    async def test_a_key_can_open_a_plugin_screen_built_from_the_scope_and_its_result_is_the_status(self):
-        key = SimpleNamespace(key="c", label="Compaction", action=None, screen="screens:Board")
-        self.service.keys = {"z": ("alpha", "Compaction", None, key)}
+    async def test_a_plugin_screen_is_built_from_the_scope_and_its_result_is_the_status(self):
+        self.service.screens = {("alpha", "board"): (None, "screens:Board")}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin key")
-            await pilot.press("z")
+            await self.until(pilot, lambda: self.app.plugin_screens, "the registry")
+            self.command("alpha: board").callback()
             await self.until(pilot, lambda: isinstance(self.app.screen, DismissingScreen), "the plugin's screen")
             self.assertEqual(self.app.screen.scope, self.app.target_scope())
-            self.assertEqual([call for call in self.service.calls if call[0] == "key"], [])  # no action ran
             self.assertFalse(self.app.operating)
             await pilot.press("enter")
             await self.until(pilot, lambda: not isinstance(self.app.screen, DismissingScreen), "the screen to close")
             self.assertIn("saved by the plugin", self.text("#status"))
-            await pilot.press("z")
-            await self.until(pilot, lambda: isinstance(self.app.screen, DismissingScreen), "the screen again")
-            await pilot.press("escape")
-            await self.until(pilot, lambda: not isinstance(self.app.screen, DismissingScreen), "the screen to close")
 
-    async def test_a_screen_key_says_when_the_plugin_is_off_and_reports_a_broken_screen(self):
-        good = SimpleNamespace(key="c", label="Compaction", action=None, screen="screens:Board")
-        bad = SimpleNamespace(key="d", label="Broken", action=None, screen="broken:Screen")
-        self.service.keys = {"z": ("alpha", "Compaction", None, good), "y": ("alpha", "Broken", None, bad)}
+    async def test_a_plugin_screen_says_when_the_plugin_is_off_and_reports_a_broken_one(self):
+        self.service.screens = {("alpha", "board"): (None, "screens:Board"), ("alpha", "broken"): (None, "broken:Screen")}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin keys")
+            await self.until(pilot, lambda: self.app.plugin_screens, "the registry")
             self.service.off = {"alpha"}
-            await pilot.press("z")
+            self.command("alpha: board").callback()
             await self.until(pilot, lambda: "alpha is off in" in self.text("#status"), "the off message")
             self.assertNotIsInstance(self.app.screen, DismissingScreen)
             self.service.off = set()
-            await pilot.press("y")
+            self.command("alpha: broken").callback()
             await self.until(pilot, lambda: "screen failed: no module named broken" in self.text("#status"), "the failure")
             self.assertIn(("record", "screen broken:Screen", "no module named broken"), self.service.calls)
             self.assertTrue(self.app.is_running)
 
-    async def test_plugin_keys_are_ignored_while_typing_or_in_a_dialog(self):
-        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
-        async with self.app.run_test(size=(140, 32)) as pilot:
-            await self.start(pilot)
-            await self.until(pilot, lambda: "z" in self.app.plugin_keys, "the plugin key")
-            await pilot.press("slash", "z")
-            await pilot.pause(0.2)
-            self.assertEqual(self.app.query_one("#filter", Input).value, "z")
-            await pilot.press("escape")
-            self.app.action_help()
-            await pilot.pause(0.1)
-            await pilot.press("z")
-            await pilot.pause(0.2)
-            self.assertEqual([call for call in self.service.calls if call[0] == "key"], [])
-
-    async def test_help_lists_plugin_keys_screens_and_clashes(self):
-        self.service.keys = {"z": ("alpha", "Say hello", None, None)}
+    async def test_help_lists_what_plugins_add_to_the_palette(self):
+        self.service.actions = {("alpha", "Say hello"): ("alpha", "Say hello", None, None)}
         self.service.screens = {("alpha", "board"): (None, "x:Board")}
-        self.service.clashes = ["alpha and beta both want the y key; set it in plugins.json keys"]
         async with self.app.run_test(size=(140, 40)) as pilot:
             await self.start(pilot)
-            await self.until(pilot, lambda: self.app.plugin_keys, "the registry")
+            await self.until(pilot, lambda: self.app.plugin_actions, "the registry")
             self.app.action_help()
             await pilot.pause(0.1)
             content = self.app.screen.content
             self.assertTrue(content.startswith(KEYS))
-            self.assertIn("z              alpha: Say hello", content)
-            self.assertIn("alpha: board (command palette)", content)
-            self.assertIn("Not bound: alpha and beta both want the y key", content)
+            self.assertIn("PLUGINS (command palette)", content)
+            self.assertIn("Ctrl+p         alpha: Say hello", content)
+            self.assertIn("alpha: board (screen)", content)
 
-    async def test_the_command_palette_offers_plugins_and_plugin_screens(self):
+    async def test_the_command_palette_offers_plugins_actions_and_plugin_screens(self):
+        self.service.actions = {("alpha", "Say hello"): ("alpha", "Say hello", None, None)}
         self.service.screens = {("alpha", "board"): (None, "x:Board")}
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
@@ -432,6 +412,7 @@ class PluginDashboardTests(DashboardCase):
             titles = [command.title for command in self.app.get_system_commands(self.app.screen)]
             self.assertIn("Plugins", titles)
             self.assertIn("alpha: board", titles)
+            self.assertIn("alpha: Say hello", titles)
 
     async def test_inspector_shows_plugin_lines_after_the_core_facts_without_blocking(self):
         self.service.fact_lines = [("alpha", "3 open"), ("beta", "unavailable")]
@@ -586,6 +567,42 @@ class PluginsScreenTests(DashboardCase):
             await self.until(pilot, lambda: isinstance(self.app.screen, OwnScreen), "the plugin's screen")
             self.assertEqual(self.app.screen.opened_with[1], self.backend)
 
+    async def test_declared_fields_build_the_settings_screen_and_win_over_the_schema(self):
+        fields = [{"path": "default.budget", "label": "Budget", "kind": "int", "placeholder": "0", "help": "tokens kept"},
+                  {"path": "loud", "label": "Loud", "kind": "bool", "options": (), "placeholder": "", "help": ""},
+                  {"path": "mode", "label": "Mode", "kind": "choice", "options": ("fast", "slow"), "placeholder": "fast", "help": ""},
+                  {"path": "note", "label": "Note", "kind": "text", "options": (), "placeholder": "", "help": ""}]
+        self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": SCHEMA, "screen": None,
+                                             "values": {"default": {"budget": 5}, "mode": "slow"}, "fields": fields}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open_screen(pilot)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginSettingsScreen) and self.app.screen.widgets, "settings")
+            edit = self.app.screen
+            self.assertEqual(list(edit.widgets), ["default.budget", "loud", "mode", "note"])
+            self.assertEqual((edit.widgets["default.budget"].value, edit.widgets["mode"].value), ("5", "slow"))
+            self.assertEqual(edit.widgets["default.budget"].placeholder, "0")
+            self.assertIn("tokens kept", " ".join(str(w.render()) for w in edit.query(".fhelp")))
+            edit.widgets["default.budget"].value = "9"
+            edit.widgets["loud"].action_step(1)
+            edit.widgets["mode"].action_step(-2)  # back to the default option
+            await pilot.press("ctrl+enter")
+            await self.until(pilot, lambda: self.app.screen is screen, "the save to close")
+            call = next(call for call in self.service.calls if call[0] == "edit")
+            self.assertEqual(call[3], {("default", "budget"): 9, ("loud",): True, ("mode",): DELETE})
+
+    async def test_a_status_line_a_settings_screen_leaves_reaches_the_dashboard_when_the_plugins_screen_closes(self):
+        self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": None, "values": {},
+                                             "screen": "ui:Settings"}
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            screen = await self.open_screen(pilot)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, OwnScreen), "the plugin's screen")
+            self.app.screen.dismiss("Settings saved. Restart agents.")
+            await self.until(pilot, lambda: self.app.screen is screen, "back on the Plugins screen")
+            await pilot.press("escape")
+            await self.until(pilot, lambda: "Settings saved. Restart agents." in self.text("#status"), "the status line")
+
     async def test_compact_terminals_keep_the_list_and_error_line_visible(self):
         async with self.app.run_test(size=(60, 20)) as pilot:
             screen = await self.open_screen(pilot)
@@ -615,8 +632,8 @@ PLUGIN = """
 from multiverse.plugins import api
 
 def register(mv):
-    mv.dashboard.key("z", "Say hello", lambda context: f"hello {context.row['name'] if context.row else '-'} in {context.scope.name}")
-    mv.dashboard.key("b", "Break", lambda context: 1 / 0)
+    mv.dashboard.action("Say hello", lambda context: f"hello {context.row['name'] if context.row else '-'} in {context.scope.name}")
+    mv.dashboard.action("Break", lambda context: 1 / 0)
     mv.dashboard.screen("board", "screens:Board")
 
     @mv.dashboard.inspector
@@ -644,57 +661,52 @@ class Board(ModalScreen):
 class RealPluginTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     """The dashboard against real plugin code: registry, key actions, inspector lines and the error count."""
 
-    async def test_keys_screens_and_inspector_lines_of_a_real_plugin(self):
-        from multiverse.plugins import loader
-        self.write_plugin("greeter", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen", "dashboard.inspector"],
+    async def test_actions_screens_and_the_error_count_of_a_real_plugin(self):
+        self.write_plugin("greeter", {"module": "plugin", "extends": ["dashboard.action", "dashboard.screen", "dashboard.inspector"],
                                       "settings": {"version": 1, "schema": "schema.json"}},
                           {"plugin.py": PLUGIN, "screens.py": SCREENS,
                            "schema.json": '{"type": "object", "properties": {"greeting": {"type": "string", "default": "hi"}}}'})
         self.enable("greeter")
         app = MultiverseApp(self.root, LocalBackend(), refresh_interval=0, plugin_service=PluginService())
+
+        async def until(check, what):
+            for _ in range(300):
+                await app.workers.wait_for_complete()
+                try:
+                    if check():
+                        return
+                except Exception:
+                    pass
+                await pilot.pause(0.02)
+            self.fail(f"timed out waiting for {what}")
+
+        def status():
+            return str(app.query_one("#status", Static).render())
+
+        def run(title):
+            next(c for c in app.get_system_commands(app.screen) if c.title == title).callback()
+
         async with app.run_test(size=(140, 36)) as pilot:
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if app.snapshot is not None and app.plugin_keys:
-                    break
-                await pilot.pause(0.02)
-            self.assertEqual(sorted(app.plugin_keys), ["b", "z"])
+            await until(lambda: app.snapshot is not None and app.plugin_actions, "the registry")
+            self.assertEqual(sorted(name for _, name in app.plugin_actions), ["Break", "Say hello"])
             self.assertIn(("greeter", "board"), app.plugin_screens)
-            await pilot.press("z")
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if "hello" in str(app.query_one("#status", Static).render()):
-                    break
-                await pilot.pause(0.02)
-            self.assertIn("hello", str(app.query_one("#status", Static).render()))
-            await pilot.press("b")
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if "failed" in str(app.query_one("#status", Static).render()):
-                    break
-                await pilot.pause(0.02)
-            self.assertIn("failed", str(app.query_one("#status", Static).render()))
+            run("greeter: Say hello")
+            await until(lambda: "hello" in status(), "the action's status line")
+            run("greeter: Break")
+            await until(lambda: "failed" in status(), "the failure")
             self.assertTrue(app.is_running)
             self.assertGreaterEqual(app.plugin_service.error_count(), 1)
             app.refresh_snapshot()
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if "plugin error" in str(app.query_one("#totals", Static).render()):
-                    break
-                await pilot.pause(0.02)
-            self.assertIn("plugin error", str(app.query_one("#totals", Static).render()))
-            app.action_plugins()
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if isinstance(app.screen, PluginsScreen) and app.screen.items:
-                    break
-                await pilot.pause(0.02)
-            names = [entry["name"] for entry in app.screen.items]
-            self.assertIn("greeter", names)
-            self.assertTrue(next(entry for entry in app.screen.items if entry["name"] == "greeter")["on"])
+            await until(lambda: "plugin error" in str(app.query_one("#totals", Static).render()), "the error count")
+            await pilot.press("P")
+            await until(lambda: isinstance(app.screen, PluginsScreen) and app.screen.items, "the Plugins screen")
+            mine = next(entry for entry in app.screen.items if entry["name"] == "greeter")
+            self.assertTrue(mine["on"])
+            self.assertIn("actions Break, Say hello", describe(mine))
+            self.assertIn("screens board", describe(mine))
 
     async def test_service_facts_and_a_plugin_screen_from_the_palette(self):
-        self.write_plugin("greeter", {"module": "plugin", "extends": ["dashboard.key", "dashboard.screen", "dashboard.inspector"]},
+        self.write_plugin("greeter", {"module": "plugin", "extends": ["dashboard.action", "dashboard.screen", "dashboard.inspector"]},
                           {"plugin.py": PLUGIN, "screens.py": SCREENS})
         self.enable("greeter")
         service = PluginService()
@@ -716,37 +728,175 @@ class RealPluginTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await pilot.pause(0.02)
             self.assertIn("board of", str(app.screen.query_one("#board", Static).render()))
 
-    async def test_a_real_plugin_key_opens_its_screen(self):
-        self.write_plugin("opener", {"module": "plugin", "api": "1.4", "extends": ["dashboard.key", "dashboard.screen"]},
-                          {"plugin.py": "def register(mv):\n    mv.dashboard.key('o', 'Open board', screen='screens:Board')\n"
-                                        "    mv.dashboard.screen('board', 'screens:Board')\n",
-                           "screens.py": SCREENS.replace('BINDINGS = [("escape", "app.pop_screen", "Close")]',
-                                                         'BINDINGS = [("enter", "done", "Done")]\n'
-                                                         '    def action_done(self):\n        self.dismiss("board closed")')})
-        self.enable("opener")
+
+PANELS_PLUGIN = """
+from multiverse.plugins import api
+
+def register(mv):
+    @mv.dashboard.panel("tally", title="Tally")
+    def tally(context):
+        return [api.Markdown(f"{context.universe.path.parent.name} n={context.widget.get('n')} on={sorted(context.plugins)}"),
+                api.Table(("a", "b"), (("1", "2"),))]
+
+    @mv.dashboard.panel("note", auto=True)
+    def note(context):
+        return api.Markdown("auto note")
+
+    @mv.dashboard.panel("boom")
+    def boom(context):
+        raise RuntimeError("kaput")
+
+    @mv.dashboard.panel("slow")
+    def slow(context):
+        import time
+        time.sleep(3)
+        return api.Markdown("late")
+
+    @mv.dashboard.panel("bad")
+    def bad(context):
+        return "not a block"
+"""
+
+
+class PortalPanelTests(PluginTestCase):
+    """Plugin panels in a scope's local view: named by the view or automatic, rendered in the snapshot."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_plugin("panelsy", {"module": "plugin", "extends": ["dashboard.panel"]}, {"plugin.py": PANELS_PLUGIN})
+        self.sub = self.subverse("ops")
+
+    def view(self, root, **config):
+        write(Path(root) / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": ["name"], **config})
+
+    def widgets(self, root):
+        return LocalBackend().snapshot(root)["widgets"]
+
+    def test_a_view_names_a_data_panel_and_gets_its_blocks_with_the_plugin_marked(self):
+        self.enable("panelsy")
+        self.view(self.root, plugin_panels="none", widgets=[{"type": "tally", "title": "Counts", "n": 3}])
+        shown = self.widgets(self.root)
+        self.assertEqual([w["type"] for w in shown], ["markdown", "table"])
+        self.assertEqual((shown[0]["title"], shown[1]["title"]), ("Counts", ""))
+        self.assertIn("n=3 on=['panelsy']", shown[0]["text"])
+        self.assertEqual({w["plugin"] for w in shown}, {"panelsy"})
+        self.assertEqual(shown[1]["rows"], [["1", "2"]])
+
+    def test_auto_panels_follow_the_views_own_widgets_and_can_be_left_out(self):
+        self.enable("panelsy")
+        own = {"type": "markdown", "title": "Own", "text": "mine"}
+        self.view(self.root, widgets=[own])
+        shown = self.widgets(self.root)
+        self.assertEqual([(w["type"], w["title"]) for w in shown], [("markdown", "Own"), ("markdown", "panelsy")])
+        self.assertEqual(shown[1]["text"], "auto note")
+        self.view(self.root, widgets=[own], plugin_panels="none")
+        self.assertEqual([w["title"] for w in self.widgets(self.root)], ["Own"])
+        self.view(self.root, widgets=[own], plugin_panels=["other"])
+        self.assertEqual([w["title"] for w in self.widgets(self.root)], ["Own"])
+        self.view(self.root, widgets=[own], plugin_panels=["note"])
+        self.assertEqual([w["title"] for w in self.widgets(self.root)], ["Own", "panelsy"])
+        self.view(self.root, widgets=[own], plugin_panels=["panelsy:note"])
+        self.assertEqual(len(self.widgets(self.root)), 2)
+
+    def test_an_auto_panel_the_view_already_names_is_not_shown_twice(self):
+        self.enable("panelsy")
+        self.view(self.root, widgets=[{"type": "panelsy:note", "title": "Note"}])
+        self.assertEqual([w["title"] for w in self.widgets(self.root)], ["Note"])
+
+    def test_a_plugin_on_only_in_a_subverse_shows_its_panels_there_and_a_hint_elsewhere(self):
+        self.enable("panelsy", root=self.sub)
+        self.view(self.root, widgets=[{"type": "panelsy:tally", "title": "Counts"}])
+        self.view(self.sub, widgets=[{"type": "tally", "title": "Counts", "n": 1}])
+        top = self.widgets(self.root)
+        self.assertEqual(top[0]["text"], "widget type panelsy:tally needs plugin panelsy, which is off here")
+        portal = self.widgets(self.sub)
+        self.assertEqual([w["type"] for w in portal], ["markdown", "table", "markdown"])  # its panel, then the auto one
+        self.assertIn("n=1", portal[0]["text"])
+        self.assertEqual(portal[2]["text"], "auto note")
+
+    def test_no_plugin_on_means_the_view_is_exactly_what_it_says(self):
+        self.view(self.root, widgets=[{"type": "markdown", "title": "Own", "text": "mine"}])
+        self.assertEqual(self.widgets(self.root), [{"type": "markdown", "title": "Own", "text": "mine"}])
+
+    def test_a_failing_panel_is_one_line_and_counts_against_its_plugin(self):
+        from multiverse.plugins import loader
+        self.enable("panelsy")
+        self.view(self.root, plugin_panels="none", widgets=[{"type": "boom", "title": "Bad"}, {"type": "bad", "title": "Worse"},
+                                                           {"type": "markdown", "title": "Fine", "text": "x"}])
+        shown = self.widgets(self.root)
+        self.assertEqual([w["title"] for w in shown], ["Bad", "Worse", "Fine"])
+        self.assertIn("panel boom could not be shown", shown[0]["text"])
+        self.assertIn("not str", shown[1]["text"])
+        self.assertEqual(sum(len(texts) for texts in loader.errors().values()), 2)
+
+    def test_a_slow_panel_is_cut_off_and_never_holds_up_the_snapshot(self):
+        import time
+        from multiverse.plugins import loader
+        self.enable("panelsy")
+        self.view(self.root, plugin_panels="none", widgets=[{"type": "slow", "title": "Slow"}])
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.2):
+            started = time.monotonic()
+            first = self.widgets(self.root)
+            again = self.widgets(self.root)
+            elapsed = time.monotonic() - started
+        self.assertLess(elapsed, 1.5)
+        self.assertIn("could not be shown", first[0]["text"])
+        self.assertIn("could not be shown", again[0]["text"])
+
+    def test_a_bad_plugin_panels_option_says_so_and_changes_nothing_else(self):
+        self.enable("panelsy")
+        self.view(self.root, plugin_panels=7, widgets=[{"type": "markdown", "title": "Own", "text": "mine"}])
+        shown = self.widgets(self.root)
+        self.assertEqual(shown[0]["title"], "Own")
+        self.assertIn('plugin_panels must be "auto", "none" or a list', next(w["text"] for w in shown if w["title"] == "View configuration error"))
+
+    def test_two_plugins_with_one_panel_type_need_the_qualified_name(self):
+        self.write_plugin("other", {"module": "plugin", "extends": ["dashboard.panel"]},
+                          {"plugin.py": "from multiverse.plugins import api\n\ndef register(mv):\n"
+                                        "    mv.dashboard.panel('tally', lambda context: api.Markdown('other tally'))\n"})
+        self.enable("panelsy")
+        self.enable("other")
+        self.view(self.root, plugin_panels="none", widgets=[{"type": "tally", "title": "A"}, {"type": "other:tally", "title": "B"}])
+        shown = self.widgets(self.root)
+        self.assertIn("is offered by other and panelsy; name it as PLUGIN:tally", shown[0]["text"])
+        self.assertEqual(shown[1]["text"], "other tally")
+
+
+class PortalPanelScreenTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
+    async def test_a_portal_draws_its_plugin_panels_with_their_plugin_and_refreshes_them_with_the_fleet(self):
+        self.write_plugin("panelsy", {"module": "plugin", "extends": ["dashboard.panel"]},
+                          {"plugin.py": "from multiverse.plugins import api\nfrom pathlib import Path\n\ndef register(mv):\n"
+                                        "    @mv.dashboard.panel('live')\n    def live(context):\n"
+                                        "        return api.Markdown(Path(context.universe.path / 'live.txt').read_text())\n"})
+        sub = self.subverse("ops")
+        self.enable("panelsy", root=sub)
+        (sub / "live.txt").write_text("first")
+        write(sub / "views" / "default.json", {"title": "Ops", "columns": ["name"], "plugin_panels": "none",
+                                               "widgets": [{"type": "live", "title": "Live"}]})
         app = MultiverseApp(self.root, LocalBackend(), refresh_interval=0, plugin_service=PluginService())
-        async with app.run_test(size=(120, 30)) as pilot:
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if "o" in app.plugin_keys:
-                    break
-                await pilot.pause(0.02)
-            self.assertEqual(app.plugin_keys["o"][1], "Open board")
-            await pilot.press("o")
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if app.screen.query("#board"):
-                    break
-                await pilot.pause(0.02)
-            self.assertIn("board of", str(app.screen.query_one("#board", Static).render()))
-            await pilot.press("enter")
-            for _ in range(200):
-                await app.workers.wait_for_complete()
-                if "board closed" in str(app.query_one("#status", Static).render()):
-                    break
-                await pilot.pause(0.02)
-            self.assertIn("board closed", str(app.query_one("#status", Static).render()))
-            self.assertIn("o              opener: Open board", app.plugin_help())
+        async with app.run_test(size=(140, 32)) as pilot:
+            async def until(check, what):
+                for _ in range(300):
+                    await app.workers.wait_for_complete()
+                    try:
+                        if check():
+                            return
+                    except Exception:
+                        pass
+                    await pilot.pause(0.02)
+                self.fail(f"timed out waiting for {what}")
+
+            def texts():
+                return [str(label.render()) for label in app.query_one("#local-view").query(Static)]
+
+            await until(lambda: app.snapshot is not None, "the dashboard")
+            app.enter_scope(sub)
+            await until(lambda: app.root == sub and any("first" in text for text in texts()), "the plugin panel")
+            self.assertIn("Live · panelsy", [str(label.render()) for label in app.query_one("#local-view").query(".view-title")])
+            (sub / "live.txt").write_text("second")
+            app.refresh_snapshot()
+            await until(lambda: any("second" in text for text in texts()), "the refreshed panel")
+            self.assertFalse(any("first" in text for text in texts()))
 
 
 if __name__ == "__main__":

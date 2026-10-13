@@ -7,6 +7,7 @@ from ..store import read
 from . import theme
 from .columns import COLUMNS
 from .panels import error_widget, normalize_widgets
+from .plugin_panels import option_of
 
 DEFAULT_COLUMNS = ["name", "harness", "live", "status", "context", "phase", "summary"]
 # Former column keys that views written for older versions still use.
@@ -46,8 +47,14 @@ def _read_view(root):
     offered = _plugin_column_keys(root) if any(isinstance(key, str) and key not in COLUMNS for key in requested) else set()
     selected = list(dict.fromkeys(key for key in requested if isinstance(key, str)
                                   and (key in COLUMNS or key in offered or _qualified(key))))
+    widgets = normalize_widgets(config.get("widgets", []), root)
+    try:
+        plugin_panels = option_of(config.get("plugin_panels"))
+    except ValueError as error:
+        plugin_panels = "auto"
+        widgets = [*widgets, error_widget("View configuration error", error)]
     return {"columns": selected or DEFAULT_COLUMNS, "accent": accent,
-            "title": str(config.get("title", "")), "widgets": normalize_widgets(config.get("widgets", []), root)}
+            "title": str(config.get("title", "")), "widgets": widgets, "plugin_panels": plugin_panels}
 
 
 def columns(root):

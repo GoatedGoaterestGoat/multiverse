@@ -110,6 +110,15 @@ def panel(kind, root=None):
     return found
 
 
+def _data_panel(kind, root):
+    """A function making the placeholder for a widget that a plugin renders from data, or None."""
+    from . import plugin_panels
+    found = plugin_panels.find(root, kind)
+    if found is None:
+        return None
+    return lambda widget, title: plugin_panels.placeholder(found[0], found[1], widget, title)
+
+
 def normalize_widgets(value, root=None):
     """Validate each widget independently so a bad widget cannot hide the fleet."""
     if not isinstance(value, list):
@@ -123,6 +132,9 @@ def normalize_widgets(value, root=None):
             title = str(widget.get("title", kind or "Widget"))[:200]
             if not isinstance(kind, str):
                 raise ValueError(f"unknown widget type: {kind}")
+            if kind not in PANELS and root is not None and (data := _data_panel(kind, root)) is not None:
+                result.append(data(widget, title))  # rendered later, off the event loop (ui/plugin_panels.py)
+                continue
             result.append(panel(kind, root).parse(widget, title))
         except Exception as error:  # any failure stays inside its widget
             result.append(error_widget(f"Widget {index + 1} error", error))
@@ -204,7 +216,12 @@ class LocalView(VerticalScroll):
             except Exception as error:
                 widget = error_widget(f"Widget {index + 1} error", error)
                 shown = PANELS["markdown"].compose(self, root, widget, index)
-            children.append(Label(widget["title"], classes="view-title", markup=False))
+            title = widget["title"]
+            plugin = widget.get("plugin")
+            if plugin and title and title != plugin:
+                title = f"{title} · {plugin}"  # where a plugin's panel comes from
+            if title:
+                children.append(Label(title, classes="view-title", markup=False))
             children.extend(shown)
         if children:
             await self.mount(*children)

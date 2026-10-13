@@ -38,6 +38,7 @@ class Field:
     initial: object = ''
     group: str | None = None
     role: str | None = None
+    help: str = ''
 
 
 def lookup(data, path):

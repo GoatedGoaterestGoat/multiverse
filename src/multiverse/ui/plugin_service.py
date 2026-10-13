@@ -64,22 +64,20 @@ class PluginService:
         """Plugin failures recorded in this process (cheap: no plugin code runs)."""
         return sum(len(texts) for texts in loader.errors().values())
 
-    def registry(self, root, core_keys):
-        """Keys and screens of every plugin on anywhere in the tree under `root`.
+    def registry(self, root):
+        """Palette actions and screens of every plugin on anywhere in the tree under `root`.
 
-        {"keys": {key: (plugin, label)}, "screens": {(plugin, name): reference},
-         "clashes": [sentence]}. The top scope's plugins.json settles clashes first.
+        {"actions": {(plugin, name): (plugin, name, Loaded, function)}, "screens": {(plugin, name): (Loaded, reference)}}.
+        Where a plugin is off is checked when an entry is used, not here.
         """
-        keys, screens, clashes = {}, {}, []
+        actions, screens = {}, {}
         for scope in universe.tree(Path(root)):
-            found, problems = plugins.dashboard_keys(scope, core_keys)
-            for key, (loaded, item) in found.items():
-                keys.setdefault(key, (loaded.name, item.label, loaded, item))
-            clashes += [text for text in problems if text not in clashes]
+            for loaded, name, function in plugins.dashboard_actions(scope):
+                actions.setdefault((loaded.name, name), (loaded.name, name, loaded, function))
             for loaded in loader.active(scope):
                 for name, reference in loaded.registrations.screens.items():
                     screens.setdefault((loaded.name, name), (loaded, reference))
-        return {"keys": keys, "screens": screens, "clashes": clashes}
+        return {"actions": actions, "screens": screens}
 
     def facts(self, root, row):
         """[(plugin, text)] for one agent row: each plugin on in its universe, in name order.
@@ -96,29 +94,29 @@ class PluginService:
                 lines.append((loaded.name, str(text)))
         return lines
 
-    def run_key(self, scope, entry, row):
-        """Run one plugin key's action for `row` in `scope`; returns its status line or None.
+    def run_action(self, scope, entry, row):
+        """Run one plugin's palette action for `row` in `scope`; returns its status line or None.
 
         Raises ValueError when the plugin is off in that scope, RuntimeError
         when the action failed (the loader has the details) or ran too long.
         """
-        name, label, loaded, item = entry
+        plugin, name, loaded, function = entry
         scope = Path(scope)
-        if name not in plugins.on_here(scope):
-            raise ValueError(f"{name} is off in {scope.name}: turn it on from the Plugins screen")
+        if plugin not in plugins.on_here(scope):
+            raise ValueError(f"{plugin} is off in {scope.name}: turn it on from the Plugins screen (P)")
         context = SimpleNamespace(row=dict(row) if row else None, scope=scope, app=None)
         pool = ThreadPoolExecutor(max_workers=1)
         try:
-            future = pool.submit(loader.guard, loaded, f"key {item.key}", item.action, context, root=scope, default=FAILED)
+            future = pool.submit(loader.guard, loaded, f"action {name}", function, context, root=scope, default=FAILED)
             try:
                 result = future.result(timeout=ACTION_TIMEOUT)
             except Timeout:
-                loader.record(loaded, f"key {item.key}", TimeoutError(f"took longer than {ACTION_TIMEOUT:g} s"), scope)
-                raise RuntimeError(f"{name}: {label} took longer than {ACTION_TIMEOUT:g} s") from None
+                loader.record(loaded, f"action {name}", TimeoutError(f"took longer than {ACTION_TIMEOUT:g} s"), scope)
+                raise RuntimeError(f"{plugin}: {name} took longer than {ACTION_TIMEOUT:g} s") from None
         finally:
             pool.shutdown(wait=False)
         if result is FAILED:
-            raise RuntimeError(f"{name}: {label} failed; see mv2 plugins")
+            raise RuntimeError(f"{plugin}: {name} failed; see mv2 plugins")
         return None if result is None else str(result)
 
     def record(self, loaded, what, error, root):

@@ -51,7 +51,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     def __init__(self, root, backend=None, *, refresh_interval=1.5, plugin_service=None):
         super().__init__()
         self.plugin_service = plugin_service or PluginService()
-        self.plugin_keys, self.plugin_screens, self.plugin_clashes = {}, {}, []
+        self.plugin_actions, self.plugin_screens = {}, {}
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
         self.root = Path(root)
@@ -135,8 +135,6 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         if action in ('kill', 'stop', 'resume'):
             eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
             return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
-        if action == "plugin_key":
-            return self.ready() and not isinstance(self.focused, (Input, TextArea))
         if action == "filter":
             # Handle the opening slash before buffered keys are forwarded to
             # the old widget, but leave literal slashes in editors and drafts.
@@ -362,58 +360,41 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         if self.ready():
             self.push_screen(Details("Keyboard & mouse", KEYS + self.plugin_help()))
 
-    def core_keys(self):
-        """Every key the dashboard itself binds: plugins never get these."""
-        names = set()
-        for binding in [*type(self).BINDINGS, *AgentTable.BINDINGS]:
-            names.update(binding.key.split(",") if isinstance(binding, Binding) else [])
-        return names | {"ctrl+p", "ctrl+q", "tab", "shift+tab", "ctrl+c"}
-
     @work(group="plugin-registry", exclusive=True, exit_on_error=False)
     async def load_plugin_registry(self):
-        """Find the keys and screens of the plugins on in this tree, off the event loop."""
-        # From the opened root, not the portal being shown: plugin screens and keys stay the same as you move
-        # between subverses, and each says "<plugin> is off in <scope>" where it is off.
-        root = self.home
+        """Find the palette actions and screens of the plugins on in this tree, off the event loop."""
+        # From the opened root, not the portal being shown: the palette stays the same as you move between
+        # subverses, and each entry says "<plugin> is off in <scope>" where it is off.
         try:
-            registry = await asyncio.to_thread(self.plugin_service.registry, root, self.core_keys())
+            registry = await asyncio.to_thread(self.plugin_service.registry, self.home)
         except Exception as error:
             self.set_status(f"Plugins could not be read: {error}", error=True)
             return
-        # Only plugin bindings are replaced; the app's own stay untouched.
-        bindings = self._bindings.key_to_bindings
-        for key in [key for key, items in bindings.items() if any(item.action.startswith("plugin_key(") for item in items)]:
-            del bindings[key]
-        self.plugin_keys = registry["keys"]
+        self.plugin_actions = registry["actions"]
         self.plugin_screens = registry["screens"]
-        self.plugin_clashes = registry["clashes"]
-        for key, (plugin, label, *_rest) in self.plugin_keys.items():
-            self.bind(key, f"plugin_key({key!r})", description=f"{plugin}: {label}", show=False)
-        self.refresh_bindings()
 
     def plugin_help(self):
-        """The `?` help lines for plugin keys, screens and clashes; empty without plugins."""
-        lines = [f"{key:<14} {plugin}: {label}" for key, (plugin, label, *_rest) in sorted(self.plugin_keys.items())]
-        lines += [f"Screen         {plugin}: {name} (command palette)" for plugin, name in sorted(self.plugin_screens)]
-        lines += [f"Not bound: {text}" for text in self.plugin_clashes]
-        return "\n\nPLUGINS\n" + "\n".join(lines) if lines else ""
+        """The `?` help lines for what plugins add to the command palette; empty without plugins."""
+        lines = [f"{'Ctrl+p':<14} {plugin}: {name}" for plugin, name in sorted(self.plugin_actions)]
+        lines += [f"{'Ctrl+p':<14} {plugin}: {name} (screen)" for plugin, name in sorted(self.plugin_screens)]
+        return "\n\nPLUGINS (command palette)\n" + "\n".join(lines) if lines else ""
 
-    def action_plugin_key(self, key):
-        entry = self.plugin_keys.get(key)
+    def run_plugin_action(self, key):
+        entry = self.plugin_actions.get(key)
         if entry is None or not self.ready():
-            return
-        if getattr(entry[3], "screen", None):  # a key that opens a screen instead of running an action
-            self.open_plugin_screen(entry[0], entry[2], entry[3].screen)
             return
         scope, row = self.target_scope(), self.visible_rows.get(self.selected_key)
         row = dict(row) if row else None
-        label = f"{entry[0]}: {entry[1]}"
-        self.submit_operation(label, self.plugin_service.run_key, scope, entry, row,
+        self.submit_operation(f"{entry[0]}: {entry[1]}", self.plugin_service.run_action, scope, entry, row,
                               after=lambda text: self.set_status(text) if text else None)
 
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
+        for key in sorted(self.plugin_actions):
+            plugin, name = key
+            yield SystemCommand(f"{plugin}: {name}", f"Run {plugin}'s {name} for the selected row or group",
+                                lambda key=key: self.run_plugin_action(key))
         for (plugin, name), (loaded, reference) in sorted(self.plugin_screens.items()):
             yield SystemCommand(f"{plugin}: {name}", f"Open {plugin}'s {name} screen",
                                 lambda plugin=plugin, loaded=loaded, reference=reference: self.open_plugin_screen(plugin, loaded, reference))
@@ -424,6 +405,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             self.push_screen(PluginsScreen(root, self.scope_name(root), self.plugin_service), self.plugins_changed)
 
     def plugins_changed(self, changed):
+        if isinstance(changed, str) and changed:  # a plugin screen left a status line
+            self.set_status(changed)
         if changed:
             columns.reset_plugin_caches()  # resolved plugin columns and panels may be out of date
             self.host_failed = False

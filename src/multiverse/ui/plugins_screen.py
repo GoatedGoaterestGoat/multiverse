@@ -79,6 +79,7 @@ class PluginsScreen(ModalScreen):
         self.root, self.scope_name, self.service = Path(root), name or Path(root).name, service
         self.items, self.problems, self.host = [], [], None
         self.changed = self.busy = False
+        self.note = None  # a status line a plugin screen left
 
     def compose(self):
         with Vertical(id="plugins-dialog"):
@@ -147,7 +148,7 @@ class PluginsScreen(ModalScreen):
         self.action_settings()
 
     def action_close(self):
-        self.dismiss(self.changed)
+        self.dismiss(self.note or self.changed)
 
     def action_toggle(self):
         item = self.selected()
@@ -213,7 +214,7 @@ class PluginsScreen(ModalScreen):
         self.error("")
         if settings.get("screen"):
             self.open_own_screen(item)
-        elif settings.get("schema") is None:
+        elif settings.get("fields") is None and settings.get("schema") is None:
             self.error(f"{item['name']}'s settings cannot be edited here: {settings.get('problem') or 'no schema'}")
         else:
             self.app.push_screen(PluginSettingsScreen(self.root, self.service, item), self.edited)
@@ -229,7 +230,26 @@ class PluginsScreen(ModalScreen):
     def edited(self, saved):
         if saved:
             self.changed = True
+        if isinstance(saved, str) and saved:
+            self.note = saved  # shown on the dashboard's status line when this screen closes
         self.load()
+
+
+def declared_fields(items, values):
+    """[Field] for the fields a plugin declared with mv.dashboard.settings(fields): text, int, float, bool or choice."""
+    fields = []
+    for item in items:
+        where = tuple(str(item["path"]).split("."))
+        kind, options = item.get("kind", "text"), item.get("options") or ()
+        if kind == "bool":
+            kind, options = "choice", BOOL_OPTIONS
+        elif kind == "choice":
+            options = tuple((value, shown(value)) for value in options)
+        made = field(".".join(where), where, clean(item.get("label") or ".".join(where)), kind, values,
+                     item.get("placeholder", ""), options)
+        made.help = clean(item.get("help") or "")
+        fields.append(made)
+    return fields
 
 
 def schema_fields(schema, values, path=()):
@@ -296,9 +316,16 @@ class PluginSettingsScreen(FieldScreen):
         banner = self.query_one("#plugin-settings-problem", Static)
         banner.display = bool(problem)
         banner.update(f"This settings file cannot be used: {clean(problem)}" if problem else "")
-        fields, self.skipped = schema_fields(settings["schema"], settings.get("values") or {})
+        if settings.get("fields") is not None:
+            fields, self.skipped = declared_fields(settings["fields"], settings.get("values") or {}), []
+        else:
+            fields, self.skipped = schema_fields(settings["schema"], settings.get("values") or {})
         body = self.query_one("#plugin-settings-body", VerticalScroll)
-        body.mount(*self.field_rows(fields))
+        rows = self.field_rows(fields)
+        for row, made in zip(rows, fields):
+            body.mount(row)
+            if made.help:
+                body.mount(Static(made.help, classes="fhelp", markup=False))
         if self.skipped:
             body.mount(Static("Edit these in " + clean(settings.get("path") or "the settings file") + ": "
                               + ", ".join(clean(name) for name in self.skipped), classes="cwarn", markup=False))

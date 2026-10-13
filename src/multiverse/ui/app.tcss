@@ -112,5 +112,6 @@ Form, Details, ArtifactPreview, CompactionScreen, AgentScreen, PluginsScreen, Pl
 #plugin-details { height: auto; color: $mv-subtext0; }
 #plugin-settings-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
 #plugin-settings-body { height: 1fr; scrollbar-size: 1 1; }
+.fhelp { height: auto; padding-left: 22; color: $mv-overlay1; }
 #inspect-plugins { height: auto; max-height: 4; color: $mv-subtext0; }
 #inspect-plugins { display: none; }

@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
 from multiverse.ui.compaction import AgentScreen, CompactionScreen, apply_changes, sections
+from multiverse.ui.plugins_screen import PluginsScreen
 from multiverse.ui.settings import Choice, Field
 from multiverse.ui.tree import group_key
 from multiverse.ui.screens import KEYS
@@ -162,30 +163,34 @@ class EditLogicTests(unittest.TestCase):
         self.assertIs(new["enabled"], True)
 
 
-class CompactionKeyService(FakeService):
-    """The compaction plugin's `c` key, which opens CompactionScreen for the selected scope."""
+class CompactionPluginService(FakeService):
+    """The compaction plugin, whose settings screen is CompactionScreen: reached with P, then Configure."""
 
     def __init__(self):
         super().__init__()
-        key = SimpleNamespace(key="c", label="Compaction", action=None, screen="screens:CompactionScreen")
-        self.keys = {"c": ("compaction", "Compaction", None, key)}
+        settings = {"path": "compaction.json", "source": "file", "problem": None, "schema": None, "values": {},
+                    "screen": "screens:CompactionScreen"}
+        self.items = [dict(self.items[0], name="compaction", settings=settings)]
 
     def on_here(self, root):
         return {"compaction"}
 
-    def screen_class(self, loaded, reference):
+    def settings_screen(self, root, name, reference):
         return CompactionScreen
 
 
 class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.backend = FakeBackend()
-        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=CompactionKeyService())
+        self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=CompactionPluginService())
 
-    async def press_c(self, pilot):
-        """The plugin's key is known once the registry has loaded; then c opens the screen."""
-        await self.until(pilot, lambda: self.app.snapshot is not None and "c" in self.app.plugin_keys, "the plugin key")
-        await pilot.press("c")
+    async def open_settings(self, pilot):
+        """What a person does: P for the Plugins screen, then Configure on the compaction plugin."""
+        await self.until(pilot, lambda: self.app.snapshot is not None and self.app.visible_rows, "the dashboard")
+        await pilot.press("P")
+        await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen)
+                         and self.app.screen.query_one("#plugins-table", DataTable).row_count == 1, "the Plugins screen")
+        await pilot.press("enter")
         await self.until(pilot, lambda: isinstance(self.app.screen, CompactionScreen), "the compaction screen")
 
     async def settle(self, pilot):
@@ -213,20 +218,23 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
 
     async def open(self, pilot):
         await self.settle(pilot)
-        await self.press_c(pilot)
+        await self.open_settings(pilot)
         await self.settle(pilot)
         return self.app.screen
 
     def widget(self, screen, key):
         return screen.widgets[key]
 
-    async def test_the_key_comes_from_the_plugin_help_lists_it_and_the_footer_stays_unchanged(self):
+    async def test_there_is_no_c_key_any_more_the_screen_is_reached_from_the_plugins_screen(self):
         self.assertNotIn("Compaction settings", KEYS)
+        self.assertIn("P              Plugins", KEYS)
         self.assertNotIn("c", [key for binding in self.app.BINDINGS for key in binding.key.split(",")])
         async with self.app.run_test(size=(100, 40)) as pilot:
-            await self.until(pilot, lambda: "c" in self.app.plugin_keys, "the plugin key")
-            self.assertIn("compaction: Compaction", self.app.plugin_help())
-            self.assertNotIn("c", [binding.key for binding in self.app.BINDINGS if binding.show])
+            await self.until(pilot, lambda: self.app.snapshot is not None, "the dashboard")
+            await pilot.press("c")
+            await pilot.pause(0.2)
+            self.assertNotIsInstance(self.app.screen, CompactionScreen)
+            self.assertNotIn("P", [binding.key for binding in self.app.BINDINGS if binding.show])
 
     async def test_sections_fill_from_the_file_and_defaults_are_placeholders(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
@@ -274,8 +282,9 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             expected["default"]["k"] = 4
             del expected["harnesses"]["claude"]["builder"]["effort"]
             self.assertEqual(self.backend.saved, [expected])
-            self.assertNotIsInstance(self.app.screen, CompactionScreen)
-            self.assertIn("saved", str(self.app.query_one("#status", Static).render()))
+            self.assertIsInstance(self.app.screen, PluginsScreen)  # back where it was opened from
+            await pilot.press("escape")
+            await self.until(pilot, lambda: "saved" in str(self.app.query_one("#status", Static).render()), "the status line")
 
     async def test_escape_discards_and_a_rejected_save_stays_open_with_the_error(self):
         async with self.app.run_test(size=(100, 40)) as pilot:
@@ -294,6 +303,7 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("escape")
             await self.settle(pilot)
             self.assertNotIsInstance(self.app.screen, CompactionScreen)
+            self.assertIsInstance(self.app.screen, PluginsScreen)
             self.assertEqual(self.backend.saved, [])
 
     async def test_an_unusable_file_is_shown_at_the_top(self):
@@ -312,7 +322,7 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(pilot)
             review = self.backend.root / "subverses/pr-review"
             self.app.select_key(group_key(review))
-            await self.press_c(pilot)
+            await self.open_settings(pilot)
             await self.settle(pilot)
             self.assertEqual(calls, [review])
             self.assertEqual(self.app.screen.scope_name, "pr-review")
@@ -417,11 +427,11 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
         self.backend.long_plan = 60
         heights = []
         for size in ((100, 30), (100, 50)):
-            app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=CompactionKeyService())
+            app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=CompactionPluginService())
             async with app.run_test(size=size) as pilot:
                 self.app = app
                 await self.settle(pilot)
-                await self.press_c(pilot)
+                await self.open_settings(pilot)
                 await self.until(pilot, lambda: app.screen.query_one("#compaction-agents", DataTable).row_count == 1,
                                  "the compaction screen")
                 app.screen.query_one("#compaction-agents", DataTable).focus()

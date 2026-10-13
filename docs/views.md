@@ -113,7 +113,7 @@ error with the default hierarchy columns. Missing configuration uses defaults.
 
 ## Compaction settings
 
-`c` (a key of the compaction plugin, listed under PLUGINS in `?` help, and working in scopes where that plugin is on) opens the tree-compaction settings of the selected scope: the `compaction.json` at
+The compaction plugin's settings screen, reached with `P` (Plugins), selecting compaction and pressing Enter (Configure) in a scope where the plugin is on, edits the tree-compaction settings of the selected scope: the `compaction.json` at
 its root, and the scope's agents. One screen edits the shared settings (`enabled`, the
 default scheduler with its budget, image mode and parameters) and a section per
 harness (`enabled` and its default scheduler either follow the universe settings or
@@ -128,4 +128,32 @@ Enter on an agent in the table opens its screen: status, whether it follows the 
 settings or overrides them with its own scheduler, and a per-turn plan preview (share, raw or summarized, tree
 built or missing) that follows the fields as they are edited, without saving. Ctrl+Enter
 saves the scheduler or returns the agent to the default. See [compaction.md](compaction.md)
-for what the settings mean. The key is not in the footer, which is full.
+for what the settings mean.
+
+## Plugins in a portal
+
+Entering a subverse opens its portal: the dashboard scoped to that subverse, with its own
+`views/default.json`. Nothing is inherited from the parent's view, as with `plugins.json`
+and settings. Plugins apply to the portal as follows.
+
+- **Columns.** A view may name a plugin's column (`name`, or `plugin:name` always). The name
+  is resolved over the portal's scope tree, so an ancestor's view can show a column whose plugin
+  is on only below it: rows where the plugin is off show `—`. A portal with widgets gives the
+  table about half the width, and a plugin column is hidden below the compact width unless the
+  plugin registered it `compact`.
+- **Widgets.** A widget `type` may name a plugin panel (`type` or `plugin:type`) when that plugin
+  is on in the portal's scope; elsewhere the widget says `needs plugin X, which is off here`.
+  A plugin that renders its panel from data (`mv.dashboard.panel(type, render)`) supplies
+  Markdown, Table or Artifacts blocks. They are computed with each refresh in the background with a
+  two-second limit, clipped like the built-in widgets, and shown under the title `Title · plugin`.
+  A panel that fails shows one line and counts as that plugin's error. The widget object in
+  the view is passed to the plugin, so a view can parameterize it:
+  `{"type": "tally", "title": "Counts", "n": 3}`.
+- **Automatic panels.** A panel its plugin marks `auto` appears after the view's own widgets
+  in every portal where the plugin is on, under the plugin's name (or the title it gave). A view
+  decides with `"plugin_panels"`: `"auto"` (the default), `"none"`, or a list of widget types
+  (`"note"` or `"plugin:note"`) to allow. A panel the view names itself is not shown twice. With no
+  plugin on, nothing is added and an existing view looks exactly as before.
+- **Command palette, screens and settings** are the same in every portal: they come from the scope
+  the dashboard was opened at, and each says `plugin is off in <scope>` where it is off. The
+  theme and the plugin host also follow the opened scope, not the portal.

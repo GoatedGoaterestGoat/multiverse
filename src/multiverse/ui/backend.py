@@ -7,7 +7,7 @@ from ..store import read
 from ..tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse)
 from .. import plugins
-from . import columns, theme
+from . import columns, plugin_panels, theme
 from .columns import COLUMNS
 from .tree import counts, within
 from .views import view
@@ -44,6 +44,8 @@ class LocalBackend:
                 member["plugin_cells"] = columns.cells(member)
         else:
             columns.PLUGIN_COLUMNS = {}
+        # Plugin panels render here, off the event loop, from this scope's agents; the dashboard only draws the result.
+        widgets = plugin_panels.expand(root, config["widgets"], members, config.get("plugin_panels", "auto"))
         groups = []
         for scope in universe.tree(root):
             group = {"path": str(scope), "parent": str(scope.parent.parent) if scope != root else None,
@@ -61,7 +63,7 @@ class LocalBackend:
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),
-                "columns": config["columns"], "widgets": config["widgets"], "agents": members}
+                "columns": config["columns"], "widgets": widgets, "agents": members}
 
     def spawn(self, root, values):
         return spawn.run(root, name=values["name"], task=values.get("task", ""),
