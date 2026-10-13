@@ -14,7 +14,7 @@ is part of the API version.
         def action_save(self):             # Ctrl+Enter
             ...                            # self.dismiss("a status line") when done
 
-Promised from API 1.7 (it changes only by adding, or in a new major version):
+Promised from API 1.8 (it changes only by adding, or in a new major version):
 
 - `FieldScreen(root, backend)`: a ModalScreen with `.root` (a Path), `.backend`,
   `.fields`, `.rows`, `.widgets` and `.saving`. Esc calls `action_close` (it
