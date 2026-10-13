@@ -437,7 +437,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 8)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 9)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - **Stability.** 1.x is promised stable from 1.8, the version compaction uses
   with nothing but the API (step 7 of
@@ -1283,10 +1283,22 @@ multiverse-v2/
   - `claude_transcript(native_id, records)`: a Claude transcript where Claude
     keeps it.
   - `executable(name, script)`: a fake program on `PATH`.
+  - `module(name)`: a module of the plugin under test, such as
+    `"engine.store"`, as mv2 loaded it for the test (1.9).
   - `write_plugin`, `enable`, `subverse` and `entry`, for tests that need
     other plugins or scopes.
-  - Dashboard tests run the app with Textual's `App.run_test()`, as mv2's own
-    do.
+  - `dashboard(size=, root=)` (1.9): the real dashboard on the test's
+    universe with the plugins really loaded, used as `async with
+    self.dashboard() as d` in a test that is also an
+    `IsolatedAsyncioTestCase`. There is no fake backend to keep in step with
+    mv2. A small set of actions drives it: `open_plugins()`,
+    `open_settings(name)` (P, the plugin, Configure), `run_action(title)`,
+    `press`, `until`, `select`, `enter`/`back`, `table()`, `local_view()`,
+    `status` and `header`. `multiverse.plugins.dashboard_testing`'s docstring
+    lists exactly what is promised; the backend's methods are not.
+- `multiverse.plugins.testing.plugin_module(directory, name)` (1.9) imports a
+  plugin's module as mv2 does, with no universe and whether or not the plugin is
+  on anywhere: for test modules that import the plugin's code at module level.
 - `PluginTestCase` loads plugins afresh for each test, so a module of a
   previous test's load is gone. Keep a plugin's relative imports at module
   level: one inside a function (`from .engine import x`) fails when an old

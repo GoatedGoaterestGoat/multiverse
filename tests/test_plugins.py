@@ -1,4 +1,5 @@
 """The plugin core: manifests, discovery, trust, plugins.json, settings, loading and the API."""
+import importlib
 import json
 import os
 from pathlib import Path
@@ -100,7 +101,7 @@ class DiscoveryTest(PluginTestCase):
 
     def test_missing_invalid_and_incompatible_plugins_say_why(self):
         self.enable("ghost")
-        self.write_plugin("future", {"api": "1.9"})
+        self.write_plugin("future", {"api": "1.999"})
         self.enable("future")
         (self.plugins_dir / "bad").mkdir()
         (self.plugins_dir / "bad" / "plugin.json").write_text("[]")
@@ -108,7 +109,7 @@ class DiscoveryTest(PluginTestCase):
         self.assertEqual(states["ghost"][0], "missing")
         self.assertEqual(states["future"][0], "incompatible")
         have = ".".join(map(str, loader.API_VERSION))
-        self.assertIn(f"needs plugin API 1.9; this mv2 has {have}; update mv2", states["future"][1])
+        self.assertIn(f"needs plugin API 1.999; this mv2 has {have}; update mv2", states["future"][1])
         self.assertEqual(states["bad"][0], "invalid")
 
     def test_safe_mode_loads_nothing(self):
@@ -440,3 +441,28 @@ class NoDashboardKeysTest(PluginTestCase):
             loader.load(self.entry(name))
         except plugins.PluginError as error:
             return error
+
+
+class TestingHelpersTest(PluginTestCase):
+    def setUp(self):
+        super().setUp()
+        self.directory = self.write_plugin("deep", {"module": "plugin"}, {
+            "plugin.py": "from .engine import store\ndef register(mv): pass\n",
+            "engine/__init__.py": "",
+            "engine/store.py": "from .model import VALUE\ndef later():\n    from .model import VALUE as again\n    return again\n",
+            "engine/model.py": "VALUE = 42\n"})
+
+    def test_plugin_module_needs_no_universe_and_is_the_one_mv2_loads(self):
+        from multiverse.plugins.testing import plugin_module
+        store = plugin_module(self.directory, "engine.store")  # the plugin is not on anywhere
+        self.assertEqual((store.VALUE, store.later()), (42, 42))
+        self.assertIs(plugin_module(self.directory, "engine.store"), store)  # one copy per process
+        self.enable("deep")
+        self.assertIs(importlib.import_module(f"{loader.load(self.entry('deep')).package}.engine.store"), store)
+        with self.assertRaises(FileNotFoundError):
+            plugin_module(self.work / "nowhere", "engine.store")
+
+    def test_module_of_the_plugin_under_test(self):
+        self.plugin = self.directory
+        self.enable("deep")
+        self.assertEqual(self.module("engine.model").VALUE, 42)

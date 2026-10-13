@@ -16,6 +16,7 @@ executables, no inherited agent identity, and `plugin` found through
 MV2_PLUGIN_PATH and turned on. Nothing here starts an agent, tmux or a native
 harness: `agent()` writes an agent's records and `executable()` a fake program.
 """
+import importlib
 import json
 import os
 from pathlib import Path
@@ -26,6 +27,21 @@ from unittest import mock
 from . import config, loader
 from .. import plugins
 from ..universe import templates
+
+def plugin_module(directory, name):
+    """A module of the plugin at `directory` (`name` such as "engine.store"), imported as mv2 imports it:
+    one copy per process, with no universe and whether or not the plugin is on anywhere (API 1.9).
+
+    For test modules that import a plugin's own modules at module level, before
+    any test's universe exists. Its relative imports work as they do in mv2."""
+    directory = Path(directory).resolve()
+    plugin = json.loads((directory / "plugin.json").read_text())["name"]
+    with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(directory)}):
+        found = loader.entry(None, plugin)
+    if Path(found.directory).resolve() != directory:
+        raise RuntimeError(f"mv2 found {plugin} at {found.directory}, not {directory}")
+    return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
+
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
            "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
@@ -102,6 +118,18 @@ class PluginTestCase(unittest.TestCase):
         if name is None:
             name = json.loads((Path(self.plugin) / "plugin.json").read_text())["name"]
         return loader.load(self.entry(name, root))
+
+    def module(self, name):
+        """A module of the plugin under test (`plugin`), as mv2 loaded it for this test (API 1.9)."""
+        return importlib.import_module(f"{self.loaded().package}.{name}")
+
+    def dashboard(self, size=(120, 40), root=None):
+        """The real dashboard on this universe with the plugins really loaded, driven by verbs (API 1.9).
+
+        Use it with `async with` in a test that is also an IsolatedAsyncioTestCase; see
+        multiverse.plugins.dashboard_testing for what a test may rely on."""
+        from .dashboard_testing import Dashboard
+        return Dashboard(self, size=size, root=root)
 
     def agent(self, name, harness="claude", root=None, native_id=None, runtime=None, **properties):
         """Write an agent's records (properties.json, runtime.json) and return its directory. No process starts."""
