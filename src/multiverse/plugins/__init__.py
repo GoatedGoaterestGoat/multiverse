@@ -6,6 +6,7 @@ counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
 answer goes on without it. See docs/plugins.md.
 """
+from dataclasses import asdict
 import json
 from pathlib import Path
 
@@ -185,6 +186,7 @@ def listing(root):
                 "problem": found.problem, "errors": recent.get(found.name, []),
                 "permissions": manifest.permission_texts() if manifest else [],
                 "commands": dict(manifest.commands) if manifest else {},
+                "provides": _provides(found),
                 "settings": None,
                 "shadowed": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed]}
         if manifest is not None and manifest.settings is not None:
@@ -196,9 +198,26 @@ def listing(root):
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": current.problem or schema_problem, "schema": schema,
                                 "values": current.values,
-                                "screen": (found.loaded.registrations.settings_screen if found.loaded else None)}
+                                "screen": (found.loaded.registrations.settings_screen if found.loaded else None),
+                                "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
+                                           if found.loaded and found.loaded.registrations.settings_fields else None)}
         result.append(item)
     return result
+
+
+def awaiting_migration(root):
+    """{"plugin-settings/NAME.json": legacy file name} for each plugin whose pre-plugin settings file is still
+    here and that has no settings file yet. Manifests only, no plugin code: for `mv2 refresh`, which must not
+    add a template's default settings file in front of a universe's real, unmigrated settings."""
+    found = {}
+    for entry_ in entries(root):
+        manifest = entry_.manifest
+        if manifest is None or manifest.settings is None or not manifest.settings.legacy:
+            continue
+        target = settings_files.path(root, entry_.name)
+        if (Path(root) / manifest.settings.legacy).is_file() and not target.exists():
+            found[target.relative_to(root).as_posix()] = manifest.settings.legacy
+    return found
 
 
 def migrations(root):
@@ -295,6 +314,42 @@ def install(name):
     if result.returncode != 0:
         raise PluginError(f"git could not fetch {name}: {(result.stderr or result.stdout).strip()}")
     return {"name": name, "path": str(known[name]), "installed": (known[name] / "plugin.json").is_file()}
+
+
+def _provides(found):
+    """What a plugin adds: from its manifest, and once it is loaded in this process, from what it registered."""
+    manifest = found.manifest
+    if manifest is None:
+        return None
+    known = {"commands": sorted(manifest.commands), "statusline": [item.name for item in manifest.statusline],
+             "events": list(manifest.events)}
+    if found.loaded is None:
+        return {**known, "columns": None, "actions": None, "panels": None, "keys": None, "screens": None,
+                "services": None}
+    registered = found.loaded.registrations
+    return {**known, "columns": sorted(registered.columns), "actions": sorted(registered.actions),
+            "panels": sorted({*registered.panels, *registered.data_panels}),
+            "keys": sorted(key.key for key in registered.keys), "screens": sorted(registered.screens),
+            "services": len(registered.services)}
+
+
+def dashboard_actions(root):
+    """[(Loaded, name, function)] of the command palette actions plugins on here register, in plugin-name order."""
+    return [(loaded, name, function) for loaded in loader.active(root)
+            for name, function in sorted(loaded.registrations.actions.items())]
+
+
+def dashboard_panels(root):
+    """[(Loaded, type, spec)] of the panels plugins on here register, in plugin-name order.
+
+    spec is a loader.DataPanel (render, title, auto) or, for the class form, the "module:Class" string."""
+    found = []
+    for loaded in loader.active(root):
+        for kind, spec in sorted(loaded.registrations.data_panels.items()):
+            found.append((loaded, kind, spec))
+        for kind, reference in sorted(loaded.registrations.panels.items()):
+            found.append((loaded, kind, reference))
+    return found
 
 
 def set_enabled(root, name, on):

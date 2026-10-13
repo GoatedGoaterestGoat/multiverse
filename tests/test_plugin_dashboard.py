@@ -187,3 +187,117 @@ class PluginColumnScreenTest(PluginTestCase, IsolatedAsyncioTestCase):
             self.assertEqual(titles[1], "Shout")
             self.assertIn("WORKER", [str(cell) for cell in table.get_row("agent:a")] if "agent:a" in table.rows else
                           [str(table.get_row_at(index)[1]) for index in range(table.row_count)])
+
+
+DATA_PANEL = """
+from multiverse.plugins import api
+
+def register(mv):
+    @mv.dashboard.panel("board", title="Board", auto=True)
+    def board(context):
+        names = ", ".join(sorted(agent.name for agent in context.agents)) or "nobody"
+        return [api.Markdown(f"**{context.widget.get('heading', 'Agents')}**: {names}"),
+                api.Table(("plugin",), tuple((name,) for name in sorted(context.plugins))),
+                api.Artifacts((api.Artifact("Report", "artifacts/r.md"), {"label": "Log", "path": "log.txt"}))]
+    mv.dashboard.panel("legacy", "widgets:Old")
+"""
+
+
+class DataPanelTest(PluginTestCase):
+    def setUp(self):
+        super().setUp()
+        self.write_plugin("boards", {"module": "plugin", "extends": ["dashboard.panel"], "permissions": ["agents.read"]},
+                          {"plugin.py": DATA_PANEL})
+        self.write_plugin("blind", {"module": "plugin", "extends": ["dashboard.panel"]}, {"plugin.py": DATA_PANEL})
+        self.enable("boards")
+        self.enable("blind")
+
+    def test_data_panels_render_plain_blocks(self):
+        from multiverse import plugins
+        from multiverse.plugins import api
+        found = {(loaded.name, kind): spec for loaded, kind, spec in plugins.dashboard_panels(self.root)}
+        self.assertEqual(found[("boards", "legacy")], "widgets:Old")
+        spec = found[("boards", "board")]
+        self.assertEqual((spec.title, spec.auto), ("Board", True))
+        rows = [{"id": "a1", "name": "worker", "universe": str(self.root), "live": "alive"}]
+        boards = next(loaded for loaded, kind, _ in plugins.dashboard_panels(self.root) if loaded.name == "boards")
+        context = api.panel_context(boards, self.root, {"heading": "Crew"}, rows, plugins.on_here(self.root))
+        self.assertEqual([agent.name for agent in context.agents], ["worker"])
+        widgets = api.blocks(spec.render(context), spec.title)
+        self.assertEqual(widgets[0], {"type": "markdown", "title": "Board", "text": "**Crew**: worker"})
+        self.assertEqual(widgets[1]["rows"], [["blind"], ["boards"]])
+        self.assertEqual([item["label"] for item in widgets[2]["items"]], ["Report", "Log"])
+        blind = next(loaded for loaded, _, _ in plugins.dashboard_panels(self.root) if loaded.name == "blind")
+        self.assertEqual(api.panel_context(blind, self.root, {}, rows, set()).agents, ())  # no agents.read
+
+    def test_unusable_results_are_refused(self):
+        from multiverse.plugins import api
+        for result, expected in ((api.Table(("a", "b"), (("1",),)), "same length"), ("text", "not str"),
+                                 (api.Artifacts(("x",)), "Artifact")):
+            with self.subTest(result=result):
+                with self.assertRaisesRegex(api.Error, expected):
+                    api.blocks(result, "T")
+
+    def test_listing_says_what_a_plugin_provides(self):
+        from multiverse import plugins
+        from multiverse.plugins import loader
+        item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "boards")
+        self.assertIsNone(item["provides"]["panels"])  # not loaded in this process yet
+        loader.load(self.entry("boards"))
+        item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "boards")
+        self.assertEqual(item["provides"]["panels"], ["board", "legacy"])
+        self.assertEqual(item["provides"]["commands"], [])
+
+
+SETTINGS_ENTRY = """
+from multiverse.plugins import api
+
+def register(mv):
+    mv.dashboard.settings([api.Field("greeting", "Greeting", placeholder="hello"),
+                           api.Field("mode", "Mode", "choice", options=("fast", "slow"))])
+
+    @mv.dashboard.action("Say hello")
+    def hello(context):
+        return f"hello from {context.scope.name}"
+"""
+
+
+class SettingsEntryTest(PluginTestCase):
+    def test_declared_fields_and_palette_actions(self):
+        from multiverse import plugins
+        from multiverse.plugins import loader
+        self.write_plugin("greeter", {"module": "plugin", "extends": ["dashboard.settings", "dashboard.action"],
+                                      "settings": {"version": 1}}, {"plugin.py": SETTINGS_ENTRY})
+        self.enable("greeter")
+        loader.load(self.entry("greeter"))
+        item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "greeter")
+        self.assertEqual([field["path"] for field in item["settings"]["fields"]], ["greeting", "mode"])
+        self.assertIsNone(item["settings"]["screen"])
+        self.assertEqual(item["provides"]["actions"], ["Say hello"])
+        [(loaded, name, function)] = plugins.dashboard_actions(self.root)
+        from types import SimpleNamespace
+        self.assertEqual(function(SimpleNamespace(row=None, scope=self.root)), "hello from .multiverse")
+
+    def test_a_screen_entry_and_what_is_refused(self):
+        from multiverse.plugins import api, loader
+        self.write_plugin("own", {"module": "plugin", "extends": ["dashboard.settings"]}, {
+            "plugin.py": "def register(mv):\n    mv.dashboard.settings(screen='screens:Settings')\n"})
+        self.enable("own")
+        self.assertEqual(loader.load(self.entry("own")).registrations.settings_screen, "screens:Settings")
+        with self.assertRaisesRegex(api.Error, "choice field needs its options"):
+            api.Field("mode", "Mode", "choice")
+        cases = (("mv.dashboard.settings()", "either fields or screen"),
+                 ("mv.dashboard.settings([api.Field('a', 'A')])", 'declares no "settings"'),
+                 ("mv.dashboard.action('x', lambda c: 1)", 'does not list it in "extends"'))
+        for body, expected in cases:
+            with self.subTest(body):
+                loader.reset()
+                self.write_plugin("bad", {"module": "plugin", "extends": ["dashboard.settings"]},
+                                  {"plugin.py": f"from multiverse.plugins import api\ndef register(mv):\n    {body}\n"})
+                self.enable("bad")
+                try:
+                    loader.load(self.entry("bad"))
+                    problem = ""
+                except loader.PluginError as error:
+                    problem = str(error)
+                self.assertIn(expected, problem)

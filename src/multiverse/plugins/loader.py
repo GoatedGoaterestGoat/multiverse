@@ -33,7 +33,7 @@ import types
 from ..store import now
 from . import config, manifest as manifests, settings as settings_files, trust
 
-API_VERSION = (1, 4)
+API_VERSION = (1, 5)
 BUNDLED = Path(__file__).parent / "builtin"
 # plugins/ beside src/ when this code runs from a checkout; None when it runs from an installed package.
 _REPOSITORY = Path(__file__).resolve().parents[3]
@@ -78,6 +78,15 @@ class Column:
 
 
 @dataclass
+class DataPanel:
+    """A local view panel a plugin renders from data: render(api.PanelContext) gives api blocks."""
+    kind: str
+    render: object
+    title: str | None = None
+    auto: bool = False  # shown in every scope where the plugin is on, unless a view opts out
+
+
+@dataclass
 class Key:
     key: str
     label: str
@@ -92,14 +101,17 @@ class Registrations:
     bootstrap: list = field(default_factory=list)
     doctor: list = field(default_factory=list)
     columns: dict = field(default_factory=dict)
-    panels: dict = field(default_factory=dict)  # type -> "module:Class"
+    panels: dict = field(default_factory=dict)  # type -> "module:Class" (a Panel class)
+    data_panels: dict = field(default_factory=dict)  # type -> DataPanel: render(PanelContext) -> blocks
     inspector: list = field(default_factory=list)
     theme: dict | None = None
     keys: list = field(default_factory=list)
     screens: dict = field(default_factory=dict)  # name -> "module:Class"
     settings_check: object = None
     settings_migrate: object = None  # fn(data, source) -> data, or (data, on) for pre-plugin settings
-    settings_screen: str | None = None  # "module:Class"
+    settings_screen: str | None = None  # "module:Class": the plugin's own settings screen
+    settings_fields: list | None = None  # api.Field: settings shown as these fields rather than from the schema
+    actions: dict = field(default_factory=dict)  # palette name -> fn(context) -> status line
     launch: dict = field(default_factory=dict)  # family -> [fn(LaunchInfo) -> Contribution | None]
     capabilities: dict = field(default_factory=dict)  # name -> fn(SessionInfo) -> api.Capability
     usage: list = field(default_factory=list)  # fn(SessionInfo, usage) -> usage

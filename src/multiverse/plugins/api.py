@@ -107,9 +107,28 @@ class Dashboard(_Points):
             raise Error("A column width is 1 to 120")
         registrations.columns[key] = loader.Column(key, str(title), width, value, bool(compact), bool(flexible), group)
 
-    def panel(self, kind, reference):
-        """A local view widget type, "module:Class": a Panel with parse(widget, title) and compose(view, root, widget, index)."""
-        self._allow("dashboard.panel").panels[str(kind)] = _reference(reference)
+    def panel(self, kind, render=None, *, title=None, auto=False):
+        """A local view widget type a view names as `kind` (or PLUGIN:kind).
+
+        render(PanelContext) returns Markdown, Table, Artifacts or a list of them
+        (API 1.5): plain data the dashboard draws, refreshed with the agent list,
+        off its event loop and within 2 s. With auto=True the panel also shows at
+        the end of every scope's local view where the plugin is on, unless that
+        view's "plugin_panels" leaves it out. `title` defaults to the plugin's name.
+
+        The older form, render="module:Class" (a Panel class with parse and
+        compose, which imports the dashboard), still works. Usable as a decorator factory."""
+        if render is None:
+            return lambda decorated: self.panel(kind, decorated, title=title, auto=auto)
+        registrations = self._allow("dashboard.panel")
+        if isinstance(render, str):
+            registrations.panels[str(kind)] = _reference(render)
+            return render
+        if not callable(render):
+            raise Error('A panel renders with a function of its context, or names "module:Class"')
+        registrations.data_panels[str(kind)] = loader.DataPanel(str(kind), render,
+                                                                 None if title is None else str(title), bool(auto))
+        return render
 
     def inspector(self, function):
         """function(row) -> a line for the agent inspector, or None. Usable as a decorator."""
@@ -123,8 +142,48 @@ class Dashboard(_Points):
             raise Error("A theme maps color names to #rrggbb values")
         registrations.theme = dict(colors)
 
+    def settings(self, fields=None, *, screen=None):
+        """This plugin's settings in the dashboard, opened from the plugin settings screen (P) (API 1.5).
+
+        Without this, the dashboard builds fields from the plugin's settings
+        schema. `fields` (a list of Field) chooses and labels them instead, with
+        the same look and checks. `screen="module:Class"` is the plugin's own
+        screen for settings fields cannot express, built as Class(root=scope,
+        backend=app.backend); a string it dismisses with becomes the status line."""
+        self._allow("dashboard.settings")
+        if (fields is None) == (screen is None):
+            raise Error("settings() takes either fields or screen")
+        registrations = self._loaded.registrations
+        if screen is not None:
+            registrations.settings_screen = _reference(screen)
+            return
+        fields = list(fields)
+        if not fields or not all(isinstance(item, Field) for item in fields):
+            raise Error("settings(fields=...) takes a list of api.Field")
+        if self._loaded.manifest.settings is None:
+            raise Error(f'{self._loaded.name} shows settings fields but declares no "settings" in plugin.json')
+        registrations.settings_fields = fields
+
+    def action(self, name, function=None):
+        """A command palette entry, "PLUGIN: name", for something that is not a setting (API 1.5).
+
+        function(context) runs off the screen's event loop and may return a
+        status line; context.row is a copy of the selected row (or None),
+        context.scope the selected universe's Path. It runs only where the plugin
+        is on. Usable as a decorator factory."""
+        if function is None:
+            return lambda decorated: self.action(name, decorated)
+        registrations = self._allow("dashboard.action")
+        if not isinstance(name, str) or not name.strip() or not callable(function):
+            raise Error("action(name, function) needs a name and a function")
+        registrations.actions[name.strip()] = function
+        return function
+
     def key(self, key, label, action=None, *, screen=None):
-        """A dashboard key, with either an action or a screen.
+        """Deprecated: plugins get no dashboard keys. Use settings() for a settings screen (under P) and
+        action() for the command palette. Goes before the 1.x stability promise.
+
+        A dashboard key, with either an action or a screen.
 
         action(context) runs off the screen's event loop and may return a status
         line; context.row is a copy of the selected row (or None), context.scope
@@ -255,6 +314,100 @@ class Events(_Points):
                     agent={"id": agent.id, "name": agent.name} if isinstance(agent, Agent) else agent, data=data)
 
 
+@dataclass(frozen=True)
+class Field:
+    """One setting on a plugin's settings screen: where it lives in the file and how it is edited.
+
+    path: dotted key ("default.budget"). kind: text, int, float, bool or choice
+    (`options` its values). A blank field means the setting's default, shown as
+    `placeholder`; clearing one removes the key."""
+    path: str
+    label: str
+    kind: str = "text"
+    options: tuple = ()
+    placeholder: str = ""
+    help: str = ""
+
+    def __post_init__(self):
+        if self.kind not in ("text", "int", "float", "bool", "choice"):
+            raise Error("A field's kind is text, int, float, bool or choice")
+        if self.kind == "choice" and not self.options:
+            raise Error("A choice field needs its options")
+        if not isinstance(self.path, str) or not self.path or self.path.startswith("schema"):
+            raise Error("A field's path is a dotted settings key (not schema)")
+
+
+@dataclass(frozen=True)
+class Markdown:
+    """A block of Markdown in a plugin panel. Links are not opened automatically."""
+    text: str
+
+
+@dataclass(frozen=True)
+class Table:
+    """A table in a plugin panel: column titles, and rows of the same length. Cells are literal text."""
+    columns: tuple
+    rows: tuple = ()
+
+
+@dataclass(frozen=True)
+class Artifact:
+    """A file in a plugin panel's Artifacts: a path relative to the universe directory."""
+    label: str
+    path: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class Artifacts:
+    items: tuple
+
+
+@dataclass(frozen=True)
+class PanelContext:
+    """What a panel's render receives. `agents` are the scope tree's agents, empty without agents.read."""
+    universe: "Universe"
+    widget: dict
+    agents: tuple
+    plugins: frozenset
+
+
+def blocks(result, title):
+    """A render's result as the dashboard's widget objects ({"type": "markdown"|"table"|"artifacts", ...}).
+    Raises Error naming what cannot be drawn."""
+    items = result if isinstance(result, (list, tuple)) else [result]
+    found = []
+    for item in items:
+        if isinstance(item, Markdown):
+            found.append({"type": "markdown", "title": title, "text": str(item.text)})
+        elif isinstance(item, Table):
+            columns = [str(column) for column in item.columns]
+            rows = [[str(cell) for cell in row] for row in item.rows]
+            if not columns or any(len(row) != len(columns) for row in rows):
+                raise Error("a Table needs columns, and rows of the same length")
+            found.append({"type": "table", "title": title, "columns": columns, "rows": rows})
+        elif isinstance(item, Artifacts):
+            entries = []
+            for entry in item.items:
+                entry = Artifact(**entry) if isinstance(entry, dict) else entry
+                if not isinstance(entry, Artifact):
+                    raise Error("Artifacts holds Artifact(label, path, description) items")
+                entries.append({"label": str(entry.label), "path": str(entry.path),
+                                "description": str(entry.description)})
+            found.append({"type": "artifacts", "title": title, "items": entries})
+        else:
+            raise Error(f"a panel renders Markdown, Table or Artifacts, not {type(item).__name__}")
+    return found
+
+
+def panel_context(loaded, root, widget, rows, plugins_on):
+    """The PanelContext a data panel of `loaded` gets in the scope at `root`."""
+    mv = Plugin(loaded)
+    agents = tuple(Agent(dict(row), mv) for row in rows if "id" in row and "name" in row and "universe" in row) \
+        if mv.can("agents.read") else ()
+    return PanelContext(mv.universe(root), dict(widget or {}), agents, frozenset(plugins_on))
+
+
 @dataclass
 class ServiceContext:
     """What a service's start() receives: the universes the host runs for, and an event set when it must stop."""
@@ -374,9 +527,7 @@ class SettingsAccess:
         return function
 
     def screen(self, reference):
-        """This plugin's own settings screen, "module:Class", in place of the one built from its schema.
-
-        Built as Class(root=Path, backend=app.backend), like dashboard screens."""
+        """Deprecated alias of mv.dashboard.settings(screen=...)."""
         self._loaded.registrations.settings_screen = _reference(reference)
 
 

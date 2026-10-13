@@ -75,6 +75,14 @@ class MigrateTest(PluginTestCase):
         child = self.subverse("child")
         self.assertFalse(self.entry("tree", child).on)  # no legacy file there
 
+    def test_refresh_can_tell_which_settings_files_await_migration(self):
+        self.assertEqual(plugins.awaiting_migration(self.root), {})
+        (self.root / "tree.json").write_text("{}")
+        self.assertEqual(plugins.awaiting_migration(self.root), {"plugin-settings/tree.json": "tree.json"})
+        (self.root / "plugin-settings").mkdir()
+        (self.root / "plugin-settings/tree.json").write_text('{"schema": 2}')
+        self.assertEqual(plugins.awaiting_migration(self.root), {})
+
     def test_a_legacy_file_with_its_plugin_off_is_reported(self):
         (self.root / "tree.json").write_text("{}")
         self.assertEqual(plugins.problems(self.root), [])

@@ -23,6 +23,9 @@ EXTENSION_POINTS = frozenset({
     "cli", "catalog", "bootstrap", "doctor",
     "dashboard.column", "dashboard.panel", "dashboard.inspector", "dashboard.theme",
     "dashboard.key", "dashboard.screen",
+    # API 1.5: a plugin's way into the dashboard is its settings (under P) and palette actions;
+    # dashboard.key is deprecated and goes before the 1.x stability promise.
+    "dashboard.settings", "dashboard.action",
     # API 1.1: the harness side.
     "launch", "capabilities", "usage", "statusline", "helper",
     # API 1.2: events and long-running work in the plugin host.

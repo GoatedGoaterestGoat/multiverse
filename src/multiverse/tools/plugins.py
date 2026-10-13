@@ -221,9 +221,11 @@ def check(directory):
         if missing:
             problems.append(f"declares commands it does not register: {', '.join(missing)}")
         used = {"cli": registered.commands, "bootstrap": registered.bootstrap, "doctor": registered.doctor,
-                "dashboard.column": registered.columns, "dashboard.panel": registered.panels,
+                "dashboard.column": registered.columns, "dashboard.panel": {**registered.panels, **registered.data_panels},
                 "dashboard.inspector": registered.inspector, "dashboard.theme": registered.theme,
                 "dashboard.key": registered.keys, "dashboard.screen": registered.screens,
+                "dashboard.settings": registered.settings_screen or registered.settings_fields,
+                "dashboard.action": registered.actions,
                 "launch": registered.launch or found.harnesses, "capabilities": registered.capabilities,
                 "usage": registered.usage, "statusline": found.statusline, "helper": registered.helpers,
                 "events": registered.handlers, "service": registered.services}

@@ -120,8 +120,7 @@ Each universe and subverse may have a `plugins.json` at its root:
 {
   "schema": 1,
   "enabled": {"compaction": true, "remote": false, "notifier": true},
-  "theme": null,
-  "keys": {}
+  "theme": null
 }
 ```
 
@@ -142,8 +141,8 @@ Each universe and subverse may have a `plugins.json` at its root:
 - There is no live inheritance, the same rule as settings and views. A
   subverse made from a template gets the template's `plugins.json`. Otherwise
   it has its own file or the defaults.
-- `theme` picks one theme plugin. `keys` remaps or frees a dashboard key when
-  two plugins, or a plugin and the user, want the same one.
+- `theme` picks one theme plugin. `keys` settled plugin dashboard keys, which
+  are deprecated; it goes with them.
 
 ```sh
 mv2 plugins                       # every plugin found: source, version, on/off here, problems
@@ -172,7 +171,7 @@ decides:
 | Scope | Extension points | Decided by |
 | --- | --- | --- |
 | **Agent** | launch contributions, harness extensions, capabilities, usage, status-line items, catalog entries, doctor checks | The agent's own universe or subverse. A Claude agent in a subverse that disables compaction gets no compaction, even if the root enables it. |
-| **Dashboard** | theme, keys, screens, columns, panels, inspector lines | The dashboard loads every plugin that is on anywhere in the tree it shows. A key or screen acting on a scope (`c` on a subverse) works only where that scope enables the plugin, and otherwise says so. A column a view names shows `—` for agents whose universe has the plugin off. The theme and global keys come from the top scope the dashboard opened. |
+| **Dashboard** | theme, settings screens, palette actions and screens, columns, panels, inspector lines | The dashboard loads every plugin that is on anywhere in the tree it shows. A settings screen, palette action or screen acting on a scope works only where that scope enables the plugin, and otherwise says so. A column a view names shows `—` for agents whose universe has the plugin off. The theme and the palette entries come from the top scope the dashboard opened. |
 | **Host** | services, event handlers | The top-level universe the host runs for. A handler receives events from every scope where its plugin is on. |
 
 ### Settings
@@ -526,12 +525,12 @@ for several plugins using it at once.
 | `mv.usage.adjust(fn)` | `fn(SessionInfo, usage)` returns usage, for example with the context replaced and marked estimated | Applied in plugin-name order, after the adapter. Compaction is the only user so far. |
 | `statusline` in the manifest, and `mv.statusline.write(agent, name, text)` | A status-line item the manifest declares (`{"trees": {"claude": true, "tmux": false}}`), with its text written by whatever process knows it (see [Status lines](#status-lines)) | Each name has one owner, and core's names are refused. The order and on/off come from `statusline.json`, as today. |
 | `mv.dashboard.column(key, title, width, value, compact=, flexible=, group=)` | An agent column: `value(row)` for agent rows, `group(row)` for subverse rows | Core keys are reserved. A view can name it `KEY` while that is unique, and `plugin:KEY` always works. A view keeps a plugin column it names even while the plugin is off, and shows `—` for rows whose universe has it off. A short name that later becomes ambiguous shows `—`, and the clash is listed on the Plugins screen. |
-| `mv.dashboard.panel(type, panel)` | A view widget type for `views/*.json` | The same naming rule. A plugin panel is code, so it shows only where its plugin is on. Elsewhere it shows "needs plugin X". |
+| `mv.dashboard.panel(type, render, title=, auto=)` | A view widget type for `views/*.json`. `render(api.PanelContext)` returns `api.Markdown`, `api.Table`, `api.Artifacts` or a list of them: plain data the dashboard draws, refreshed with the agent list, off its event loop within 2 s. The context has the scope's `universe`, the view's `widget` object, the scope tree's `agents` (with `agents.read`) and the `plugins` on there. With `auto=True` it also shows after the view's own widgets wherever the plugin is on, unless the view's `"plugin_panels"` (`"auto"`, `"none"` or a list of types) leaves it out. The older class form, `"module:Class"`, stays for interactive panels. | The same naming rule. It shows only where its plugin is on; elsewhere it shows "needs plugin X". |
 | `mv.dashboard.inspector_fact(fn)` | A function in `AGENT_FACTS` | Core facts first, then plugins in name order. Each fact is wrapped so an error shows as one line. |
 | `mv.dashboard.theme(colors)` | A full or partial palette by `theme.py` name | Only the theme `plugins.json` names is applied. |
-| `mv.dashboard.key(key, label, action, scope="universe")` | A key binding. The action gets the selected row and scope. | Core keys win. Between plugins, `plugins.json` `keys` decides, and otherwise both are refused with a note in `?` help. |
-| `mv.dashboard.screen(name, "module:Class")` | A Textual screen, pushed by a key or the command palette | Namespaced by plugin. |
-| `mv.dashboard.settings(name, fields_fn, save_fn)` | A `FieldScreen` over one of the plugin's config files | The same pattern as compaction's `c` screen today. |
+| `mv.dashboard.settings(fields=None, screen=None)` | The plugin's way into the dashboard: its settings, opened from the core plugin settings screen (`P`). Without this call the dashboard builds fields from the plugin's settings schema. `fields`, a list of `api.Field(path, label, kind, options, placeholder, help)`, chooses and labels them, with the same look and checks. `screen="module:Class"` is the plugin's own screen for what fields cannot express, built as `Class(root=scope, backend=app.backend)`; a string it dismisses with becomes the status line. | One per plugin. |
+| `mv.dashboard.action(name, fn)` | A command palette entry, `PLUGIN: name`, for something that is not a setting. `fn(context)` runs off the event loop and may return a status line. | Namespaced by plugin. Plugins get no dashboard keys: every core key stays core. |
+| `mv.dashboard.screen(name, "module:Class")` | A Textual screen opened from the command palette | Namespaced by plugin. |
 | `events` in the manifest, and `mv.events.on(type, fn)` | `fn(api.Event)` run in the plugin's host worker for each event of a type or pattern (`agent.*`) the manifest's `events` subscribes to. The subscription is what makes core record that type at all. | All handlers for a type run, each in its own error boundary, with a 60 s budget. An `events.gap` event says what was pruned before it could be read. |
 | `mv.events.emit(kind, data, universe=, agent=)` | A `PLUGIN.kind` event in a universe's journal | Namespaced to the plugin. |
 | `mv.service(start, stop=None)` | `start(api.ServiceContext)` runs in a thread of the plugin's worker until it returns or `context.stopping` is set; `stop()` runs when the host stops it | Each plugin has its own worker process. A worker whose service crashes is restarted at most 3 times in 5 minutes. |
@@ -1068,7 +1067,7 @@ is absent too.
 | `display.py` "estimated after compaction: conversation only" | Generic in core: it shows `estimated_reason` from the adjuster |
 | `tools/compaction.py`, `cli.py`'s `compaction` | `mv.cli.command("compaction", …)`, with the same arguments and output |
 | `tools/doctor.py` `_compaction` | `mv.doctor.check` |
-| `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | `mv.dashboard.key("c", …)` and `mv.dashboard.screen`. The screens are unchanged, on `FieldScreen`. |
+| `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | `mv.dashboard.settings(screen=…)`, opened from the plugin settings screen (`P`); `c` is free. The screens are unchanged, on `FieldScreen`, and the per-agent scheduler opens from inside them. |
 | Templates' `compaction.json` | `plugins.json` and `plugin-settings/compaction.json` (above) |
 | `tools/doctor.py`'s check of `compaction.json` | The plugin's `check(settings)`, which core's settings validation runs |
 | The `statusline.json` item, the mv2-help skill, the Claude README | The item is unchanged. The skill and README text say compaction is a plugin and how to install it. |
@@ -1326,7 +1325,23 @@ Decided by the user on 2026-10-11:
   and plugin code must not stall its screen. It starts the host instead when a
   plugin needs one.
 
-Under consideration, not decided: replacing plugin dashboard keys
-(`mv.dashboard.key`) with one core key that opens a plugin settings screen,
-from which each plugin opens its own settings (compaction's `c` screen would
-move there). An API change is still possible before the stability promise.
+Decided by the user on 2026-10-13:
+
+- **No plugin hotkeys.** One core key, `P`, opens the plugin settings screen
+  for the selected universe or subverse: every plugin with its on/off state,
+  errors and what it provides there. Configure opens that plugin's settings,
+  as declared fields or its own screen (`mv.dashboard.settings`). Plugin
+  actions that are not settings go in the command palette under the plugin's
+  name (`mv.dashboard.action`), never on a key, and `c` becomes free.
+  `mv.dashboard.key` and `mv.settings.screen` are deprecated in API 1.5 and are
+  removed before the 1.x stability promise, once compaction no longer uses
+  them.
+- **Per-subverse dashboard** (`claude-tui`'s design):
+  - Palette entries and screens are built once from the opened root, and say
+    "<plugin> is off in <scope>" where it is off.
+  - Panels are data-driven, rendered in the snapshot worker under a time
+    budget and refreshed with the fleet; the class form stays for interactive
+    panels.
+  - Auto panels show after a view's own widgets where the plugin is on, with
+    an opt-out through `"plugin_panels"`.
+  - `listing()["provides"]` says on the `P` screen what each plugin adds there.
