@@ -438,8 +438,14 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION = (1, 0)`. Adding something raises the minor version. Removing
-  or changing something raises the major version.
+- `api.VERSION` is `(1, 4)` today. Adding something raises the minor version.
+  Removing or changing something raises the major version.
+- **Stability.** mv2 promises stability for 1.x once compaction uses nothing
+  but `api` (step 7 of [Moving compaction](#moving-compaction-into-a-plugin)).
+  From then on, every new version stays backward compatible: a plugin written
+  against the last promised stable version keeps working on every newer one.
+  Additions raise the minor; anything else needs a new major. Until that
+  promise, 1.x may still change where compaction's move shows a need.
 - mv2 supports the current major and the one before it for at least one
   release. A plugin on the old major loads with a deprecation note in
   `mv2 plugins`.
@@ -1160,8 +1166,8 @@ their own, and mv2's repository includes them as optional Git submodules:
 multiverse-v2/
   .gitmodules
   plugins/
-    compaction/    -> github.com/OWNER/mv2-compaction   (submodule, pinned commit)
-    remote/        -> github.com/OWNER/mv2-remote       (submodule, pinned commit)
+    compaction/    -> github.com/GoatedGoaterestGoat/GOAT                 (submodule, pinned commit)
+    remote/        -> github.com/GoatedGoaterestGoat/mv2-remote-control   (submodule, pinned commit)
   src/multiverse/plugins/builtin/typeahead/   (stays in mv2: it is part of the mod)
 ```
 
@@ -1182,7 +1188,7 @@ multiverse-v2/
   needs a newer API than this mv2 has.
 - **Installed without a checkout.** Each plugin repository is also a Python
   package with a `multiverse.plugins` entry point, so
-  `pip install git+https://github.com/OWNER/mv2-compaction` works for an mv2
+  `pip install git+https://github.com/GoatedGoaterestGoat/GOAT` works for an mv2
   installed with pip. Both routes load the same code.
 - **Updating.** `mv2 update` moves the plugins that are initialized with the
   checkout and never fetches or initializes one that is not. Before the fetch,
@@ -1261,7 +1267,7 @@ against it. Compaction and the remote control come last.
 | **1. Foundation** | `multiverse.plugins`: discovery, manifest, `plugins.json`, `plugin-settings/`, trust, loader, failure boundaries. `api` v1 client and utilities. `mv2 plugins` list/info/enable/disable/settings/check/trust. Extension points for CLI, catalog, bootstrap, doctor, dashboard columns, panels, inspector, theme, keys, screens and settings, plus the Plugins screen. `testing` helpers. The `hello-column` example | None without plugins. `cli.py`'s "no plugin discovery" note goes. |
 | **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, the Codex contract (allowlisted config, instructions, MCP servers on spawn, with the bridge's `thread/start` transform), `runtime.json`'s `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
 | **3. Events and host** | The event journal with segments, retention and emitters. The host supervisor with per-plugin workers. Services. The `cost-item` and `notifier` examples | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
-| **4. Distribution** | Checkout plugins (`plugins/*` submodules), Python entry points, `mv2 plugins install`, `mv2 update` updating initialized submodules, `mv2 plugins migrate`, per-subverse UI with plugin panels in portals, API 1.0 frozen | None |
+| **4. Distribution** | Checkout plugins (`plugins/*` submodules), Python entry points, `mv2 plugins install`, `mv2 update` updating initialized submodules, `mv2 plugins migrate`, `mv2 plugins new` | None |
 | **5. Compaction** | Steps 2 to 8 of [Moving compaction](#moving-compaction-into-a-plugin), with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
 | **6. Remote control** | Its own repository as the `plugins/remote` submodule, under [its rules](#what-the-remote-control-must-do) | None until enabled |
 
@@ -1294,7 +1300,10 @@ Decided by the user on 2026-10-11:
   and compaction moves from `compaction.json` to it with a migration.
 - **Separate repositories:** compaction and the remote control are versioned in
   their own private repositories under `GoatedGoaterestGoat`, included as
-  optional submodules. Their names are not chosen yet.
+  optional submodules: `GOAT` (compaction, keeping its Git history) and
+  `mv2-remote-control`. For now both are local repositories only, beside the mv2
+  checkout. Nothing is pushed until the user signs in as `GoatedGoaterestGoat`
+  and says so.
 - **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
   extensions. Its contract is in [Codex](#codex).
 - **Universe plugins:** allowed, loaded only once trusted at their exact
@@ -1302,6 +1311,13 @@ Decided by the user on 2026-10-11:
 - **Order:** the whole mv2 side first; compaction and the remote control last
   ([Phases](#phases)).
 - **Permissions:** declared and enforced at the API, with no sandbox.
+- **API stability:** 1.x is promised stable once compaction's step 7 is done
+  (compaction uses only `api`); after that, a plugin written against the last
+  promised stable version keeps working on every newer version
+  ([Versioning](#versioning)).
+- **Per-subverse dashboard:** the per-subverse UI (plugin panels in a
+  subverse's portal) is `claude-tui`'s to design; it asks for any API it
+  needs.
 - **The host:** a long-running host, as the general place for any plugin's
   event handlers and services, not shaped by one plugin
   ([The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)).
@@ -1310,8 +1326,7 @@ Decided by the user on 2026-10-11:
   and plugin code must not stall its screen. It starts the host instead when a
   plugin needs one.
 
-Still open:
-
-1. The two repositories' names.
-2. Whether to keep compaction's history in its repository (recommended: yes,
-   with `git filter-repo`).
+Under consideration, not decided: replacing plugin dashboard keys
+(`mv.dashboard.key`) with one core key that opens a plugin settings screen,
+from which each plugin opens its own settings (compaction's `c` screen would
+move there). An API change is still possible before the stability promise.
