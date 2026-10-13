@@ -155,6 +155,17 @@ def own_scheduler(fields, values, prefix):
 class SchedulerScreen(FieldScreen):
     """A field screen whose scheduler fields show only for the scheduler chosen in their group."""
     data = command  # where the screens read and write; a test may give a stand-in with the same four functions
+    # The compaction screens' own layout; the fields' look comes with FieldScreen.
+    DEFAULT_CSS = """
+    SchedulerScreen #compaction-dialog { width: 92%; max-width: 100; height: 92%; border: round $mv-teal; background: $mv-base; padding: 0 1; }
+    SchedulerScreen #compaction-dialog .detail-title { height: 1; }
+    SchedulerScreen #compaction-problem { height: auto; color: $mv-red; text-style: bold; margin-bottom: 1; }
+    SchedulerScreen #compaction-body { height: 1fr; scrollbar-size: 1 1; }
+    SchedulerScreen #compaction-agents { height: auto; max-height: 12; }
+    SchedulerScreen #agent-top { height: auto; max-height: 60%; scrollbar-size: 1 1; }
+    SchedulerScreen #plan { height: 1fr; min-height: 4; }
+    SchedulerScreen #plan-summary, SchedulerScreen #agent-follows, SchedulerScreen #agent-status { height: auto; color: $mv-subtext0; }
+    """
     def applies(self, item, values):
         return visible(item, values)
 
