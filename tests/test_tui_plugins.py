@@ -599,6 +599,27 @@ class PluginsScreenTests(DashboardCase):
             call = next(call for call in self.service.calls if call[0] == "edit")
             self.assertEqual(call[3], {("default", "budget"): 9, ("loud",): True, ("mode",): DELETE})
 
+    async def test_a_field_screen_brings_its_own_look_not_the_dashboards_stylesheet(self):
+        """A plugin's field screen must look right with nothing in app.tcss for its rows, error line or help."""
+        fields = [{"path": "budget", "label": "Budget", "kind": "int", "placeholder": "0", "help": "tokens kept"},
+                  {"path": "mode", "label": "Mode", "kind": "choice", "options": ("fast", "slow"), "placeholder": "", "help": ""}]
+        self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": None, "values": {}, "screen": None,
+                                             "fields": fields}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            await self.open_screen(pilot)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginSettingsScreen) and self.app.screen.widgets, "settings")
+            screen = self.app.screen
+            await pilot.pause(0.1)
+            row, label = screen.query(".frow").first(), screen.query(".flabel").first()
+            self.assertEqual((row.styles.height.value, label.styles.width.value), (1, 22))
+            self.assertEqual(screen.query(".frow Input").first().styles.height.value, 1)
+            self.assertEqual(str(screen.query_one(".cerror").styles.color.hex), "#F38BA8")
+            self.assertEqual(screen.query(".fhelp").first().styles.padding.left, 22)
+            self.assertEqual(screen.styles.align_horizontal, "center")
+            sheet = (Path(__file__).resolve().parents[1] / "src/multiverse/ui/app.tcss").read_text()
+            self.assertFalse([line for line in sheet.splitlines() if line.startswith((".frow", ".flabel", ".cerror", ".csection", ".cwarn", ".fhelp"))])
+
     async def test_a_status_line_a_settings_screen_leaves_reaches_the_dashboard_when_the_plugins_screen_closes(self):
         self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": None, "values": {},
                                              "screen": "ui:Settings"}

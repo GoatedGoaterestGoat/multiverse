@@ -148,6 +148,23 @@ class Choice(Static, can_focus=True):
 class FieldScreen(ModalScreen):
     """Shared behaviour of the screens that edit fields: widgets, visibility and the error line."""
     BINDINGS = [Binding("escape", "close", "Close"), Binding("ctrl+enter", "save", "Save")]
+    # The look of a field screen travels with the class, so a plugin's screen needs nothing from app.tcss for
+    # its fields: rows (.frow with .flabel and an Input or Choice), the error line (.cerror), section titles
+    # (.csection), notes (.cwarn) and a field's help (.fhelp).
+    DEFAULT_CSS = """
+    FieldScreen { align: center middle; background: $mv-crust 75%; }
+    FieldScreen .csection { height: 1; margin-top: 1; color: $mv-teal; text-style: bold; }
+    FieldScreen .cwarn { height: auto; color: $mv-yellow; }
+    FieldScreen .cerror { height: auto; color: $mv-red; }
+    FieldScreen .frow { height: 1; }
+    FieldScreen .flabel { width: 22; color: $mv-subtext0; }
+    FieldScreen .frow Input { width: 1fr; height: 1; border: none; padding: 0 1; background: $mv-surface0; }
+    FieldScreen .frow Input:focus { background: $mv-surface1; border: none; }
+    FieldScreen .frow Input > .input--placeholder { color: $mv-overlay1; }
+    FieldScreen .frow Choice { width: 1fr; height: 1; padding: 0 1; background: $mv-surface0; }
+    FieldScreen .frow Choice:focus { background: $mv-surface1; color: $mv-teal; }
+    FieldScreen .fhelp { height: auto; padding-left: 22; color: $mv-overlay1; }
+    """
 
     def __init__(self, root, backend):
         super().__init__()
