@@ -627,12 +627,40 @@ never restarts the daemon on its own. A disposable native-daemon regression test
 removes the original workspace and verifies that configuration reads still work.
 
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-and `unset_env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
+`unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
 whatever first started it, often an agent's tool shell, and agent panes are
 interactive terminals. Setting `unset_env` replaces this list, which opts back in.
+
+`env` maps variable names to string values that every spawn and resume of the
+harness starts with, replacing any inherited value:
+
+```json
+{"schema": 2, "adapter": "claude", "settings": {
+  "env": {"IS_SANDBOX": "1"},
+  "args": ["--dangerously-skip-permissions"]
+}}
+```
+
+The agent's pane otherwise inherits the tmux server's environment, which is fixed
+when that server starts, so `env` is the way to give one harness, in one universe,
+its own variables. A name in `env` is no longer removed by the default `unset_env`
+list (`NO_COLOR`, for example); naming it in an explicit `unset_env` as well is an
+error. Names are `[A-Za-z_][A-Za-z0-9_]*`. mv2 rejects names it manages for every
+launch (`MV2_*`, `PATH`, `HOME`, `CODEX_THREAD_ID`, `CLAUDECODE`) and those it reads
+itself to find a harness's sessions (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex,
+`CLAUDE_CONFIG_DIR` for Claude); set those in the environment mv2 runs in. Variables
+an adapter sets for its bridge, such as Claude's `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
+take precedence. Codex bridge tools run in the shared daemon rather than the
+terminal process, so the relay also forwards each variable to them as
+`shell_environment_policy.set`, as it does for `MV2_*`; plain Codex tools inherit them
+from the process under Codex's own `shell_environment_policy`. Claude's compaction
+builder runs with the same variables, except those it always scrubs. Values are
+stored as plain text in `harness.json` and each launch's `request.json`, and a
+forwarded Codex value appears on the command line: keep secrets out of `env`.
+Schema-1 manifests accept the same `env` object.
 No adapter changes installed native configuration. The Claude bridge reads only the
 inbox key Claude publishes for its own launch's socket; no other credentials are read.
 

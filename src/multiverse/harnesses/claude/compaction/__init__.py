@@ -100,6 +100,9 @@ class ClaudeCompaction:
     def unset_env(self) -> tuple[str, ...]:
         return tuple(self.adapter.spec.get('unset_env', []))
 
+    def harness_env(self) -> dict[str, str]:
+        return dict(self.adapter.spec.get('env', {}))
+
     def call(self, argv, cwd, env, timeout):
         """Run one Claude call; `cancel()` from another thread stops it."""
         with self._lock:

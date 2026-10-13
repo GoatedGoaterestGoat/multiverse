@@ -41,7 +41,8 @@ with open(os.environ['FAKE_LOG'], 'a') as log:
                           'assistant': [m['content'][0].get('text', m['content'][0].get('type'))
                                         for m in messages if m.get('role') == 'assistant'],
                           'mv2': sorted(k for k in os.environ if k.startswith('MV2_')),
-                          'retries': os.environ.get('CLAUDE_CODE_MAX_RETRIES')}}) + '\n')
+                          'retries': os.environ.get('CLAUDE_CODE_MAX_RETRIES'),
+                          'endpoint': os.environ.get('ANTHROPIC_BASE_URL'), 'effort': os.environ.get('CLAUDE_EFFORT')}}) + '\n')
 mode = os.environ.get('FAKE_MODE', 'merge')
 if mode == 'refuse':
     print(json.dumps({{'type': 'result', 'is_error': True, 'stop_reason': 'refusal', 'api_error_status': None,
@@ -459,6 +460,24 @@ class MergeTest(Fixture):
         self.assertEqual(call['assistant'][:2], ['**Compacted summary (2 entries):**\n\nI looked.', 'done'])
         self.assertFalse(call['thinking'])
         self.assertIn('[0] summary node (covers 2 leaves) | "I looked."\n  [1] asst_text | "done"', call['instruction'])
+
+    def test_a_merge_sees_the_harness_env_but_never_a_scrubbed_name(self):
+        harness = self.root / 'harnesses/claude/harness.json'
+        value = json.loads(harness.read_text())
+        value['settings']['env'] = {'ANTHROPIC_BASE_URL': 'https://gateway.example', 'CLAUDE_EFFORT': 'max',
+                                    'CLAUDE_CODE_MAX_RETRIES': '9'}
+        write(harness, value)
+        self.adapter = harnesses.load(self.root, 'claude')
+        r, _ = conversation()
+        self.write_transcript(r.rows[:12])
+        source = self.source()
+        turn = source.turns()[0]
+        source.merge(turn, list(turn.leaves), config.Builder(model='sonnet', effort='low', options={'claude_max_retries': 2}))
+        call = self.calls()[-1]
+        # The builder reaches the same endpoint as the agent; its own effort and retries still decide.
+        self.assertEqual(call['endpoint'], 'https://gateway.example')
+        self.assertIsNone(call['effort'])
+        self.assertEqual(call['retries'], '2')
 
     def test_a_refused_merge_is_retried_unchanged_then_by_the_fallback_model(self):
         r, _ = conversation()
