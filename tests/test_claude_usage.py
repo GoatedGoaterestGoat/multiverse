@@ -21,6 +21,9 @@ class ClaudeUsageTest(BaseTest):
         super().setUp()
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}))
+        # The compaction plugin makes the estimate after a compaction; the base template leaves it off.
+        from multiverse.plugins import config as plugins_config
+        plugins_config.set_enabled(self.root, 'compaction', True)
 
     def response(self, id, input_tokens, output_tokens):
         usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,

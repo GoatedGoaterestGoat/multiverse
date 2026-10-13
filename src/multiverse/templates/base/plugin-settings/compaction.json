@@ -1,6 +1,5 @@
 {
-  "schema": 1,
-  "enabled": false,
+  "schema": 2,
   "default": {
     "scheduler": "last_k_raw",
     "k": 2,

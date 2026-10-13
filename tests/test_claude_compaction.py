@@ -144,6 +144,8 @@ def conversation():
 class Fixture(BaseTest):
     def setUp(self):
         super().setUp()
+        # These tests write compaction.json (schema 1); the template ships the plugin's file, which would win.
+        (self.root / 'plugin-settings' / 'compaction.json').unlink(missing_ok=True)
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config), 'FAKE_LOG': str(self.work / 'fake.log')}))
         self.session_id = str(uuid4())
@@ -647,6 +649,8 @@ class AdapterTest(Fixture):
             find_agent(self.root, self.agent_dir.name)
 
     def test_compaction_needs_the_bridge(self):
+        from multiverse.plugins import config as plugins_config
+        plugins_config.set_enabled(self.root, 'compaction', True)
         self.assertIsNone(self.source().unavailable())
         write(self.root / 'harnesses/claude/harness.json', {'schema': 2, 'adapter': 'claude', 'settings': {'inbox_bridge': False}})
         self.adapter = harnesses.load(self.root, 'claude')

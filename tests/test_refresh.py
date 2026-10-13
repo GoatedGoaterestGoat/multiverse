@@ -97,6 +97,21 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(self.actions(take=["bootstrap.md"], apply=True)["bootstrap.md"], "update")
         self.assertEqual((self.root / "bootstrap.md").read_text(), "Bootstrap v2\n")
 
+    def test_plugin_settings_wait_for_the_migration_of_a_legacy_file(self):
+        # A universe from before compaction became a plugin: its compaction.json, and the template's new settings file.
+        write(self.root / "compaction.json", {"schema": 1, "harnesses": {"claude": {"enabled": True}}})
+        self.put("plugin-settings/compaction.json", '{"schema": 2}\n')
+        self.assertEqual(self.actions()["plugin-settings/compaction.json"], "deferred")
+        reason = {c["path"]: c["reason"] for c in self.plan()["changes"]}["plugin-settings/compaction.json"]
+        self.assertIn("run mv2 plugins migrate", reason)
+        refresh.run(self.root, apply=True)
+        self.assertFalse((self.root / "plugin-settings/compaction.json").exists())  # nothing in front of the real settings
+        # After mv2 plugins migrate wrote the universe's own settings, they are kept.
+        write(self.root / "plugin-settings/compaction.json", {"schema": 2, "default": {"budget": 200000}})
+        (self.root / "compaction.json").unlink()
+        self.assertEqual(self.actions()["plugin-settings/compaction.json"], "local")
+        self.assertEqual(self.actions(take=["plugin-settings/compaction.json"])["plugin-settings/compaction.json"], "update")
+
     def test_take_rejects_paths_outside_the_template(self):
         with self.assertRaises(ValueError):
             self.plan(take=["universe.json"])

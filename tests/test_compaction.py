@@ -89,6 +89,11 @@ class Events:
 
 
 class SettingsTest(BaseTest):
+    def setUp(self):
+        super().setUp()
+        # These test compaction.json (schema 1) unless they write the plugin's file; the template ships the latter.
+        (self.root / config.SETTINGS).unlink(missing_ok=True)
+
     def test_without_a_settings_file_the_defaults_apply_and_the_plugin_switch_decides(self):
         (self.root / 'compaction.json').unlink(missing_ok=True)
         self.assertEqual(config.path(self.root), self.root / 'plugin-settings' / 'compaction.json')
@@ -129,16 +134,20 @@ class SettingsTest(BaseTest):
         self.assertEqual(json.loads((self.root / 'compaction.json').read_text())['default'], {'budget': 6})
         self.assertFalse((self.root / 'plugin-settings' / 'compaction.json').exists())
 
-    def test_the_templates_give_claude_its_builder_and_nothing_shared(self):
+    def test_the_templates_ship_the_plugins_settings_and_development_turns_it_on(self):
         from multiverse.harnesses.claude.compaction import ClaudeCompaction
+        from multiverse.plugins import config as plugins_config
         templates = Path(config.__file__).resolve().parents[1] / 'templates'
-        for name, enabled in (('base', False), ('development', True)):
+        defaults = json.loads((templates.parent / 'plugins/builtin/compaction/defaults/settings.json').read_text())
+        for name, on in (('base', False), ('development', True)):
             with self.subTest(template=name):
-                value = json.loads((templates / name / config.FILE).read_text())
-                self.assertNotIn('builder', value)
-                loaded = config.parse(value).for_harness('claude', ClaudeCompaction.builder_defaults)
-                self.assertEqual(loaded.enabled, enabled)
+                self.assertFalse((templates / name / config.LEGACY).exists())
+                value = json.loads((templates / name / config.SETTINGS).read_text())
+                self.assertEqual(value, defaults)  # the plugin's own defaults, written out
+                loaded = config.parse(value)
+                self.assertEqual(loaded.schema, 2)
                 self.assertEqual(value['harnesses']['claude']['builder']['model'], ClaudeCompaction.builder_defaults['model'])
+                self.assertEqual(plugins_config.load(templates / name).enabled.get('compaction', False), on)
 
     def test_each_harness_has_its_own_builder_and_may_replace_the_shared_settings(self):
         write(self.root / 'compaction.json', {

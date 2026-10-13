@@ -166,7 +166,7 @@ class SettingsTest(PluginTestCase):
         self.assertEqual((found.values, found.source, found.problem), ({"schema": 2, "greeting": "hello"}, "defaults", None))
         (self.root / "greeter.json").write_text('{"old": true}')
         self.assertEqual(settings.read(self.root, manifest_).source, "legacy")
-        settings.path(self.root, "greeter").parent.mkdir()
+        settings.path(self.root, "greeter").parent.mkdir(exist_ok=True)
         settings.path(self.root, "greeter").write_text('{"schema": 1, "greeting": "x"}')
         self.assertIn("run mv2 plugins migrate", settings.read(self.root, manifest_).problem)
         settings.path(self.root, "greeter").write_text('{"schema": 2, "greeting": "", "extra": 1}')
@@ -175,7 +175,7 @@ class SettingsTest(PluginTestCase):
     def test_edit_changes_only_named_keys_and_refuses_bad_results(self):
         manifest_ = self.plugin_with_settings()
         path = settings.path(self.root, "greeter")
-        path.parent.mkdir()
+        path.parent.mkdir(exist_ok=True)
         path.write_text('{"schema": 2, "limits": {"count": 3}, "greeting": "hey"}')
         settings.edit(self.root, manifest_, {"limits.count": 4})
         self.assertEqual(json.loads(path.read_text()), {"schema": 2, "limits": {"count": 4}, "greeting": "hey"})
@@ -198,7 +198,7 @@ class SettingsTest(PluginTestCase):
         loader.load(self.entry("greeter"))
         with self.assertRaisesRegex(ValueError, "too scary"):
             plugins.edit_settings(self.root, "greeter", {"greeting": "boo"})
-        settings.path(self.root, "greeter").parent.mkdir()
+        settings.path(self.root, "greeter").parent.mkdir(exist_ok=True)
         settings.path(self.root, "greeter").write_text('{"schema": 2, "greeting": "boo"}')
         found = self.entry("greeter")
         self.assertEqual(found.state, "unusable")

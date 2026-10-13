@@ -100,6 +100,15 @@ def _event(root, kind, data):
         pass
 
 
+def _awaiting_migration(root):
+    """{"plugin-settings/NAME.json": legacy file} for plugins whose pre-plugin settings file is still here."""
+    try:
+        from ..plugins import awaiting_migration
+        return awaiting_migration(root)
+    except Exception:  # refresh never fails over plugins
+        return {}
+
+
 def refresh_plan(root, template=None, take=()):
     """Compare a universe's definition files with its template; change nothing.
 
@@ -107,7 +116,10 @@ def refresh_plan(root, template=None, take=()):
     refreshed. A file that still matches it takes template updates; a locally
     edited file is kept, and a conflict when both changed. Without a manifest
     (universes installed before refresh existed), a file that differs from the
-    template is `unknown` and changes only when named in `take`.
+    template is `unknown` and changes only when named in `take`. A template's
+    `plugin-settings/NAME.json` is `deferred` while the universe still has that
+    plugin's pre-plugin settings file (until `mv2 plugins migrate`), and one the
+    universe wrote itself is `local`.
     """
     root = Path(root)
     meta = read(root / "universe.json")
@@ -121,6 +133,7 @@ def refresh_plan(root, template=None, take=()):
         raise ValueError(f"Template {name} has no universe at {source}")
     upstream, local = definition_files(source), definition_files(root)
     recorded = (manifest or {}).get("files", {})
+    awaiting = _awaiting_migration(root)
     take = set(take)
     unknown_take = take - set(upstream)
     if unknown_take:
@@ -137,6 +150,11 @@ def refresh_plan(root, template=None, take=()):
         if mine == theirs:
             current += 1
             continue
+        if path in awaiting and mine is None and path not in take:
+            # A template's plugin settings must not go in front of this universe's real, unmigrated ones.
+            changes.append({"path": path, "action": "deferred",
+                            "reason": f"{awaiting[path]} is still here: run mv2 plugins migrate first"})
+            continue
         if path in take:
             action, reason = ("add", "taken from the template") if mine is None else ("update", "taken from the template")
         elif manifest is None:
@@ -147,6 +165,9 @@ def refresh_plan(root, template=None, take=()):
             action, reason = "update", "template changed; no local edits"
         elif theirs == before:
             action, reason = "local", "edited locally; template unchanged"
+        elif before is None and path.startswith("plugin-settings/"):
+            # Written here, by mv2 plugins migrate from the universe's own settings: they stay.
+            action, reason = "local", "the universe's own plugin settings; kept"
         else:
             action, reason = "conflict", "edited locally and changed in the template"
         changes.append({"path": path, "action": action, "reason": reason})

@@ -79,7 +79,7 @@ class MigrateTest(PluginTestCase):
         self.assertEqual(plugins.awaiting_migration(self.root), {})
         (self.root / "tree.json").write_text("{}")
         self.assertEqual(plugins.awaiting_migration(self.root), {"plugin-settings/tree.json": "tree.json"})
-        (self.root / "plugin-settings").mkdir()
+        (self.root / "plugin-settings").mkdir(exist_ok=True)  # the base template ships it
         (self.root / "plugin-settings/tree.json").write_text('{"schema": 2}')
         self.assertEqual(plugins.awaiting_migration(self.root), {})
 
@@ -112,7 +112,7 @@ class MigrateTest(PluginTestCase):
 
     def test_an_older_settings_version_is_upgraded(self):
         from multiverse.tools import plugins as tool
-        (self.root / "plugin-settings").mkdir()
+        (self.root / "plugin-settings").mkdir(exist_ok=True)  # the base template ships it
         (self.root / "plugin-settings/tree.json").write_text(json.dumps({"schema": 1, "budget": 3}))
         self.enable("tree")
         self.assertIn("run mv2 plugins migrate", self.entry("tree").problem)

@@ -49,7 +49,7 @@ Edit the selected scope's files, preserving unrelated values:
 | `workflows/NAME/entry.json` + `prompt.md` | Catalog description and a task procedure interpreted by the agent. |
 | `harnesses/NAME/harness.json` | Adapter choice and native launch/resume preferences. |
 | `views/default.json` | Dashboard title, accent and columns. |
-| `compaction.json` | Harness-specific conversation compaction and scheduler settings. |
+| `plugins.json` + `plugin-settings/NAME.json` | Which plugins are on here, and each one's settings (compaction: `plugin-settings/compaction.json`; an older `compaction.json` until `plugins migrate`). |
 | `state/` | Runtime records and conversations; use mv2 operations rather than hand-editing them. |
 
 To add a skill, create `skills/NAME/entry.json` containing `{"description": "When and why to use this skill."}` and put its instructions in `SKILL.md`. Commands and workflows use the same metadata with `prompt.md`. Discovery scans direct child directories with metadata; a lone `SKILL.md` is not cataloged. Resolve ambiguous names by kind, such as `skills/NAME`. Skill bodies are loaded on demand, not automatically injected. Each subverse needs its own installed definitions.
@@ -64,7 +64,7 @@ Use an existing installed definition as the starting point. Settings such as `ar
 
 For simple view customization, use values such as `{"title": "Testing", "accent": "#cba6f7", "columns": ["name", "live", "phase", "summary"]}`. `accent: "auto"` assigns group colors. The root view controls the shared hierarchy's columns. Group title/accent can differ by subverse. Views display state; they do not schedule work.
 
-For compaction requests, inspect the installed `compaction.json`, `compaction --help` and the target harness's capabilities. The dashboard's `c` edits scope settings; an agent's scheduler can override the scope default. Do not assume every harness supports mv2 compaction or copy provider settings to another adapter.
+For compaction requests, inspect `plugins` (is the compaction plugin on here?), the installed `plugin-settings/compaction.json` (or an unmigrated `compaction.json`), `compaction --help` and the target harness's capabilities. In the dashboard, `P` → compaction → Configure edits scope settings; an agent's scheduler can override the scope default. Do not assume every harness supports mv2 compaction or copy provider settings to another adapter.
 
 ## Update mv2 itself
 

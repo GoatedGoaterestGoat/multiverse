@@ -93,7 +93,8 @@ plugin API (see [harness adapters](docs/harness-adapters.md)).
 project/.multiverse/
   universe.json                 # ID, name, workspace and template provenance
   template-files.json           # fingerprints of installed definitions, for refresh
-  compaction.json               # tree compaction per harness (off in the base template)
+  plugins.json                  # which plugins are on here (compaction is off in the base template)
+  plugin-settings/compaction.json  # tree compaction's settings (until migrated, compaction.json)
   statusline.json               # Claude status-line items and the tmux status bar
   bootstrap.md                  # short automatic instructions
   harnesses/codex/              # declarative source adapter reference and preferences
