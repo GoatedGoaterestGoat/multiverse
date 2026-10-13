@@ -19,10 +19,18 @@ from ..universe.agents import check_available_name, directory, runtime, update_r
 from ..universe.mailbox import message_record, update_message
 from . import native
 
-def listing(root, recursive=False):
+def listing(root, recursive=False, only=None):
+    """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none."""
+    if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
+                             or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
+        raise ValueError(f"Not an agent ID: {only!r}")
     rows, snapshots = [], {}
     for scope in universe.tree(root) if recursive else [root]:
-        for path in sorted((scope / "state" / "agents").glob("*/properties.json")):
+        agents_dir = scope / "state" / "agents"
+        paths = [agents_dir / only / "properties.json"] if only is not None else sorted(agents_dir.glob("*/properties.json"))
+        for path in paths:
+            if only is not None and not path.is_file():
+                continue
             try:
                 properties = read(path)
                 facts = runtime(path.parent)

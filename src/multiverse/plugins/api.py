@@ -682,11 +682,14 @@ class Universe:
     def agent(self, reference):
         """One agent by name, unique ID prefix or ID (needs agents.read)."""
         self._plugin._need("agents.read")
+        from ..runtime import lifecycle
         from ..universe import agents
         identity = _call(agents.directory, self.path, reference).name
-        for found in self.agents():
-            if found.id == identity:
-                return found
+        # Just this agent's row, built by the listing's own code: no other agent is observed. A record whose
+        # own ID is not its directory's is not this agent, so it is never returned as one.
+        for row in _call(lifecycle.listing, self.path, only=identity):
+            if row.get("id") == identity:
+                return Agent(row, self._plugin)
         raise Error(f"No agent named {reference} here")
 
     def spawn(self, name, *, harness="codex", task=None, model=None, wait=False):
