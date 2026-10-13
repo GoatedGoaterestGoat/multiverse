@@ -1,57 +1,28 @@
 """Tree compaction as a bundled plugin (docs/plugins.md, "Moving compaction into a plugin").
 
-While the move is under way, register() points at the existing modules
-(multiverse.compaction and each harness's compaction source); core's direct
-calls are replaced one extension point at a time. The plugin is on wherever
-the universe's compaction.json is (the manifest's settings.legacy), so a
-universe behaves as before until it is migrated.
+The plugin's own code: engine/ (harness-neutral: settings, schedulers, trees,
+building, compaction, the helper actions), sources/ (each harness family's
+compaction source), support.py (which harnesses it supports), command.py
+(`mv2 compaction`), screens.py (its settings under the dashboard's P) and
+claude/ (its Claude plugin, which answers /compact). register() wires them to
+mv2. Until a universe is migrated, its compaction.json (the manifest's
+settings.legacy) keeps the plugin on there.
 """
 from datetime import datetime
-from importlib import import_module
 import json
 from pathlib import Path
 import re
 
-from multiverse.compaction import config
 from multiverse.plugins import api
 
-# Each harness family with a compaction source: the module with its builder defaults and checks.
-SOURCES = {'claude': 'multiverse.harnesses.claude.compaction'}
+from .engine import actions, config
+from .support import builder_support, state
+
 # Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
 # it). Runs with the agent's Python, like the mod's reports; a missing one blocks too.
-GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
-
-
-def builder_support(family):
-    """(builder defaults, check_builder) of a harness family's compaction source, or None without one."""
-    module = SOURCES.get(family)
-    if module is None:
-        return None
-    source = import_module(module)
-    return dict(source.BUILDER_DEFAULTS), source.check_builder
-
-
-def state(root, harness, family, loaded=None):
-    """(settings, None) for a harness in the universe at `root`, or (None, why its compaction.json cannot be used).
-
-    `loaded` checks a parsed file (config.Config) before it is written instead
-    of the one on disk. A family without a compaction source gives (None, None).
-    Launches, capabilities and `mv2 doctor` use it; `mv2 compaction` refuses
-    loudly instead.
-    """
-    support = builder_support(family)
-    if support is None:
-        return None, None
-    defaults, check = support
-    try:
-        settings = (loaded or config.load(root)).for_harness(harness, defaults)
-    except ValueError as error:
-        return None, str(error)
-    try:
-        check(settings.builder)
-    except ValueError as error:
-        return None, f'{config.path(root)}: harnesses.{harness}.builder: {error}'
-    return settings, None
+GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.plugins run compaction guard || exit 2'
+# The helper actions harness integrations run (`python -m multiverse.plugins run compaction ACTION`).
+ACTIONS = ('install', 'background', 'status', 'worker', 'guard')
 
 
 def launch(info):
@@ -227,7 +198,9 @@ def register(mv: api.Plugin):
     mv.doctor.check(lambda universe: doctor(mv, universe))
     mv.settings.check(lambda settings, root: check_settings(mv, settings, root))
     mv.settings.migrate(migrate)
-    from multiverse.tools import compaction as command
+    from . import command
     mv.cli.command('compaction', command.configure, command.run)
+    for name in ACTIONS:
+        mv.helper.action(name, lambda arguments, name=name: actions.main([name, *arguments]))
     # Its settings under the dashboard's P screen: its own screen, which also opens each agent's scheduler.
     mv.dashboard.settings(screen='screens:CompactionScreen')

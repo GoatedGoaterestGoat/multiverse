@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 import re
 
-from ..store import write
+from multiverse.store import write
 
 SETTINGS = 'plugin-settings/compaction.json'  # the plugin's settings (schema 2)
 LEGACY = 'compaction.json'                    # the pre-plugin file (schema 1), read until it is migrated

@@ -20,8 +20,8 @@ import os
 import re
 import uuid as uuidlib
 
-from ....compaction.model import Leaf, Node, leaves_under
-from ....compaction.protocol import Merge, MergeError
+from ...engine.model import Leaf, Node, leaves_under
+from ...engine.protocol import Merge, MergeError
 
 TIMEOUT = 600
 TIMESTAMP = '2026-04-30T00:00:00.000Z'

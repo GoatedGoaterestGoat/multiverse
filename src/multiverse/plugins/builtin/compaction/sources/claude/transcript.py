@@ -37,7 +37,7 @@ import json
 from pathlib import Path
 import re
 
-from ....compaction.model import Leaf, Turn, estimate_tokens
+from ...engine.model import Leaf, Turn, estimate_tokens
 from . import images as image_tokens
 
 # Rows that carry no conversation content.

@@ -1,6 +1,7 @@
 """Claude's compaction protocol: transcript reading across compactions, merges through a fake `claude`,
 rendering for the mod's hook, launch settings and an install end to end. No model is called."""
 from datetime import datetime, timedelta, timezone
+import importlib
 import json
 import os
 from pathlib import Path
@@ -12,20 +13,31 @@ from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
-from multiverse.compaction import __main__ as entry, config, pipeline
-from multiverse.compaction.model import Leaf, Node
-from multiverse.compaction.protocol import MergeError
-from multiverse.compaction.store import Store
 from multiverse.harnesses.claude import Transcript
-from multiverse.harnesses.claude.compaction import ClaudeCompaction, TranscriptError, merge, render, transcript
 from multiverse.harnesses.types import LaunchContext, SessionHandle
+from multiverse.plugins import entry as plugin_entry, loader as plugin_loader
 from multiverse.store import read, write
 from test_multiverse import BaseTest
+
+
+def compaction(name):
+    """A module of the bundled compaction plugin, as mv2 loads it (one copy per process)."""
+    package = plugin_loader.load(plugin_entry(None, 'compaction'), off=True).package
+    return importlib.import_module(f'{package}.{name}')
+
+
+entry, config, pipeline = (compaction(f'engine.{name}') for name in ('actions', 'config', 'pipeline'))
+Leaf, Node = compaction('engine.model').Leaf, compaction('engine.model').Node
+MergeError = compaction('engine.protocol').MergeError
+Store = compaction('engine.store').Store
+ClaudeCompaction, TranscriptError = compaction('sources.claude').ClaudeCompaction, compaction('sources.claude').TranscriptError
+merge, render, transcript = (compaction(f'sources.claude.{name}') for name in ('merge', 'render', 'transcript'))
 
 START = datetime(2026, 9, 1, tzinfo=timezone.utc)
 
 FAKE_CLAUDE = r'''#!{python}
 import json, os, re, sys
+
 argv = sys.argv[1:]
 session = argv[argv.index('--resume') + 1]
 slug = re.sub(r'[^a-zA-Z0-9]', '-', os.getcwd())
@@ -334,7 +346,7 @@ def describe(message):
 
 class RenderTest(unittest.TestCase):
     def test_every_message_is_built_one_block_each_and_thinking_is_left_out(self):
-        from multiverse.compaction.model import Turn
+        Turn = compaction('engine.model').Turn
         prompt = Leaf('user_text', ('p',), 2, content={'text': 'Do it'})
         thinking = Leaf('thinking', ('t',), 50, content={'text': ''})
         use = Leaf('tool_use', ('use',), 10, content={'tool_use_id': 'tu1', 'name': 'Bash', 'input': {'command': 'ls'}})
@@ -354,7 +366,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual((payload['count'], payload['built'], payload['dropped']), (5, 5, 1))
 
     def test_a_tool_exchange_is_delivered_as_its_call_then_its_result(self):
-        from multiverse.compaction.model import Turn
+        Turn = compaction('engine.model').Turn
         exchanges = [Leaf('tool_exchange', (f'u{n}', f'r{n}'), 9, content={
             'tool_use_id': n, 'name': 'Bash', 'input': {'command': n}, 'result_text': f'out {n}', 'is_error': n == 'b'})
             for n in 'ab']
@@ -366,7 +378,7 @@ class RenderTest(unittest.TestCase):
             {'role': 'user', 'text': '', 'toolUses': [], 'toolResults': [{'tool_use_id': 'b', 'text': 'out b', 'isError': True}]}])
 
     def test_an_unpaired_call_or_result_gets_v1s_placeholder(self):
-        from multiverse.compaction.model import Turn
+        Turn = compaction('engine.model').Turn
         use = Leaf('tool_use', ('use',), 10, content={'tool_use_id': 'tu1', 'name': 'mcp:odd name', 'input': {}})
         result = Leaf('tool_result', ('res',), 20, content={'tool_use_id': 'tu1', 'text': 'a b', 'is_error': False})
         later = Leaf('asst_text', ('x',), 3, content={'text': 'done'})
@@ -378,7 +390,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(results[1]['toolUses'][0]['tool_use_id'], 'tu1')
 
     def test_unpaired_calls_of_a_batch_are_answered_before_anything_follows(self):
-        from multiverse.compaction.model import Turn
+        Turn = compaction('engine.model').Turn
         uses = [Leaf('tool_use', (f'u{n}',), 5, content={'tool_use_id': n, 'name': 'Bash', 'input': {}}) for n in 'abc']
         results = [Leaf('tool_result', (f'r{n}',), 5, content={'tool_use_id': n, 'text': n, 'is_error': False}) for n in 'cab']
         a, b, c = uses
@@ -400,7 +412,7 @@ class RenderTest(unittest.TestCase):
                           'S', 'end'])
 
     def test_images_are_noted_and_an_empty_prompt_gets_v1s_placeholder(self):
-        from multiverse.compaction.model import Turn
+        Turn = compaction('engine.model').Turn
         prompt = Leaf('user_text', ('p',), 3000, content={'text': 'Look', 'images': 2}, images=2990)
         shown = Leaf('user_text', ('s',), 1600, content={'text': '', 'images': 1}, images=1600)
         payload = render.render([Turn('t', prompt, [shown]), Turn('u', Leaf('user_text', ('q',), 0, content={'text': ''}), [])],
@@ -476,7 +488,7 @@ class MergeTest(Fixture):
         source = self.source()
         turn = source.turns()[0]
         builder = claude_builder(turn_retries=1, rate_limit=config.RateLimit(retries=0))
-        from multiverse.compaction.build import Build, Reporter
+        Build, Reporter = compaction('engine.build').Build, compaction('engine.build').Reporter
         events = []
         with patch.dict(os.environ, {'FAKE_MODE': 'refuse'}):
             failures = Build(source, Store(self.agent_dir), builder, Reporter(Store(self.agent_dir), events.append)).turns([turn])
@@ -516,7 +528,7 @@ class AdapterTest(Fixture):
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
         on = self.adapter.spawn(LaunchContext('spawn', self.values()))
         hooks = self.settings(on)['hooks']['PreCompact'][0]['hooks'][0]
-        self.assertIn('-m multiverse.compaction guard', hooks['command'])
+        self.assertIn('-m multiverse.plugins run compaction guard', hooks['command'])
         self.assertEqual(on.environment['MV2_COMPACTION'], '1')
         self.assertEqual(self.settings(on)['crossSessionInbound'], 'accept')
         # The bundled compaction plugin contributes it; compaction.json alone turns the plugin on.
@@ -588,8 +600,7 @@ class AdapterTest(Fixture):
 
     def test_mv2_plugins_migrate_turns_compaction_json_into_the_plugins_settings(self):
         from multiverse import plugins
-        from multiverse.compaction import config
-        from multiverse.harnesses.claude.compaction import BUILDER_DEFAULTS
+        BUILDER_DEFAULTS = compaction('sources.claude').BUILDER_DEFAULTS
         old = {'schema': 1, 'enabled': False, 'default': {'scheduler': 'last_k_raw', 'k': 2, 'budget': 0},
                'harnesses': {'claude': {'enabled': True, 'default': {'budget': 200000}, 'builder': {'effort': 'high'}}}}
         write(self.root / 'compaction.json', old)
@@ -620,7 +631,7 @@ class AdapterTest(Fixture):
 
     def test_mv2_compaction_is_the_compaction_plugins_command(self):
         from multiverse import cli
-        from multiverse.tools import compaction as command
+        command = compaction('command')
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
         self.assertFalse(cli.builtin('compaction'))
         found = cli.tool('compaction', self.root)
@@ -644,7 +655,7 @@ class AdapterTest(Fixture):
             with self.subTest(expected=expected), self.assertRaisesRegex(ValueError, expected):
                 source.check_builder(value)
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'builder': {'effort': 'extreme'}}}})
-        from multiverse.tools.compaction import find_agent
+        find_agent = compaction('command').find_agent
         with self.assertRaisesRegex(ValueError, 'harnesses.claude.builder: effort'):
             find_agent(self.root, self.agent_dir.name)
 
@@ -673,10 +684,9 @@ class AdapterTest(Fixture):
         self.assertEqual(Transcript(path).read().responses['m1']['cache_read_input_tokens'], 90)
 
 
-class DashboardBackendTest(Fixture):
-    def test_the_dashboard_reads_and_saves_compaction_through_the_tool(self):
-        from multiverse.ui.backend import LocalBackend
-        backend, agent = LocalBackend(), self.agent_dir.name
+class DashboardDataTest(Fixture):
+    def test_the_settings_screens_read_and_save_through_the_command(self):
+        command, agent = compaction('command'), self.agent_dir.name
         r = Rows()
         for index in range(4):
             r.user(f'Task {index}', f'p{index}')
@@ -684,7 +694,7 @@ class DashboardBackendTest(Fixture):
             r.assistant(f'n{index}', {'type': 'text', 'text': f'second answer {index}'}, 5)
         self.write_transcript(r.rows)
         write(self.root / 'compaction.json', {'harnesses': {'claude': {'enabled': True}}})
-        view = backend.compaction_overview(self.root)
+        view = command.overview(self.root)
         claude = next(row for row in view['harnesses'] if row['name'] == 'claude')
         self.assertEqual((claude['enabled'], claude['options'], claude['builder']['model'], claude['problem']),
                          (True, ['claude_max_retries'], 'sonnet', None))
@@ -693,40 +703,39 @@ class DashboardBackendTest(Fixture):
         self.assertEqual((row['scheduler_from'], row['trees_cached']), ('universe', 0))
         # The whole file and Claude's own checks run before anything is written.
         with self.assertRaisesRegex(ValueError, 'effort'):
-            backend.save_compaction(self.root, {'harnesses': {'claude': {'enabled': True, 'builder': {'effort': 'extreme'}}}})
+            command.save_settings(self.root, {'harnesses': {'claude': {'enabled': True, 'builder': {'effort': 'extreme'}}}})
         self.assertEqual(json.loads((self.root / 'compaction.json').read_text()), {'harnesses': {'claude': {'enabled': True}}})
-        saved = backend.save_compaction(self.root, {'default': {'scheduler': 'uniform', 'budget': 0},
+        saved = command.save_settings(self.root, {'default': {'scheduler': 'uniform', 'budget': 0},
                                                     'harnesses': {'claude': {'enabled': True}}})
         self.assertEqual(saved['default'], {'scheduler': 'uniform', 'budget': 0})
         # Previews never save; the default preview follows the universe.
-        current = backend.compaction_agent(self.root, agent)
+        current = command.agent_view(self.root, agent=agent)
         self.assertEqual((current['scheduler_from'], current['summary']['turns'], current['summary']['summarized']),
                          ('universe', 4, 4))
-        kept = backend.compaction_agent(self.root, agent, scheduler={'scheduler': 'last_k_raw', 'k': 4, 'budget': 0})
+        kept = command.agent_view(self.root, agent=agent, scheduler={'scheduler': 'last_k_raw', 'k': 4, 'budget': 0})
         self.assertEqual((kept['summary']['summarized'], kept['summary']['after_partial']), (0, False))
         self.assertEqual(kept['summary']['tokens_after'], kept['summary']['tokens_before'])
-        self.assertTrue(backend.compaction_agent(self.root, agent, scheduler=None)['summary']['after_partial'])
+        self.assertTrue(command.agent_view(self.root, agent=agent, scheduler=None)['summary']['after_partial'])
         self.assertFalse(config.agent_file(self.agent_dir).exists())
         self.assertEqual(current['failures'], [])
         # A turn whose build is still failed says why, numbered as the plan numbers it.
-        from multiverse.compaction.store import Store
-        from multiverse.tools.compaction import find_agent
+        find_agent = compaction('command').find_agent
         turns = pipeline.conversation(find_agent(self.root, agent).source.turns())
         store = Store(self.agent_dir)
         store.set_failure(turns[2].id, 'the model refused this merge')
         store.set_failure('0123456789abcdef', 'gone')
-        failing = backend.compaction_agent(self.root, agent)
+        failing = command.agent_view(self.root, agent=agent)
         self.assertEqual(failing['failures'], ['turn 3: the model refused this merge', 'turn 01234567: gone'])
-        self.assertEqual(backend.compaction_agent(self.root, agent, preview=False)['failures'], failing['failures'])
+        self.assertEqual(command.agent_view(self.root, agent=agent, preview=False)['failures'], failing['failures'])
         store.set_failure(turns[2].id, None)
         store.set_failure('0123456789abcdef', None)
         with self.assertRaisesRegex(ValueError, 'scheduler'):
-            backend.compaction_agent(self.root, agent, scheduler={'scheduler': 'nope'})
-        own = backend.set_compaction_scheduler(self.root, agent, {'scheduler': 'last_k_raw', 'k': 1, 'budget': 0})
+            command.agent_view(self.root, agent=agent, scheduler={'scheduler': 'nope'})
+        own = command.set_scheduler(self.root, agent=agent, scheduler={'scheduler': 'last_k_raw', 'k': 1, 'budget': 0})
         self.assertEqual((own['scheduler_from'], own['scheduler']['k']), ('agent', 1))
-        self.assertEqual(next(row for row in backend.compaction_overview(self.root)['agents']
+        self.assertEqual(next(row for row in command.overview(self.root)['agents']
                               if row['id'] == agent)['scheduler_from'], 'agent')
-        self.assertEqual(backend.set_compaction_scheduler(self.root, agent, None)['scheduler_from'], 'universe')
+        self.assertEqual(command.set_scheduler(self.root, agent=agent, scheduler=None)['scheduler_from'], 'universe')
         self.assertFalse(config.agent_file(self.agent_dir).exists())
 
 

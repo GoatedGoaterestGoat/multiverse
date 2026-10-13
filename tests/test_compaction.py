@@ -3,6 +3,7 @@
 A fake CompactionSource stands in for a harness, so these tests exercise exactly
 the protocol the generic code relies on, with no model or harness process.
 """
+import importlib
 import io
 import json
 import os
@@ -15,13 +16,24 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
-from multiverse.compaction import __main__ as entry, config, pipeline, schedule
-from multiverse.compaction.build import Build, BuildFailed, Cancelled, Reporter
-from multiverse.compaction.model import Leaf, Node, Turn, tree_from_record, tree_record
-from multiverse.compaction.protocol import Merge, MergeError
-from multiverse.compaction.store import Store
+from multiverse.plugins import entry as plugin_entry, loader as plugin_loader
 from multiverse.store import write
 from test_multiverse import BaseTest
+
+
+def compaction(name):
+    """A module of the bundled compaction plugin, as mv2 loads it (one copy per process)."""
+    package = plugin_loader.load(plugin_entry(None, 'compaction'), off=True).package
+    return importlib.import_module(f'{package}.{name}')
+
+
+entry, config, pipeline, schedule = (compaction(f'engine.{name}') for name in ('actions', 'config', 'pipeline', 'schedule'))
+Build, BuildFailed, Cancelled, Reporter = (getattr(compaction('engine.build'), name)
+                                           for name in ('Build', 'BuildFailed', 'Cancelled', 'Reporter'))
+Leaf, Node, Turn, tree_from_record, tree_record = (getattr(compaction('engine.model'), name)
+                                                   for name in ('Leaf', 'Node', 'Turn', 'tree_from_record', 'tree_record'))
+Merge, MergeError = compaction('engine.protocol').Merge, compaction('engine.protocol').MergeError
+Store = compaction('engine.store').Store
 
 FAST = config.Builder(rate_limit=config.RateLimit(retries=3, first=0.01, multiplier=2, maximum=0.05))
 
@@ -121,7 +133,7 @@ class SettingsTest(BaseTest):
             config.parse({'schema': 3})
 
     def test_saving_writes_where_the_settings_are(self):
-        from multiverse.tools import compaction as command
+        command = compaction('command')
         (self.root / 'compaction.json').unlink(missing_ok=True)
         command.save_settings(self.root, {'default': {'budget': 5}})
         written = json.loads((self.root / 'plugin-settings' / 'compaction.json').read_text())
@@ -135,10 +147,11 @@ class SettingsTest(BaseTest):
         self.assertFalse((self.root / 'plugin-settings' / 'compaction.json').exists())
 
     def test_the_templates_ship_the_plugins_settings_and_development_turns_it_on(self):
-        from multiverse.harnesses.claude.compaction import ClaudeCompaction
+        ClaudeCompaction = compaction('sources.claude').ClaudeCompaction
         from multiverse.plugins import config as plugins_config
-        templates = Path(config.__file__).resolve().parents[1] / 'templates'
-        defaults = json.loads((templates.parent / 'plugins/builtin/compaction/defaults/settings.json').read_text())
+        import multiverse
+        templates = Path(multiverse.__file__).resolve().parent / 'templates'
+        defaults = json.loads((Path(config.__file__).resolve().parents[1] / 'defaults' / 'settings.json').read_text())
         for name, on in (('base', False), ('development', True)):
             with self.subTest(template=name):
                 self.assertFalse((templates / name / config.LEGACY).exists())

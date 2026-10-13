@@ -4,7 +4,7 @@ from pathlib import Path
 from .. import universe
 from ..harnesses import load as load_harness
 from ..store import read
-from ..tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move,
+from ..tools import (ask, get_usage, attach, capabilities, deliver, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse)
 from .. import plugins
 from . import columns, plugin_panels, theme
@@ -114,18 +114,6 @@ class LocalBackend:
 
     def remove_subverse(self, path):
         return remove.run(universe.parent(path), target=str(path), subverse=True)
-
-    def compaction_overview(self, root):
-        return compaction.overview(root)
-
-    def save_compaction(self, root, value):
-        return compaction.save_settings(root, value)
-
-    def compaction_agent(self, root, reference, **preview):
-        return compaction.agent_view(root, agent=reference, **preview)
-
-    def set_compaction_scheduler(self, root, reference, scheduler):
-        return compaction.set_scheduler(root, agent=reference, scheduler=scheduler)
 
     def subverse(self, root, values):
         result = subverse.run(root, name=values["name"], template=values.get("template") or "base",

@@ -10,7 +10,8 @@ import type { EngineInterface, On, SessionCompactResult, SessionMessage } from '
 // for the Claude harness (the launch sets MV2_COMPACTION=1).
 //
 // - session.compact: the session's /compact runs
-//   `python -m multiverse.compaction install`, which builds any summary trees
+//   `python -m multiverse.plugins run compaction install` (the compaction
+//   plugin's helper action), which builds any summary trees
 //   still missing, expands them by the agent's scheduler and streams back the
 //   compacted conversation. Progress, retries and errors show in the status
 //   line, as transcript notices and as toasts while it runs. The hook answers
@@ -27,7 +28,7 @@ import type { EngineInterface, On, SessionCompactResult, SessionMessage } from '
 //   left (a reload, a turn that ended in an error, a restart), when background
 //   building is on.
 //
-// The status line's compaction item is a file: `python -m multiverse.compaction`
+// The status line's compaction item is a file: the compaction plugin
 // writes status-items/compaction.txt whenever it learns where compaction
 // stands (`status`, which `background` also runs, and each install), and the
 // status line reads it like any plugin's item. These hooks have it learn that
@@ -38,8 +39,11 @@ import type { EngineInterface, On, SessionCompactResult, SessionMessage } from '
 // The rows an install adds are found later from the transcript: they follow
 // the compaction's boundary, as many as the install returned.
 
+// The compaction plugin's helper actions, run with the agent's Python in its universe (MV2_UNIVERSE).
+const HELPER = ["-m", "multiverse.plugins", "run", "compaction"] as const
+
 type Event = { event: string; [key: string]: unknown }
-// What `python -m multiverse.compaction status` reports.
+// What the compaction plugin's `status` helper action reports.
 export type Status = { enabled?: boolean; trees?: number; turns?: number; missing?: number; building?: boolean; failed?: number }
 
 // What the hooks last learned: whether a builder runs, so they keep looking while it does.
@@ -78,7 +82,7 @@ async function config($: EngineInterface) {
 async function refresh($: EngineInterface) {
   const { enabled, python, directory } = await config($)
   if (!enabled || !python || !directory) return
-  const result = await $.process.run([python, "-m", "multiverse.compaction", "status", "--agent-dir", directory],
+  const result = await $.process.run([python, ...HELPER, "status", "--agent-dir", directory],
     { timeoutMs: 15000 })
   if (result.exitCode === 0) readStatus(result.stdout)
 }
@@ -162,7 +166,7 @@ async function install($: EngineInterface, trigger: string, instructions: string
   })
   showProgress($, "compacting…")
   const child = $.process.spawn({
-    argv: [python, "-m", "multiverse.compaction", "install", "--agent-dir", directory], input: request })
+    argv: [python, ...HELPER, "install", "--agent-dir", directory], input: request })
   const returned: Message[] = []
   let buffer = "", stderr = "", result: Event | undefined, failure: string | undefined
   const handle = (event: Event) => {
@@ -239,7 +243,7 @@ async function background($: EngineInterface) {
   if (!enabled || !python || !directory) return
   const ended = await $.clock.now()
   const result = await $.process.run(
-    [python, "-m", "multiverse.compaction", "background", "--agent-dir", directory, "--turn-ended", String(ended)],
+    [python, ...HELPER, "background", "--agent-dir", directory, "--turn-ended", String(ended)],
     { timeoutMs: 15000 })
   if (result.exitCode !== 0) {
     $.ui.log(`mv2 compaction: the background builder did not start: ${result.stderr.trim()}`)

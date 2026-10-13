@@ -44,23 +44,19 @@ class Agent:
         return schedule if self.source.keeps_images else replace(schedule, image_mode='drop_all')
 
 
-def open_agent(root, directory, adapter, session) -> Agent:
-    """The agent's compaction context, through its harness adapter's compaction support.
+def open_agent(root, directory, harness, source: CompactionSource) -> Agent:
+    """The agent's compaction context, given its harness's compaction source for its session.
 
-    The caller finds the agent (`runtime.native.context`), so compaction does not
-    depend on how agents run. The harness supplies its builder defaults and checks
-    the builder settings.
+    The caller finds the agent and its source (support.open_agent), so the
+    engine depends on no harness. The source supplies its builder defaults and
+    checks the builder settings.
     """
-    factory = getattr(adapter, 'compaction', None)
-    if factory is None:
-        raise CompactionError(f'The {session.harness} harness does not support compaction')
-    source = factory(session)
-    settings = settings_file.load(root).for_harness(session.harness, source.builder_defaults)
+    settings = settings_file.load(root).for_harness(harness, source.builder_defaults)
     try:
         source.check_builder(settings.builder)
     except ValueError as error:
-        raise ValueError(f'{settings_file.path(root)}: harnesses.{session.harness}.builder: {error}') from error
-    return Agent(root, directory, session.harness, settings, source)
+        raise ValueError(f'{settings_file.path(root)}: harnesses.{harness}.builder: {error}') from error
+    return Agent(root, directory, harness, settings, source)
 
 
 def conversation(turns: list[Turn]) -> list[Turn]:

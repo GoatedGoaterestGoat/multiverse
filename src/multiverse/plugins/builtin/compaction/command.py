@@ -1,20 +1,22 @@
-"""Show or set an agent's compaction: scheduler, summary trees, recent errors.
+"""`mv2 compaction`: show or set an agent's compaction: scheduler, summary trees, recent errors.
 
-The CLI runs `run`; the dashboard's compaction screens use `overview`,
-`save_settings`, `agent_view` and `set_scheduler` through LocalBackend.
+The CLI runs `run`; the plugin's settings screens (screens.py) call
+`overview`, `save_settings`, `agent_view` and `set_scheduler` directly.
 """
 import json
 import sys
 
-from ..runtime import lifecycle, native
-from .. import harnesses, universe
-from ..compaction import config as settings_file
-from ..compaction.build import Build, Cancelled, Reporter
-from ..compaction.config import IMAGE_MODES, SCHEDULERS
-from ..compaction.pipeline import conversation, open_agent, plan as planned
-from ..compaction.schedule import allocate, frontier_for, frontier_tokens, needs_tree
-from ..compaction.store import Store
-from ..store import read, write
+from multiverse import harnesses, universe
+from multiverse.runtime import lifecycle
+from multiverse.store import read, write
+
+from . import support
+from .engine import config as settings_file
+from .engine.build import Build, Cancelled, Reporter
+from .engine.config import IMAGE_MODES, SCHEDULERS
+from .engine.pipeline import conversation, plan as planned
+from .engine.schedule import allocate, frontier_for, frontier_tokens, needs_tree
+from .engine.store import Store
 
 SAVED = object()  # agent_view previews the agent's saved scheduler
 
@@ -51,8 +53,7 @@ def _stderr(event):
 
 def find_agent(root, agent):
     """The named agent's compaction context."""
-    directory, adapter, session, _ = native.context(root, agent)
-    return open_agent(root, directory, adapter, session)
+    return support.open_agent(root, agent)
 
 
 def run(root=None, *, agent, scheduler=None, budget=None, k=None, recency_ratio=None, recency_half_life=None,
@@ -98,21 +99,22 @@ def run(root=None, *, agent, scheduler=None, budget=None, k=None, recency_ratio=
     return result
 
 
-def _adapters(root):
-    """This universe's harnesses that support compaction, by name."""
+def _harnesses(root):
+    """This universe's harnesses that support compaction: {name: family}."""
     found = {}
     for manifest in sorted((root / 'harnesses').glob('*/harness.json')):
         try:
-            adapter = harnesses.load(root, manifest.parent.name)
+            family = getattr(harnesses.load(root, manifest.parent.name), 'family', '') or ''
         except (OSError, ValueError, KeyError):
             continue
-        if hasattr(adapter, 'compaction'):
-            found[manifest.parent.name] = adapter
+        if support.builder_support(family) is not None:
+            found[manifest.parent.name] = family
     return found
 
 
-def _defaults(adapter):
-    return adapter.compaction_defaults() if adapter is not None and hasattr(adapter, 'compaction_defaults') else {}
+def _defaults(family):
+    found = support.builder_support(family) if family else None
+    return found[0] if found else {}
 
 
 def _activity(store):
@@ -138,23 +140,23 @@ def overview(root=None):
         loaded = settings_file.parse(written if path.exists() else settings_file.blank(path))
     except ValueError as error:
         loaded, problem = settings_file.Config(), problem or f'{path}: {error}'
-    adapters = _adapters(root)
+    families = _harnesses(root)
     shared = loaded.for_harness('')
     rows = []
-    for name in sorted(set(adapters) | set(loaded.harnesses)):
-        adapter, defaults = adapters.get(name), _defaults(adapters.get(name))
+    for name in sorted(set(families) | set(loaded.harnesses)):
+        family, defaults = families.get(name), _defaults(families.get(name))
         settings = loaded.for_harness(name, defaults)
-        state = adapter.compaction_state(root, loaded) if adapter is not None and not problem else (None, None)
-        rows.append({'name': name, 'supported': adapter is not None, 'enabled': settings.enabled,
+        state = support.state(root, name, family, loaded) if family is not None and not problem else (None, None)
+        rows.append({'name': name, 'supported': family is not None, 'enabled': settings.enabled,
                      'default': settings.default.settings(), 'builder': settings_file.describe(settings)['builder'],
                      'defaults': defaults, 'options': [key for key in defaults if key not in settings_file.BUILDER],
                      'problem': state[1]})
     members = []
     for item in lifecycle.listing(root):
-        if item.get('harness') not in adapters:
+        if item.get('harness') not in families:
             continue
         directory = root / 'state' / 'agents' / item['id']
-        settings = loaded.for_harness(item['harness'], _defaults(adapters[item['harness']]))
+        settings = loaded.for_harness(item['harness'], _defaults(families[item['harness']]))
         try:
             schedule, origin = settings_file.schedule_for(directory, settings)
         except ValueError:
@@ -184,8 +186,8 @@ def save_settings(root=None, value=None):
     loaded = settings_file.parse(value)
     if not settings_file.legacy(path) and loaded.schema != 2:
         raise ValueError(f'{path} holds schema 2 settings')
-    for adapter in _adapters(root).values():
-        problem = adapter.compaction_state(root, loaded)[1]
+    for name, family in _harnesses(root).items():
+        problem = support.state(root, name, family, loaded)[1]
         if problem:
             raise ValueError(problem)
     write(path, value)
@@ -265,7 +267,3 @@ def set_scheduler(root=None, *, agent, scheduler):
     settings_file.save_schedule(target.directory, None if scheduler is None else settings_file.parse_schedule(scheduler))
     return agent_view(root, agent=agent, preview=False)
 
-
-if __name__ == '__main__':
-    from ._common import main
-    main(configure, run)

@@ -22,7 +22,7 @@ import subprocess
 import time
 from uuid import uuid4
 
-from ..store import lock, now, read, write
+from multiverse.store import lock, now, read, write
 from .model import Turn, tree_from_record, tree_record
 
 RECENT_ERRORS = 20

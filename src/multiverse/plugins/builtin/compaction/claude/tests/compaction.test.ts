@@ -25,7 +25,7 @@ function world(on: On, events: object[], options: Options = {}) {
   const reports = [...(options.statuses ?? [{ enabled: true, trees: 0, missing: 0, building: false, failed: 0 }])]
   on('process.run', async ($, e) => {
     runs.push(e.argv)
-    const asked = e.argv[3] === 'status' || e.argv[3] === 'background'
+    const asked = e.argv[5] === 'status' || e.argv[5] === 'background'
     const status = asked ? (reports.length > 1 ? reports.shift() : reports[0]) : undefined
     const stdout = status ? JSON.stringify({ event: 'status', ...status }) + '\n' : ''
     return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -69,7 +69,7 @@ describe('session.compact', () => {
     const result = await $.session.compact({ trigger: 'manual', messages: offered })
     expect(result).toEqual({ messages: [offered[0], built] })
     expect(w.core).toEqual([])
-    expect(w.spawned[0]!.argv).toEqual(['/python', '-m', 'multiverse.compaction', 'install', '--agent-dir', '/agent'])
+    expect(w.spawned[0]!.argv).toEqual(['/python', '-m', 'multiverse.plugins', 'run', 'compaction', 'install', '--agent-dir', '/agent'])
     const request = JSON.parse(w.spawned[0]!.input ?? '{}')
     expect(request.trigger).toBe('manual')
     expect(request.offered).toEqual([{ handle: 'row-1', role: 'user' }, { handle: 'row-2', role: 'assistant' }])
@@ -128,9 +128,9 @@ describe('turn end', () => {
     await $.classic.Stop({ stop_hook_active: false })
     await w.clock.settle()
     const argv = w.runs.find((run) => run.includes('background'))
-    expect(argv?.slice(0, 6)).toEqual(['/python', '-m', 'multiverse.compaction', 'background', '--agent-dir', '/agent'])
-    expect(argv?.[6]).toBe('--turn-ended')
-    expect(Number(argv?.[7])).toBe(w.clock.now())
+    expect(argv?.slice(0, 8)).toEqual(['/python', '-m', 'multiverse.plugins', 'run', 'compaction', 'background', '--agent-dir', '/agent'])
+    expect(argv?.[8]).toBe('--turn-ended')
+    expect(Number(argv?.[9])).toBe(w.clock.now())
   })
 
   test('does nothing when compaction is off', async ($, on) => {
@@ -141,7 +141,7 @@ describe('turn end', () => {
   })
 })
 
-const statusRuns = (runs: (readonly string[])[]) => runs.filter((run) => run[3] === 'status')
+const statusRuns = (runs: (readonly string[])[]) => runs.filter((run) => run[5] === 'status')
 
 describe('one-off scheduler', () => {
   test("the summary line names the settings a /compact's arguments chose, and nothing otherwise", () => {
@@ -164,7 +164,7 @@ describe('status line', () => {
     const w = world(on, [])
     await $.classic.SessionStart({ source: 'resume' })
     await w.clock.settle()
-    expect(w.runs).toEqual([['/python', '-m', 'multiverse.compaction', 'background', '--agent-dir', '/agent',
+    expect(w.runs).toEqual([['/python', '-m', 'multiverse.plugins', 'run', 'compaction', 'background', '--agent-dir', '/agent',
                              '--turn-ended', String(w.clock.now())]])
   })
 
@@ -172,7 +172,7 @@ describe('status line', () => {
     const w = world(on, [])
     await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
     await w.clock.settle()
-    expect(statusRuns(w.runs)).toEqual([['/python', '-m', 'multiverse.compaction', 'status', '--agent-dir', '/agent']])
+    expect(statusRuns(w.runs)).toEqual([['/python', '-m', 'multiverse.plugins', 'run', 'compaction', 'status', '--agent-dir', '/agent']])
     await $.session.start({ cwd: '/work', surface: null, isInteractive: false })
     await w.clock.settle()
     expect(statusRuns(w.runs).length).toBe(1)
@@ -181,7 +181,7 @@ describe('status line', () => {
   test('the turn end runs the builder call before the hook returns, so a reload cannot cancel it', async ($, on) => {
     const w = world(on, [])
     await $.classic.Stop({ stop_hook_active: false })
-    expect(w.runs.filter((run) => run[3] === 'background').length).toBe(1)
+    expect(w.runs.filter((run) => run[5] === 'background').length).toBe(1)
   })
 
   test('nothing is read when compaction is off', async ($, on) => {

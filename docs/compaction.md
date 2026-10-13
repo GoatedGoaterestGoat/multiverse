@@ -11,9 +11,10 @@ tells it that a summary was made.
 The algorithm is Multiverse v1's (`multiverse-plugin/vendor/compaction`), with
 the same parser, merge prompts, schedulers and expansion. What changed is the
 delivery: v1 rewrote the live transcript, while mv2 answers the harness's own
-compaction (for Claude, the mod's `session.compact` hook). It is implemented
-once, independent of any harness, in `src/multiverse/compaction/`; Claude Code
-is the first harness that supports it.
+compaction (for Claude, a `session.compact` hook). It is the bundled
+`compaction` plugin (`src/multiverse/plugins/builtin/compaction/`): its engine
+(`engine/`) is independent of any harness, each harness family has a source
+(`sources/`), and Claude Code is the first harness that supports it.
 
 ## How it works
 
@@ -152,8 +153,8 @@ Code's `cleanupPeriodDays` should be large.
 
 ## Compacting a session
 
-When the session compacts, the harness runs `python -m multiverse.compaction
-install`. It allocates the budget, builds any tree still missing (or waits for
+When the session compacts, the harness runs the plugin's `install` helper
+action (`python -m multiverse.plugins run compaction install`). It allocates the budget, builds any tree still missing (or waits for
 the background builder working on that turn), expands the trees and streams the
 result back. Turns kept whole never wait for a tree. Progress, retries and
 errors are reported as they happen.
@@ -251,7 +252,7 @@ sets `MV2_COMPACTION=1` for the mod and adds a `PreCompact` hook to its settings
   counts), with `· building` while the background builder works, turns whose
   build failed, and a failed `/compact`. It is read when the session starts,
   when a turn ends, every 15 s while a builder runs and after each `/compact`
-  (`python -m multiverse.compaction status`). A running `/compact` shows its
+  (the plugin's `status` helper action). A running `/compact` shows its
   progress in the same slot.
 - **Merges** are v1's privileged CLI merges, unchanged: `claude -p --resume
   <synthetic session>` with no tools, using your Claude login, v1's newest

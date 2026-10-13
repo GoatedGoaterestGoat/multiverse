@@ -25,7 +25,7 @@ anything else follows it.
 """
 import re
 
-from ....compaction.model import Leaf, Node
+from ...engine.model import Leaf, Node
 
 PLACEHOLDER_TOOL = 'summarized_tool'
 PLACEHOLDER_RESULT = '(result summarized)'

@@ -13,7 +13,8 @@
     "doctor",
     "cli",
     "statusline",
-    "dashboard.settings"
+    "dashboard.settings",
+    "helper"
   ],
   "permissions": [
     "harness.claude"

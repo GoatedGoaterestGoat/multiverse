@@ -17,11 +17,11 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-Tree compaction is the bundled `compaction` plugin: its launch contribution
-tells the mod to answer the session's `/compact` with mv2's compacted
-conversation and adds a PreCompact hook that refuses Claude's own compaction
-should the mod ever fail to answer. `compaction(session)` returns the protocol
-implementation in `compaction/`.
+Tree compaction is the bundled `compaction` plugin (plugins/builtin/compaction):
+its launch contribution loads its own Claude plugin, which answers the
+session's `/compact` with mv2's compacted conversation, and adds a PreCompact
+hook that refuses Claude's own compaction should that ever fail to answer. Its
+Claude source (sources/claude) reads this harness's transcripts.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -353,36 +353,6 @@ class ClaudeAdapter(ConfiguredAdapter):
         if directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
             return None
         return root
-
-    @staticmethod
-    def compaction_defaults():
-        """Claude's builder settings where compaction.json gives none."""
-        from .compaction import BUILDER_DEFAULTS
-        return dict(BUILDER_DEFAULTS)
-
-    def compaction_state(self, root, loaded=None):
-        """(settings, None) for this harness in the universe at `root`, or (None, why its compaction.json cannot be used).
-
-        `loaded` checks a parsed file (config.Config) before it is written
-        instead of the one on disk. Launches, capabilities and `mv2 doctor` use
-        it; `mv2 compaction` refuses loudly instead.
-        """
-        from ...compaction import config
-        from .compaction import BUILDER_DEFAULTS, check_builder
-        try:
-            settings = (loaded or config.load(root)).for_harness(self.name, BUILDER_DEFAULTS)
-        except ValueError as error:
-            return None, str(error)
-        try:
-            check_builder(settings.builder)
-        except ValueError as error:
-            return None, f'{Path(root) / config.FILE}: harnesses.{self.name}.builder: {error}'
-        return settings, None
-
-    def compaction(self, session):
-        """The compaction protocol for this exact session (multiverse.compaction.protocol)."""
-        from .compaction import ClaudeCompaction
-        return ClaudeCompaction(self, session)
 
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)

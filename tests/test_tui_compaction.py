@@ -1,16 +1,18 @@
 """The compaction screens: pure edit logic, then the dashboard flow against a fake backend."""
 import asyncio
 import copy
+import importlib
 from pathlib import Path
 import sys
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
 from textual.widgets import DataTable, Input, Static
-from multiverse.ui.compaction import AgentScreen, CompactionScreen, apply_changes, sections
+from multiverse.plugins import entry as plugin_entry, loader as plugin_loader
 from multiverse.ui.plugins_screen import PluginsScreen
 from multiverse.ui.settings import Choice, Field
 from multiverse.ui.tree import group_key
@@ -18,6 +20,11 @@ from multiverse.ui.screens import KEYS
 from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
 from test_tui_plugins import FakeService
+
+# The screens are the bundled compaction plugin's, as mv2 loads it.
+screens = importlib.import_module(f"{plugin_loader.load(plugin_entry(None, 'compaction'), off=True).package}.screens")
+AgentScreen, CompactionScreen, apply_changes, sections = (screens.AgentScreen, screens.CompactionScreen,
+                                                           screens.apply_changes, screens.sections)
 
 FILE = {"schema": 1, "enabled": False,
         "default": {"scheduler": "last_k_raw", "k": 2, "budget": 0, "image_mode": "budget_fit"},
@@ -93,7 +100,7 @@ class TitleTests(unittest.TestCase):
     def test_the_title_is_the_universe_name_from_universe_json_else_its_directory(self):
         import json
         import tempfile
-        from multiverse.ui.compaction import universe_name
+        universe_name = screens.universe_name
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "pr-review"
             root.mkdir()
@@ -179,9 +186,29 @@ class CompactionPluginService(FakeService):
         return CompactionScreen
 
 
+class BackendData:
+    """The screens' data (overview, save_settings, agent_view, set_scheduler), from the test's fake backend."""
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def overview(self, root):
+        return self.backend.compaction_overview(root)
+
+    def save_settings(self, root, value):
+        return self.backend.save_compaction(root, value)
+
+    def agent_view(self, root, *, agent, **preview):
+        return self.backend.compaction_agent(root, agent, **preview)
+
+    def set_scheduler(self, root, *, agent, scheduler):
+        return self.backend.set_compaction_scheduler(root, agent, scheduler)
+
+
 class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.backend = FakeBackend()
+        self.enterContext(patch.object(screens.SchedulerScreen, "data", BackendData(self.backend)))
         self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0, plugin_service=CompactionPluginService())
 
     async def open_settings(self, pilot):
@@ -212,6 +239,19 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
             if asyncio.get_running_loop().time() > deadline:
                 self.fail(f"timed out waiting for {what}")
             await pilot.pause(0.02)
+
+    async def stable(self, pilot, measure, what, rounds=6, timeout=8.0):
+        """Wait until `measure()` returns the same value `rounds` times in a row, so a layout still moving is not read."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        last, same = None, 0
+        while same < rounds:
+            await pilot.pause(0.03)
+            value = measure()
+            same = same + 1 if value == last else 0
+            last = value
+            if asyncio.get_running_loop().time() > deadline:
+                self.fail(f"timed out waiting for {what} to settle (last {last!r})")
+        return last
 
     def shown(self, screen, selector=".cerror"):
         return str(screen.query_one(selector, Static).render())
@@ -438,9 +478,11 @@ class CompactionScreenTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("enter")
                 await self.until(pilot, lambda: isinstance(app.screen, AgentScreen)
                                  and app.screen.query_one("#plan", DataTable).row_count == 60, "the 60-turn plan")
-                await pilot.pause(0.1)
                 agent = app.screen
                 plan = agent.query_one("#plan", DataTable)
+                # The status block above it sizes itself after the first draw: read the table once the layout rests.
+                await self.stable(pilot, lambda: (plan.region.height, agent.query_one("#agent-top").region.height),
+                                  "the plan table's height")
                 dialog = agent.query_one("#compaction-dialog").region
                 heights.append(plan.region.height)
                 self.assertGreaterEqual(plan.region.height, 4)

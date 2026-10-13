@@ -20,7 +20,7 @@ from pathlib import Path
 import subprocess
 import threading
 
-from ....compaction.store import Store
+from ...engine.store import Store
 from . import merge as merging
 from . import render as rendering
 from . import transcript
@@ -78,7 +78,7 @@ class ClaudeCompaction:
 
     @staticmethod
     def claude_home() -> Path:
-        from .. import claude_home
+        from multiverse.harnesses.claude import claude_home
         return claude_home()
 
     def transcript_path(self) -> Path:
