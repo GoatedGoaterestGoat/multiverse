@@ -6,9 +6,7 @@ The CLI runs `run`; the plugin's settings screens (screens.py) call
 import json
 import sys
 
-from multiverse import harnesses, universe
-from multiverse.runtime import lifecycle
-from multiverse.store import read, write
+from multiverse.plugins.api import files
 
 from . import support
 from .engine import config as settings_file
@@ -58,7 +56,7 @@ def find_agent(root, agent):
 
 def run(root=None, *, agent, scheduler=None, budget=None, k=None, recency_ratio=None, recency_half_life=None,
         image_mode=None, use_default=False, plan=False, build=False):
-    root = universe.resolve(root)
+    root = support.MV.universe(root).path
     target = find_agent(root, agent)
     changing = any(value is not None for value in (scheduler, budget, k, recency_ratio, recency_half_life, image_mode))
     if use_default and changing:
@@ -104,7 +102,7 @@ def _harnesses(root):
     found = {}
     for manifest in sorted((root / 'harnesses').glob('*/harness.json')):
         try:
-            family = getattr(harnesses.load(root, manifest.parent.name), 'family', '') or ''
+            family = support.MV.harness_info(root, manifest.parent.name).family
         except (OSError, ValueError, KeyError):
             continue
         if support.builder_support(family) is not None:
@@ -126,7 +124,7 @@ def _activity(store):
 
 def overview(root=None):
     """The universe's compaction settings as written and in effect, its harnesses and its agents."""
-    root = universe.resolve(root)
+    root = support.MV.universe(root).path
     path = settings_file.path(root)
     written, problem = {}, None
     if path.exists():
@@ -152,18 +150,18 @@ def overview(root=None):
                      'defaults': defaults, 'options': [key for key in defaults if key not in settings_file.BUILDER],
                      'problem': state[1]})
     members = []
-    for item in lifecycle.listing(root):
-        if item.get('harness') not in families:
+    for item in support.MV.universe(root).agents():
+        if item.harness not in families:
             continue
-        directory = root / 'state' / 'agents' / item['id']
-        settings = loaded.for_harness(item['harness'], _defaults(families[item['harness']]))
+        directory = item.directory
+        settings = loaded.for_harness(item.harness, _defaults(families[item.harness]))
         try:
             schedule, origin = settings_file.schedule_for(directory, settings)
         except ValueError:
             schedule, origin = settings.default, 'agent'
         store, status = Store(directory), Store(directory).status()
         errors = status.get('errors', [])
-        members.append({'id': item['id'], 'name': item.get('name'), 'harness': item['harness'], 'live': item.get('live'),
+        members.append({'id': item.id, 'name': item.name, 'harness': item.harness, 'live': item.live,
                         'scheduler': schedule.settings(), 'scheduler_from': origin, 'trees_cached': store.tree_count(),
                         'activity': _activity(store), 'failed_turns': len(status.get('failures', {})),
                         'last_error': errors[-1].get('message') if errors else None})
@@ -179,7 +177,7 @@ def save_settings(root=None, value=None):
     It goes where the universe's settings are (settings_file.path): an unmigrated
     compaction.json stays one; plugin-settings/compaction.json is schema 2.
     """
-    root = universe.resolve(root)
+    root = support.MV.universe(root).path
     path = settings_file.path(root)
     if not settings_file.legacy(path) and isinstance(value, dict) and 'schema' not in value:
         value = {'schema': 2, **value}
@@ -190,7 +188,7 @@ def save_settings(root=None, value=None):
         problem = support.state(root, name, family, loaded)[1]
         if problem:
             raise ValueError(problem)
-    write(path, value)
+    files.write_json(path, value)
     return overview(root)
 
 
@@ -201,7 +199,7 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
     would follow, or scheduler settings to try. `failures` says why each turn
     whose build is still failed failed, as 'turn <n>: <reason>'.
     """
-    root = universe.resolve(root)
+    root = support.MV.universe(root).path
     target = find_agent(root, agent)
     written, origin = settings_file.schedule_for(target.directory, target.settings)
     if scheduler is SAVED:
@@ -212,7 +210,7 @@ def agent_view(root=None, *, agent, scheduler=SAVED, preview=True):
         trying = settings_file.parse_schedule(scheduler)
     store, status = target.store, target.store.status()
     try:
-        name = read(target.directory / 'properties.json').get('name')
+        name = files.read_json(target.directory / 'properties.json').get('name')
     except (OSError, ValueError):
         name = None
     result = {'agent': target.directory.name, 'name': name, 'harness': target.harness, 'enabled': target.settings.enabled,
@@ -262,7 +260,7 @@ def _failures(failed: dict, turns) -> list[str]:
 
 def set_scheduler(root=None, *, agent, scheduler):
     """Give the agent its own scheduler, or with None return it to the default; returns agent_view without a plan."""
-    root = universe.resolve(root)
+    root = support.MV.universe(root).path
     target = find_agent(root, agent)
     settings_file.save_schedule(target.directory, None if scheduler is None else settings_file.parse_schedule(scheduler))
     return agent_view(root, agent=agent, preview=False)

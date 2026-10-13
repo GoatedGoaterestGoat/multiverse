@@ -6,9 +6,10 @@ harness through here.
 """
 from importlib import import_module
 
-from multiverse.runtime import native
-
 from .engine import config, pipeline
+
+# The api.Plugin that register() received; set before anything calls into the plugin.
+MV = None
 
 # Each harness family with a compaction source: its package (in sources/) and the class.
 SOURCES = {'claude': ('.sources.claude', 'ClaudeCompaction')}
@@ -50,16 +51,17 @@ def state(root, harness, family, loaded=None):
     return settings, None
 
 
-def source(adapter, session):
-    """The compaction source for this exact session, or CompactionError when its harness has none."""
-    family = getattr(adapter, 'family', '') or ''
-    module, name = _module(family)
+def source(harness, session):
+    """The compaction source for this exact session (api.HarnessInfo, api.SessionInfo), or CompactionError."""
+    module, name = _module(harness.family)
     if module is None:
         raise pipeline.CompactionError(f'The {session.harness} harness does not support compaction')
-    return getattr(module, name)(adapter, session)
+    return getattr(module, name)(harness, session)
 
 
 def open_agent(root, reference):
     """An agent's compaction context (pipeline.Agent), found by name, ID or directory name."""
-    directory, adapter, session, _ = native.context(root, reference)
-    return pipeline.open_agent(root, directory, session.harness, source(adapter, session))
+    agent = MV.universe(root).agent(reference)
+    session = agent.session()
+    harness = MV.harness_info(agent.universe.path, agent.harness)
+    return pipeline.open_agent(agent.universe.path, agent.directory, agent.harness, source(harness, session))

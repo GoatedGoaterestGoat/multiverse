@@ -5,7 +5,8 @@ building, compaction, the helper actions), sources/ (each harness family's
 compaction source), support.py (which harnesses it supports), command.py
 (`mv2 compaction`), screens.py (its settings under the dashboard's P) and
 claude/ (its Claude plugin, which answers /compact). register() wires them to
-mv2. Until a universe is migrated, its compaction.json (the manifest's
+mv2 and keeps the API object in support.MV; nothing here imports mv2 beyond
+multiverse.plugins.api and multiverse.plugins.ui. Until a universe is migrated, its compaction.json (the manifest's
 settings.legacy) keeps the plugin on there.
 """
 from datetime import datetime
@@ -15,6 +16,7 @@ import re
 
 from multiverse.plugins import api
 
+from . import command, support
 from .engine import actions, config
 from .support import builder_support, state
 
@@ -192,13 +194,13 @@ def migrate(data, source):
 
 
 def register(mv: api.Plugin):
+    support.MV = mv  # command, screens and the helper actions reach mv2 through it
     mv.launch.contribute('claude', launch)
     mv.capabilities.add('compaction', lambda info: capability(mv, info))
     mv.usage.adjust(usage)
     mv.doctor.check(lambda universe: doctor(mv, universe))
     mv.settings.check(lambda settings, root: check_settings(mv, settings, root))
     mv.settings.migrate(migrate)
-    from . import command
     mv.cli.command('compaction', command.configure, command.run)
     for name in ACTIONS:
         mv.helper.action(name, lambda arguments, name=name: actions.main([name, *arguments]))

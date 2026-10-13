@@ -22,8 +22,10 @@ import subprocess
 import time
 from uuid import uuid4
 
-from multiverse.store import lock, now, read, write
+from multiverse.plugins.api import files
 from .model import Turn, tree_from_record, tree_record
+
+lock, now, read, write = files.lock, files.now, files.read_json, files.write_json
 
 RECENT_ERRORS = 20
 

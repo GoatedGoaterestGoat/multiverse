@@ -29,7 +29,7 @@ import subprocess
 import sys
 import threading
 
-from ..support import open_agent as find_agent
+from .. import support
 from . import config as settings_file
 from .build import Build, Cancelled, Reporter, json_lines
 from .pipeline import CompactionError, compact, conversation, plan
@@ -45,7 +45,7 @@ def _agent(directory: str):
     root = directory.parents[2] if len(directory.parents) > 2 else None
     if root is None or directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
         raise ValueError(f'Not an agent directory: {directory}')
-    return find_agent(root, directory.name)
+    return support.open_agent(root, directory.name)
 
 
 def install(directory: str, request: dict, emit) -> int:
@@ -159,10 +159,9 @@ def line(facts: dict, compact_failed: bool = False) -> str:
 
 def show(agent, facts: dict):
     """Write the agent's `compaction` status-line item (state/agents/<id>/status-items/compaction.txt)."""
-    from multiverse.plugins import harness as plugin_harness
     try:
-        plugin_harness.write_item(agent.directory, 'compaction', line(facts, agent.store.status().get('compact_failed', False)))
-    except OSError:
+        support.MV.statusline.write(agent.directory, 'compaction', line(facts, agent.store.status().get('compact_failed', False)))
+    except (OSError, ValueError):  # the status line is best effort
         pass
 
 

@@ -60,13 +60,12 @@ class ClaudeCompaction:
     builder_defaults = BUILDER_DEFAULTS
     check_builder = staticmethod(check_builder)
 
-    def __init__(self, adapter, session):
+    def __init__(self, harness, session):
+        """`harness` is the agent's api.HarnessInfo, `session` its api.SessionInfo."""
         if not session.native_id:
             raise TranscriptError('No Claude session ID recorded for this agent')
-        if not session.session_file:
-            raise TranscriptError('No agent directory recorded for this agent')
-        self.adapter, self.session = adapter, session
-        self.agent_dir = Path(session.session_file).parent
+        self.harness_info, self.session = harness, session
+        self.agent_dir = Path(session.directory)
         self.store = Store(self.agent_dir)
         self.rows_by_uuid: dict[str, dict] = {}
         self.order: list[str] = []
@@ -76,10 +75,11 @@ class ClaudeCompaction:
 
     # Paths and process control --------------------------------------------
 
-    @staticmethod
-    def claude_home() -> Path:
-        from multiverse.harnesses.claude import claude_home
-        return claude_home()
+    def claude_home(self) -> Path:
+        """Claude's data directory (CLAUDE_CONFIG_DIR, else ~/.claude), where its transcripts are."""
+        if self.harness_info.home is None:
+            raise TranscriptError("Claude's data directory is not known for this harness")
+        return Path(self.harness_info.home)
 
     def transcript_path(self) -> Path:
         pattern = str(self.claude_home() / 'projects' / '*' / f'{self.session.native_id}.jsonl')
@@ -95,10 +95,10 @@ class ClaudeCompaction:
         return path.resolve()
 
     def executable(self) -> str:
-        return self.adapter.spec['spawn'][0]
+        return self.harness_info.executable
 
     def unset_env(self) -> tuple[str, ...]:
-        return tuple(self.adapter.spec.get('unset_env', []))
+        return tuple(self.harness_info.unset_env)
 
     def call(self, argv, cwd, env, timeout):
         """Run one Claude call; `cancel()` from another thread stops it."""
@@ -131,7 +131,7 @@ class ClaudeCompaction:
     # Protocol ----------------------------------------------------------------
 
     def unavailable(self):
-        if not getattr(self.adapter, 'settings', {}).get('inbox_bridge'):
+        if not self.harness_info.bridge:
             return 'compaction needs the multiverse mod: set "inbox_bridge": true in harnesses/claude/harness.json'
         return None
 

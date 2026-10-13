@@ -36,7 +36,7 @@ import json
 from pathlib import Path
 import re
 
-from multiverse.store import write
+from multiverse.plugins.api import files
 
 SETTINGS = 'plugin-settings/compaction.json'  # the plugin's settings (schema 2)
 LEGACY = 'compaction.json'                    # the pre-plugin file (schema 1), read until it is migrated
@@ -378,7 +378,7 @@ def save_schedule(agent_dir, schedule: Schedule | None):
     if schedule is None:
         path.unlink(missing_ok=True)
     else:
-        write(path, schedule.settings())
+        files.write_json(path, schedule.settings())
 
 
 def describe(settings: Settings) -> dict:

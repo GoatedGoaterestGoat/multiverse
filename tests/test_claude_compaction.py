@@ -181,9 +181,11 @@ class Fixture(BaseTest):
         return path
 
     def source(self):
-        session = SessionHandle(self.agent_dir.name, 'claude', str(self.work), native_id=self.session_id,
-                                session_file=str(self.agent_dir / 'session.jsonl'))
-        return ClaudeCompaction(self.adapter, session)
+        """The Claude source as the plugin builds it: the harness and the session as the API describes them."""
+        from multiverse.plugins import api
+        harness = compaction('support').MV.harness_info(self.root, 'claude')
+        session = api.SessionInfo(self.root, self.agent_dir.name, 'claude', 'claude', self.session_id)
+        return ClaudeCompaction(harness, session)
 
     def save_payload(self, created, count, sources):
         store = Store(self.agent_dir)

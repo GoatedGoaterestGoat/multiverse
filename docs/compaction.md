@@ -14,7 +14,9 @@ delivery: v1 rewrote the live transcript, while mv2 answers the harness's own
 compaction (for Claude, a `session.compact` hook). It is the bundled
 `compaction` plugin (`src/multiverse/plugins/builtin/compaction/`): its engine
 (`engine/`) is independent of any harness, each harness family has a source
-(`sources/`), and Claude Code is the first harness that supports it.
+(`sources/`), and Claude Code is the first harness that supports it. It reaches
+mv2 only through the plugin API (`multiverse.plugins.api`, and
+`multiverse.plugins.ui` for its screens).
 
 ## How it works
 

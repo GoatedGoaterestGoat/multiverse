@@ -14,12 +14,45 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import DataTable, Footer, Label, Static
 
-from multiverse.display import clean, tokens
-from multiverse.store import read
-from multiverse.ui.settings import BOOL_OPTIONS, MISSING, Field, FieldScreen, convert, delete, field, lookup, put
+from multiverse.plugins.api import files, text
+from multiverse.plugins.ui import BOOL_OPTIONS, MISSING, Field, FieldScreen, convert, field
 
 from . import command
 from .engine import config
+
+clean, tokens = text.clean, text.tokens
+
+
+def lookup(data, path):
+    """The value at a key path, or MISSING."""
+    for key in path:
+        if not isinstance(data, dict) or key not in data:
+            return MISSING
+        data = data[key]
+    return data
+
+
+def put(data, path, value):
+    for key in path[:-1]:
+        if not isinstance(data.get(key), dict):
+            data[key] = {}
+        data = data[key]
+    data[path[-1]] = value
+
+
+def delete(data, path):
+    """Remove a key and the objects it leaves empty."""
+    parents = [data]
+    for key in path[:-1]:
+        parents.append(parents[-1].get(key) if isinstance(parents[-1], dict) else None)
+    if not isinstance(parents[-1], dict):
+        return
+    parents[-1].pop(path[-1], None)
+    for depth in range(len(path) - 1, 0, -1):
+        if parents[depth] == {}:
+            parents[depth - 1].pop(path[depth - 1], None)
+        else:
+            break
 
 GENERIC = config.describe(config.Settings())['builder']
 SCHEDULER_NAMES = tuple(config.SCHEDULERS)
@@ -173,7 +206,7 @@ class SchedulerScreen(FieldScreen):
 def universe_name(root):
     """The universe's own name from universe.json, else its directory's."""
     try:
-        return str(read(Path(root) / "universe.json").get("name") or Path(root).name)
+        return str(files.read_json(Path(root) / "universe.json").get("name") or Path(root).name)
     except (OSError, ValueError, AttributeError):
         return Path(root).name
 

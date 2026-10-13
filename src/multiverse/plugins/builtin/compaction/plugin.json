@@ -3,7 +3,7 @@
   "name": "compaction",
   "version": "1.0.0",
   "description": "Tree compaction: per-turn summary trees in place of a harness's own summary",
-  "api": "1.5",
+  "api": "1.8",
   "module": "plugin",
   "default": "off",
   "extends": [
@@ -17,7 +17,10 @@
     "helper"
   ],
   "permissions": [
-    "harness.claude"
+    "harness.claude",
+    "agents.read",
+    "process.spawn",
+    "models.claude"
   ],
   "commands": {
     "compaction": "Show or set an agent's compaction: scheduler, summary trees, recent errors"
