@@ -245,7 +245,7 @@ each process that needs it:
 | `mv2 COMMAND` | One command | The command itself when it is a plugin's. Doctor checks. Launch contributions, since spawn, resume and wake run here. Catalog entries. |
 | Dashboard | While open | UI extension points. Launch contributions for launches it starts. Doctor. |
 | Plugin host | Long-lived, only while a plugin needs it | Event handlers and services, one worker process per plugin (see [The plugin host](#the-plugin-host-where-long-running-plugin-code-lives)). |
-| Plugin helper | One call | `python -m multiverse.plugins run NAME ACTION`, which harness extensions call, as the mod calls `python -m multiverse.compaction install` today. |
+| Plugin helper | One call | `python -m multiverse.plugins run NAME ACTION`, which harness extensions call: compaction's Claude hooks run `run compaction install`, `status` and `background` this way. |
 | Agent runner | One launch | Nothing in v1. A plugin cannot crash or slow a runner. Runner-side observers can come later if a real use needs them. |
 | Harness (Claude, Pi) | One launch | The plugin's harness extension, in the harness's own language and API. |
 | tmux status script | Every 2 s | Nothing. It reads status-item files (below), so it never imports plugin code. |
@@ -916,7 +916,7 @@ run and cannot enforce it. Codex's compaction capability stays unavailable.
 Sources: [PreCompact implementation and tests](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/hooks/src/events/compact.rs),
 [history injection](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/core/src/codex_thread.rs),
 [thread resume fields](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server-protocol/src/protocol/v2/thread.rs),
-and `src/multiverse/compaction/protocol.py`.
+and the compaction plugin's `engine/protocol.py`.
 
 ### Status lines
 
@@ -932,7 +932,7 @@ state/agents/<id>/status-items/<item>.txt      one line, at most 200 characters
 - **Writing.** Whatever process knows the value writes it, atomically: a helper,
   a host handler, or the plugin's Claude directory with `$.fs.write`. An empty
   or missing file shows nothing. Compaction writes `compaction.txt` from the
-  facts it already prints (`python -m multiverse.compaction status`):
+  facts it already prints (its `status` helper action):
   `trees 51/52 · building`.
 - **Reading.** The mod adds a declared item's file to the files its timer
   watches. The tmux script reads it only when the item is on for that harness.
@@ -1063,10 +1063,13 @@ is absent too.
 
 ### What moves where
 
-| Today | Becomes |
+Done in steps 2 to 6 below. "Before" is where the code was in core; the
+plugin's files are under `src/multiverse/plugins/builtin/compaction/`.
+
+| Before | Now |
 | --- | --- |
-| `compaction/` (model, config, schedule, store, build, pipeline, protocol, `__main__`) | The plugin's own package, unchanged. `__main__` actions become `mv.helper` actions. |
-| `harnesses/claude/compaction/` (transcript, merge, render, images, `ClaudeCompaction`) | The plugin's Claude source. The plugin picks the source by the agent's harness family; `CompactionSource` stays its internal seam. |
+| `compaction/` (model, config, schedule, store, build, pipeline, protocol, `__main__`) | The plugin's `engine/`. The `__main__` actions are `mv.helper` actions, and `multiverse.compaction` keeps only a `-m` forwarding stub for agents launched before the move. |
+| `harnesses/claude/compaction/` (transcript, merge, render, images, `ClaudeCompaction`) | The plugin's `sources/claude/`. The plugin picks the source by the agent's harness family; `CompactionSource` stays its internal seam. |
 | `mod/hooks/compaction.ts` (`session.compact`, `classic.Stop`, `classic.SessionStart`, `session.start`) | The plugin's `claude/` directory, a Claude plugin of its own. `/compact` progress uses its own status slot. |
 | The mod's `compaction` status item, read through `compactionLine()` | `status-items/compaction.txt`, written by the plugin, read by the mod like any item |
 | Adapter `_with_bridge`: `MV2_COMPACTION=1`, the `PreCompact` guard in `--settings`, `bridge without compaction` | A launch contribution: environment, `claude_settings` with the guard, `problem` and `mode` |
@@ -1074,9 +1077,9 @@ is absent too.
 | Adapter `_compaction_capability`; `base.py` giving every harness "no tree compaction"; `CAPABILITIES` listing it | `mv.capabilities.add("compaction", …)`, which answers for every harness, with the same texts |
 | Adapter `latest_compaction()` and `get_usage`'s estimated context | `mv.usage.adjust`, with the same fields (`estimated`, `estimated_at`, `estimated_from`) |
 | `display.py` "estimated after compaction: conversation only" | Generic in core: it shows `estimated_reason` from the adjuster |
-| `tools/compaction.py`, `cli.py`'s `compaction` | `mv.cli.command("compaction", …)`, with the same arguments and output |
+| `tools/compaction.py`, `cli.py`'s `compaction` | The plugin's `command.py`, registered with `mv.cli.command("compaction", …)`, with the same arguments and output |
 | `tools/doctor.py` `_compaction` | `mv.doctor.check` |
-| `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | `mv.dashboard.settings(screen=…)`, opened from the plugin settings screen (`P`); `c` is free. The screens are unchanged, on `FieldScreen`, and the per-agent scheduler opens from inside them. |
+| `ui/compaction.py`, the four backend methods, `action_compaction`, the `c` binding, the help line | The plugin's `screens.py`, registered with `mv.dashboard.settings(screen=…)` and opened from the plugin settings screen (`P`); `c` is free. The screens are unchanged, on `FieldScreen`, and the per-agent scheduler opens from inside them. |
 | Templates' `compaction.json` | `plugins.json` and `plugin-settings/compaction.json` (above) |
 | `tools/doctor.py`'s check of `compaction.json` | The plugin's `check(settings)`, which core's settings validation runs |
 | The `statusline.json` item, the mv2-help skill, the Claude README | The item is unchanged. The skill and README text say compaction is a plugin and how to install it. |
@@ -1087,6 +1090,11 @@ zero usage never replaces its response's usage. It applies to Claude's own
 compaction too.
 
 ### Steps
+
+Progress: steps 1 to 6 are done on `plugin-system`. Step 2 is 4c8aaa3, b52eac2,
+e2f5966, d0a29d1, 6371e15 and ba97471; step 3 86aa026; step 4 6706189;
+step 5 f82f2bb, 42f9bf0 and f7b2ca4; step 6 f1d60ff. Step 7 is next; step 8
+waits for it.
 
 Each step keeps the full suite, `test_compaction.py`,
 `test_claude_compaction.py` (with `DashboardBackendTest`),
@@ -1132,9 +1140,10 @@ import paths changing in tests:
    left.
 7. **Use only `api`.** The plugin stops importing internals: it finds its
    agent through `mv.universe().agent()` and the session through the agent, and
-   uses `api.files` for writes and locks. Anything it still needs is added to
-   the API, or the plugin keeps a marked exception that is removed before
-   API 1.0 is final.
+   uses `api.files` for writes and locks, `api.text` and
+   `mv.harness_info(...).home` in place of core helpers, and
+   `multiverse.plugins.ui` for its screens (all there from API 1.8). When it is
+   done, 1.x is promised stable ([Versioning](#versioning)).
 8. **Its own repository.** Once it uses only `api` and its tests run on
    `multiverse.plugins.testing`, its directory is split into the new repository
    with its history, and mv2's copy is replaced by the `plugins/compaction`
