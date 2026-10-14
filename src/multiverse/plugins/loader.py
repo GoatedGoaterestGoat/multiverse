@@ -51,7 +51,8 @@ _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
 _generation = 0  # rises whenever a plugin is loaded or fails to load
-SYNCHRONOUS_BUDGET = 2.0  # seconds a guarded call may take where a person waits on it
+SYNCHRONOUS_BUDGET = 2.0
+UNUSABLE = "its settings cannot be used: "  # how an `unusable` entry's problem begins, after the plugin's name  # seconds a guarded call may take where a person waits on it
 
 
 class PluginError(ValueError):
@@ -339,10 +340,14 @@ def _entry(root, name, on, source, directory, found, shadowed):
     if known is not None:
         entry.state, entry.loaded = "loaded", known
     if root is not None and found.settings is not None:
-        # Unusable settings: the plugin acts as off in this universe, with the reason.
+        # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
+        # the universe's own paths.
         problem = settings(root, entry).problem
         if problem:
-            entry.state, entry.problem = "unusable", problem
+            detail = problem.replace(f"{Path(root)}/", "")
+            if detail.startswith(f"{name}: "):
+                detail = detail[len(name) + 2:]
+            entry.state, entry.problem = "unusable", f"{name}: {UNUSABLE}{detail}"
     return entry
 
 

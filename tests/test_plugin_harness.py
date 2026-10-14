@@ -102,6 +102,40 @@ class LaunchPlanTest(PluginTestCase):
             self.assertEqual(plan.plugins["guard"], {"version": "0.1.0", "state": "skipped", "reason": reason})
         self.assertEqual(harness.launch_plan(self.info(family="codex")).plugins, {})
 
+    def test_a_plugin_left_out_for_unusable_settings_says_so(self):
+        """Its own settings check runs only once its code is loaded, as a launch loads it: the launch must still
+        say why it was left out, as for a plugin that broke."""
+        self.write_plugin("picky", {
+            "module": "plugin", "extends": ["launch"], "permissions": ["harness.claude"],
+            "harnesses": {"claude": [{"dir": "claude"}]}, "settings": {"version": 1}}, {"plugin.py": (
+                "def register(mv):\n"
+                "    def check(settings):\n"
+                "        if settings.get('level') not in (None, 1, 2):\n"
+                "            raise ValueError('level must be 1 or 2')\n"
+                "    mv.settings.check(check)\n")})
+        self.enable("picky")
+        (self.root / "plugin-settings").mkdir(exist_ok=True)
+        (self.root / "plugin-settings" / "picky.json").write_text('{"schema": 1, "level": 9}')
+        loader.reset()  # a fresh process: nothing loaded yet
+        plan = harness.launch_plan(self.info())
+        self.assertNotIn(str((self.plugins_dir / "picky" / "claude").resolve()), plan.claude_plugin_dirs)
+        self.assertEqual(plan.plugins["picky"]["state"], "skipped")
+        self.assertIn("its settings cannot be used", plan.plugins["picky"]["reason"])
+        self.assertTrue(any(problem.startswith("plugin picky was left out: its settings cannot be used")
+                            and "level must be 1 or 2" in problem for problem in plan.problems), plan.problems)
+        self.assertNotIn(str(self.root), " ".join(plan.problems))  # paths are the universe's own
+        self.assertEqual(harness.launch_plan(self.info(family="codex")).plugins.get("picky"), None)  # nothing there
+        # doctor names the plugin, once, with the universe's own path, in a fresh process as well.
+        from multiverse import plugins
+        for fresh in (True, False):
+            if fresh:
+                loader.reset()
+            found = plugins.problems(self.root) + plugins.doctor(self.root, lambda loaded: None)
+            self.assertEqual([problem for problem in found if "picky" in problem],
+                             ["picky: its settings cannot be used: level must be 1 or 2"])
+        self.assertEqual([problem for problem in plugins.doctor(self.root, lambda loaded: None) if "picky" in problem],
+                         [])  # doctor alone, once problems() has said it, adds nothing
+
     def test_conflicts_and_core_variables_leave_the_plugin_out(self):
         self.write_plugin("rival", {"module": "plugin", "extends": ["launch"], "permissions": ["harness.claude"]}, {
             "plugin.py": "from multiverse.plugins import api\n"

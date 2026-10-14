@@ -130,9 +130,30 @@ def launch_plan(info, base_settings=None, base_environment=None):
         return empty
 
 
+def _unusable(root, family):
+    """{name: (version, why) or None} of the plugins on here whose settings cannot be used: (version, why) for
+    those that would have added to a `family` launch, None for the rest."""
+    found = {}
+    for entry in loader.entries(root):
+        if not entry.on or entry.state != "unusable" or entry.manifest is None:
+            continue
+        contributes = entry.manifest.harnesses.get(family) or (
+            entry.loaded is not None and entry.loaded.registrations.launch.get(family))
+        detail = (entry.problem or "").split(loader.UNUSABLE, 1)[-1]
+        found[entry.name] = (entry.manifest.version, detail) if contributes else None
+    return found
+
+
 def _launch_plan(info, plan):
     owners = {key: "the harness" for key in plan.environment}  # environment variable -> who set it
     active = loader.active(info.universe)
+    # A plugin's own settings check runs once its code is loaded, which active() has just done: one whose settings
+    # cannot be used here is left out of the launch, and the launch says why, as for a plugin that broke.
+    unusable = _unusable(info.universe, info.family)
+    active = [loaded for loaded in active if loaded.name not in unusable]
+    for name, (version, detail) in sorted((name, found) for name, found in unusable.items() if found):
+        plan.plugins[name] = {"version": version, "state": "skipped", "reason": loader.UNUSABLE + detail}
+        plan.problems.append(f"plugin {name} was left out: {loader.UNUSABLE}{detail}")
     if callable(info.version):
         wanted = any(loaded.manifest.harnesses.get(info.family) or loaded.registrations.launch.get(info.family)
                      for loaded in active)
@@ -367,11 +388,11 @@ def declared_items(root, active):
 
 
 def item_conflicts(root):
-    """Sentences for status-line items that are not shown because of their name."""
-    active = loader.active(root)
-    names = {found.name for found in loader.entries(root)}
+    """Sentences for status-line items that are not shown because of their name. Manifests only: no plugin code."""
+    found_here = loader.entries(root)
+    names = {found.name for found in found_here}
     problems, owners = [], {}
-    for loaded in active:
+    for loaded in (found for found in found_here if found.usable):
         for item in loaded.manifest.statusline:
             if item.name in names and item.name != loaded.name:
                 problems.append(f"{loaded.name}'s status-line item {item.name!r} is not shown: "

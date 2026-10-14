@@ -101,7 +101,11 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
                     done.append(plugins.migrate(Path(item["universe"]), item))
                 except (OSError, ValueError) as error:
                     item["problem"] = str(error)
-        return {"universe": str(root), "planned": planned, "applied": done, "apply": apply}
+                    item["unchanged"] = getattr(error, "unchanged", True)
+        result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply}
+        if apply and any(item.get("problem") for item in planned):
+            result["ok"] = False  # something was not converted: exit 1
+        return result
     if plugin_action == "events":
         from ..plugins import events
         removed = [str(path) for path in events.prune(root)] if prune else []

@@ -6,8 +6,10 @@ counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
 answer goes on without it. See docs/plugins.md.
 """
+from contextlib import contextmanager
 from dataclasses import asdict
 import json
+import os
 from pathlib import Path
 
 from . import config, loader, settings as settings_files
@@ -102,6 +104,11 @@ def problems(root, reserved=()):
     settings_problem = config.load(root).problem
     if settings_problem:
         found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
+    for name, failure in sorted(_failed_conversions(root).items()):
+        legacy = Path(root) / str(failure.get("file", ""))
+        if failure.get("file") and legacy.is_file() and _fingerprint(legacy) == failure.get("fingerprint"):
+            found_problems.append(f"{name}: {failure['file']} could not be converted ({failure.get('reason')}); "
+                                  f"it is unchanged: fix it and run mv2 plugins migrate --apply")
     pending = None
     for found in entries(root):
         legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
@@ -140,6 +147,11 @@ def problems(root, reserved=()):
             loader.load(found)
         except PluginError as error:
             found_problems.append(str(error))
+    # Loading runs each plugin's own settings check: settings it refuses make it unusable here, said once.
+    now = {found.name: found for found in entries(root)}
+    for found in usable:
+        if found.name in now and now[found.name].state == "unusable":
+            found_problems.append(now[found.name].problem)
     try:
         from .harness import item_conflicts
         found_problems.extend(item_conflicts(root))
@@ -154,7 +166,14 @@ def doctor(root, universe_for):
     `universe_for(loaded)` gives the api.Universe a check receives.
     """
     found_problems = []
-    for loaded in loader.active(root):
+    before = {found.name: found.state for found in entries(root)}
+    active = loader.active(root)
+    # A plugin's own settings check runs only once its code is loaded, as this just did: report what that finds,
+    # which problems() (manifests only) could not see.
+    for found in entries(root):
+        if found.on and found.state == "unusable" and before.get(found.name) != "unusable":
+            found_problems.append(found.problem)
+    for loaded in active:
         for check in loaded.registrations.doctor:
             try:
                 answer = check(universe_for(loaded))
@@ -205,19 +224,118 @@ def listing(root):
     return result
 
 
+# A plugin whose settings may be converted: listed, trusted and compatible (on or off).
+MIGRATABLE = ("off", "on", "loaded", "unusable")
+MIGRATE_LOCK = ".migrate.lock"
+MIGRATE_FAILED = "migrate-failed.json"
+
+
+def _pending_legacy(root):
+    """[(entry, legacy path, target path)] of plugins whose pre-plugin settings file is still here with no settings
+    file yet. Manifests and file checks only, no plugin code."""
+    found = []
+    for entry_ in entries(root):
+        manifest = entry_.manifest
+        if (manifest is None or manifest.settings is None or not manifest.settings.legacy
+                or entry_.state not in MIGRATABLE):
+            continue
+        legacy, target = Path(root) / manifest.settings.legacy, settings_files.path(root, entry_.name)
+        if legacy.is_file() and not target.exists():
+            found.append((entry_, legacy, target))
+    return found
+
+
 def awaiting_migration(root):
     """{"plugin-settings/NAME.json": legacy file name} for each plugin whose pre-plugin settings file is still
     here and that has no settings file yet. Manifests only, no plugin code: for `mv2 refresh`, which must not
     add a template's default settings file in front of a universe's real, unmigrated settings."""
-    found = {}
-    for entry_ in entries(root):
-        manifest = entry_.manifest
-        if manifest is None or manifest.settings is None or not manifest.settings.legacy:
-            continue
-        target = settings_files.path(root, entry_.name)
-        if (Path(root) / manifest.settings.legacy).is_file() and not target.exists():
-            found[target.relative_to(root).as_posix()] = manifest.settings.legacy
-    return found
+    return {target.relative_to(root).as_posix(): legacy.name for _, legacy, target in _pending_legacy(root)}
+
+
+def _fingerprint(path):
+    status = path.stat()
+    return [status.st_mtime_ns, status.st_size]
+
+
+def _failed_conversions(root):
+    """{plugin: {"file", "fingerprint", "reason"}} of conversions that failed and were not retried since."""
+    try:
+        value = json.loads((Path(root) / "state" / "plugins" / MIGRATE_FAILED).read_text())
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def migrate_on_first_use(root):
+    """Convert the pre-plugin settings files of `root` and its subverses, once; returns lines for stderr.
+
+    Runs where mv2 starts work in a universe (`mv2` commands and plugin
+    helpers), before the command or helper action runs, never in runners or the
+    status line. Nothing pending costs a manifest check and no plugin import.
+    A pending file is converted under the universe's migrate lock, planned again
+    there, so of two processes one converts and the other finds nothing to do.
+    A conversion that fails leaves the file as it was and is said once; it is
+    tried again when the file changes, and doctor reports it until then. Never
+    raises."""
+    from .. import universe
+    lines = []
+    try:
+        if loader.safe_mode():
+            return lines
+        root = Path(root)
+        for scope in universe.tree(root):
+            try:
+                pending = _pending_legacy(scope)
+                failed = _failed_conversions(scope) if pending else {}
+                due = [item for item in pending
+                       if failed.get(item[0].name, {}).get("fingerprint") != _fingerprint(item[1])]
+                if due:
+                    lines.extend(_convert(scope, "" if scope == root else _where(root, scope)))
+            except Exception as error:  # one universe that cannot be read never stops the rest
+                lines.append(f"mv2: could not check {scope} for settings to convert: {error}")
+    except Exception as error:
+        lines.append(f"mv2: could not check for settings to convert: {error}")
+    return lines
+
+
+def _where(root, scope):
+    try:
+        return " in " + "/".join(part for part in Path(scope).relative_to(root).parts if part != "subverses")
+    except ValueError:
+        return f" in {scope}"
+
+
+def _convert(scope, where):
+    from ..store import lock, write
+    lines = []
+    state = Path(scope) / "state" / "plugins"
+    with lock(state / MIGRATE_LOCK):
+        failed = _failed_conversions(scope)
+        for found, legacy, target in _pending_legacy(scope):  # planned again: another process may have done it
+            fingerprint = _fingerprint(legacy)
+            if failed.get(found.name, {}).get("fingerprint") == fingerprint:
+                continue
+            item = {"plugin": found.name, "kind": "legacy", "from": str(legacy), "to": str(target)}
+            try:
+                done = migrate(scope, item)
+            except (PluginError, OSError, ValueError, KeyError) as error:
+                reason = " ".join(str(error).split())
+                failed[found.name] = {"file": legacy.name, "fingerprint": fingerprint, "reason": reason}
+                after = ("it is unchanged: fix it and run mv2 plugins migrate --apply"
+                         if getattr(error, "unchanged", True) else
+                         f"check {target.relative_to(scope).as_posix()} and {config.path(scope).name} by hand")
+                lines.append(f"mv2: {found.name}{where}: could not convert {legacy.name} ({reason}); {after}")
+                continue
+            failed.pop(found.name, None)
+            switch = {True: ", turned it on in plugins.json", False: ", turned it off in plugins.json"}.get(done["on"], "")
+            backup = Path(done["backup"]).parent
+            lines.append(f"mv2: {found.name}{where}: converted {legacy.name} to "
+                         f"{target.relative_to(scope).as_posix()}{switch} (the old file is in "
+                         f"{backup.relative_to(scope).as_posix()}/)"
+                         + (f"; but {done['warning']}" if done.get("warning") else ""))
+        if failed or (state / MIGRATE_FAILED).exists():
+            write(state / MIGRATE_FAILED, failed)
+    return lines
 
 
 def migrations(root):
@@ -249,34 +367,110 @@ def migrations(root):
     return planned
 
 
+class MigrationError(PluginError):
+    """A migration that did not happen. `unchanged` says whether every file is as it was before it began."""
+
+    def __init__(self, message, unchanged=True):
+        super().__init__(message)
+        self.unchanged = unchanged
+
+
+@contextmanager
+def _in_universe(root):
+    """The API's default universe is `root` while a plugin's migration runs: never the caller's ambient one."""
+    previous = os.environ.get("MV2_UNIVERSE")
+    os.environ["MV2_UNIVERSE"] = str(root)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("MV2_UNIVERSE", None)
+        else:
+            os.environ["MV2_UNIVERSE"] = previous
+
+
 def migrate(root, item):
-    """Apply one planned migration: the new settings are checked, then written; the old file goes to trash."""
+    """Apply one planned migration, so that it either happens or leaves things as they were.
+
+    The plugin's migration runs with `root` as the API's universe. Its result
+    is checked, and so is plugins.json when the switch is to be set, before
+    anything changes. Then: the old file is copied to trash, the new settings
+    are written (never over a settings file that appeared meanwhile), the
+    switch is set, and the old file is removed last. A step that fails undoes
+    the ones before it, unless someone changed the new file meanwhile, and
+    MigrationError.unchanged says which. A converted file whose old file could
+    not be removed is reported in the result's `warning`."""
     from ..store import write
     from ..universe import trash
+    root = Path(root)
     found = entry(root, item["plugin"])
     loaded = loader.load(found, off=True)
     function = loaded.registrations.settings_migrate
     if function is None:
-        raise PluginError(f"{found.name} offers no migration")
-    source = Path(item["from"])
+        raise MigrationError(f"{found.name} offers no migration")
+    source, target, legacy = Path(item["from"]), Path(item["to"]), item["kind"] == "legacy"
     old = json.loads(source.read_text())
     try:
-        answer = function(old, "legacy" if item["kind"] == "legacy" else item["version"])
+        with _in_universe(root):
+            answer = function(old, "legacy" if legacy else item["version"])
     except Exception as error:
-        raise PluginError(f"{found.name}'s migration failed: {loader.record(loaded, 'migrate', error, root)}") from error
+        loader.record(loaded, "migrate", error, root)
+        raise MigrationError(f"{found.name}'s migration failed: {type(error).__name__}: {error}") from error
     data, on = answer if isinstance(answer, tuple) and len(answer) == 2 else (answer, None)
     if not isinstance(data, dict) or (on is not None and not isinstance(on, bool)):
-        raise PluginError(f"{found.name}'s migration returned something other than settings")
-    settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"], root)
-    backup = trash.entry(Path(root), "plugins-migrate") / source.name
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    backup.write_bytes(source.read_bytes())
-    write(Path(item["to"]), data)
-    if item["kind"] == "legacy":
-        source.unlink()
-        if on is not None and found.name not in config.load(root).enabled:
+        raise MigrationError(f"{found.name}'s migration returned something other than settings")
+    with _in_universe(root):
+        settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"], root)
+    switches = config.load(root)
+    switch = legacy and on is not None and found.name not in switches.enabled
+    if switch and switches.problem:
+        raise MigrationError(f"{config.path(root).name} cannot be used, so the switch for {found.name} cannot be "
+                             f"set: {switches.problem}")
+    if legacy and target.exists():
+        raise MigrationError(f"{target.relative_to(root).as_posix()} appeared meanwhile")
+    previous = None if legacy else target.read_bytes()
+    try:
+        write(target, data)
+    except OSError as error:
+        raise MigrationError(f"{target.name} could not be written: {error}",
+                             unchanged=_undo(target, None, previous)) from error
+    written = target.read_bytes()
+    if switch:
+        try:
             config.set_enabled(root, found.name, on)
-    return {**item, "on": on, "backup": str(backup)}
+        except (OSError, ValueError) as error:
+            raise MigrationError(f"the switch in {config.path(root).name} could not be set: {error}",
+                                 unchanged=_undo(target, written, previous)) from error
+    # Only now, with everything else done, is the old file moved to trash (a copy first, then removed); a version
+    # upgrade keeps a copy of the file it replaced.
+    backup = trash.entry(root, "plugins-migrate") / source.name
+    result = {**item, "on": on if switch else None, "backup": str(backup)}
+    try:
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        backup.write_bytes(previous if previous is not None else source.read_bytes())
+        if legacy:
+            source.unlink()
+    except OSError as error:
+        result["warning"] = (f"{source.name} could not be moved to trash ({error}): remove it yourself" if legacy
+                             else f"no copy of the old settings was kept ({error})")
+    return result
+
+
+def _undo(target, written, previous):
+    """Put `target` back as it was before a migration wrote it; True when done. A file someone changed meanwhile
+    (not what the migration wrote) is left alone."""
+    try:
+        if not target.exists():
+            return previous is None
+        if written is not None and target.read_bytes() != written:
+            return False
+        if previous is None:
+            target.unlink()
+        else:
+            target.write_bytes(previous)
+        return True
+    except OSError:
+        return False
 
 
 def submodules():
