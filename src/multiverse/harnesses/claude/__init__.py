@@ -261,6 +261,7 @@ class ClaudeAdapter(ConfiguredAdapter):
     supports_bridge = True
     family = 'claude'
     bridge_policy = 'auto'
+    storage_env = ('CLAUDE_CONFIG_DIR',)
 
     @classmethod
     def configured(cls, name, settings):

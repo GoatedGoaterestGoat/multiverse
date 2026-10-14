@@ -19,6 +19,7 @@ class CodexAdapter(ConfiguredAdapter):
     supports_bridge = True
     family = 'codex'
     resume_prompt_args = ('{task}',)
+    storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
     def _configure_launch(self):
         if self.settings.get('inbox_bridge') is True:
@@ -116,6 +117,9 @@ class CodexAdapter(ConfiguredAdapter):
         for key, value in context.environment.items():
             if key.startswith('MV2_') or key == 'PATH':
                 options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
+        # The harness's own variables reach those tools the same way.
+        for key, value in command.environment.items():
+            options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
         argv[position:position] = options
         storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
         if context.environment.get('CODEX_SQLITE_HOME'):
