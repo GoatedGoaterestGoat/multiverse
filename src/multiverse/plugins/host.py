@@ -299,6 +299,10 @@ def work(root, name):
         _log(root, f"{name}: {error}")
         return 1
     mv = api.Plugin(loaded)
+    # The supervisor that started this worker. If it dies without stopping its workers (kill -9, the OOM killer,
+    # a crash), this process is reparented and its parent changes: then it stops too. A changed parent cannot be
+    # fooled the way a recorded pid could be, by another process reusing that pid.
+    supervisor = os.getppid()
     stopping = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(signum, lambda *_: stopping.set())
@@ -308,6 +312,9 @@ def work(root, name):
     refreshed = 0.0
     try:
         while not stopping.is_set() and not failed.is_set():
+            if os.getppid() != supervisor:
+                _log(root, f"{name}: supervisor gone; stopping")
+                break
             if time.monotonic() - refreshed > 5:
                 refreshed = time.monotonic()
                 current = needed(root).get(name, [])
