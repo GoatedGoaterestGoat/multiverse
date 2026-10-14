@@ -1,7 +1,7 @@
 """Fast-forward the running mv2 checkout and sync its Python environment.
 
 Plugins that are Git submodules at plugins/<name> move with the checkout when
-they are initialized and have no tracked changes or local commits. A clean
+they are initialized, detached and clean, at or behind a previous pin. A clean
 checkout left behind by an unavailable remote is retried, including when mv2
 itself is already current. Checks run before fetching, merging and moving.
 One that is not initialized is never fetched or initialized; a new one
@@ -149,7 +149,7 @@ def _plugin_repository(checkout, path):
 
 
 def _plugin_facts(checkout, path):
-    """(HEAD, tracked changes, conflict, git directory) of an initialized plugin, or None; raises when unreadable."""
+    """(HEAD, tracked changes, conflict, git directory, branch) of an initialized plugin, or None."""
     found = _plugin_repository(checkout, path)
     if found is None:
         return None
@@ -157,7 +157,10 @@ def _plugin_facts(checkout, path):
     head = _must(directory, "rev-parse", "HEAD").strip()
     changes = _must(directory, "status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=untracked")
     conflict = _must(checkout, "ls-files", "-u", "-z", "--", path)
-    return head, bool(changes), bool(conflict), identity
+    branch = _git(directory, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode not in (0, 1):
+        raise ValueError(_detail(branch))
+    return head, bool(changes), bool(conflict), identity, branch.stdout.strip() if not branch.returncode else None
 
 
 def _plugin_state(checkout, links):
@@ -173,18 +176,18 @@ def _plugin_state(checkout, links):
         if facts is None:
             continue
         state[path] = facts
-        head, changes, conflict, _ = facts
+        head, changes, conflict, _, branch = facts
         if conflict:
             refusals.append(f"{path} has a merge conflict in the mv2 checkout; resolve it before updating.")
         elif changes:
             refusals.append(f"{path} has local changes; commit or discard them before updating.")
-        elif head != pin:
+        elif head != pin and branch is None:
             try:
                 # A failed fetch can leave the pin unknown locally. Do not mistake that for local work:
                 # _move_plugins must fetch and prove ancestry before it can change this checkout.
                 if _has_commit(checkout / path, pin) and not _ancestor(checkout / path, head, pin):
-                    refusals.append(f"{path} has local commits beyond the {pin[:7]} mv2 pins; "
-                                    "publish or preserve them before updating.")
+                    refusals.append(f"{path} {_pin_position(checkout / path, head, pin)}; "
+                                    "choose the intended plugin revision before updating. Its checkout was left unchanged.")
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 refusals.append(f"{path} could not be checked: {error}")
     return state, refusals
@@ -204,6 +207,11 @@ def _ancestor(directory, before, after):
     return process.returncode == 0
 
 
+def _pin_position(directory, head, pin):
+    position = "is ahead of" if _ancestor(directory, pin, head) else "has diverged from"
+    return f"checkout {head[:7]} {position} mv2's pin {pin[:7]}"
+
+
 def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
     plan = []
     for path in sorted(set(before) | set(after)):
@@ -215,6 +223,10 @@ def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
             entry["state"] = "removed"
         elif path not in state:
             entry["state"] = "not_installed"
+        elif len(state[path]) > 4 and state[path][4] is not None:
+            entry["state"], entry["branch"] = "preserved", state[path][4]
+            entry["reason"] = (f"is on branch {entry['branch']} at {state[path][0][:7]}; "
+                               f"mv2 pins {after[path][:7]}. Its checkout is left unchanged.")
         elif before[path] == after[path]:
             entry["state"] = "unchanged" if state[path][0] == after[path] else "would_update"
         else:
@@ -296,7 +308,7 @@ def _move_plugins(checkout, plan, state, pins):
                 previously_pinned = (_has_commit(checkout / path, pins[path])
                                      and _ancestor(checkout / path, old, pins[path]))
                 if not previously_pinned and not _ancestor(checkout / path, old, new):
-                    raise ValueError("it has local commits; preserve them before updating")
+                    raise ValueError(_pin_position(checkout / path, old, new) + "; choose the intended plugin revision")
             # --checkout overrides any submodule.<name>.update (merge, rebase, a command);
             # nested submodules are neither fetched nor updated.
             moved = _git(checkout, "-c", "fetch.recurseSubmodules=false", "submodule", "update", "--checkout",
@@ -585,6 +597,8 @@ def _plugin_lines(result, entry):
              "removed": [f"{path} would no longer be part of mv2; it would be left on disk." if result["check"]
                          else f"{path} is no longer part of mv2; it was left on disk."],
              "failed": [f"! {path} was not updated: {entry.get('reason')}"]}.get(entry["state"], [])
+    if entry["state"] == "preserved":
+        found.append(f"Warning: {path} {entry['reason']}")
     deinit = f"git -C {shlex.quote(result['checkout'])} submodule deinit -f -- {path}"
     if entry["state"] == "would_update":
         found.append(f"If its remote is unavailable, {path} would stay at {before} with a warning; "

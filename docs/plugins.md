@@ -1346,9 +1346,13 @@ multiverse-v2/
 - **Updating.** `mv2 update` moves the plugins that are initialized with the
   checkout and never fetches or initializes one that is not. Before the fetch,
   again before the merge, and again before each plugin moves, mv2 checks for
-  tracked changes, conflicts and commits beyond its pin, and refuses to discard
-  local work (untracked files are fine). A clean checkout behind its pin is
-  retried even when mv2 itself is already current. It moves with
+  tracked changes and conflicts, and refuses to discard local work (untracked
+  files are fine). A clean plugin checkout on a branch is left untouched with a
+  warning, so updating mv2 never detaches the user's plugin branch. A detached
+  checkout ahead of or diverged from mv2's pin still blocks the update, with its
+  actual relationship to the pin reported rather than a claim that its commits
+  are unpublished. Only clean detached checkouts at or behind an older pin move;
+  a checkout left behind is retried even when mv2 itself is current. It moves with
   `git submodule update --checkout`, one plugin at a time, with nested fetches
   off, whatever the user's update
   mode is. Local-path remotes are allowed for that fetch only. `--check` shows
