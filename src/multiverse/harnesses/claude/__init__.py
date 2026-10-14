@@ -95,9 +95,11 @@ class Transcript:
     """Usage recorded in one transcript file, read once and then as it grows.
 
     Claude writes one record per content block of a response, each with the
-    response's usage, so usage is counted once per response ID. A compaction
-    that keeps a row stores it again with zero usage; that copy never replaces
-    the response's real usage.
+    response's usage, so usage is counted once per response ID. A row with zero
+    usage is never a response: a compaction that keeps a row stores it again with
+    zero usage, and an installed compaction's rows arrive as new IDs with zero
+    usage (Claude's `<synthetic>` model). Neither replaces a real response's usage
+    or becomes the latest request, so `last` stays the latest real response.
     """
 
     def __init__(self, path):
@@ -118,7 +120,7 @@ class Transcript:
                 continue
             message = record.get('message') if isinstance(record, dict) and record.get('type') == 'assistant' else None
             if isinstance(message, dict) and isinstance(message.get('usage'), dict) and message.get('id'):
-                if message['id'] in self.responses and not any(counted(message['usage'], key) for key in USAGE_KEYS):
+                if not any(counted(message['usage'], key) for key in USAGE_KEYS):
                     continue
                 self.responses[message['id']] = message['usage']
                 self.last = record.get('timestamp') or self.last

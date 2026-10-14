@@ -137,6 +137,24 @@ class ClaudeUsageTest(BaseTest):
         return json.dumps({'type': 'assistant', 'timestamp': stamp,
                            'message': {'id': id, 'usage': usage, 'content': [{'type': 'text'}]}}) + '\n'
 
+    def built(self, stamp):
+        """A row a compaction's install stores: a new ID, Claude's synthetic model and zero usage."""
+        usage = {'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}
+        return json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
+            'id': str(uuid4()), 'model': '<synthetic>', 'usage': usage, 'content': [{'type': 'text', 'text': 'kept'}]}}) + '\n'
+
+    def test_rows_with_zero_usage_are_never_the_latest_response(self):
+        from multiverse.harnesses.claude import context_reading
+        agent, directory = self.agent()
+        native_id = str(uuid4())
+        project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0),
+                                  self.built('2026-10-04T00:10:00.500Z'), self.built('2026-10-04T00:10:00.501Z'))
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}):
+            self.assertEqual(context_reading(native_id), (150010, '2026-10-04T00:00:00Z'))
+            with (project / f'{native_id}.jsonl').open('a') as handle:
+                handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+            self.assertEqual(context_reading(native_id), (32005, '2026-10-04T00:11:00Z'))
+
     def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000, derived_at='2026-10-04T05:00:00+00:00'):
         agent, directory = self.agent()
         native_id = str(uuid4())
@@ -203,6 +221,20 @@ class ClaudeUsageTest(BaseTest):
         self.assertNotIn('estimated', self.context(adapter, session))
         adapter, session, *_ = self.compacted(installed_at='not a time')
         self.assertNotIn('estimated', self.context(adapter, session))
+
+    @NEEDS_COMPACTION
+    def test_the_rows_an_install_stores_do_not_end_the_estimate(self):
+        adapter, session, project, native_id, install = self.compacted()
+        # Claude stores the installed conversation as new rows half a second later, each with zero usage.
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.built('2026-10-04T00:10:00.500Z') + self.built('2026-10-04T00:10:00.502Z'))
+        context = self.context(adapter, session)
+        self.assertEqual((context['tokens'], context['estimated'], context['estimated_from']), (22000, True, install))
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+        context = self.context(adapter, session)
+        self.assertEqual(context['tokens'], 32005)
+        self.assertNotIn('estimated', context)
 
     @NEEDS_COMPACTION
     def test_without_the_mod_the_estimate_still_replaces_the_stale_transcript_reading(self):
