@@ -786,10 +786,25 @@ launch.
   fields, timeouts and tool lists are checked against the supported version.
   Startup is optional by default (`required = false`), and approvals and
   authentication stay native. Manifests may not hold inline bearer tokens or
-  OAuth client secrets, only references to the user's environment. A stdio
-  server that needs the agent's identity gets it passed explicitly, since a
-  shared daemon does not inherit the TUI's environment. This is the only v1 way
-  for a plugin to add MCP config, and `config.mcp_servers` is refused.
+  OAuth client secrets, only references to the user's environment.
+  - **Environment:** a local server receives only the `env` and `env_vars` it
+    declares, never the launch's whole environment, so harness `settings.env`
+    (API keys) and other plugins' variables never reach it.
+  - **References stay references:** `env_vars` values remain references in the
+    plain launch's command line and process environment. In bridge mode only
+    accepted references are resolved, in the session RPC, and never put on
+    argv.
+  - **Agent identity:** a server that needs it declares `env_vars` such as
+    `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_UNIVERSE`, `MV2_CLI` or `MV2_PYTHON`.
+  - **Tool environment:** the variables the harness and plugins set for tools
+    go through the bridge session RPC, and through the process environment in
+    a plain launch. An exact, normal, exclusive resume of an idle thread
+    applies them; rejoining a native thread that is subscribed or active may
+    keep its old config, and mv2 never forces an unload or restart to change
+    that.
+
+  This is the only v1 way for a plugin to add MCP config, and
+  `config.mcp_servers` is refused.
 
 **Plain and bridge launches must mean the same.** Plain mode encodes
 contributions as `-c` overrides. Bridge mode needs a narrow transform owned by
