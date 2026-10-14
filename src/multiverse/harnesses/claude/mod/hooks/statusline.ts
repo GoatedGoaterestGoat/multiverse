@@ -1,10 +1,8 @@
 // The Multiverse status line, as pure logic: no `$`, so any file may import it
 // (a `$` cannot be passed across files) and the tests can call it directly.
 //
-// Claude allows one status line per plugin. Two writers share it: the normal
-// line below, and the progress line of a running /compact. Each writer sets its
-// own text here and shows `currentLine()`, so progress wins while it lasts and
-// the normal line returns when it is cleared.
+// Claude allows one status line per plugin; this module's line is the normal
+// line below (the compaction plugin shows /compact's progress in its own).
 //
 // The line's items come from `statusline.json` at the universe root (shipped in
 // every template, managed by `mv2 refresh`):
@@ -82,15 +80,6 @@ export function parseItems(runtime: unknown): PluginItem[] {
     items.push({ name, plugin, claude, tmux })
   }
   return items
-}
-
-// The compaction plugin's item, for a launch that enabled compaction
-// (MV2_COMPACTION=1) before the plugin declared it: such a launch's runtime.json
-// does not list it. Remove once no agent launched before the declaration is left.
-export const COMPACTION_ITEM: PluginItem = { name: "compaction", plugin: "compaction", claude: true, tmux: false }
-
-export function withCompaction(items: readonly PluginItem[], compactionOn: boolean): PluginItem[] {
-  return compactionOn && !items.some((item) => item.name === "compaction") ? [...items, COMPACTION_ITEM] : [...items]
 }
 
 // `text` is the file's content, or undefined when there is no file: the
@@ -173,19 +162,14 @@ export function render(config: Config, facts: Facts): string | undefined {
   return parts.length ? parts.join(SEPARATOR) : undefined
 }
 
-// The two lines sharing the slot. Nothing here touches the screen: a writer
-// sets its own, then shows `currentLine()`.
+// The line in the slot. Nothing here touches the screen: the writer sets it,
+// then shows `currentLine()`.
 let base: string | undefined
-let progress: string | undefined
 
 export function setBase(line: string | undefined) {
   base = line
 }
 
-export function setProgress(line: string | undefined) {
-  progress = line
-}
-
 export function currentLine(): string | undefined {
-  return progress ?? base
+  return base
 }

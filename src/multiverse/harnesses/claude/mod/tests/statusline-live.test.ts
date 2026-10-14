@@ -134,47 +134,9 @@ describe('status line', () => {
     expect(w.lines.at(-1)).toBe('reviewer (PR review) · done')
   })
 
-  test('a running /compact’s progress keeps the slot while the timer ticks, and the normal line returns after', async ($, on) => {
-    const w = session(on, { MV2_AGENT_DIR: AGENT, MV2_UNIVERSE: UNIVERSE, MV2_CLI: '/mv2', MV2_PYTHON: '/python', MV2_COMPACTION: '1' })
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const event = (value: object) => ({ stream: 'stdout' as const, text: JSON.stringify(value) + '\n' })
-    on('process.spawn', async function* () {
-      yield event({ event: 'progress', phase: 'building', turn: 'turn-aaaaaaaa', turns: 2, turns_done: 0, merges: 1, merges_left: 3 })
-      await gate
-      yield event({ event: 'message', message: { keep: 'row-1' } })
-      yield event({ event: 'result', count: 1, install_id: 'install-1', path: '/agent/compaction/installs/install-1.json',
-                    stats: { turns: 1, summarized: 0, tokens_before: 10, tokens_after: 5 } })
-      return { value: { code: 0, signal: null } }
-    })
-    on('session.compact', async () => ({ messages: [] }))
-    w.disk(`${AGENT}/properties.json`, properties('working'))
-    // A launch from before the compaction plugin declared its item: runtime.json does not list it.
-    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running' }))
-    await start($)
-    await w.clock.settle()
-    expect(w.lines.at(-1)).toBe('working')
-    const compacting = $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Fix it', toolUses: [], handle: 'row-1' }] })
-    await w.clock.settle()
-    expect(w.lines.at(-1)).toContain('compacting')
-    // The phase changes and the timer ticks while it runs: the progress keeps the slot.
-    w.disk(`${AGENT}/properties.json`, properties('blocked'))
-    await w.clock.advance(2000)
-    expect(w.lines.at(-1)).toContain('compacting')
-    // The compaction writes its item's file (python -m multiverse.compaction does, after the install).
-    w.disk(`${AGENT}/status-items/compaction.txt`, 'trees 1/1\n')
-    release()
-    await compacting
-    await w.clock.settle()
-    await w.clock.advance(2000)
-    // The normal line is back, with compaction's item read from its file.
-    expect(w.lines.at(-1)).toBe('blocked · trees 1/1')
-  })
-
-  // An agent launched without compaction neither declares the item nor has MV2_COMPACTION, so even a
-  // leftover file shows nothing.
+  // An agent launched without compaction does not declare the item, so even a leftover file shows nothing.
   test('an agent launched without compaction shows no compaction item, even when the config asks for it', async ($, on) => {
-    const w = session(on)  // no MV2_COMPACTION in this launch
+    const w = session(on)
     w.disk(`${AGENT}/properties.json`, properties('working'))
     w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running' }))
     w.disk(`${AGENT}/status-items/compaction.txt`, 'trees 9/9\n')

@@ -1,7 +1,6 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { registerCompaction } from './compaction'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
-import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, withCompaction } from './statusline'
+import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
 import type { Config, Facts, PluginItem } from './statusline'
 import { registerUsage } from './usage'
 
@@ -56,8 +55,8 @@ const asked = new Map<string, string>()
 // Tools whose call is itself a question to the person.
 const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
 
-// The status line under the prompt (statusline.ts holds the logic and the slot
-// it shares with /compact's progress). A timer looks at its files' size and time,
+// The status line under the prompt (statusline.ts holds the logic and the slot).
+// A timer looks at its files' size and time,
 // with no subprocess, and reads only what changed; `mv2 inbox --peek` runs only
 // when the inbox changed. Plugin items add runtime.json (which declares them) and
 // the file of each item that is on.
@@ -114,8 +113,7 @@ async function refreshStatus($: EngineInterface) {
       // Status reports rewrite runtime.json often; the items it declares rarely change.
       let items: PluginItem[] | undefined
       try {
-        items = withCompaction(parseItems(JSON.parse((await readFile($, `${directory}/runtime.json`)) ?? "")),
-          (await $.env.get("MV2_COMPACTION")) === "1")
+        items = parseItems(JSON.parse((await readFile($, `${directory}/runtime.json`)) ?? ""))
       } catch { /* mid-write: the next change reads it */ }
       if (items !== undefined && JSON.stringify(items) !== JSON.stringify(declared)) {
         declared = items
@@ -265,7 +263,6 @@ function text(content: readonly { type: string; text?: unknown }[]): string {
 
 export const register: Register = (on) => {
   registerUsage(on)
-  registerCompaction(on)
 
   registerMultiverse(on)
 

@@ -1009,11 +1009,8 @@ install`), showing progress and every error in the status line, as notices and
 as toasts, and skips with the reason when it cannot. The `PreCompact` hook
 refuses Claude's own compaction should it not answer, so a session never falls
 back to it. Its `Stop` hook starts the background tree builder with the time the
-turn ended. The multiverse mod keeps a copy of these hooks for sessions launched
-before the plugin had its own directory (no `MV2_COMPACTION_PLUGIN`), which
-call the forwarding stub `python -m multiverse.compaction`. The plugin's Claude
-source (`sources/claude/`) reads this harness's transcripts; the adapter itself
-has no compaction code. Compaction settings that cannot be used (invalid, or
+turn ended. The plugin's Claude source (`sources/claude/`) reads this harness's
+transcripts; the adapter itself has no compaction code. Compaction settings that cannot be used (invalid, or
 builder settings Claude rejects) never stop a launch: that launch runs without
 compaction, without the `PreCompact` guard, and records why as its
 `native_mode` fallback, which the inspector shows. The `compaction` capability then reports the error, and

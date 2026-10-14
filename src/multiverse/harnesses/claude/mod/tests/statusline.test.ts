@@ -1,10 +1,11 @@
-// The status line's pure logic: config parsing, rendering and the shared slot.
+// The status line's pure logic: config parsing, rendering and the slot.
 import { describe, expect, test } from 'claude-code/testing'
-import { COMPACTION_ITEM, DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase, setProgress, withCompaction } from '../hooks/statusline'
+import { DEFAULTS, clean, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from '../hooks/statusline'
 
 // `compaction` is the compaction plugin's item, read from its file like any plugin's.
 const FACTS = { agent: 'reviewer', universe: 'pr-review', phase: 'working', summary: 'reading the diff', inbox: 2,
   plugins: { compaction: 'trees 3 · prepared' } }
+const COMPACTION_ITEM = { name: 'compaction', plugin: 'compaction', claude: true, tmux: false }
 const COMPACTION = [COMPACTION_ITEM]
 
 describe('statusline config', () => {
@@ -117,17 +118,12 @@ describe('which universes name themselves in the agent item', () => {
 })
 
 describe('statusline slot', () => {
-  test('progress shows while it lasts and the normal line returns after', async () => {
+  test('the slot shows the line last set, and nothing once it is cleared', async () => {
     setBase(undefined)
-    setProgress(undefined)
     expect(currentLine()).toBeUndefined()
     setBase('working · inbox 1')
     expect(currentLine()).toBe('working · inbox 1')
-    setProgress('compacting…')
-    expect(currentLine()).toBe('compacting…')
     setBase('idle')
-    expect(currentLine()).toBe('compacting…')
-    setProgress(undefined)
     expect(currentLine()).toBe('idle')
     setBase(undefined)
     expect(currentLine()).toBeUndefined()
@@ -139,11 +135,8 @@ describe('plugin items', () => {
   const TESTS = { name: 'test-runs', plugin: 'ci', claude: false, tmux: true }
   const runtime = (status_items: unknown) => ({ state: 'running', plugins: { plugins: {}, status_items } })
 
-  test('compaction is a plugin item; a launch that enabled it before the plugin declared it still shows it', async () => {
+  test('compaction is a plugin item, shown where a launch declares it', async () => {
     expect(parseItems(runtime([COMPACTION_ITEM]))).toEqual([COMPACTION_ITEM])
-    expect(withCompaction([COST], true)).toEqual([COST, COMPACTION_ITEM])
-    expect(withCompaction([COST, COMPACTION_ITEM], true)).toEqual([COST, COMPACTION_ITEM])
-    expect(withCompaction([COST], false)).toEqual([COST])
     // The key every template's statusline.json already has places it as before.
     const { config } = parseConfig('{"items": {"agent": false, "phase": true, "summary": false, "inbox": true, "compaction": true}}', COMPACTION)
     expect(config.order).toEqual(['agent', 'phase', 'summary', 'inbox', 'compaction'])
