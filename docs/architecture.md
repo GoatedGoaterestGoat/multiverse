@@ -47,7 +47,7 @@ Each part a view can extend is a registry:
 | A line in the agent inspector | `ui/inspector.py`: a function in `AGENT_FACTS` |
 | A color | `ui/theme.py`; `app.tcss` reads it as `$mv-NAME` |
 | A settings screen | `ui/settings.py`: `Field`s on a `FieldScreen` |
-| A key, screen, palette action or panel from a plugin | Not in `ui/`: the plugin registers it (`mv.dashboard.*`), and `ui/plugin_service.py` and `ui/plugin_panels.py` ask for it off the event loop. Plugins take no keys: their way in is `P` (`ui/plugins_screen.py`) and the command palette |
+| A screen, palette action, panel, column or inspector line from a plugin | Not in `ui/`: the plugin registers it (`mv.dashboard.*`), and `ui/plugin_service.py`, `ui/plugin_panels.py` and the backend's column step ask for it off the event loop, each call in a daemon thread within a time budget (`plugins.loader.guarded`). A plugin gets no key: its way in is `P` (`ui/plugins_screen.py`) and the command palette |
 
 Other modules: `tree.py` turns a snapshot into folder rows; `views.py` reads a
 universe's `views/default.json`; `drafts.py` holds the inline new-agent and

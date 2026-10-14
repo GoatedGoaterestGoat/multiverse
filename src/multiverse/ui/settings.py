@@ -18,6 +18,16 @@ from textual.widgets import Input, Label, Static
 from ..display import clean
 
 MISSING = object()
+
+
+class _Null:
+    """A choice that writes null, apart from None, which means "not set" in a choice."""
+
+    def __repr__(self):
+        return "NULL"
+
+
+NULL = _Null()
 BOOL_OPTIONS = ((True, 'true'), (False, 'false'))
 
 
@@ -60,6 +70,8 @@ def field(key, path, label, kind, data, placeholder='', options=(), **extra):
         if not any(item[0] is None for item in options):
             options = ((None, f'default: {shown(placeholder)}' if placeholder != '' else 'default'), *options)
         initial = None if value is MISSING else value
+        if value is None and any(item[0] is NULL for item in options):
+            initial = NULL  # an explicit null the schema allows, as opposed to "not set"
         if initial is not None and initial not in [item[0] for item in options]:
             options = (*options, (initial, shown(initial)))
     else:
@@ -70,7 +82,7 @@ def field(key, path, label, kind, data, placeholder='', options=(), **extra):
 def convert(item, value):
     """A widget value as it is written in the file; MISSING when it is blank."""
     if item.kind == 'choice':
-        return MISSING if value is None else value
+        return None if value is NULL else MISSING if value is None else value
     text = value.strip()
     if not text:
         return MISSING

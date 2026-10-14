@@ -18,8 +18,9 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
+from ..store import read
 from ..plugins.settings import DELETE
-from .settings import BOOL_OPTIONS, MISSING, FieldScreen, convert, field, shown
+from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
           "untrusted": "needs trust", "changed": "changed: needs trust", "incompatible": "incompatible",
@@ -70,8 +71,19 @@ def describe(item):
     return "\n".join(lines)
 
 
+def universe_name(root):
+    """The universe's own name from universe.json, else its directory's (a top universe's directory is `.multiverse`)."""
+    try:
+        return str(read(Path(root) / "universe.json").get("name") or Path(root).name)
+    except (OSError, ValueError, AttributeError):
+        return Path(root).name
+
+
 class PluginsScreen(ModalScreen):
     """Plugins in one scope: Space turns one on or off there, Enter opens its settings."""
+    DEFAULT_CSS = """
+    PluginsScreen .cerror { height: auto; color: $mv-red; }
+    """
     BINDINGS = [Binding("escape", "close", "Close"), Binding("space", "toggle", "On / off"),
                 Binding("enter", "settings", "Configure"), Binding("h", "host", "Host")]
 
@@ -202,6 +214,7 @@ class PluginsScreen(ModalScreen):
             return
         self.busy = False
         self.changed = True
+        self.app.host_user_stopped = not start  # a host stopped here stays stopped until h starts it again
         self.error("")
         self.load()
 
@@ -219,7 +232,7 @@ class PluginsScreen(ModalScreen):
         elif settings.get("fields") is None and settings.get("schema") is None:
             self.error(f"{item['name']}'s settings cannot be edited here: {settings.get('problem') or 'no schema'}")
         else:
-            self.app.push_screen(PluginSettingsScreen(self.root, self.service, item), self.edited)
+            self.app.push_screen(PluginSettingsScreen(self.root, self.service, item, self.scope_name), self.edited)
 
     @work(group="plugins-screen", exit_on_error=False)
     async def open_own_screen(self, item):
@@ -276,7 +289,7 @@ def schema_fields(schema, values, path=()):
         elif isinstance(spec.get("enum"), list) and all(isinstance(item, (str, int, float, bool)) or item is None
                                                          for item in spec["enum"]):
             fields.append(field(key, where, label, "choice", values, default,
-                                tuple((item, shown(item)) for item in spec["enum"])))
+                                tuple((NULL if item is None else item, shown(item)) for item in spec["enum"])))
         elif plain == ["boolean"]:
             fields.append(field(key, where, label, "choice", values, default, BOOL_OPTIONS))
         elif plain == ["integer"]:
@@ -298,15 +311,16 @@ class PluginSettingsScreen(FieldScreen):
     plugin's own check.
     """
 
-    def __init__(self, root, service, item):
+    def __init__(self, root, service, item, scope_name=""):
         super().__init__(root, service)
         self.item = item
         self.service = service
         self.skipped = []
+        self.scope_name = scope_name or universe_name(root)
 
     def compose(self):
         with Vertical(id="plugins-dialog"):
-            yield Label(f"Settings · {clean(self.item['name'])} · {clean(self.root.name)}", classes="detail-title", markup=False)
+            yield Label(f"Settings · {clean(self.item['name'])} · {clean(self.scope_name)}", classes="detail-title", markup=False)
             yield Static("", id="plugin-settings-problem", markup=False)
             yield VerticalScroll(id="plugin-settings-body")
             yield Static("", classes="cerror", markup=False)

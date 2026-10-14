@@ -258,6 +258,27 @@ class HostTests(DashboardCase):
             await self.until(pilot, lambda: self.called("start_host") and not screen.busy, "the host to start again")
             self.assertTrue(screen.changed)
 
+    async def test_a_host_stopped_with_h_is_not_started_again_when_the_screen_closes(self):
+        self.service.host = {"needed": True, "running": True, "stopped": {}, "pid": 7, "workers": ["loud"]}
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            await self.start(pilot)
+            self.app.action_plugins()
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.host, "the screen")
+            screen = self.app.screen
+            await pilot.press("h")
+            await self.until(pilot, lambda: self.called("stop_host") and not screen.busy, "the host to stop")
+            await pilot.press("escape")
+            await self.until(pilot, lambda: self.app.screen is not screen, "the screen to close")
+            await pilot.pause(0.3)
+            await self.app.workers.wait_for_complete()
+            self.assertEqual(self.called("start_host"), [])
+            self.assertIn("host off", self.text("#totals"))
+            # h again starts it, and a later check may keep it up.
+            self.app.action_plugins()
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginsScreen) and self.app.screen.host, "the screen")
+            await pilot.press("h")
+            await self.until(pilot, lambda: self.called("start_host"), "the host to start")
+
     async def test_start_failure_on_the_screen_shows_the_reason(self):
         self.service.host = {"needed": True, "running": False, "stopped": {}, "pid": None, "workers": []}
         self.service.host_start_error = "no tmux"
@@ -269,6 +290,17 @@ class HostTests(DashboardCase):
             screen = self.app.screen
             await pilot.press("h")
             await self.until(pilot, lambda: "could not start: no tmux" in str(screen.query_one(".cerror", Static).render()), "the reason")
+
+
+class PlainServiceTests(unittest.TestCase):
+    def test_a_host_that_does_not_come_up_points_at_its_real_log(self):
+        from multiverse.plugins import host
+        service = PluginService()
+        with mock.patch.object(host, "start", return_value={"running": False}):
+            with self.assertRaises(RuntimeError) as raised:
+                service.start_host(Path("/demo/fastvideo/.multiverse"))
+        self.assertIn(str(host.host_directory(Path("/demo/fastvideo/.multiverse")) / "host.log"), str(raised.exception))
+        self.assertIn("state/plugins/host/host.log", str(raised.exception))
 
 
 class PluginDashboardTests(DashboardCase):
@@ -574,6 +606,50 @@ class PluginsScreenTests(DashboardCase):
             await pilot.press("enter")
             await self.until(pilot, lambda: isinstance(self.app.screen, OwnScreen), "the plugin's screen")
             self.assertEqual(self.app.screen.opened_with[1], self.backend)
+
+    async def test_error_lines_on_the_plugins_screen_are_red(self):
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            screen = await self.open_screen(pilot)
+            self.assertEqual(str(screen.query_one(".cerror").styles.color.hex), "#F38BA8")
+
+    async def test_the_settings_title_names_the_universe_not_the_hidden_directory(self):
+        self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": SCHEMA, "values": {},
+                                             "screen": None}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            await self.open_screen(pilot)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginSettingsScreen) and self.app.screen.widgets, "settings")
+            title = str(self.app.screen.query_one(".detail-title").render())
+            self.assertIn("Settings · alpha · Fastvideo", title)
+            self.assertNotIn(".multiverse", title)
+
+    async def test_an_enum_with_null_still_has_a_default_option_and_writes_null_when_chosen(self):
+        schema = {"type": "object", "properties": {"mode": {"type": ["string", "null"], "enum": ["a", "b", None]}}}
+        self.service.items[0]["settings"] = {"path": "p", "source": "file", "problem": None, "schema": schema,
+                                             "values": {"mode": "b"}, "screen": None}
+        async with self.app.run_test(size=(100, 40)) as pilot:
+            screen = await self.open_screen(pilot)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginSettingsScreen) and self.app.screen.widgets, "settings")
+            edit = self.app.screen
+            choice = edit.widgets["mode"]
+            self.assertEqual([label for _, label in choice.options], ["default", "a", "b", "null"])
+            self.assertEqual(choice.value, "b")
+            choice.action_step(1)  # null
+            await pilot.press("ctrl+enter")
+            await self.until(pilot, lambda: self.app.screen is screen, "the save to close")
+            call = next(call for call in self.service.calls if call[0] == "edit")
+            self.assertEqual(call[3], {("mode",): None})
+            self.service.calls.clear()
+            self.service.items[0]["settings"]["values"] = {"mode": None}
+            screen.load()
+            await pilot.pause(0.3)
+            await pilot.press("enter")
+            await self.until(pilot, lambda: isinstance(self.app.screen, PluginSettingsScreen) and self.app.screen.widgets, "settings")
+            self.assertEqual(self.app.screen.widgets["mode"].options[self.app.screen.widgets["mode"].index][1], "null")
+            await pilot.press("ctrl+enter")
+            await self.until(pilot, lambda: self.app.screen is screen, "an unchanged save to close")
+            self.assertEqual([call for call in self.service.calls if call[0] == "edit"], [])
 
     async def test_declared_fields_build_the_settings_screen_and_win_over_the_schema(self):
         fields = [{"path": "default.budget", "label": "Budget", "kind": "int", "placeholder": "0", "help": "tokens kept"},

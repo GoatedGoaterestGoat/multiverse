@@ -71,6 +71,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.plugin_actions, self.plugin_screens = {}, {}
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
+        self.host_user_stopped = False  # stopped from the Plugins screen with h: do not start it again until h does
         self.root = Path(root)
         self.home = self.root  # where the dashboard was opened: the navigation boundary and where plugin screens come from
         self.backend = backend or LocalBackend()
@@ -221,7 +222,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         root = self.root
         try:
             state = await asyncio.to_thread(self.plugin_service.host_state, root)
-            if state and start and state["needed"] and not state["running"] and not self.host_failed:
+            if (state and start and state["needed"] and not state["running"] and not self.host_failed
+                    and not self.host_user_stopped):
                 self.set_status("Starting the plugin host…")
                 try:
                     await asyncio.to_thread(self.plugin_service.start_host, root)
