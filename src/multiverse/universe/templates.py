@@ -109,15 +109,6 @@ def _awaiting_migration(root):
         return {}
 
 
-def _plugins_here(root):
-    """Names of the plugins found for this universe (manifests only), or None when they cannot be read."""
-    try:
-        from ..plugins import entries
-        return {found.name for found in entries(root)}
-    except Exception:  # refresh never fails over plugins
-        return None
-
-
 def refresh_plan(root, template=None, take=()):
     """Compare a universe's definition files with its template; change nothing.
 
@@ -125,12 +116,12 @@ def refresh_plan(root, template=None, take=()):
     refreshed. A file that still matches it takes template updates; a locally
     edited file is kept, and a conflict when both changed. Without a manifest
     (universes installed before refresh existed), a file that differs from the
-    template is `unknown` and changes only when named in `take`. A template's
-    `plugin-settings/NAME.json` is `deferred` while plugin NAME is not here (a
-    checkout without its submodule: only its manifest knows its pre-plugin
-    settings file) and while the universe still has that plugin's pre-plugin
-    settings file (until `mv2 plugins migrate`); one the universe wrote itself
-    is `local`.
+    template is `unknown` and changes only when named in `take`. While a
+    plugin's pre-plugin settings file waits here to be converted, whatever the
+    plugin's state (installed or not: core knows compaction's), the template's
+    `plugin-settings/NAME.json` and `plugins.json` are `deferred`: the old file
+    decides both when it is converted. A plugin settings file the universe
+    wrote itself is `local`.
     """
     root = Path(root)
     meta = read(root / "universe.json")
@@ -145,7 +136,7 @@ def refresh_plan(root, template=None, take=()):
     upstream, local = definition_files(source), definition_files(root)
     recorded = (manifest or {}).get("files", {})
     awaiting = _awaiting_migration(root)
-    here = _plugins_here(root)
+    waiting = ", ".join(sorted(set(awaiting.values())))
     take = set(take)
     unknown_take = take - set(upstream)
     if unknown_take:
@@ -162,16 +153,12 @@ def refresh_plan(root, template=None, take=()):
         if mine == theirs:
             current += 1
             continue
-        plugin = path[len("plugin-settings/"):-len(".json")] if path.startswith("plugin-settings/") and path.endswith(".json") else None
-        if plugin and here is not None and plugin not in here and mine is None and path not in take:
-            # Without the plugin nothing says whether a pre-plugin file here holds its real settings.
+        if path not in take and ((path in awaiting and mine is None) or (path == "plugins.json" and awaiting)):
+            # A template's plugin settings and switch must not go in front of this universe's real, unconverted
+            # ones: converting the old file sets both.
             changes.append({"path": path, "action": "deferred",
-                            "reason": f"the {plugin} plugin is not here: run mv2 plugins install {plugin} first"})
-            continue
-        if path in awaiting and mine is None and path not in take:
-            # A template's plugin settings must not go in front of this universe's real, unmigrated ones.
-            changes.append({"path": path, "action": "deferred",
-                            "reason": f"{awaiting[path]} is still here: run mv2 plugins migrate first"})
+                            "reason": f"{waiting} is still here and not converted: run mv2 plugins migrate --apply "
+                                      f"first (installing its plugin if it is not installed)"})
             continue
         if path in take:
             action, reason = ("add", "taken from the template") if mine is None else ("update", "taken from the template")
@@ -186,6 +173,9 @@ def refresh_plan(root, template=None, take=()):
         elif before is None and path.startswith("plugin-settings/"):
             # Written here, by mv2 plugins migrate from the universe's own settings: they stay.
             action, reason = "local", "the universe's own plugin settings; kept"
+        elif before is None and path == "plugins.json":
+            # Written here too (a conversion sets the switch from the old file): the universe's own choice.
+            action, reason = "local", "the universe's own plugin switches; kept"
         else:
             action, reason = "conflict", "edited locally and changed in the template"
         changes.append({"path": path, "action": action, "reason": reason})

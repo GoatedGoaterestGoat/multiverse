@@ -267,9 +267,9 @@ def _signature(root):
         parts.append((source, str(directory), _stat(directory / manifests.FILE)))
         if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
             parts.append(_files(directory.resolve()) == failed[directory.resolve()])
-        if source == "universe":  # trust covers every file
+        if source == "universe":  # trust covers every file but .git, compiled bytecode included
             parts.append(tuple((str(path), _stat(path)) for path in sorted(directory.rglob("*"))
-                               if "__pycache__" not in path.parts))
+                               if ".git" not in path.relative_to(directory).parts))
     return tuple(parts)
 
 
@@ -291,23 +291,37 @@ def entries(root):
 
 def _entries_uncached(root):
     settings = config.load(root) if root is not None else config.Config()
-    chosen, shadowed, invalid = {}, {}, {}
+    chosen, shadowed, invalid, untrusted, trusted = {}, {}, {}, {}, {}
     for source, directory in _source_directories(root):
         try:
             found = manifests.load(directory)
         except manifests.ManifestError as error:
             invalid.setdefault(directory.name, (source, directory, str(error)))
             continue
+        if source == "universe" and found.name not in chosen:
+            state, value = trust.verify(directory)
+            if state != "trusted":
+                # An untrusted copy in a universe never hides the plugin another source provides (a repository's
+                # plugins/typeahead must not turn the bundled typeahead off); alone, it is listed as untrusted.
+                untrusted.setdefault(found.name, (source, directory, found, state))
+                continue
+            trusted[found.name] = value
         if found.name in chosen:
             shadowed.setdefault(found.name, []).append((source, directory))
         else:
             chosen[found.name] = (source, directory, found)
+    for name, (source, directory, found, state) in untrusted.items():
+        if name in chosen:
+            shadowed.setdefault(name, []).append((source, directory))
+        else:
+            chosen[name] = (source, directory, found)
+            trusted[name] = None
     result = {}
     for name, (source, directory, found) in chosen.items():
         # A pre-plugin settings file turns nothing on: its first-use conversion writes the switch into plugins.json.
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
-        result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []))
+        result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
     for name, (source, directory, problem) in invalid.items():
         if name not in result:
             result[name] = Entry(name, "invalid", settings.is_on(name), source, directory, problem=problem)
@@ -318,16 +332,24 @@ def _entries_uncached(root):
     return [result[name] for name in sorted(result)]
 
 
-def _entry(root, name, on, source, directory, found, shadowed):
+def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None):
     entry = Entry(name, "on" if on else "off", on, source, directory, found, shadowed=shadowed)
     if source == "universe":
-        trusted = trust.state(directory)
+        trusted = "trusted" if fingerprint else trust.state(directory)
         if trusted != "trusted":
             entry.state = trusted
             entry.problem = (f"{name} is in this universe's plugins/ and is not trusted; review it, then run "
                              f"mv2 plugins trust {name}" if trusted == "untrusted" else
                              f"{name} changed since it was trusted; review it, then run mv2 plugins trust {name}")
             return entry
+        try:
+            # What runs is the copy of exactly the trusted bytes, never the universe's directory itself.
+            copy = trust.cached(directory, fingerprint)
+            entry.manifest = manifests.load(copy)
+        except (OSError, ValueError, manifests.ManifestError) as error:
+            entry.state, entry.problem = "changed", f"{name} could not be copied for running: {error}"
+            return entry
+        found = entry.manifest
     problem = compatible(found)
     if problem:
         entry.state, entry.problem = "incompatible", f"{name} {problem}"
@@ -337,9 +359,10 @@ def _entry(root, name, on, source, directory, found, shadowed):
     if safe_mode():
         entry.state, entry.problem = "safe-mode", f"{SAFE_MODE}=off: no plugins are loaded"
         return entry
+    running = Path(found.directory).resolve()  # where it runs from: its own directory, or a trusted copy
     with _lock:
-        known = _loaded.get(Path(directory).resolve())
-    if isinstance(known, Failed) and known.files == _files(Path(directory).resolve()):
+        known = _loaded.get(running)
+    if isinstance(known, Failed) and known.files == _files(running):
         entry.state, entry.problem = "failed", known.problem
         return entry
     if known is not None:
@@ -364,7 +387,7 @@ def entry(root, name):
 
 
 def _package_name(found):
-    digest = hashlib.sha256(str(Path(found.directory).resolve()).encode()).hexdigest()[:10]
+    digest = hashlib.sha256(str(Path(found.manifest.directory).resolve()).encode()).hexdigest()[:10]
     return f"{PACKAGE}.{found.name.replace('-', '_')}_{digest}"
 
 
@@ -394,7 +417,7 @@ def load(found, off=False):
     if not (found.on and found.state in ("on", "loaded", "unusable")) and not (off and found.state == "off"):
         raise PluginError(found.problem or f"{found.name} is off here")
     from . import api  # the API imports this module
-    directory = Path(found.directory).resolve()
+    directory = Path(found.manifest.directory).resolve()  # a trusted universe plugin runs from its copy
     # One lock per plugin: a slow import or register() never holds up another plugin, or any guarded call.
     with _plugin_lock(directory):
         with _lock:

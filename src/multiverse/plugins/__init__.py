@@ -105,7 +105,11 @@ def problems(root, reserved=()):
     settings_problem = config.load(root).problem
     if settings_problem:
         found_problems.append(f"plugins.json cannot be used, so every plugin is at its default: {settings_problem}")
+    waiting_uninstalled = dict(not_installed(root))
+    found_problems.extend(not_installed_message(name, legacy) for name, legacy in waiting_uninstalled.items())
     for name, failure in sorted(_failed_conversions(root).items()):
+        if failure.get("not_installed"):
+            continue
         legacy = Path(root) / str(failure.get("file", ""))
         if failure.get("file") and legacy.is_file() and _fingerprint(legacy) == failure.get("fingerprint"):
             found_problems.append(f"{name}: {failure['file']} could not be converted ({failure.get('reason')}); "
@@ -121,6 +125,8 @@ def problems(root, reserved=()):
                     else "it is converted the next time mv2 runs here, or now with mv2 plugins migrate --apply")
             found_problems.append(f"{found.name}: {legacy} is still here and not converted yet: {then}.")
             continue
+        if found.on and found.state == "missing" and (found.name in waiting_uninstalled or found.name in KNOWN):
+            continue  # said above with what to do about its old file, or, with none waiting, a note (notes())
         if found.on and found.state == "missing":
             if pending is None:
                 try:
@@ -159,6 +165,17 @@ def problems(root, reserved=()):
     except Exception:
         pass
     return found_problems
+
+
+def notes(root):
+    """What doctor says without counting it a problem: a KNOWN optional plugin that is on here but not installed,
+    with no old settings file waiting (then nothing is lost: it only does not run). The development template
+    turns compaction on, and a checkout without access to its repository cannot install it."""
+    waiting = dict(not_installed(root))
+    return [f"{found.name} is on here but not installed (an optional plugin: mv2 plugins install {found.name}, "
+            f"which needs access to its repository)"
+            for found in entries(root)
+            if found.on and found.state == "missing" and found.name in KNOWN and found.name not in waiting]
 
 
 def doctor(root, universe_for):
@@ -246,11 +263,48 @@ def _pending_legacy(root):
     return found
 
 
-def awaiting_migration(root):
-    """{"plugin-settings/NAME.json": legacy file name} for each plugin whose pre-plugin settings file is still
-    here and that has no settings file yet. Manifests only, no plugin code: for `mv2 refresh`, which must not
-    add a template's default settings file in front of a universe's real, unmigrated settings."""
-    return {target.relative_to(root).as_posix(): legacy.name for _, legacy, target in _pending_legacy(root)}
+# Plugins mv2 knows by name although they live outside it (optional checkout submodules): their pre-plugin
+# settings file, and the harness families they took part in. With these, an old file is never silently ignored
+# while its plugin is not installed (a checkout without the submodule, or without access to it).
+KNOWN = {"compaction": {"legacy": "compaction.json", "families": ("claude",)}}
+
+
+def waiting_settings(root):
+    """{"plugin-settings/NAME.json": old file name} of every plugin whose pre-plugin settings file waits here to
+    be converted, whatever the plugin's state (on, off, untrusted, missing, or a known plugin not installed at
+    all). Manifests and KNOWN only, no plugin code: for `mv2 refresh`, which must never put a template's
+    settings in front of a universe's real ones, and for settings edits."""
+    root, found, names = Path(root), {}, set()
+    for entry_ in entries(root):
+        names.add(entry_.name)
+        legacy = (entry_.manifest.settings.legacy if entry_.manifest is not None and entry_.manifest.settings
+                  else KNOWN.get(entry_.name, {}).get("legacy"))
+        if legacy and (root / legacy).is_file() and not settings_files.path(root, entry_.name).exists():
+            found[settings_files.path(root, entry_.name).relative_to(root).as_posix()] = legacy
+    for name, known in KNOWN.items():
+        if name not in names and (root / known["legacy"]).is_file() \
+                and not settings_files.path(root, name).exists():
+            found[settings_files.path(root, name).relative_to(root).as_posix()] = known["legacy"]
+    return found
+
+
+awaiting_migration = waiting_settings  # the name refresh has used
+
+
+def not_installed(root):
+    """[(name, old file)] of KNOWN plugins whose pre-plugin settings file is here while no copy of the plugin is
+    found: their settings are not used until it is installed."""
+    if root is None:
+        return []
+    found = {entry_.name for entry_ in entries(root) if entry_.manifest is not None}
+    return [(name, known["legacy"]) for name, known in KNOWN.items()
+            if name not in found and (Path(root) / known["legacy"]).is_file()
+            and not settings_files.path(root, name).exists()]
+
+
+def not_installed_message(name, legacy):
+    return (f"{legacy} is here but the {name} plugin isn't installed: run mv2 plugins install {name}, "
+            f"or move {legacy} away to stop using its settings")
 
 
 def _fingerprint(path):
@@ -286,6 +340,7 @@ def migrate_on_first_use(root):
         root = Path(root)
         for scope in universe.tree(root):
             try:
+                lines.extend(_say_not_installed(scope, "" if scope == root else _where(root, scope)))
                 pending = _pending_legacy(scope)
                 failed = _failed_conversions(scope) if pending else {}
                 due = [item for item in pending
@@ -297,6 +352,34 @@ def migrate_on_first_use(root):
     except Exception as error:
         lines.append(f"mv2: could not check for settings to convert: {error}")
     return lines
+
+
+def _say_not_installed(scope, where):
+    """A KNOWN plugin's old file waits while the plugin is not installed: said once per version of the file."""
+    from ..store import write
+    missing = not_installed(scope)
+    if not missing:
+        return []
+    state = Path(scope) / "state" / "plugins"
+    lines = []
+    with lock_of(state / MIGRATE_LOCK):
+        failed = _failed_conversions(scope)
+        for name, legacy in missing:
+            fingerprint = _fingerprint(Path(scope) / legacy)
+            if failed.get(name, {}).get("fingerprint") == fingerprint:
+                continue
+            failed[name] = {"file": legacy, "fingerprint": fingerprint, "reason": "not installed", "not_installed": True}
+            lines.append(f"mv2: {not_installed_message(name, legacy)}" + (f" ({where.strip()})" if where else ""))
+        try:
+            write(state / MIGRATE_FAILED, failed)
+        except OSError:
+            pass
+    return lines
+
+
+def lock_of(path):
+    from ..store import lock
+    return lock(path)
 
 
 def _where(root, scope):

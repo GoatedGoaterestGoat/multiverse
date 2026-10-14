@@ -2,41 +2,118 @@
 
 A repository can carry `.multiverse/plugins/`, and opening it must not run its
 code. The user trusts such a plugin at its current content: its path and a
-SHA-256 over its files go in `~/.multiverse/trusted-plugins.json`, outside every
-universe. Any change to the files means trusting it again.
+SHA-256 over every one of its files (only `.git` is left out) go in
+`~/.multiverse/trusted-plugins.json`, outside every universe. Any change to the
+files, compiled bytecode and `node_modules` included, means trusting it again.
+
+What runs is never the universe's directory itself but a copy of exactly the
+trusted bytes, in `~/.multiverse/plugin-cache/<sha256>/`, made by hashing the
+files as they are copied: the plugin is imported from it and its Claude
+directory loaded from it. The copy leaves out compiled Python bytecode, so a
+.pyc planted beside a reviewed .py never runs; and what Claude writes into a
+directory it loads (tsconfig.json, types) lands in the copy, never changing the
+trusted plugin.
 """
 import hashlib
+import os
 from pathlib import Path
+import shutil
+import tempfile
 
 from ..store import lock, now, read, write
 
 FILE = "trusted-plugins.json"
-# Not part of what the user reviewed: caches and version control.
-SKIPPED = {"__pycache__", ".git", "node_modules"}
+CACHE = "plugin-cache"
+COMPLETE = ".mv2-complete"
+# Version control is not part of a plugin; everything else is, whether it runs from source or not.
+SKIPPED = {".git"}
+# Code a reviewer cannot read: trust warns about it.
+COMPILED = (".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd", ".node", ".wasm")
 
 
 def user_directory():
     return Path.home() / ".multiverse"
 
 
-def fingerprint(directory):
-    """SHA-256 over every file's relative path and bytes, in a fixed order.
-
-    Raises ValueError for a symbolic link, as templates do: trust covers the
-    plugin's own files, never something a link points to.
-    """
+def _files(directory):
+    """(relative path, path) of every file in a plugin, in a fixed order; ValueError for a symbolic link."""
     directory = Path(directory)
-    digest = hashlib.sha256()
     for path in sorted(directory.rglob("*")):
         relative = path.relative_to(directory)
-        if any(part in SKIPPED for part in relative.parts) or path.suffix == ".pyc":
+        if any(part in SKIPPED for part in relative.parts):
             continue
         if path.is_symlink():
             raise ValueError(f"{path}: plugins in a universe may not contain symbolic links")
         if path.is_file():
-            data = path.read_bytes()
-            digest.update(relative.as_posix().encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+            yield relative, path
+
+
+def _add(digest, relative, data):
+    digest.update(relative.as_posix().encode() + b"\0" + str(len(data)).encode() + b"\0" + data)
+
+
+def fingerprint(directory):
+    """SHA-256 over every file's relative path and bytes, in a fixed order: everything but `.git`.
+
+    Raises ValueError for a symbolic link, as templates do: trust covers the
+    plugin's own files, never something a link points to.
+    """
+    digest = hashlib.sha256()
+    for relative, path in _files(directory):
+        _add(digest, relative, path.read_bytes())
     return "sha256:" + digest.hexdigest()
+
+
+def compiled(directory):
+    """What a reviewer cannot read: compiled files and node_modules, as relative paths (node_modules once)."""
+    found = set()
+    for relative, _ in _files(directory):
+        if "node_modules" in relative.parts:
+            found.add(Path(*relative.parts[:relative.parts.index("node_modules") + 1]).as_posix() + "/")
+        elif relative.suffix in COMPILED:
+            found.add(relative.as_posix())
+    return sorted(found)
+
+
+def cache_directory(value):
+    return user_directory() / CACHE / value.split(":", 1)[-1]
+
+
+def cached(directory, value):
+    """The copy of the plugin at `directory` whose fingerprint is `value`, made now if needed; its path.
+
+    The bytes are hashed as they are copied, so the copy is exactly what was
+    trusted: if the plugin changed meanwhile, nothing is kept and ValueError
+    says so. Compiled bytecode is hashed but not copied (Python compiles the
+    copy's own), and the copy is used only once complete."""
+    target = cache_directory(value)
+    if (target / COMPLETE).is_file():
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".copy-", dir=target.parent))
+    try:
+        digest = hashlib.sha256()
+        for relative, path in _files(directory):
+            data = path.read_bytes()
+            _add(digest, relative, data)
+            if "__pycache__" in relative.parts or relative.suffix in (".pyc", ".pyo"):
+                continue
+            copy = staging / relative
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            copy.write_bytes(data)
+            os.chmod(copy, path.stat().st_mode & 0o777)
+        if "sha256:" + digest.hexdigest() != value:
+            raise ValueError(f"{directory} changed while it was copied; review it, then trust it again")
+        (staging / COMPLETE).write_text(value + "\n")
+        try:
+            staging.rename(target)
+        except OSError:  # another process made the same copy first
+            if not (target / COMPLETE).is_file():
+                raise
+        return target
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
 
 def _records():
@@ -51,14 +128,20 @@ def _records():
 
 def state(directory):
     """`trusted`, `changed` (trusted at other content) or `untrusted`."""
+    return verify(directory)[0]
+
+
+def verify(directory):
+    """(state, fingerprint): the fingerprint is the trusted one when the state is `trusted`, else None."""
     directory = Path(directory).resolve()
     record = _records().get(str(directory))
     if not isinstance(record, dict):
-        return "untrusted"
+        return "untrusted", None
     try:
-        return "trusted" if record.get("fingerprint") == fingerprint(directory) else "changed"
+        value = fingerprint(directory)
     except (OSError, ValueError):
-        return "changed"
+        return "changed", None
+    return ("trusted", value) if record.get("fingerprint") == value else ("changed", None)
 
 
 def trust(directory):

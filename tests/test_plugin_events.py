@@ -375,3 +375,21 @@ class DeliveryTest(PluginTestCase):
         host._write_cursor(child, "pair", 5)
         host._deliver(self.loaded, self.mv, child, "pair")
         self.assertFalse(child.exists())
+
+
+class ShortReasonTest(PluginTestCase):
+    """A core event's reason is one short line, never a terminal tail with a prompt in it (PR #20 review, 7)."""
+
+    def test_reasons_are_cut_to_their_first_line(self):
+        self.write_plugin("listener", {"extends": ["events"], "events": ["*"]})
+        self.enable("listener")
+        tail = "Launch failed: exit 1\nLast terminal output:\n> SECRET PROMPT TEXT\n" + "x" * 8000
+        events.emit(self.root, "agent.exited", {"id": "a", "name": "w"}, data={"state": "failed", "reason": tail})
+        events.emit(self.root, "message.failed", {"id": "a", "name": "w"}, data={"id": "m", "reason": "y" * 500})
+        events.emit(self.root, "listener.note", None, data={"reason": "keep\nall of it"})  # a plugin's own event
+        exited, failed, own = events.read(self.root, 0)[0]
+        self.assertEqual(exited["data"]["reason"], "Launch failed: exit 1")
+        self.assertEqual(len(failed["data"]["reason"]), 200)
+        self.assertTrue(failed["data"]["reason"].endswith("…"))
+        self.assertEqual(own["data"]["reason"], "keep\nall of it")
+        self.assertNotIn("SECRET", json.dumps([exited, failed]))

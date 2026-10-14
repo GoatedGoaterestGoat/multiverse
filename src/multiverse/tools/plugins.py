@@ -23,6 +23,8 @@ def configure(parser):
     parser.add_argument("--unset", action="append", default=[], metavar="KEY", dest="removals",
                         help="settings: remove one setting, back to its default; repeatable")
     parser.add_argument("--prune", action="store_true", help="events: delete journal segments past retention now")
+    parser.add_argument("--load", action="store_true",
+                        help="check: import the plugin even when it is a universe plugin that is not trusted")
     parser.add_argument("--apply", action="store_true", help="migrate: make the changes (otherwise only show them)")
     parser.add_argument("--recursive", action="store_true", help="migrate: this universe and every subverse")
     parser.add_argument("--dir", dest="directory", help="new: where to create it (default: the current directory)")
@@ -54,7 +56,7 @@ def _changes(assignments, removals):
 
 
 def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-        recursive=False, directory=None, json=False):
+        recursive=False, directory=None, load=False, json=False):
     if plugin_action not in ACTIONS:
         raise ValueError(f"Unknown plugins action {plugin_action!r}; use one of {', '.join(ACTIONS)}")
     if (apply or recursive) and plugin_action != "migrate":
@@ -64,7 +66,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     if plugin_action == "check":
         if not name:
             raise ValueError("mv2 plugins check takes the plugin's directory")
-        return check(Path(name))
+        return check(Path(name), load=load)
     if plugin_action == "new":
         if not name:
             raise ValueError("mv2 plugins new takes the new plugin's name")
@@ -102,7 +104,9 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
                 except (OSError, ValueError) as error:
                     item["problem"] = str(error)
                     item["unchanged"] = getattr(error, "unchanged", True)
-        result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply}
+        result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply,
+                  "not_installed": [{"plugin": name, "file": legacy, "universe": str(scope)}
+                                    for scope in scopes for name, legacy in plugins.not_installed(scope)]}
         if apply and any(item.get("problem") for item in planned):
             result["ok"] = False  # something was not converted: exit 1
         return result
@@ -139,7 +143,8 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     if found.source != "universe":
         raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
     if plugin_action == "trust":
-        return {"name": name, "directory": str(found.directory), "fingerprint": trust.trust(found.directory)}
+        return {"name": name, "directory": str(found.directory), "fingerprint": trust.trust(found.directory),
+                "unreadable": trust.compiled(found.directory)}
     return {"name": name, "directory": str(found.directory), "forgotten": trust.forget(found.directory)}
 
 
@@ -188,8 +193,17 @@ def scaffold(name, parent):
     return {"name": name, "directory": str(directory)}
 
 
-def check(directory):
-    """Everything about a plugin directory that can be told without turning it on anywhere."""
+def _universe_plugin(directory):
+    """Whether `directory` is a plugin in some universe's own plugins/ (which runs only once trusted)."""
+    return directory.parent.name == "plugins" and (directory.parent.parent / "universe.json").is_file()
+
+
+def check(directory, load=False):
+    """Everything about a plugin directory that can be told without turning it on anywhere.
+
+    A universe's own plugin that is not trusted is checked without importing
+    it (manifest, schema and default settings only), unless `load` asks for
+    its code; a trusted one is checked from its trusted copy."""
     directory = directory.expanduser().resolve()
     problems, notes = [], []
     try:
@@ -214,8 +228,20 @@ def check(directory):
         except ValueError as error:
             problems.append(f"settings: {error}")
     registered = None
+    running = directory
+    if not problems and _universe_plugin(directory) and not load:
+        state, value = trust.verify(directory)
+        if state != "trusted":
+            notes.append(f"its code was not imported: it is not trusted (run mv2 plugins trust {found.name} after "
+                         f"reviewing it, or check it with --load to import it now)")
+            return {"directory": str(directory), "ok": True, "problems": [], "notes": notes, "name": found.name}
+        try:
+            running = trust.cached(directory, value)
+            found = manifests.load(running)
+        except (OSError, ValueError, manifests.ManifestError) as error:
+            problems.append(f"its trusted copy could not be made: {error}")
     if not problems:
-        entry = loader.Entry(found.name, "on", True, "path", directory, found)
+        entry = loader.Entry(found.name, "on", True, "path", running, found)
         try:
             registered = loader.load(entry).registrations
         except loader.PluginError as error:
@@ -244,9 +270,9 @@ def check(directory):
 
 
 def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), removals=(), prune=False, apply=False,
-            recursive=False, directory=None, json=False):
+            recursive=False, directory=None, load=False, json=False):
     result = run(root, plugin_action=plugin_action, name=name, assignments=assignments, removals=removals, prune=prune,
-                 apply=apply, recursive=recursive, directory=directory)
+                 apply=apply, recursive=recursive, directory=directory, load=load)
     if json:
         return result
     if plugin_action in ("check", "migrate") and result.get("ok") is False:
@@ -323,7 +349,11 @@ def text(action, result):
         lines.append(json.dumps(result["values"], indent=2, ensure_ascii=False))
         return "\n".join(lines)
     if action == "trust":
-        return f'Trusted {result["name"]} at its current content ({result["fingerprint"][:19]}…). Any change needs trust again.'
+        text = f'Trusted {result["name"]} at its current content ({result["fingerprint"][:19]}…). Any change needs trust again.'
+        if result.get("unreadable"):
+            text += ("\n! It ships code you cannot read as source, which runs with your permissions: "
+                     + ", ".join(result["unreadable"]) + ". Trust it only if you trust where these came from.")
+        return text
     if action == "untrust":
         return f'{result["name"]} is no longer trusted.' if result["forgotten"] else f'{result["name"]} was not trusted.'
     if action == "install":
@@ -335,9 +365,12 @@ def text(action, result):
                           f'Then: mv2 plugins check {result["directory"]}, mv2 plugins enable {result["name"]}, and its tests:',
                           f'  python -m unittest discover -s {Path(result["directory"]) / "tests"}'])
     if action == "migrate":
+        waiting = [f'! {plugins.not_installed_message(item["plugin"], item["file"])}'
+                   + ("" if item["universe"] == result["universe"] else f' (in {item["universe"]})')
+                   for item in result.get("not_installed", [])]
         if not result["planned"]:
-            return "Nothing to migrate."
-        lines = []
+            return "\n".join(waiting) if waiting else "Nothing to migrate."
+        lines = list(waiting)
         applied = {(item["plugin"], item["universe"]) for item in result["applied"]}
         for item in result["planned"]:
             what = (f'{item["from"]} -> {item["to"]}' if item["kind"] == "legacy"
@@ -375,7 +408,10 @@ def text(action, result):
             lines.append(f'Pruned {len(result["pruned"])} segments.')
         return "\n".join(lines)
     if action == "check":
-        lines = [f'{result.get("name", result["directory"])}: ' + ("ready." if result["ok"] else "not usable.")]
+        unchecked = any(note.startswith("its code was not imported") for note in result["notes"])
+        lines = [f'{result.get("name", result["directory"])}: ' + (
+            "manifest and settings look right; its code was not checked." if result["ok"] and unchecked
+            else "ready." if result["ok"] else "not usable.")]
         lines.extend(f"! {problem}" for problem in result["problems"])
         lines.extend(f"Note: {note}" for note in result["notes"])
         return "\n".join(lines)

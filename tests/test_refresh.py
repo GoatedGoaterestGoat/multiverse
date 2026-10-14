@@ -127,14 +127,29 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(self.actions()["plugin-settings/notes.json"], "local")
         self.assertEqual(self.actions(take=["plugin-settings/notes.json"])["plugin-settings/notes.json"], "update")
 
-    def test_plugin_settings_wait_for_a_plugin_that_is_not_here(self):
-        # A checkout without the plugin's submodule cannot tell whether a pre-plugin file here holds its settings.
+    def test_plugin_settings_wait_only_while_an_old_file_waits(self):
+        # Without an old file there is nothing to protect: a plugin that is not here is no reason to hold back
+        # (a universe without access to an optional plugin would list it deferred forever).
         self.put("plugin-settings/absent.json", '{"schema": 2}\n')
-        self.assertEqual(self.actions()["plugin-settings/absent.json"], "deferred")
-        self.assertIn("mv2 plugins install absent", self.reason("plugin-settings/absent.json"))
+        self.assertEqual(self.actions()["plugin-settings/absent.json"], "add")
+        # A known plugin's old file waits (core knows compaction's, installed or not): its settings and the
+        # template's switches wait for it, whatever the plugin's state.
+        self.put("plugin-settings/compaction.json", '{"schema": 2}\n')
+        self.put("plugins.json", '{"schema": 1, "enabled": {"compaction": true}}\n')
+        (self.root / "compaction.json").write_text('{"enabled": false}\n')
+        for path in ("plugin-settings/compaction.json", "plugins.json"):
+            self.assertEqual(self.actions()[path], "deferred")
+            self.assertIn("compaction.json is still here and not converted", self.reason(path))
         refresh.run(self.root, apply=True)
-        self.assertFalse((self.root / "plugin-settings/absent.json").exists())
-        self.assertEqual(self.actions(take=["plugin-settings/absent.json"])["plugin-settings/absent.json"], "add")
+        self.assertFalse((self.root / "plugin-settings/compaction.json").exists())
+        self.assertEqual(self.actions(take=["plugin-settings/compaction.json"])["plugin-settings/compaction.json"], "add")
+        # Converted: the universe wrote both itself, with no install record: kept as its own from then on.
+        (self.root / "compaction.json").unlink()
+        (self.root / "plugin-settings" / "compaction.json").write_text('{"schema": 2, "budget": 50000}\n')
+        (self.root / "plugins.json").write_text('{"schema": 1, "enabled": {"compaction": false}}\n')
+        self.assertEqual({path: self.actions()[path] for path in ("plugins.json", "plugin-settings/compaction.json")},
+                         {"plugins.json": "local", "plugin-settings/compaction.json": "local"})
+        self.assertEqual(self.actions(take=["plugins.json"])["plugins.json"], "update")  # take still overrides
 
     def test_take_rejects_paths_outside_the_template(self):
         with self.assertRaises(ValueError):

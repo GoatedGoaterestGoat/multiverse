@@ -245,6 +245,12 @@ def _launch_plan(info, plan):
                                  | ({"claude_settings"} if any(c.claude_settings for c in contributions) else set()))
         if any(contribution.problem for contribution in contributions):
             record["problem"] = "; ".join(c.problem for c in contributions if c.problem)
+    # A known plugin's old settings wait while it is not installed: the launch says so rather than run quietly
+    # without it.
+    from . import KNOWN, not_installed, not_installed_message
+    for name, legacy in not_installed(info.universe) if isinstance(info.universe, (str, Path)) else ():
+        if info.family in KNOWN[name]["families"]:
+            plan.problems.append(not_installed_message(name, legacy))
     # Status-line items only of the plugins that take part in this launch: one left out shows none, and an item
     # file an earlier launch left behind is removed, so the line never shows what nobody updates.
     taking_part = [loaded for loaded in active if plan.plugins.get(loaded.name, {}).get("state") != "skipped"]

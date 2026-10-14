@@ -42,6 +42,8 @@ def check(root, notes=None):
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
         found.extend((problem, problem) for problem in _plugins(scope))
+        if notes is not None:
+            notes.extend(_plugin_notes(scope))
     return found
 
 
@@ -85,6 +87,15 @@ def _plugins(scope):
     except Exception as error:  # the rest of doctor must still run
         found = [f"the plugins could not be checked: {type(error).__name__}: {error}"]
     return [f"Plugin {problem}" if not problem.startswith("plugins.json") else problem for problem in found]
+
+
+def _plugin_notes(scope):
+    """What doctor says about plugins without counting it a problem (a known optional plugin not installed)."""
+    try:
+        from .. import plugins
+        return [f"Plugin {note}" for note in plugins.notes(scope)]
+    except Exception:  # a note is never worth failing doctor over
+        return []
 
 
 if __name__ == "__main__":

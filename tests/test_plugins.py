@@ -82,6 +82,10 @@ class DiscoveryTest(PluginTestCase):
         self.assertEqual((found.source, found.manifest.version), ("path", "1.0.0"))
         self.assertEqual(found.shadowed, [("universe", universe_copy), ("personal", personal)])
         with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": ""}):
+            # An untrusted universe copy never hides another source's plugin; trusted, it comes first.
+            found = self.entry("twin")
+            self.assertEqual((found.source, found.shadowed), ("personal", [("universe", universe_copy)]))
+            trust.trust(universe_copy)
             self.assertEqual(self.entry("twin").source, "universe")
 
     def test_universe_plugins_need_trust_at_their_content(self):

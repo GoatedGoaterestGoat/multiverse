@@ -240,6 +240,11 @@ def edit(root, manifest, changes, check=None):
     if manifest.settings is None:
         raise ValueError(f"{manifest.name} has no settings")
     file = path(root, manifest.name)
+    legacy = manifest.settings.legacy
+    if legacy and not file.exists() and (Path(root) / legacy).is_file():
+        # Built from defaults, the new file would stand in front of the real settings for good.
+        raise ValueError(f"{legacy} is still here and not converted: run mv2 plugins migrate --apply first, "
+                         f"so its settings are kept")
     with lock(Path(root) / "state" / ".plugins.lock"):
         data = _json(file) if file.is_file() else defaults_of(manifest)
         for key, value in changes.items():

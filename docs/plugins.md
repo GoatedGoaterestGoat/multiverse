@@ -228,6 +228,17 @@ where to look, and core can check, edit and refresh them the same way:
     a process of its own. It reads that process's JSON and says what was
     converted, partly converted or not converted; that never fails the update.
   - Runners, the status line and the plugin host never convert.
+  - **Not installed:** a known optional plugin's old file (core's table has
+    `compaction` → `compaction.json`) may wait while the plugin isn't
+    installed, for example a checkout without its submodule or without access
+    to it. Then `doctor`, Claude launches, `mv2 plugins migrate`, `mv2 update`
+    and the first-use step (once per version of the file) say "compaction.json
+    is here but the compaction plugin isn't installed: run mv2 plugins install
+    compaction, or move compaction.json away to stop using its settings".
+    Nothing reads the file meanwhile.
+  - **Never in front:** while an old file waits, whatever the plugin's state,
+    neither a settings edit nor `mv2 refresh` puts new settings or the
+    template's switch in front of it.
 - **Checked.** The manifest names a JSON Schema. Core validates against it, and
   the plugin may add its own checks (`check(settings)`, like compaction's
   harness builder checks). An unusable file never stops a launch: the plugin
@@ -1020,12 +1031,29 @@ is about consent and blast radius:
    typeahead.
 2. **Universe plugins need trust.** A repository can carry `.multiverse/plugins/`,
    and opening the dashboard in a fresh clone must not run its code.
-   `mv2 plugins trust NAME` records the plugin's path and a SHA-256 of its files
-   in `~/.multiverse/trusted-plugins.json`, outside every universe. Agents cannot
-   reach it through `mv2`, though nothing stops a process with the user's
-   permissions from writing it. Any change to the files means trust is needed
-   again (like direnv's `allow`). Until then the plugin is listed as
-   `untrusted` and never imported.
+   - **Recording trust:** `mv2 plugins trust NAME` records the plugin's path and
+     a SHA-256 over every one of its files in
+     `~/.multiverse/trusted-plugins.json`, outside every universe. Only `.git`
+     is left out of the hash; compiled bytecode and `node_modules` are
+     included, and `trust` warns when a plugin ships code that can't be read
+     as source.
+   - **Who can trust:** trust is meant to be the person's decision after
+     reviewing the plugin, but nothing technical stops an agent from running
+     `mv2 plugins trust`, or any process with the user's permissions from
+     writing that file.
+   - **Changes:** any change to the files means trust is needed again (like
+     direnv's `allow`). Until then the plugin is listed as `untrusted` and
+     never imported.
+   - **No hiding:** an untrusted universe copy never hides a plugin of the same
+     name from another source; a repository's `plugins/typeahead` cannot turn
+     the bundled one off.
+   - **What runs:** never the universe's directory itself, but a copy of
+     exactly the trusted bytes in `~/.multiverse/plugin-cache/<sha256>/`. It is
+     hashed while copied and left out if anything changed meanwhile, and
+     compiled bytecode is not copied, so a `.pyc` planted beside a reviewed
+     `.py` never runs. The plugin is imported from that copy and its Claude
+     directory loaded from it, so what Claude writes there (`tsconfig.json`,
+     types) never touches the trusted plugin.
 3. **Permissions are declared and enforced at the API.** The `mv` object a
    plugin receives has only what its manifest asks for. Without
    `messages.send` there is no `send`. This catches mistakes and makes a
@@ -1342,7 +1370,10 @@ multiverse-v2/
 - `mv2 plugins check PATH` validates the manifest, the API version,
   `extends` against what `register` actually registers, imports in a CLI-like
   process (no Textual), name conflicts with core and with plugins that are on,
-  and `claude plugin validate` for Claude directories.
+  and `claude plugin validate` for Claude directories. It never imports a
+  universe's own plugin that is not trusted: that one gets the manifest,
+  schema and default-settings checks only, unless `--load` asks for its code.
+  A trusted one is checked from its trusted copy.
 - `multiverse.plugins.testing.PluginTestCase` gives each test a temporary
   universe made from the base template with the plugin (its `plugin`
   directory) found and turned on. It also gives a temporary home, a temporary

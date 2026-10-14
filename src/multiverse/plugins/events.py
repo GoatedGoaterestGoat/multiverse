@@ -35,10 +35,12 @@ import time
 
 from ..store import lock, now
 from . import config, loader
+from .manifest import CORE_EVENTS
 
 DIRECTORY = "events"
 SEGMENT_BYTES = 1024 * 1024
 EVENT_BYTES = 16 * 1024
+REASON_CHARACTERS = 200  # a core event's reason, cut to its first line
 LOCK_SECONDS = 0.2  # the longest emit waits for the journal; past it, the event is dropped and logged
 TAIL_BYTES = 64 * 1024
 DEFAULT_RETAIN_DAYS = 7
@@ -79,8 +81,11 @@ def emit(root, kind, agent=None, launch=None, data=None):
         agent_ref = None
         if agent:
             agent_ref = {"id": agent.get("id"), "name": agent.get("name")}
+        data = dict(data or {})
+        if kind in CORE_EVENTS and isinstance(data.get("reason"), str):
+            data["reason"] = short_reason(data["reason"])
         event = {"schema": 1, "seq": 0, "at": now(), "type": kind, "agent": agent_ref, "launch": launch,
-                 "data": data or {}}
+                 "data": data}
         with _bounded_lock(directory(root) / ".lock") as held:
             if not held:
                 _log(root, f"{kind}: dropped: the journal was busy")
@@ -89,6 +94,13 @@ def emit(root, kind, agent=None, launch=None, data=None):
     except Exception as error:
         _log(root, f"{kind}: {type(error).__name__}: {error}")
         return None
+
+
+def short_reason(text, limit=REASON_CHARACTERS):
+    """A core event's reason: its first line, at most `limit` characters. A launch's reason can end with the
+    terminal's last lines, which may hold a prompt or a message: those never reach the journal."""
+    line = next((part.strip() for part in str(text).splitlines() if part.strip()), "")
+    return line if len(line) <= limit else line[:limit - 1] + "…"
 
 
 @contextmanager

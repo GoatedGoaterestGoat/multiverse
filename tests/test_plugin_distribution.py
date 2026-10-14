@@ -152,7 +152,8 @@ class InstallTest(PluginTestCase):
         with mock.patch.object(loader, "CHECKOUT", checkout / "plugins"):
             self.assertEqual(list(plugins.submodules()), ["compaction"])
             self.enable("compaction")
-            self.assertIn("run mv2 plugins install compaction", plugins.problems(self.root)[0])
+            # compaction is a known optional plugin: on but not installed, with no old file waiting, is a note.
+            self.assertIn("mv2 plugins install compaction", plugins.notes(self.root)[0])
             result = plugins.install("compaction")
             self.assertTrue(result["installed"])
             self.assertEqual(self.entry("compaction").source, "checkout")
