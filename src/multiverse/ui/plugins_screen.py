@@ -53,6 +53,10 @@ def provided(provides):
 def describe(item):
     """The selected plugin in a few lines: what it is, why it is not working and what it last did wrong."""
     lines = [f"{clean(item['name'])} {clean(item.get('version') or '')} · {clean(item.get('source') or '')}".rstrip()]
+    # First, where the person looks: a plugin that came with a project must not silently replace one that came with mv2.
+    overridden = {str(over.get("directory")) for over in item.get("overrides") or ()}
+    for over in item.get("overrides") or ():
+        lines.append(f"Overrides the {clean(over.get('source'))} {clean(item['name'])} plugin ({clean(over.get('directory'))})")
     if item.get("description"):
         lines.append(clean(item["description"]))
     if item.get("problem"):
@@ -63,6 +67,8 @@ def describe(item):
     if item.get("permissions"):
         lines.append("Allowed to: " + "; ".join(clean(text) for text in item["permissions"]))
     for shadow in item.get("shadowed") or ():
+        if str(shadow.get("directory")) in overridden:
+            continue
         lines.append(f"Shadows a {clean(shadow.get('source'))} plugin at {clean(shadow.get('directory'))}")
     settings = item.get("settings")
     if settings:

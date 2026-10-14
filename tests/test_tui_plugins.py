@@ -607,6 +607,22 @@ class PluginsScreenTests(DashboardCase):
             await self.until(pilot, lambda: isinstance(self.app.screen, OwnScreen), "the plugin's screen")
             self.assertEqual(self.app.screen.opened_with[1], self.backend)
 
+    async def test_a_plugin_that_overrides_another_says_so_before_anything_else(self):
+        self.service.items[0]["overrides"] = [{"source": "bundled", "directory": "/mv2/plugins/builtin/alpha"}]
+        self.service.items[0]["shadowed"] = [{"source": "bundled", "directory": "/mv2/plugins/builtin/alpha"},
+                                             {"source": "personal", "directory": "/home/u/.multiverse/plugins/alpha"}]
+        async with self.app.run_test(size=(100, 32)) as pilot:
+            screen = await self.open_screen(pilot)
+            lines = str(screen.query_one("#plugin-details", Static).render()).splitlines()
+            at = next(i for i, line in enumerate(lines) if line.startswith("alpha 0.1.0"))
+            self.assertEqual(lines[at + 1], "Overrides the bundled alpha plugin (/mv2/plugins/builtin/alpha)")
+            text = "\n".join(lines)
+            self.assertEqual(text.count("/mv2/plugins/builtin/alpha"), 1)  # not repeated as a shadow
+            self.assertIn("Shadows a personal plugin at /home/u/.multiverse/plugins/alpha", text)
+            await pilot.press("down")
+            await self.until(pilot, lambda: "beta plugin" in str(screen.query_one("#plugin-details", Static).render()), "beta")
+            self.assertNotIn("Overrides", str(screen.query_one("#plugin-details", Static).render()))
+
     async def test_error_lines_on_the_plugins_screen_are_red(self):
         async with self.app.run_test(size=(100, 32)) as pilot:
             screen = await self.open_screen(pilot)
