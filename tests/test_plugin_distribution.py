@@ -66,14 +66,11 @@ class MigrateTest(PluginTestCase):
         self.write_plugin("tree", {"module": "plugin", "settings": {"version": 2, "legacy": "tree.json"}},
                           {"plugin.py": MIGRATING})
 
-    def test_a_legacy_settings_file_keeps_the_plugin_on_until_plugins_json_says(self):
-        self.assertFalse(self.entry("tree").on)
-        (self.root / "tree.json").write_text(json.dumps({"enabled": False}))
-        self.assertTrue(self.entry("tree").on)  # the plugin's own settings decide what it does
-        self.enable("tree", on=False)
-        self.assertFalse(self.entry("tree").on)
-        child = self.subverse("child")
-        self.assertFalse(self.entry("tree", child).on)  # no legacy file there
+    def test_a_legacy_settings_file_turns_nothing_on_until_it_is_converted(self):
+        (self.root / "tree.json").write_text(json.dumps({"enabled": True, "colour": "teal"}))
+        self.assertFalse(self.entry("tree").on)  # no switch yet, and its settings are not read
+        self.assertEqual(len(plugins.migrate_on_first_use(self.root)), 1)  # the conversion writes the switch
+        self.assertTrue(self.entry("tree").on)
 
     def test_refresh_can_tell_which_settings_files_await_migration(self):
         self.assertEqual(plugins.awaiting_migration(self.root), {})
@@ -83,21 +80,21 @@ class MigrateTest(PluginTestCase):
         (self.root / "plugin-settings/tree.json").write_text('{"schema": 2}')
         self.assertEqual(plugins.awaiting_migration(self.root), {})
 
-    def test_a_legacy_file_with_its_plugin_off_is_reported(self):
+    def test_a_legacy_file_waiting_to_be_converted_is_reported(self):
         (self.root / "tree.json").write_text("{}")
-        self.assertEqual(plugins.problems(self.root), [])
-        self.enable("tree", on=False)
         [problem] = plugins.problems(self.root)
-        self.assertIn("tree.json is still here, but the tree plugin is not used: plugins.json turns it off", problem)
-        self.enable("tree")
+        self.assertEqual(problem, "tree: tree.json is still here and not converted yet: it is converted the next time "
+                                  "mv2 runs here, or now with mv2 plugins migrate --apply.")
         with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
             [problem] = plugins.problems(self.root)
-        self.assertIn("MV2_PLUGINS=off loads no plugins", problem)
+        self.assertIn("not converted yet: nothing is converted while MV2_PLUGINS=off", problem)
+        plugins.migrate_on_first_use(self.root)
+        self.assertEqual(plugins.problems(self.root), [])
 
     def test_legacy_settings_move_to_the_plugin_and_turn_it_on(self):
         from multiverse.tools import plugins as tool
         (self.root / "tree.json").write_text(json.dumps({"enabled": True, "budget": 5}))
-        self.assertEqual(plugins.settings_of(self.root, "tree")[0], {"enabled": True, "budget": 5})  # read until migrated
+        self.assertEqual(plugins.settings_of(self.root, "tree")[0], {"schema": 2})  # never read: defaults until converted
         plan = tool.run(self.root, plugin_action="migrate")
         self.assertEqual([item["kind"] for item in plan["planned"]], ["legacy"])
         self.assertIn("Would migrate tree", tool.text("migrate", plan))

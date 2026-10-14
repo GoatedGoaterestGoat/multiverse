@@ -114,12 +114,12 @@ def problems(root, reserved=()):
     for found in entries(root):
         legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
                   else None)
-        if legacy and (Path(root) / legacy).is_file() and (not found.on or found.state == "safe-mode"):
-            # Its pre-plugin file says to use it, but it is not used: say so rather than run quietly without it.
-            why = (f"{loader.SAFE_MODE}=off loads no plugins" if found.state == "safe-mode"
-                   else f"{config.path(root).name} turns it off")
-            found_problems.append(f"{legacy} is still here, but the {found.name} plugin is not used: {why}. "
-                                  f"Turn it on with mv2 plugins enable {found.name}, or move {legacy} away.")
+        if (legacy and (Path(root) / legacy).is_file() and not settings_files.path(root, found.name).exists()
+                and found.name not in _failed_conversions(root)):
+            # Waiting for its first-use conversion: until then the plugin has neither its switch nor its settings.
+            then = (f"nothing is converted while {loader.SAFE_MODE}=off" if loader.safe_mode()
+                    else "it is converted the next time mv2 runs here, or now with mv2 plugins migrate --apply")
+            found_problems.append(f"{found.name}: {legacy} is still here and not converted yet: {then}.")
             continue
         if found.on and found.state == "missing":
             if pending is None:

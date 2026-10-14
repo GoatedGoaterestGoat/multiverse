@@ -295,12 +295,8 @@ def _entries_uncached(root):
             chosen[found.name] = (source, directory, found)
     result = {}
     for name, (source, directory, found) in chosen.items():
+        # A pre-plugin settings file turns nothing on: its first-use conversion writes the switch into plugins.json.
         default = found.default if source == "bundled" else "off"
-        if (root is not None and name not in settings.enabled and found.settings is not None
-                and found.settings.legacy and (root / found.settings.legacy).is_file()):
-            # Its pre-plugin settings file is still here: it stays on, as that file had it, until
-            # `mv2 plugins migrate` writes the switch into plugins.json. Its settings decide the rest.
-            default = "on"
         on = settings.is_on(name, default)
         result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []))
     for name, (source, directory, problem) in invalid.items():

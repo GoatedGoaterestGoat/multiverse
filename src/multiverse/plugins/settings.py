@@ -36,7 +36,7 @@ class Settings:
     """`values`: the settings in effect (the file, else the defaults). `problem`: why they cannot be used."""
     values: dict
     path: Path
-    source: str  # "file", "legacy", "defaults" or "none"
+    source: str  # "file", "defaults" or "none"
     problem: str | None = None
 
 
@@ -196,19 +196,17 @@ def _accept(manifest, data, check, where, root=None):
 def read(root, manifest, check=None):
     """The plugin's settings in this universe. Never raises; `problem` says why they cannot be used.
 
-    Order: plugin-settings/NAME.json, else the pre-plugin file the manifest
-    names (`legacy`, until `mv2 plugins migrate`), else the defaults.
+    Order: plugin-settings/NAME.json, else the defaults. A pre-plugin file the
+    manifest names (`legacy`) is never read here: it is converted on first use
+    (plugins.migrate_on_first_use), and the plugin may refuse to run while it
+    waits.
     """
     file = path(root, manifest.name)
     if manifest.settings is None:
         return Settings({}, file, "none")
-    legacy = Path(root) / manifest.settings.legacy if manifest.settings.legacy else None
     try:
         if file.is_file():
             data, source, where = _json(file), "file", str(file)
-        elif legacy is not None and legacy.is_file():
-            # The pre-plugin file is the plugin's to read: it knows that shape.
-            return Settings(_json(legacy), legacy, "legacy")
         else:
             data, source, where = defaults_of(manifest), "defaults", f"{manifest.name} default settings"
         _accept(manifest, data, check, where, root)
@@ -227,7 +225,7 @@ def install_defaults(root, manifest):
     file = path(root, manifest.name)
     legacy = Path(root) / manifest.settings.legacy if manifest.settings.legacy else None
     if file.exists() or (legacy is not None and legacy.exists()):
-        return False
+        return False  # defaults here would stand in front of a pre-plugin file waiting to be converted
     write(file, defaults_of(manifest))
     return True
 

@@ -166,7 +166,7 @@ class SettingsTest(PluginTestCase):
         found = settings.read(self.root, manifest_)
         self.assertEqual((found.values, found.source, found.problem), ({"schema": 2, "greeting": "hello"}, "defaults", None))
         (self.root / "greeter.json").write_text('{"old": true}')
-        self.assertEqual(settings.read(self.root, manifest_).source, "legacy")
+        self.assertEqual(settings.read(self.root, manifest_).source, "defaults")  # a pre-plugin file is never read
         settings.path(self.root, "greeter").parent.mkdir(exist_ok=True)
         settings.path(self.root, "greeter").write_text('{"schema": 1, "greeting": "x"}')
         self.assertIn("run mv2 plugins migrate", settings.read(self.root, manifest_).problem)

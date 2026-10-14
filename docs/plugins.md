@@ -130,11 +130,11 @@ Each universe and subverse may have a `plugins.json` at its root:
   harness), but turning the plugin on or off is always here.
 - A plugin is on where `enabled` says `true`. Where the file says nothing, its
   manifest's `default` applies. Only bundled plugins can default to `on` (today
-  only typeahead), so installing a plugin never turns it on anywhere. One
-  exception keeps upgrades invisible: a plugin whose pre-plugin settings file
-  (its manifest's `settings.legacy`, such as `compaction.json`) is still in a
-  universe is on there until `plugins.json` says otherwise. Its settings then
-  decide what it does, exactly as that file did before.
+  only typeahead), so installing a plugin never turns it on anywhere. A
+  pre-plugin settings file (a manifest's `settings.legacy`, such as
+  `compaction.json`) turns nothing on and is never read as settings. It is
+  converted on first use (below), which writes the switch into `plugins.json`
+  where that file had it on.
 - A `plugins.json` naming a plugin that is not installed is not an error for
   launches: they go on without it, and `mv2 plugins` and `doctor` say it is
   missing and how to get it.
@@ -637,8 +637,8 @@ class Contribution:          # what it may return
   unusable or conflicted) is also a problem of the launch, which Claude shows as
   its fallback reason in the inspector and capabilities. A plugin that merely
   does not fit (version, bridge, a plain launch) is recorded only. `mv2 doctor`
-  says when a plugin's pre-plugin settings file is still in a universe but the
-  plugin is off there or in safe mode.
+  says when a plugin's pre-plugin settings file is still waiting to be
+  converted, or could not be.
 - **Recording.** What each plugin contributed, and why one was left out, goes in
   `runtime.json` under `plugins`:
   `{"compaction": {"version": "1.0.0", "state": "loaded"}, "typeahead": {"state": "skipped", "reason": "needs Claude Code 2.1.292; this is 2.1.290"}}`.
@@ -1095,10 +1095,12 @@ settings file only configures it.
 universe's `compaction.json`. It turns the plugin on in `plugins.json` exactly
 where the old file left compaction on for Claude, writes the rest to
 `plugin-settings/compaction.json` without the `enabled` keys, and moves the old
-file to trash. Until a universe is migrated, the plugin counts as on wherever
-`compaction.json` exists and `plugins.json` says nothing, and reads its
-settings, `enabled` included, from that file. So no universe changes behaviour
-before it is migrated, and `doctor` reminds the user to migrate. The base template ships compaction off,
+file to trash. This happens on first use: the first `mv2` command or plugin
+helper in a universe converts it (see [Settings](#settings)), and `mv2 update`
+does it for its caller's universe. Until then nothing reads the old file: the
+plugin has no switch there, and GOAT refuses to run while a `compaction.json`
+waits (Claude's own compaction is used meanwhile), saying so in its capability,
+`doctor` and the status line. The base template ships compaction off,
 with its builder settings written out in `plugin-settings/compaction.json`. The
 development template turns it on in `plugins.json`.
 
@@ -1176,8 +1178,9 @@ import paths changing in tests:
    - Once `mv2 doctor` reports no agent launched before the split (it can tell
      from `runtime.json`'s `plugins` record), the mod's copy is removed.
 5. **Settings.** `plugins.json` becomes the switch, `plugin-settings/compaction.json`
-   the settings, and `mv2 plugins migrate` converts universes, with the legacy
-   file still read until it does (above).
+   the settings, and each universe's `compaction.json` is converted on first
+   use (above). The legacy read and the rule that kept a plugin on for its old
+   file went once that conversion was in (483a83a, then GOAT f295d43).
 6. **Move the files** into `src/multiverse/plugins/builtin/compaction/` while it
    is still in this repository. Old module paths stay
    as forwarding stubs, as `runner.py` and `statusline.py` did after PR #16:
@@ -1206,7 +1209,7 @@ specifically. `compaction` called them out, and each one has a test:
 - It never falls back to Claude's own summary while tree compaction is enabled
   and usable. The hook skips with a reason, the `.catch` skips, and the guard
   exits 2.
-- An unusable settings file (or legacy `compaction.json`) never blocks a launch. The launch runs without
+- An unusable settings file (or an unconverted `compaction.json`) never blocks a launch. The launch runs without
   the guard and records why.
 - The hook stays within its 10 s budget, with the heavy work in a spawned
   Python process. A subagent's compaction and `precompute` are left alone.
