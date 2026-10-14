@@ -37,6 +37,7 @@ from .. import universe as universes
 from ..store import now, write
 from . import api, events, loader
 
+HEARTBEAT_SECONDS = 15.0  # a supervisor whose status is older than this is not running
 RESTARTS = 3
 RESTART_WINDOW = 300
 SUPERVISE_SECONDS = 2.0
@@ -84,12 +85,25 @@ def _held(root):
 
 
 def running(root):
-    """Whether a supervisor holds this tree's host lock."""
-    handle = _held(root)
-    if handle is None:
-        return True
-    handle.close()
-    return False
+    """Whether a supervisor runs for this tree: its process is alive and its heartbeat (status.json, written every
+    SUPERVISE_SECONDS) is recent. It never takes the host lock, so a status check can never make a supervisor
+    that is just starting find the lock taken and give up."""
+    try:
+        recorded = json.loads((host_directory(root) / "status.json").read_text())
+    except (OSError, ValueError):
+        return False
+    pid = recorded.get("pid") if isinstance(recorded, dict) else None
+    if recorded.get("state") != "running" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        pass  # alive, someone else's: the beat below decides
+    except OSError:
+        return False
+    return _age(recorded.get("updated_at", "")) <= HEARTBEAT_SECONDS
 
 
 def supervise(root, *, exit_when_idle=True, stopping=None):
@@ -199,15 +213,24 @@ def start(root):
         return {**status(root), "started": False}
     meta = json.loads((root / "universe.json").read_text())
     backend = Tmux(os.environ.get("MV2_TMUX_SOCKET"))
-    terminal = backend.create(f"mv2-plugins-{meta['id'][:8]}", root,
-                              [sys.executable, "-m", "multiverse.plugins.host", str(root)])
+    try:
+        terminal = backend.create(f"mv2-plugins-{meta['id'][:8]}", root,
+                                  [sys.executable, "-m", "multiverse.plugins.host", str(root)])
+    except Exception as error:
+        if "duplicate session" not in str(error):
+            raise
+        # Another start (a second dashboard) made the session first: wait for its supervisor instead.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not running(root):
+            time.sleep(0.2)
+        return {**status(root), "started": False}
     path = host_directory(root) / "status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     write(path, {"state": "starting", "socket": terminal["socket"], "session": terminal["session"],
                  "pane": terminal["pane"], "updated_at": now()})
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not running(root):
-        time.sleep(0.1)
+        time.sleep(0.2)
     return {**status(root), "started": True}
 
 
