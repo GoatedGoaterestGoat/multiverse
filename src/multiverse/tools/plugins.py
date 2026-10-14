@@ -179,6 +179,8 @@ class {cls}Test(PluginTestCase):
 def scaffold(name, parent):
     """A new plugin directory: plugin.json, plugin.py with one example, and a test."""
     manifests.check_name(name)
+    if name in manifests.RESERVED_NAMES or name in reserved():
+        raise ValueError(f"{name!r} is reserved: mv2 uses it itself; choose another name")
     directory = (parent / name).resolve()
     if directory.exists():
         raise ValueError(f"{directory} already exists")
@@ -299,6 +301,8 @@ def text(action, result):
         for item in rows:
             line = f'{item["name"]:{width}}  {_state(item):11}  {item["source"] or "-":8}  {item["version"] or "-":8}  {item["description"]}'
             lines.append(line.rstrip())
+            for override in item.get("overrides", []):
+                lines.append(f'  overrides the {override["source"]} {item["name"]} ({override["directory"]})')
             if item["problem"]:
                 lines.append(f"  ! {item['problem']}")
             for error in item["errors"][-3:]:
@@ -309,6 +313,8 @@ def text(action, result):
     if action == "info":
         lines = [f'{result["name"]} {result["version"] or ""}'.rstrip() + (f': {result["description"]}' if result["description"] else ""),
                  f'{_state(result)} here; {result["source"]} plugin at {result["directory"]}']
+        for override in result.get("overrides", []):
+            lines.append(f'It overrides the {override["source"]} {result["name"]} at {override["directory"]}.')
         if result["problem"]:
             lines.append(f'! {result["problem"]}')
         if result["permissions"]:

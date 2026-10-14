@@ -253,6 +253,11 @@ def _read(root, after, limit):
     oldest = found[0][0]
     if after + 1 < oldest:
         gap = {"missed": oldest - after - 1, "from": after + 1, "to": oldest - 1}
+    try:  # nothing written since `after` (a worker polls every half second): no segment is read at all
+        if int((directory(root) / "seq").read_text().strip()) <= after + 1:
+            return [], gap
+    except (OSError, ValueError):
+        pass
     events = []
     for index, (first, path) in enumerate(found):
         following = found[index + 1][0] if index + 1 < len(found) else None
@@ -295,10 +300,7 @@ def summary(root):
 
 def _log(root, text):
     try:
-        path = Path(root) / "state" / "plugins" / "events.log"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as handle:
-            handle.write(f"{now()} {text}\n")
+        loader.append_log(Path(root) / "state" / "plugins" / "events.log", f"{now()} {text}")
     except (OSError, TypeError):
         pass
 

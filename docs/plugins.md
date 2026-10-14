@@ -248,10 +248,12 @@ where to look, and core can check, edit and refresh them the same way:
   settings and a `problem`. `mv.settings.edit(universe, changes)` writes the file
   as it was with only the changed keys, the rule `ui/settings.py` already
   follows, after the schema and the plugin's checks accept the whole result.
-- **Shown.** A dashboard Plugins screen (command palette, and a key if the user
-  binds one) lists plugins with an on/off toggle per scope. Enter opens a
-  plugin's settings: its own screen if it registered one (compaction's `c`
-  screens), or otherwise a `FieldScreen` generated from its schema, for plain
+- **Shown.** A dashboard Plugins screen (`P`) lists plugins with an on/off
+  toggle per scope. Configure opens a plugin's settings: its own screen if it
+  registered one (compaction's), offered whether or not the dashboard has
+  loaded the plugin yet and also while its settings cannot be used (that is
+  where they are fixed), or otherwise a `FieldScreen` generated from its
+  schema, for plain
   strings, numbers, booleans and enums.
 - **Per-agent settings** (compaction's agent scheduler) are agent state, in
   `state/agents/<id>/NAME/`, set through the plugin's own command or screen.
@@ -330,9 +332,25 @@ where they happen and delivered where plugins run**:
 - The plugin host tails the journals of every scope in its tree and calls each
   handler in order. It keeps each plugin's cursor in
   `state/plugins/NAME/events.cursor`, so a handler sees each event at least once
-  across host restarts. Handlers must be idempotent. Each event says when it
-  happened, so a handler can skip stale ones. The notifier ignores events older
-  than five minutes after a restart.
+  across host restarts.
+  - **At least once:** each handler is guarded on its own. The cursor moves past
+    an event only once every matching handler finished with it; a handler still
+    running or out of time stops the batch there, and the event is delivered
+    again on the next poll. A handler that raises is recorded and passed.
+    Handlers must be idempotent.
+  - **Stale events:** each event says when it happened, so a handler can skip
+    stale ones. The notifier ignores events older than five minutes after a
+    restart.
+  - **Where the cursor starts:** a plugin's cursor starts at the journal's end
+    when it is turned on (`mv2 plugins enable`, the Plugins screen, or a
+    first-use conversion), so events between turning it on and the host's first
+    run are delivered then. A plugin turned on some other way starts at the
+    journal's end when its worker first runs, and never replays older history.
+  - **Polling:** an idle poll reads no segment: the journal's counter says when
+    nothing is new.
+  - **Logs:** `events.log`, `host.log` and each plugin's `plugin.log` rotate to
+    `.1` at 1 MiB; `errors.log` keeps one traceback per call site a minute and
+    rotates the same way.
 - The dashboard may tail the journal too, to refresh sooner than its 1.5 s poll.
   It need not.
 
@@ -575,7 +593,7 @@ for several plugins using it at once.
 
 | Extension point | Registers | When several plugins use it |
 | --- | --- | --- |
-| `mv.cli.command(name, configure, run, cli_run=None)` | An `mv2 NAME` command with the `tools/` shape: `configure(parser)`, `run(root, **args)` returning a record, an optional `cli_run` for readable text | Core command names are reserved. Two plugins with one name: both refused, and `mv2 plugins` says so. |
+| `mv.cli.command(name, configure, run, cli_run=None)` | An `mv2 NAME` command with the `tools/` shape: `configure(parser)`, `run(root, **args)` returning a record, an optional `cli_run` for readable text. A plugin whose settings cannot be used here keeps its command, which runs after one stderr line saying why: it is often where the settings are shown or fixed. | Core command names are reserved, and `mv2 plugins new` refuses them and mv2's own reserved names. Two plugins with one name: both refused, and `mv2 plugins` says so. |
 | `catalog` (no call: listing it in `extends` is enough) | The plugin's own `skills/`, `commands/` and `workflows/`, laid out as in a universe, found without importing its code | The universe's own entry of the same kind and name shadows a plugin's. `name@plugin` or `kind/name@plugin` always reaches a plugin's entry, even a shadowed one. Two plugins with the same name are both listed, and a bare name is then ambiguous. `/multiverse` and the typeahead see them. |
 | `mv.bootstrap.line(text)` | One line appended to the agent bootstrap | Plugin lines follow the base bootstrap in plugin-name order, at most 2 lines and 300 characters per plugin, so the short bootstrap stays short. |
 | `mv.doctor.check(fn)` | `fn(universe)` returns problems as sentences | All run. Each is listed under its plugin. |
@@ -1046,7 +1064,9 @@ is about consent and blast radius:
      never imported.
    - **No hiding:** an untrusted universe copy never hides a plugin of the same
      name from another source; a repository's `plugins/typeahead` cannot turn
-     the bundled one off.
+     the bundled one off. A trusted copy does take precedence, and says so
+     wherever the person looks: `mv2 plugins list` and `info`, and the Plugins
+     screen ("overrides the bundled typeahead").
    - **What runs:** never the universe's directory itself, but a copy of
      exactly the trusted bytes in `~/.multiverse/plugin-cache/<sha256>/`. It is
      hashed while copied and left out if anything changed meanwhile, and
@@ -1061,13 +1081,21 @@ is about consent and blast radius:
    that imports `subprocess`, and `mv2 plugins info` says that. The permissions
    are `agents.read`, `agents.control`, `messages.send`, `messages.ask`,
    `messages.read`, `universe.write`, `network.listen`, `process.spawn`,
-   `harness.claude`, `harness.pi`, `harness.codex` and `models.<harness>`, the
-   last one for a plugin that spends model tokens, as compaction's merges do.
+   `harness.claude`, `harness.pi`, `harness.codex` and `models.<harness>`.
    `mv2 plugins enable` lists them in words ("can send messages to any agent in
    this universe as plugin notifier").
+   - **Enforced by the API:** the `agents.*`, `messages.*` and
+     `universe.write` permissions gate the API calls that need them.
+   - **Enforced where a manifest uses them:** the `harness.*` permissions
+     (harness entries) and `process.spawn` (a Codex MCP server's command).
+   - **Declared only:** `network.listen` and `models.<harness>`, the latter
+     for a plugin that spends model tokens, as compaction's merges do. mv2 has
+     no API for them to gate: a plugin listens or calls a model with its own
+     code. They tell the person, when enabling, what the plugin will do, and a
+     reviewer can hold the plugin to them.
 4. **Failures are contained.** As described under [Extension points](#extension-points),
    a failing plugin loses its own contribution and nothing else.
-5. **Safe mode.** `MV2_PLUGINS=off` (or `mv2 --no-plugins`) loads no plugin at
+5. **Safe mode.** `MV2_PLUGINS=off` loads no plugin at
    all, including bundled ones, for debugging. Launches made this way record
    that no plugins were loaded.
 6. **Plugins act as themselves.** A plugin's messages say they come from the

@@ -67,6 +67,27 @@ def check_schema(schema, where="schema"):
     for kind in (kinds if isinstance(kinds, list) else [kinds] if kinds is not None else []):
         if kind not in TYPES:
             raise ValueError(f"{where}.type: unknown type {kind!r}")
+    # The schema's own shape, so validating settings against it can only ever say what is wrong with them.
+    if not isinstance(schema.get("properties", {}), dict):
+        raise ValueError(f"{where}.properties must be an object")
+    if "required" in schema and (not isinstance(schema["required"], list)
+                                 or not all(isinstance(item, str) for item in schema["required"])):
+        raise ValueError(f"{where}.required must list property names")
+    if "enum" in schema and not isinstance(schema["enum"], list):
+        raise ValueError(f"{where}.enum must be a list")
+    for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum"):
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], (int, float))):
+            raise ValueError(f"{where}.{key} must be a number")
+    for key in ("minLength", "maxLength", "minItems", "maxItems"):
+        if key in schema and (isinstance(schema[key], bool) or not isinstance(schema[key], int)):
+            raise ValueError(f"{where}.{key} must be a whole number")
+    if "pattern" in schema:
+        try:
+            re.compile(schema["pattern"])
+        except (re.error, TypeError) as error:
+            raise ValueError(f"{where}.pattern is not a regular expression: {error}") from None
+    if "additionalProperties" in schema and not isinstance(schema["additionalProperties"], (bool, dict)):
+        raise ValueError(f"{where}.additionalProperties must be true, false or a schema")
     for key, child in schema.get("properties", {}).items():
         check_schema(child, f"{where}.properties.{key}")
     for key in ("items",):

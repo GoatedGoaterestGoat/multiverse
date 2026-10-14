@@ -625,8 +625,7 @@ class Plugin:
         """Append a line to state/plugins/NAME/plugin.log."""
         from ..store import now
         try:
-            with (self.state_dir(universe) / "plugin.log").open("a") as handle:
-                handle.write(f"{now()} {text}\n")
+            loader.append_log(self.state_dir(universe) / "plugin.log", f"{now()} {text}")
         except (OSError, ValueError):
             pass
 

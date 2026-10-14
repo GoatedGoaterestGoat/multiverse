@@ -63,10 +63,7 @@ def needed(root):
 
 def _log(root, text):
     try:
-        path = host_directory(root) / "host.log"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as handle:
-            handle.write(f"{now()} {text}\n")
+        loader.append_log(host_directory(root) / "host.log", f"{now()} {text}")
     except OSError:
         pass
 

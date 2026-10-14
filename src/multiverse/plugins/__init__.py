@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -23,13 +24,20 @@ def _usable(root):
     return [] if loader.safe_mode() else [found for found in entries(root) if found.usable]
 
 
+def _commanding(root):
+    """Plugins whose commands are offered: usable ones, and those whose settings cannot be used here (their
+    command is where a person sees why, and often how to fix it)."""
+    return [] if loader.safe_mode() else [found for found in entries(root)
+                                          if found.usable or (found.on and found.state == "unusable")]
+
+
 def commands(root, reserved=()):
     """{command: (plugin, help)} that plugins on here declare, from their manifests alone.
 
     A name core uses, or one two plugins declare, is left out; `problems` reports it.
     """
     claimed = {}
-    for found in _usable(root):
+    for found in _commanding(root):
         for name, text in found.manifest.commands.items():
             claimed.setdefault(name, []).append((found.name, text))
     return {name: owners[0] for name, owners in claimed.items() if name not in reserved and len(owners) == 1}
@@ -47,6 +55,9 @@ def command(root, name, reserved=(), guarded=False):
     if owner is None:
         raise PluginError(f"No plugin here provides mv2 {name}")
     loaded = loader.load(entry(root, owner[0]))
+    now = entry(root, owner[0])
+    if now.state == "unusable":
+        print(f"mv2: {now.problem}", file=sys.stderr)  # it still runs: its command may show or fix the settings
     found = loaded.registrations.commands.get(name)
     if found is None:
         raise PluginError(f"{loaded.name} declares mv2 {name} but did not register it")
@@ -225,7 +236,11 @@ def listing(root):
                 "commands": dict(manifest.commands) if manifest else {},
                 "provides": _provides(found),
                 "settings": None,
-                "shadowed": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed]}
+                "shadowed": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed],
+                # A trusted universe copy that takes the place of another source's plugin says so: a cloned
+                # repository's plugin never replaces a built-in one silently.
+                "overrides": [{"source": source, "directory": str(directory)} for source, directory in found.shadowed
+                              if found.source == "universe" and source != "universe"]}
         if manifest is not None and manifest.settings is not None:
             current = loader.settings(root, found)
             try:
@@ -235,7 +250,7 @@ def listing(root):
             item["settings"] = {"path": str(current.path), "source": current.source,
                                 "problem": current.problem or schema_problem, "schema": schema,
                                 "values": current.values,
-                                "screen": (found.loaded.registrations.settings_screen if found.loaded else None),
+                                "screen": _settings_screen(found),
                                 "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
                                            if found.loaded and found.loaded.registrations.settings_fields else None)}
         result.append(item)
@@ -526,6 +541,8 @@ def migrate(root, item):
     if switch:
         try:
             config.set_enabled(root, found.name, on)
+            if on:
+                anchor_events(root, found.name)
         except (OSError, ValueError) as error:
             raise MigrationError(f"the switch in {config.path(root).name} could not be set: {error}",
                                  unchanged=_undo(target, published, previous)) from error
@@ -720,7 +737,38 @@ def set_enabled(root, name, on):
         if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
             installed.append(str(settings_files.path(root, name)))
     config.set_enabled(root, name, bool(on))
+    if on:
+        anchor_events(root, name)
     return {"name": name, "on": bool(on), "installed": installed}
+
+
+def anchor_events(root, name):
+    """When a plugin with event handlers is turned on, its cursor starts at the journal's end now, so the events
+    between this and its host worker's first run are delivered then, not skipped. Never fails the caller."""
+    try:
+        found = entry(root, name)
+        if found.manifest is None or not found.manifest.events:
+            return
+        from . import events, host
+        if host._cursor_path(root, name).exists():
+            return
+        segments = events.segments(root)
+        host._write_cursor(root, name, events._last_sequence(segments[-1][1]) if segments else 0)
+    except Exception:
+        pass
+
+
+def _settings_screen(found):
+    """A plugin's own settings screen ("module:Class"), loading it to learn it when needed: its screen is where
+    unusable settings are fixed, so it is offered whether or not this process has loaded the plugin yet."""
+    loaded = found.loaded
+    if loaded is None and found.on and found.state in ("on", "unusable") and found.manifest is not None \
+            and "dashboard.settings" in found.manifest.extends:
+        try:
+            loaded = loader.load(found)
+        except PluginError:
+            return None
+    return loaded.registrations.settings_screen if loaded is not None else None
 
 
 def settings_of(root, name):

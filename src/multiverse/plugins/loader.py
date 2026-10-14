@@ -494,6 +494,18 @@ def _describe(error):
 
 
 ERRORS_LOG_BYTES = 1024 * 1024  # errors.log rotates to errors.log.1 past this
+LOG_BYTES = 1024 * 1024  # plugin.log, events.log and host.log rotate to NAME.1 past this
+
+
+def append_log(path, line):
+    """Append one line to a log, rotating it to NAME.1 (one old file kept) once it is past LOG_BYTES."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _log_lock:
+        if path.exists() and path.stat().st_size > LOG_BYTES:
+            path.replace(path.with_name(path.name + ".1"))
+        with path.open("a") as handle:
+            handle.write(line.rstrip("\n") + "\n")
 TRACEBACK_EVERY = 60.0  # seconds: at most one traceback per plugin and call site in this long
 _logged = {}  # (id(Loaded), what) -> (when a traceback was last written, failures not written since)
 
