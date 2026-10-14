@@ -116,6 +116,27 @@ def run(args, *, cli=False):
     return handler(**values)
 
 
+# Commands that never convert a universe's pre-plugin settings first: init makes a universe, update converts
+# with its new code in a process of its own, and plugins is where a person manages and migrates them by hand.
+NO_FIRST_USE_MIGRATION = {"init", "update", "plugins"}
+
+
+def first_use_migration(root):
+    """Convert the selected universe's (and its subverses') pre-plugin settings files, once, saying so on
+    stderr. Never fails the command: a universe that does not resolve, or a conversion that fails, leaves it
+    to run as it would have."""
+    try:
+        resolved = universe.resolve(root)
+    except (OSError, ValueError):
+        return
+    try:
+        from .plugins import migrate_on_first_use
+        for line in migrate_on_first_use(resolved):
+            print(line, file=sys.stderr)
+    except Exception as error:
+        print(f"mv2: could not check for settings to convert: {error}", file=sys.stderr)
+
+
 def main():
     argv = sys.argv[1:]
     try:
@@ -124,6 +145,8 @@ def main():
     except ValueError as error:  # a plugin's command that cannot load says why
         print(f"mv2: {error}", file=sys.stderr)
         sys.exit(1)
+    if (args.action or 'tui') not in NO_FIRST_USE_MIGRATION:
+        first_use_migration(args.root)
     render = None if hasattr(module, 'cli_run') else getattr(module, 'format_output', None)
     output(lambda: run(args, cli=True), render=render)
 

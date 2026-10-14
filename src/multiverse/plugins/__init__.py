@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from . import config, loader, settings as settings_files
@@ -334,7 +335,10 @@ def _convert(scope, where):
                          f"{backup.relative_to(scope).as_posix()}/)"
                          + (f"; but {done['warning']}" if done.get("warning") else ""))
         if failed or (state / MIGRATE_FAILED).exists():
-            write(state / MIGRATE_FAILED, failed)
+            try:
+                write(state / MIGRATE_FAILED, failed)
+            except OSError:
+                pass  # the record only spares repeating a failure: the lines still say what happened
     return lines
 
 
@@ -394,13 +398,13 @@ def migrate(root, item):
 
     The plugin's migration runs with `root` as the API's universe. Its result
     is checked, and so is plugins.json when the switch is to be set, before
-    anything changes. Then: the old file is copied to trash, the new settings
-    are written (never over a settings file that appeared meanwhile), the
-    switch is set, and the old file is removed last. A step that fails undoes
-    the ones before it, unless someone changed the new file meanwhile, and
-    MigrationError.unchanged says which. A converted file whose old file could
-    not be removed is reported in the result's `warning`."""
-    from ..store import write
+    anything changes. Then, in this order: the new settings are published
+    (never over a settings file that is there or appears meanwhile), the
+    switch is set, and only then is the old file copied to trash and removed.
+    A step that fails undoes the ones before it, unless the published file is
+    no longer exactly the one published, and MigrationError.unchanged says
+    which. A conversion whose old file could not be moved to trash is reported
+    in the result's `warning`."""
     from ..universe import trash
     root = Path(root)
     found = entry(root, item["plugin"])
@@ -426,21 +430,20 @@ def migrate(root, item):
     if switch and switches.problem:
         raise MigrationError(f"{config.path(root).name} cannot be used, so the switch for {found.name} cannot be "
                              f"set: {switches.problem}")
-    if legacy and target.exists():
-        raise MigrationError(f"{target.relative_to(root).as_posix()} appeared meanwhile")
     previous = None if legacy else target.read_bytes()
     try:
-        write(target, data)
-    except OSError as error:
-        raise MigrationError(f"{target.name} could not be written: {error}",
-                             unchanged=_undo(target, None, previous)) from error
-    written = target.read_bytes()
+        # A legacy file's settings never go over a settings file that is there or appears meanwhile.
+        published = _publish(target, data, overwrite=not legacy)
+    except FileExistsError:
+        raise MigrationError(f"{target.relative_to(root).as_posix()} appeared meanwhile") from None
+    except OSError as error:  # nothing was published: whatever is at the target is not ours
+        raise MigrationError(f"{target.name} could not be written: {error}") from error
     if switch:
         try:
             config.set_enabled(root, found.name, on)
         except (OSError, ValueError) as error:
             raise MigrationError(f"the switch in {config.path(root).name} could not be set: {error}",
-                                 unchanged=_undo(target, written, previous)) from error
+                                 unchanged=_undo(target, published, previous)) from error
     # Only now, with everything else done, is the old file moved to trash (a copy first, then removed); a version
     # upgrade keeps a copy of the file it replaced.
     backup = trash.entry(root, "plugins-migrate") / source.name
@@ -456,18 +459,56 @@ def migrate(root, item):
     return result
 
 
-def _undo(target, written, previous):
-    """Put `target` back as it was before a migration wrote it; True when done. A file someone changed meanwhile
-    (not what the migration wrote) is left alone."""
+def _publish(target, data, overwrite=False):
+    """Write settings to `target` and return the published file's identity: (device, inode, size, mtime_ns).
+
+    The file is written in full to a temporary file beside it first, and its
+    identity taken then, so ownership is never judged from what happens to be at
+    the target later. It is published by a hard link, which fails with
+    FileExistsError when a file is there (or appears meanwhile), or, with
+    `overwrite`, by an atomic replace."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(prefix=".migrate-", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "w") as out:
+            json.dump(data, out, indent=2, ensure_ascii=False)
+            out.write("\n")
+            out.flush()
+            os.fsync(out.fileno())
+        status = os.stat(temporary)
+        identity = (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+        if overwrite:
+            os.replace(temporary, target)
+        else:
+            os.link(temporary, target)
+        return identity
+    finally:
+        try:
+            os.unlink(temporary)  # its other name, after a link; already gone after a replace
+        except OSError:
+            pass
+
+
+def _ours(target, identity):
+    status = target.stat()
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns) == identity
+
+
+def _undo(target, identity, previous):
+    """Put `target` back as it was before a migration published `identity` there; True when done. A file that
+    is not exactly the one published (replaced, edited, or someone else's) is left alone."""
     try:
         if not target.exists():
             return previous is None
-        if written is not None and target.read_bytes() != written:
+        if not _ours(target, identity):
             return False
         if previous is None:
             target.unlink()
         else:
-            target.write_bytes(previous)
+            descriptor, temporary = tempfile.mkstemp(prefix=".migrate-", dir=target.parent)
+            with os.fdopen(descriptor, "wb") as out:
+                out.write(previous)
+            os.replace(temporary, target)
         return True
     except OSError:
         return False

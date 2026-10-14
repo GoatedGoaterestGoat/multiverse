@@ -201,6 +201,32 @@ where to look, and core can check, edit and refresh them the same way:
   `plugins.json` where it says nothing yet. `mv2 plugins migrate` shows what
   would change, and `--apply` does it, checking the result first and keeping
   the old file in the universe's trash. Core never guesses a migration.
+- **Converted on first use.** A pre-plugin file is converted the first time mv2
+  starts work in its universe: any `mv2` command for that universe or a parent
+  (`init`, `update` and `plugins` excepted) and any plugin helper action.
+  - It happens before the command or helper action runs (after the command
+    line is parsed, so a plugin command's own option setup may already have
+    read its settings). It runs under the universe's
+    `state/plugins/.migrate.lock` and is planned again under the lock, so that
+    of two processes one converts.
+  - It either happens or leaves every file as it was:
+    - the plugin's migration runs with that universe as the API's;
+    - its result and `plugins.json` are checked before anything changes;
+    - the old file is removed last;
+    - a step that fails undoes the ones before it.
+
+    When a file was changed meanwhile and cannot be put back, the line says so
+    rather than "unchanged".
+  - One line on stderr says what changed, so `--json` output is untouched.
+  - When nothing is pending, it costs a manifest check and imports no plugin
+    code.
+  - A conversion that fails leaves the file as it was. It is said once, `mv2
+    doctor` reports it, and it is tried again when the file changes. It never
+    changes the command's own result.
+  - `mv2 update` converts its caller's universe with the code it updated to, in
+    a process of its own. It reads that process's JSON and says what was
+    converted, partly converted or not converted; that never fails the update.
+  - Runners, the status line and the plugin host never convert.
 - **Checked.** The manifest names a JSON Schema. Core validates against it, and
   the plugin may add its own checks (`check(settings)`, like compaction's
   harness builder checks). An unusable file never stops a launch: the plugin

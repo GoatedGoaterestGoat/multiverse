@@ -249,9 +249,9 @@ def cli_run(root=None, *, plugin_action="list", name=None, assignments=(), remov
                  apply=apply, recursive=recursive, directory=directory)
     if json:
         return result
-    if plugin_action == "check" and not result["ok"]:
+    if plugin_action in ("check", "migrate") and result.get("ok") is False:
         print(text(plugin_action, result))
-        raise SystemExit(1)
+        raise SystemExit(1)  # a failed check, or a migration that did not apply
     return text(plugin_action, result)
 
 

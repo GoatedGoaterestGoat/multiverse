@@ -7,11 +7,13 @@ moves. One that is not initialized is never fetched or initialized; a new one
 is only reported (mv2 plugins install NAME). A plugin that cannot move leaves
 the rest of the update in place, and says how to repair it.
 """
+import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 
 NOTES = [
@@ -359,12 +361,87 @@ def run(root=None, *, check=False, json=False):
                                        f"Run uv sync --locked in {checkout} to retry.")
             else:
                 result["environment"] = {"state": "synced"}
+        if result["environment"]["state"] != "failed":
+            settings = _convert_settings(checkout, root)
+            if settings["state"] in ("converted", "partial", "failed"):  # nothing to say keeps the output as it was
+                result["settings"] = settings
         if plugin_failures:
             raise ValueError(" ".join(plugin_failures))
         result["ok"] = True
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         result["reason"] = " ".join(dict.fromkeys([*refusals, str(error)]))
     return result
+
+
+def _convert_settings(checkout, root):
+    """Convert the caller's universe's pre-plugin settings files with the code just updated to.
+
+    This process still has the old code loaded, so a fresh one runs `mv2 plugins
+    migrate --apply --recursive --json` from the checkout, with that universe as
+    its own. Its JSON says what was converted and what was not: none, converted,
+    partial or failed. A universe that does not resolve is skipped; nothing here
+    ever fails the update."""
+    from .. import universe
+    try:
+        target = universe.resolve(root)
+    except (OSError, ValueError):
+        return {"state": "skipped", "reason": "no universe here"}
+    python = checkout / ".venv" / "bin" / "python"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(checkout / "src"), env.get("PYTHONPATH")]))
+    env["MV2_UNIVERSE"] = str(target)
+    try:
+        converted = subprocess.run([str(python) if python.is_file() else sys.executable, "-m", "multiverse.cli",
+                                    "-u", str(target), "plugins", "migrate", "--apply", "--recursive", "--json"],
+                                   cwd=checkout, env=env, capture_output=True, text=True, errors="replace",
+                                   timeout=300)
+    except subprocess.TimeoutExpired as error:
+        return {"state": "failed", "universe": str(target), "reason": f"it did not finish within {error.timeout:g} s"}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"state": "failed", "universe": str(target), "reason": f"it could not run: {error}"}
+    try:
+        return _conversion(target, converted)
+    except Exception as error:  # whatever it printed, the update stands: this is said, never raised
+        detail = " ".join(f"{converted.stdout} {converted.stderr}".split())[:300]
+        return {"state": "failed", "universe": str(target),
+                "reason": f"its result could not be read ({type(error).__name__}: {error}): {detail}"}
+
+
+def _conversion(target, converted):
+    """none, converted, partial or failed, from `plugins migrate --json`'s record and exit code. Raises on a
+    record that is not what that command prints."""
+    record = json.loads(converted.stdout)
+    planned, applied = record["planned"], record["applied"]
+    for name, items in (("planned", planned), ("applied", applied)):
+        if not isinstance(items, list) or not all(isinstance(item, dict) and isinstance(item.get("plugin"), str)
+                                                  for item in items):
+            raise ValueError(f"{name} must list objects naming their plugin")
+    lines = []
+    for item in applied:
+        where = _scope_label(target, item.get("universe"))
+        lines.append(f"{item['plugin']}{where}: converted {Path(str(item['from'])).name} to "
+                     f"{Path(str(item['to'])).name}" + (f"; but {item['warning']}" if item.get("warning") else ""))
+    failures = [item for item in planned if item.get("problem")]
+    for item in failures:
+        where = _scope_label(target, item.get("universe"))
+        lines.append(f"{item['plugin']}{where}: not converted: {item['problem']}")
+    if (converted.returncode or record.get("ok") is False) and not failures:
+        # It says it failed without naming what: never "nothing to do".
+        detail = " ".join(converted.stderr.split())[:300] or f"exit code {converted.returncode}"
+        lines.append(f"the conversion did not finish: {detail}")
+        failures = [None]
+    state = ("none" if not applied and not failures else "converted" if not failures
+             else "failed" if not applied else "partial")
+    return {"state": state, "universe": str(target), "lines": lines}
+
+
+def _scope_label(target, scope):
+    if not scope or Path(scope) == Path(target):
+        return ""
+    try:
+        return " in " + "/".join(part for part in Path(scope).relative_to(target).parts if part != "subverses")
+    except ValueError:
+        return f" in {scope}"
 
 
 def format_output(result):
@@ -404,6 +481,14 @@ def format_output(result):
                           environment["state"], f"Environment: {environment['state']}."))
     for entry in result.get("plugins", []):
         lines.extend(_plugin_lines(result, entry))
+    settings = result.get("settings") or {}
+    if settings.get("state") in ("converted", "partial", "failed"):
+        lines.append({"converted": f"Plugin settings converted in {settings['universe']}:",
+                      "partial": f"Plugin settings partly converted in {settings['universe']}:",
+                      "failed": f"Plugin settings in {settings['universe']} were not converted:"}[settings["state"]])
+        lines.extend("  " + line for line in settings.get("lines") or [settings.get("reason", "")])
+        if settings["state"] != "converted":
+            lines.append("  Fix what it names, then run mv2 plugins migrate --apply --recursive there.")
     if result["check"]:
         lines.append("Check only: code and environment unchanged.")
     lines.extend(result["notes"])

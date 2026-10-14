@@ -32,6 +32,11 @@ class UpdateTest(unittest.TestCase):
         git_env = patch.dict(os.environ, env)
         git_env.start()
         self.addCleanup(git_env.stop)
+        # Converting plugin settings runs mv2 on the caller's universe, which here (MV2_UNIVERSE, or this
+        # repository's own .multiverse) is a real one: never in these tests. test_plugin_first_use tests it.
+        converter = patch.object(update, "_convert_settings", return_value={"state": "none"})
+        self.convert_settings = converter.start()
+        self.addCleanup(converter.stop)
         self.git(self.root, "init", "--bare", "--initial-branch=main", str(self.remote))
         self.git(self.root, "clone", str(self.remote), str(self.author))
         (self.author / "src/multiverse/tools").mkdir(parents=True)
@@ -300,7 +305,8 @@ class UpdateTest(unittest.TestCase):
         code = ("import sys\nfrom multiverse.tools import update\n"
                 "update.__file__ = sys.argv.pop(1)\nuv = sys.argv.pop(1)\n"
                 "which = update.shutil.which\n"
-                "update.shutil.which = lambda name: uv if name == 'uv' else which(name)\n")
+                "update.shutil.which = lambda name: uv if name == 'uv' else which(name)\n"
+                "update._convert_settings = lambda checkout, root: {'state': 'none'}\n")  # never a real universe
         args = [] if standalone else ["update"]
         if check:
             args.append("--check")
@@ -308,7 +314,7 @@ class UpdateTest(unittest.TestCase):
             args.append("--json")
         code += ("from multiverse.tools._common import main\nmain(update.configure, update.run)\n" if standalone
                  else "from multiverse.cli import main\nmain()\n")
-        env = os.environ.copy()
+        env = {key: value for key, value in os.environ.items() if key != "MV2_UNIVERSE"}
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
         return subprocess.run([sys.executable, "-c", code,
                                str(self.checkout / "src/multiverse/tools/update.py"), str(self.uv), *args],

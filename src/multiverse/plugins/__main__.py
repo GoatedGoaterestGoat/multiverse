@@ -5,13 +5,15 @@ agent's own Python ($MV2_PYTHON) and environment: the universe is -u, else
 MV2_UNIVERSE, else the current directory. The plugin must be on there. The
 action's return value is the exit code (None is 0); it prints its own output.
 An action that fails unexpectedly prints `mv2 plugin PLUGIN ACTION: ...` and
-exits 1, with the traceback in the plugin's errors.log.
+exits 1, with the traceback in the plugin's errors.log. Before the action, a
+pre-plugin settings file in the universe is converted, once (stderr says so).
 """
 import argparse
+import os
 import sys
 
 from .. import universe
-from . import PluginError, entry, loader
+from . import PluginError, entry, loader, migrate_on_first_use
 
 
 def main(argv=None):
@@ -27,6 +29,11 @@ def main(argv=None):
     loader.process = "helper"
     try:
         root = universe.resolve(args.root)
+        # The action's universe is this one, whatever the environment says: the API resolves from MV2_UNIVERSE.
+        os.environ["MV2_UNIVERSE"] = str(root)
+        # Any pre-plugin settings file here is converted (once) before the action runs.
+        for line in migrate_on_first_use(root):
+            print(line, file=sys.stderr)
         loaded = loader.load(entry(root, args.plugin))
         action = loaded.registrations.helpers.get(args.action)
         if action is None:
