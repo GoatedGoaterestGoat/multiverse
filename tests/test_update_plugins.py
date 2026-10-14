@@ -89,7 +89,7 @@ class PluginUpdateTest(UpdateTest):
                 result = update.run()
                 self.assertFalse(result["ok"])
                 self.assertIn("plugins/compaction", result["reason"])
-                self.assertIn("is at" if case == "elsewhere" else "has local changes", result["reason"])
+                self.assertIn("has local commits" if case == "elsewhere" else "has local changes", result["reason"])
                 self.assertEqual(self.git(self.checkout, "rev-parse", "HEAD"), self.before)
                 checked = update.run(check=True)
                 self.assertFalse(checked["ok"])
@@ -222,6 +222,160 @@ class PluginUpdateTest(UpdateTest):
         self.assertTrue(result["ok"], result)
         self.assertEqual([item["path"] for item in result["plugins"]], ["plugins/compaction"])
         self.assertFalse((self.checkout / "vendor/lib/plugin.json").exists())
+
+
+class RetryTest(PluginUpdateTest):
+    def test_an_unavailable_remote_warns_and_retries_until_access_returns(self):
+        new = self.plugin_commit()
+        self.bump()
+        offline = self.root / "offline.git"
+        self.plugin_remote.rename(offline)
+        result = update.run()
+        self.assertTrue(result["ok"], result)
+        self.assertNotEqual(result["after"], self.before)
+        self.assertEqual(self.entry(result)["state"], "unavailable")
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), self.old_pin)
+        text = update.format_output(result)
+        self.assertIn(f"Warning: plugins/compaction was left at {self.old_pin[:7]}", text)
+        self.assertIn("environment synced", text)
+        self.assertIn(f"git -C {self.checkout} submodule deinit -f -- plugins/compaction", text)
+        self.assertIn("save any local files first", text)
+        real = update._git
+
+        def no_plugin_fetch(directory, *args, **kwargs):
+            if Path(directory) == self.submodule:
+                self.assertNotIn("fetch", args)  # --check never contacts this remote
+            return real(directory, *args, **kwargs)
+        with patch.object(update, "_git", side_effect=no_plugin_fetch):
+            checked = update.run(check=True)
+        self.assertTrue(checked["ok"], checked)
+        self.assertEqual(self.entry(checked)["state"], "would_update")
+        self.assertIn("would stay at", update.format_output(checked))
+        # Further mv2 commits can update even while the optional plugin remains unavailable.
+        self.advance()
+        again = update.run()
+        self.assertTrue(again["ok"], again)
+        self.assertEqual(self.entry(again)["state"], "unavailable")
+        offline.rename(self.plugin_remote)
+        recovered = update.run()
+        self.assertTrue(recovered["ok"], recovered)
+        self.assertEqual(recovered["commits"], 0)  # retry even with no new mv2 commit
+        self.assertEqual(self.entry(recovered)["state"], "updated")
+        self.assertEqual(self.entry(recovered)["before"], self.old_pin)
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), new)
+        self.assertTrue(self.log.exists())
+
+    def test_a_clean_behind_checkout_with_the_pin_cached_moves_without_a_fetch(self):
+        new = self.plugin_commit()
+        self.bump()
+        self.git(self.submodule, "fetch", "origin")
+        self.git(self.checkout, "pull", "--ff-only")  # simulate a main update whose plugin was left behind
+        self.plugin_remote.rename(self.root / "offline.git")
+        result = update.run()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["commits"], 0)
+        self.assertEqual(self.entry(result)["state"], "updated")
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), new)
+
+    def test_the_manual_deinit_advice_works_for_a_behind_checkout(self):
+        self.plugin_commit()
+        self.bump()
+        self.plugin_remote.rename(self.root / "offline.git")
+        result = update.run()
+        self.assertTrue(result["ok"], result)
+        self.assertIn(f"git -C {self.checkout} submodule deinit -f -- plugins/compaction",
+                      update.format_output(result))
+        self.git(self.checkout, "submodule", "deinit", "-f", "--", "plugins/compaction")
+        later = update.run()
+        self.assertTrue(later["ok"], later)
+        self.assertEqual(self.entry(later)["state"], "not_installed")
+        self.assertFalse((self.submodule / "plugin.json").exists())
+
+    def test_missing_pin_never_allows_local_commits_to_be_overwritten(self):
+        new = self.plugin_commit()
+        self.bump()
+        self.git(self.checkout, "fetch", "--no-recurse-submodules", "origin")
+        self.git(self.checkout, "-c", "submodule.recurse=false", "merge", "--ff-only", "origin/main")
+        self.assertFalse(update._has_commit(self.submodule, new))
+        (self.submodule / "mine.txt").write_text("mine\n")
+        self.git(self.submodule, "add", "mine.txt")
+        self.git(self.submodule, "commit", "-m", "local work")
+        local = self.git(self.submodule, "rev-parse", "HEAD")
+        result = update.run()
+        self.assertFalse(result["ok"], result)
+        self.assertIn("local commits", result["reason"])
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), local)
+        self.assertNotEqual(local, new)
+        self.assertEqual((self.submodule / "mine.txt").read_text(), "mine\n")
+        # With the pin now fetched the next preflight refuses too, before syncing or moving anything.
+        self.log.unlink()
+        self.assertFalse(update.run()["ok"])
+        self.assertFalse(self.log.exists())
+
+    def test_a_local_remote_fetch_works_without_ambient_file_protocol_permission(self):
+        new = self.plugin_commit()
+        self.bump()
+        self.git(self.submodule, "remote", "set-url", "origin", self.plugin_remote.as_uri())
+        real = update._git
+        fetches = []
+
+        def restricted(directory, *args, **kwargs):
+            if Path(directory) == self.submodule and "fetch" in args:
+                fetches.append(args)
+                # Git's submodule machinery sets this. No global or inherited transport allowance.
+                with patch.dict(os.environ, {"GIT_PROTOCOL_FROM_USER": "0"}):
+                    return real(directory, *args, **kwargs)
+            return real(directory, *args, **kwargs)
+        with patch.dict(os.environ):
+            os.environ.pop("GIT_CONFIG_PARAMETERS", None)
+            os.environ.pop("GIT_ALLOW_PROTOCOL", None)
+            with patch.object(update, "_git", side_effect=restricted):
+                result = update.run()
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(fetches)
+        self.assertTrue(all(args[:2] == ("-c", "protocol.file.allow=always") for args in fetches))
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), new)
+        config = self.git(self.submodule, "config", "--local", "--list")
+        self.assertNotIn("protocol.file.allow", config)
+
+    def test_changes_during_a_plugin_fetch_are_preserved(self):
+        self.plugin_commit()
+        self.bump()
+        real = update._git
+
+        def edited(directory, *args, **kwargs):
+            result = real(directory, *args, **kwargs)
+            if Path(directory) == self.submodule and "fetch" in args:
+                (self.submodule / "plugin.json").write_text("edited during fetch\n")
+            return result
+        with patch.object(update, "_git", side_effect=edited):
+            result = update.run()
+        self.assertFalse(result["ok"], result)
+        self.assertIn("changed during the update", self.entry(result)["reason"])
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), self.old_pin)
+        self.assertEqual((self.submodule / "plugin.json").read_text(), "edited during fetch\n")
+
+    def test_a_remote_fetch_never_enables_file_transport(self):
+        self.plugin_commit()
+        self.bump()
+        real = update._git
+        fetches = []
+
+        def unavailable(directory, *args, **kwargs):
+            if Path(directory) == self.submodule:
+                if args[:2] == ("remote", "get-url"):
+                    return subprocess.CompletedProcess(args, 0, "https://example.invalid/private.git\n", "")
+                if "fetch" in args:
+                    fetches.append(args)
+                    return subprocess.CompletedProcess(args, 128, "", "access revoked")
+            return real(directory, *args, **kwargs)
+        with patch.object(update, "_git", side_effect=unavailable):
+            result = update.run()
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(self.entry(result)["state"], "unavailable")
+        self.assertEqual(len(fetches), 1)
+        self.assertNotIn("protocol.file.allow=always", fetches[0])
+        self.assertIn("access revoked", update.format_output(result))
 
 
 class HardeningTest(PluginUpdateTest):
@@ -379,7 +533,7 @@ class NoPluginsTest(UpdateTest):
 def load_tests(test_loader, tests, pattern):
     """Only this module's tests: the imported fixture's own run in test_update."""
     suite = unittest.TestSuite()
-    for case in (PluginUpdateTest, HardeningTest, ConflictTest, NoPluginsTest):
+    for case in (PluginUpdateTest, RetryTest, HardeningTest, ConflictTest, NoPluginsTest):
         for name in test_loader.getTestCaseNames(case):
             if name in case.__dict__:
                 suite.addTest(case(name))

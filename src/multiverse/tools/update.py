@@ -1,9 +1,10 @@
 """Fast-forward the running mv2 checkout and sync its Python environment.
 
 Plugins that are Git submodules at plugins/<name> move with the checkout when
-they are initialized: each must be exactly at the commit mv2 pins and have no
-tracked changes, before the fetch, again before the merge and again before it
-moves. One that is not initialized is never fetched or initialized; a new one
+they are initialized and have no tracked changes or local commits. A clean
+checkout left behind by an unavailable remote is retried, including when mv2
+itself is already current. Checks run before fetching, merging and moving.
+One that is not initialized is never fetched or initialized; a new one
 is only reported (mv2 plugins install NAME). A plugin that cannot move leaves
 the rest of the update in place, and says how to repair it.
 """
@@ -11,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -176,9 +178,29 @@ def _plugin_state(checkout, links):
         elif changes:
             refusals.append(f"{path} has local changes; commit or discard them before updating.")
         elif head != pin:
-            refusals.append(f"{path} is at {head[:7]}, not the {pin[:7]} mv2 pins; check it out at the pin "
-                            f"(git -C {checkout} submodule update --checkout -- {path}) before updating.")
+            try:
+                # A failed fetch can leave the pin unknown locally. Do not mistake that for local work:
+                # _move_plugins must fetch and prove ancestry before it can change this checkout.
+                if _has_commit(checkout / path, pin) and not _ancestor(checkout / path, head, pin):
+                    refusals.append(f"{path} has local commits beyond the {pin[:7]} mv2 pins; "
+                                    "publish or preserve them before updating.")
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                refusals.append(f"{path} could not be checked: {error}")
     return state, refusals
+
+
+def _has_commit(directory, revision):
+    process = _git(directory, "rev-parse", "--verify", "--quiet", revision + "^{commit}")
+    if process.returncode not in (0, 1):
+        raise ValueError(_detail(process))
+    return process.returncode == 0
+
+
+def _ancestor(directory, before, after):
+    process = _git(directory, "merge-base", "--is-ancestor", before, after)
+    if process.returncode not in (0, 1):
+        raise ValueError(_detail(process))
+    return process.returncode == 0
 
 
 def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
@@ -193,9 +215,11 @@ def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
         elif path not in state:
             entry["state"] = "not_installed"
         elif before[path] == after[path]:
-            entry["state"] = "unchanged"
+            entry["state"] = "unchanged" if state[path][0] == after[path] else "would_update"
         else:
             entry["state"] = "would_update"
+        if path in state and state[path][0] != "unknown":
+            entry["before"] = state[path][0]
         if path in urls_before and path in urls_after and urls_before[path] != urls_after[path]:
             entry["url_changed"] = {"before": urls_before[path], "after": urls_after[path]}
         plan.append(entry)
@@ -212,8 +236,42 @@ def _index_pin(checkout, path):
     return None
 
 
-def _move_plugins(checkout, plan, state):
-    """Move each initialized plugin whose pin changed, one at a time; returns the failures.
+class _PluginUnavailable(ValueError):
+    """A plugin pin cannot be fetched; optional code must not block mv2 updates."""
+
+
+def _fetch_plugin(directory, revision):
+    """Fetch missing objects only, with Git's file transport allowed for a configured local remote only."""
+    if _has_commit(directory, revision):
+        return
+    try:
+        branch = _git(directory, "symbolic-ref", "--quiet", "--short", "HEAD")
+        remote = "origin"
+        if not branch.returncode:
+            configured = _git(directory, "config", "--get", f"branch.{branch.stdout.strip()}.remote")
+            if not configured.returncode:
+                remote = configured.stdout.strip()
+        url = "." if remote == "." else _must(directory, "remote", "get-url", remote).strip()
+        # Match local URL support in plugins.install, scoped to these fetches, never global config.
+        local = url.startswith(("/", "./", "../", "~", "file:")) or (":" not in url)
+        options = ("-c", "protocol.file.allow=always") if local else ()
+        fetched = _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
+                       timeout=PLUGIN_TIMEOUT)
+        if fetched.returncode:
+            raise ValueError(_detail(fetched))
+        if not _has_commit(directory, revision):
+            fetched = _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
+                           revision, timeout=PLUGIN_TIMEOUT)
+            if fetched.returncode:
+                raise ValueError(_detail(fetched))
+        if not _has_commit(directory, revision):
+            raise ValueError(f"the remote did not provide commit {revision[:7]}")
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise _PluginUnavailable(f"its remote could not supply {revision[:7]}: {error}") from error
+
+
+def _move_plugins(checkout, plan, state, pins):
+    """Move each initialized plugin whose checkout differs from its pin; returns the failures.
 
     Everything for one plugin, its checks included, is inside its own failure
     boundary: one that cannot be read or moved is reported, and the others and
@@ -225,20 +283,31 @@ def _move_plugins(checkout, plan, state):
         path, old, new = entry["path"], entry["before"], entry["after"]
         try:
             facts = _plugin_facts(checkout, path)
-            if facts is None or facts != (old, False, False, state[path][3]) or state[path][:3] != (old, False, False):
+            if facts is None or facts != state[path] or facts[1:3] != (False, False):
                 raise ValueError("it changed during the update and was left as it is")
             if _index_pin(checkout, path) != new:
                 raise ValueError("the commit the mv2 checkout pins for it changed during the update; it was left as it is")
+            _fetch_plugin(checkout / path, new)
+            # Fetching objects never moves work. Recheck the repository and index before any checkout.
+            if _plugin_facts(checkout, path) != facts or _index_pin(checkout, path) != new:
+                raise ValueError("it changed during the update and was left as it is")
+            if old != pins[path]:
+                previously_pinned = (_has_commit(checkout / path, pins[path])
+                                     and _ancestor(checkout / path, old, pins[path]))
+                if not previously_pinned and not _ancestor(checkout / path, old, new):
+                    raise ValueError("it has local commits; preserve them before updating")
             # --checkout overrides any submodule.<name>.update (merge, rebase, a command);
             # nested submodules are neither fetched nor updated.
             moved = _git(checkout, "-c", "fetch.recurseSubmodules=false", "submodule", "update", "--checkout",
-                         "--no-recommend-shallow", "--", path, timeout=PLUGIN_TIMEOUT)
+                         "--no-fetch", "--no-recommend-shallow", "--", path, timeout=PLUGIN_TIMEOUT)
             if moved.returncode:
                 raise ValueError(_detail(moved))
             now = _plugin_facts(checkout, path)
             if now is None or now[0] != new:
                 raise ValueError(f"it is not at {new[:7]} after the update")
             entry["state"] = "updated"
+        except _PluginUnavailable as error:
+            entry["state"], entry["reason"] = "unavailable", str(error)
         except subprocess.TimeoutExpired as error:
             entry["state"], entry["reason"] = "failed", f"git did not finish within {error.timeout:g} s"
         except (OSError, ValueError, subprocess.SubprocessError) as error:
@@ -332,7 +401,7 @@ def run(root=None, *, check=False, json=False):
                 result["notes"] = list(NOTES)
             if merged.returncode:
                 raise ValueError(f"Could not fast-forward mv2: {_detail(merged)}")
-        plugin_failures = _move_plugins(checkout, plan, state) if result["after"] != before else []
+        plugin_failures = _move_plugins(checkout, plan, state, links)
         moved = [entry["path"] for entry in plan if entry["state"] == "updated"]
         if moved:
             result["notes"] = [*result["notes"], f"Running agents reload the Claude code of {', '.join(moved)} at once; "
@@ -504,6 +573,18 @@ def _plugin_lines(result, entry):
              "removed": [f"{path} would no longer be part of mv2; it would be left on disk." if result["check"]
                          else f"{path} is no longer part of mv2; it was left on disk."],
              "failed": [f"! {path} was not updated: {entry.get('reason')}"]}.get(entry["state"], [])
+    deinit = f"git -C {shlex.quote(result['checkout'])} submodule deinit -f -- {path}"
+    if entry["state"] == "would_update":
+        found.append(f"If its remote is unavailable, {path} would stay at {before} with a warning; "
+                     f"mv2 and its environment would still update. To uninstall it, save any local files first, "
+                     f"then remove its checkout: {deinit}")
+    elif entry["state"] == "unavailable":
+        environment = result["environment"]
+        status = {"synced": "environment synced", "failed": "environment sync failed",
+                  "skipped": "environment sync skipped"}.get(environment["state"], "environment not changed")
+        found.append(f"Warning: {path} was left at {before}: {entry['reason']}. mv2's code update continued; "
+                     f"{status}. Restore access and run mv2 update again, or uninstall this optional plugin: "
+                     f"save any local files first, then remove its checkout with {deinit}")
     if entry.get("url_changed"):
         found.append(f"{path} now comes from {entry['url_changed']['after']}; to fetch from there, run "
                      f"git -C {result['checkout']} submodule sync -- {path}")

@@ -198,7 +198,8 @@ where to look, and core can check, edit and refresh them the same way:
   either their version number or `"legacy"` (the pre-plugin file the manifest
   names), and returns the new settings. For `"legacy"` it may return
   `(settings, on)`, which also turns the plugin on or off in that universe's
-  `plugins.json` where it says nothing yet. `mv2 plugins migrate` shows what
+  `plugins.json`, whatever it said before (the old file is what the person
+  chose; a template may have named the plugin already). `mv2 plugins migrate` shows what
   would change, and `--apply` does it, checking the result first and keeping
   the old file in the universe's trash. Core never guesses a migration.
 - **Converted on first use.** A pre-plugin file is converted the first time mv2
@@ -1270,13 +1271,20 @@ multiverse-v2/
   installed with pip. Both routes load the same code.
 - **Updating.** `mv2 update` moves the plugins that are initialized with the
   checkout and never fetches or initializes one that is not. Before the fetch,
-  again before the merge, and again before each plugin moves, each one must be
-  exactly at the commit mv2 pins, with no tracked changes or conflicts
-  (untracked files are fine). It moves with `git submodule update --checkout`,
-  one plugin at a time, with nested fetches off, whatever the user's update
-  mode is. `--check` shows which plugins would move. A plugin that cannot move
-  leaves the rest of the update in place (code and environment) and says how
-  to repair it. New plugins are reported as available (`mv2 plugins install
+  again before the merge, and again before each plugin moves, mv2 checks for
+  tracked changes, conflicts and commits beyond its pin, and refuses to discard
+  local work (untracked files are fine). A clean checkout behind its pin is
+  retried even when mv2 itself is already current. It moves with
+  `git submodule update --checkout`, one plugin at a time, with nested fetches
+  off, whatever the user's update
+  mode is. Local-path remotes are allowed for that fetch only. `--check` shows
+  which plugins would move without fetching them. An unavailable or revoked
+  remote produces a warning: mv2 and its environment still update, the plugin
+  stays at its old commit, and the next update retries it. Restore access or
+  uninstall the optional plugin: save any local files first, then run the printed
+  `git -C CHECKOUT submodule deinit -f -- plugins/NAME` command to remove its
+  checkout. mv2 never runs that command automatically. Other move failures preserve local work and
+  report a repair. New plugins are reported as available (`mv2 plugins install
   NAME`), removed ones are left on disk, and a changed URL is shown with the
   `git submodule sync` to apply it. With no plugin submodules, `mv2 update`
   is exactly as before.
