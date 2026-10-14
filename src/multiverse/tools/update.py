@@ -22,6 +22,7 @@ NOTES = [
     "Running agents and the dashboard keep their old code until relaunched.",
     "Run mv2 refresh --apply to bring a universe's templates up to date.",
 ]
+SETTINGS_NOTICES = ("converted", "partial", "failed", "not_installed")
 
 
 def configure(parser):
@@ -432,7 +433,7 @@ def run(root=None, *, check=False, json=False):
                 result["environment"] = {"state": "synced"}
         if result["environment"]["state"] != "failed":
             settings = _convert_settings(checkout, root)
-            if settings["state"] in ("converted", "partial", "failed"):  # nothing to say keeps the output as it was
+            if settings["state"] in SETTINGS_NOTICES:  # nothing to say keeps the output as it was
                 result["settings"] = settings
         if plugin_failures:
             raise ValueError(" ".join(plugin_failures))
@@ -448,8 +449,8 @@ def _convert_settings(checkout, root):
     This process still has the old code loaded, so a fresh one runs `mv2 plugins
     migrate --apply --recursive --json` from the checkout, with that universe as
     its own. Its JSON says what was converted and what was not: none, converted,
-    partial or failed. A universe that does not resolve is skipped; nothing here
-    ever fails the update."""
+    partial, failed or not_installed. A universe that does not resolve is skipped;
+    nothing here ever fails the update."""
     from .. import universe
     try:
         target = universe.resolve(root)
@@ -477,11 +478,12 @@ def _convert_settings(checkout, root):
 
 
 def _conversion(target, converted):
-    """none, converted, partial or failed, from `plugins migrate --json`'s record and exit code. Raises on a
+    """Classify conversions and missing-plugin notices from `plugins migrate --json`. Raises on a
     record that is not what that command prints."""
     record = json.loads(converted.stdout)
     planned, applied = record["planned"], record["applied"]
-    for name, items in (("planned", planned), ("applied", applied)):
+    missing = record.get("not_installed", [])
+    for name, items in (("planned", planned), ("applied", applied), ("not_installed", missing)):
         if not isinstance(items, list) or not all(isinstance(item, dict) and isinstance(item.get("plugin"), str)
                                                   for item in items):
             raise ValueError(f"{name} must list objects naming their plugin")
@@ -494,13 +496,22 @@ def _conversion(target, converted):
     for item in failures:
         where = _scope_label(target, item.get("universe"))
         lines.append(f"{item['plugin']}{where}: not converted: {item['problem']}")
+    for item in missing:
+        name, legacy = item["plugin"], item["file"]
+        if not isinstance(legacy, str) or not legacy:
+            raise ValueError("not_installed must name its legacy settings file")
+        where = _scope_label(target, item.get("universe"))
+        # This process can still hold the old plugins module after the code update. Do not call a helper
+        # added only in the new code; consume the subprocess's data without loading or probing plugins.
+        lines.append(f"{legacy} is here but the {name} plugin isn't installed{where}: "
+                     f"run mv2 plugins install {name}, or move {legacy} away to stop using its settings")
     if (converted.returncode or record.get("ok") is False) and not failures:
         # It says it failed without naming what: never "nothing to do".
         detail = " ".join(converted.stderr.split())[:300] or f"exit code {converted.returncode}"
         lines.append(f"the conversion did not finish: {detail}")
         failures = [None]
-    state = ("none" if not applied and not failures else "converted" if not failures
-             else "failed" if not applied else "partial")
+    state = ("partial" if applied and (failures or missing) else "converted" if applied
+             else "failed" if failures else "not_installed" if missing else "none")
     return {"state": state, "universe": str(target), "lines": lines}
 
 
@@ -551,12 +562,13 @@ def format_output(result):
     for entry in result.get("plugins", []):
         lines.extend(_plugin_lines(result, entry))
     settings = result.get("settings") or {}
-    if settings.get("state") in ("converted", "partial", "failed"):
+    if settings.get("state") in SETTINGS_NOTICES:
         lines.append({"converted": f"Plugin settings converted in {settings['universe']}:",
                       "partial": f"Plugin settings partly converted in {settings['universe']}:",
-                      "failed": f"Plugin settings in {settings['universe']} were not converted:"}[settings["state"]])
+                      "failed": f"Plugin settings in {settings['universe']} were not converted:",
+                      "not_installed": f"Plugin settings in {settings['universe']} await plugin installation:"}[settings["state"]])
         lines.extend("  " + line for line in settings.get("lines") or [settings.get("reason", "")])
-        if settings["state"] != "converted":
+        if settings["state"] in ("partial", "failed"):
             lines.append("  Fix what it names, then run mv2 plugins migrate --apply --recursive there.")
     if result["check"]:
         lines.append("Check only: code and environment unchanged.")
