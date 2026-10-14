@@ -654,12 +654,18 @@ itself to find a harness's sessions (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Co
 `CLAUDE_CONFIG_DIR` for Claude); set those in the environment mv2 runs in. Variables
 an adapter sets for its bridge, such as Claude's `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
 take precedence. Codex bridge tools run in the shared daemon rather than the
-terminal process, so the relay also forwards each variable to them as
-`shell_environment_policy.set`, as it does for `MV2_*`; plain Codex tools inherit them
-from the process under Codex's own `shell_environment_policy`. Claude's compaction
-builder runs with the same variables, except those it always scrubs. Values are
-stored as plain text in `harness.json` and each launch's `request.json`, and a
-forwarded Codex value appears on the command line: keep secrets out of `env`.
+terminal process, so the relay forwards harness and plugin variables in the
+session RPC config's `shell_environment_policy.set`. These values do not appear
+on argv. Plain Codex tools inherit them from the process under Codex's own
+`shell_environment_policy`; explicit native filtering still applies. Normal
+exclusive idle resume applies the requested tool environment. Codex can retain
+old config when rejoining a thread that is still subscribed or active; mv2 never
+forces an unload or service restart to change it. Plugin MCP servers receive
+only their declared `env` and `env_vars`; agent identity requires explicit
+`env_vars` references (see [the Codex plugin contract](plugins.md#codex)).
+Claude's compaction builder runs with the same variables, except those it always
+scrubs. Values remain plain text in `harness.json` and each launch's
+`request.json`, including its RPC settings.
 Schema-1 manifests accept the same `env` object.
 No adapter changes installed native configuration. The Claude bridge reads only the
 inbox key Claude publishes for its own launch's socket; no other credentials are read.

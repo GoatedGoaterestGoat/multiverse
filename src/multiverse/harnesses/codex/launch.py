@@ -1,5 +1,6 @@
 """Pure remote-TUI launch protocol transforms; core owns transport and binding."""
 import json
+from copy import deepcopy
 from functools import partial
 from pathlib import Path
 import tomllib
@@ -177,7 +178,22 @@ class LaunchProtocol:
         explicit = self.settings.get('plugin_user_config') or {}
         if defaults or explicit:
             native = config_tree((object_field(params, 'config') if params.get('config') is not None else {}).items())
-            params['config'] = merge_config(merge_config(defaults, native), explicit)
+            params['config'] = deepcopy(merge_config(merge_config(defaults, native), explicit))
+            if method == 'thread/start':
+                # Resolve only references declared by each accepted MCP server.
+                # Native/user env values win, and changing env_vars in the request
+                # drops defaults that the caller no longer wants forwarded.
+                servers = params['config'].get('mcp_servers')
+                for name, values in (self.settings.get('plugin_mcp_environment') or {}).items():
+                    server = servers.get(name) if isinstance(servers, dict) else None
+                    if not isinstance(server, dict) or not isinstance(server.get('env_vars'), list):
+                        continue
+                    forwarded = {key: value for key, value in values.items() if key in server['env_vars']}
+                    if forwarded:
+                        server = deepcopy(server)
+                        server['env'] = {**forwarded, **object_field(server, 'env')} if server.get('env') is not None else forwarded
+                        server['env_vars'] = [key for key in server['env_vars'] if key not in forwarded]
+                        servers[name] = server
         existing = params.get('developerInstructions')
         params['developerInstructions'] = '\n\n'.join(part for part in (self.settings['bootstrap'], existing) if part)
         self.pending = value['id']

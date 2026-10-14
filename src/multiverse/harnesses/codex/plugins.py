@@ -188,7 +188,7 @@ def _inside(directory, relative, label):
     return path
 
 
-def _server(value, directory, permissions, environment):
+def _server(value, directory, permissions):
     if not isinstance(value, dict):
         raise ValueError('MCP server must be an object')
     stdio = 'command' in value
@@ -227,12 +227,12 @@ def _server(value, directory, permissions, environment):
         if 'env_vars' in server and (not _strings(server['env_vars']) or
                 any(not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', v) for v in server['env_vars'])):
             raise ValueError('MCP env_vars must name environment variables')
-        if any(key.startswith('MV2_') or key in ('CODEX_HOME', 'CODEX_SQLITE_HOME', 'CODEX_THREAD_ID', 'PATH')
+        if any(key in ('CODEX_HOME', 'CODEX_SQLITE_HOME', 'CODEX_THREAD_ID')
                for key in server.get('env_vars', [])):
-            raise ValueError('MCP env_vars cannot substitute daemon storage or launch identity')
-        # The shared daemon has no TUI launch environment. Forward the bounded
-        # launch environment explicitly, with adapter/core identity winning.
-        server['env'] = {**env, **environment}
+            raise ValueError('MCP env_vars cannot substitute native storage or session markers')
+        # env_vars are references, including opt-in launch identity. Values stay
+        # out of argv; the bridge carries only declared references over RPC.
+        server['env'] = dict(env)
     else:
         url = urlsplit(_text(server.get('url'), 'MCP url'))
         if (url.scheme not in ('http', 'https') or not url.hostname or url.username is not None
@@ -269,6 +269,7 @@ class Prepared:
     defaults: dict = field(default_factory=dict)  # literal-dot CLI paths
     session_config: dict = field(default_factory=dict)
     user_config: dict = field(default_factory=dict)
+    mcp_environment: dict = field(default_factory=dict)
 
     def apply(self, command):
         argv = list(command.argv)
@@ -286,7 +287,7 @@ class Prepared:
         return replace(command, argv=tuple(argv), environment=self.plan.environment, plugins=self.plan.record())
 
 
-def prepare(context, command, *, bridge=False, daemon=None, final=False, settings=None, harness_name='codex', cli_plan=None):
+def prepare(context, command, *, bridge=False, daemon=None, final=False, settings=None, harness_name='codex'):
     """Validate and compose one mode's plan; failures lose contributions, never the launch."""
     if not isinstance(daemon, (tuple, list)) or len(daemon) != 3 or any(type(v) is not int or v < 0 for v in daemon):
         daemon = None
@@ -304,28 +305,14 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
             cli = codex_version(command.argv[0], context.values['workspace'])
             version_read = True
         return cli
-    # Core supplies target identity even during initial preparation. Never
-    # freeze an ambient sender's MV2 variables into a shared daemon's MCP env.
-    target_id = context.values.get('agent_id', directory.name)
-    base_env = {**command.environment, **{k: v for k, v in context.environment.items()
-                if k in ('CODEX_HOME', 'CODEX_SQLITE_HOME', 'PATH')
-                or k.startswith('MV2_') and context.environment.get('MV2_AGENT_ID') == target_id}}
+    # Environment contributions belong to the launched process. They are not
+    # implicit MCP declarations and may contain credentials.
+    base_env = dict(command.environment)
+    if bridge and not final:
+        return Prepared(harness.LaunchPlan(environment=base_env), bootstrap)
     info = harness.LaunchInfo(root, directory.name, context.values.get('name', directory.name),
-                             context.mode, 'codex', harness_name, daemon if bridge and final else selected_version, bridge)
+                             context.mode, 'codex', harness_name, daemon if bridge else selected_version, bridge)
     plan = harness.launch_plan(info, base_environment=base_env)
-    # Session entries fit the daemon; presentation entries fit the TUI. A
-    # mixed entry may contribute only its presentation on a mismatched server.
-    if bridge and final and cli_plan is not None:
-        for candidate in cli_plan.codex:
-            name, _, entry = candidate
-            config = entry.fields.get('config', {})
-            if candidate not in plan.codex and isinstance(config, dict) and any(
-                    isinstance(key, str) and key.startswith('tui.') for key in config):
-                plan.codex.append(candidate)
-                record = plan.plugins.setdefault(name, {'version': cli_plan.plugins[name]['version']})
-                if record.get('state') == 'skipped':
-                    record.setdefault('unfit', []).append(record.pop('reason'))
-                record['state'] = 'loaded'
     if plan.plugins:
         selected_version()
     for record in plan.plugins.values():
@@ -369,7 +356,7 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
                 if not isinstance(local, str) or not _name.fullmatch(local):
                     raise ValueError('MCP server names must contain lowercase letters, digits, hyphens or underscores')
                 native_name = 'mv2_' + name.replace('-', '_') + '_' + local.replace('-', '_')
-                checked.append((native_name, _server(definition, plugin_dir, permissions, plan.environment)))
+                checked.append((native_name, _server(definition, plugin_dir, permissions)))
             text = None
             if 'instructions' in fields:
                 path = _inside(plugin_dir, fields['instructions'], 'instructions')
@@ -457,6 +444,14 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
         prepared.bootstrap += f'\n\n<plugin_instructions name="{name}">\n{text}\n</plugin_instructions>'
     session_defaults = [(key, value) for key, value in prepared.defaults.items() if not key.startswith('tui.')]
     prepared.session_config = config_tree(session_defaults)
+    if bridge:
+        launch_env = {**context.environment, **plan.environment}
+        target_id = context.values.get('agent_id', directory.name)
+        if context.environment.get('MV2_AGENT_ID') != target_id:
+            launch_env = {key: value for key, value in launch_env.items() if not key.startswith('MV2_')}
+        for name, server in prepared.session_config.get('mcp_servers', {}).items():
+            prepared.mcp_environment[name] = {key: launch_env[key] for key in server.get('env_vars', [])
+                                              if key in launch_env}
     forwarded = [(key, value) for key, value in user if any(overlaps(key, ns) for ns in namespaces)
                  and (context.mode == 'spawn' or not key.startswith('mcp_servers'))]
     prepared.user_config = config_tree(forwarded)

@@ -32,15 +32,17 @@ class CodexAdapter(ConfiguredAdapter):
         command = super()._launch_command(context)
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
         from .plugins import prepare
-        plain_additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
-        plain_command = plain_additions.apply(command)
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
-        plain = replace(plain_command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
+        plain = None
+        if setting is not True:
+            additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
+            plain = replace(additions.apply(command),
+                            native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain
         try:
-            bridge = self._bridge_command(command, context, plain_additions.plan)
+            bridge = self._bridge_command(command, context)
         except BridgeUnavailable as error:
             if setting is True:
                 raise
@@ -48,7 +50,7 @@ class CodexAdapter(ConfiguredAdapter):
         return replace(bridge, native_mode={'policy': policy, 'mode': 'bridge', 'fallback_reason': None},
                        fallback=plain if setting is None else None)
 
-    def _bridge_command(self, command, context, cli_plan=None):
+    def _bridge_command(self, command, context):
         settings = getattr(self, 'settings', {})
         args = [*settings.get('args', []), *settings.get(context.mode + '_args', [])]
         if any(arg == '--remote' or arg.startswith('--remote=') or arg == '--no-daemon' for arg in args):
@@ -87,7 +89,7 @@ class CodexAdapter(ConfiguredAdapter):
         from .plugins import prepare
         additions = prepare(context, command, bridge=True, daemon=native_settings.get('daemon_version'),
                             final=context.executor is not None, settings=getattr(self, 'settings', {}),
-                            harness_name=self.name, cli_plan=cli_plan)
+                            harness_name=self.name)
         command = additions.apply(command)
         argv = list(command.argv)
         argv, bootstrap, roots, permissions = remote_arguments(argv, context)
@@ -117,9 +119,12 @@ class CodexAdapter(ConfiguredAdapter):
         for key, value in context.environment.items():
             if key.startswith('MV2_') or key == 'PATH':
                 options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
-        # The harness's own variables reach those tools the same way.
-        for key, value in command.environment.items():
-            options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
+        # Harness/plugin variables can contain credentials. Pass them to native
+        # shell tools in the session RPC, never as process-list-visible flags.
+        from .plugins import merge_config
+        session_config = merge_config(
+            {'shell_environment_policy': {'set': dict(command.environment)}} if command.environment else {},
+            additions.session_config)
         argv[position:position] = options
         storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
         if context.environment.get('CODEX_SQLITE_HOME'):
@@ -134,7 +139,8 @@ class CodexAdapter(ConfiguredAdapter):
                                 'workspace': context.values['workspace'],
                                 'name': context.values['name'],
                                 'resume_permissions': permissions,
-                                'plugin_config': additions.session_config,
+                                'plugin_config': session_config,
+                                'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},
                                binds_session=True),
