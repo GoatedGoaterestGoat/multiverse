@@ -39,8 +39,9 @@ function tagged(text: string): Message | undefined {
   return { text: match[3] ?? "", mode, id: match[2] }
 }
 
-// Main-loop turn state: turn.start fires for the main loop only, and a
-// subagent's turn.complete carries its agentId.
+// Main-loop turn state. A subagent's or teammate's turn.start and turn.complete
+// carry its agentId (turn.start since Claude Code 2.1.299's types say so); only
+// the main loop's turns count, or a background subagent would leave "working".
 let turnRunning = false
 
 // What waits on the person, by key (`question:<id>`, `permission:<id>`,
@@ -286,9 +287,11 @@ export const register: Register = (on) => {
   })
 
   on("turn.start", async ($, e, next) => {
-    turnRunning = true
-    void report($)
-    void refreshStatus($)
+    if (e.agentId === undefined) {
+      turnRunning = true
+      void report($)
+      void refreshStatus($)
+    }
     return next(e)
   })
 

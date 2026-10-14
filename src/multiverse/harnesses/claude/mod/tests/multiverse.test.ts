@@ -90,6 +90,31 @@ describe('status', () => {
     expect(w.statuses.at(-1)).toBe('idle')
   })
 
+  test("a subagent's or teammate's turns leave the main loop's status alone", async ($, on) => {
+    const w = world(on)
+    await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+    await w.clock.settle()
+    expect(w.statuses.at(-1)).toBe('idle')
+    // A background subagent runs while the main loop is idle: still idle, and nothing reported.
+    const reported = w.statuses.length
+    await $.turn.start({ text: 'look into it', turnId: 's1', agentId: 'sub-1' } as never)
+    await w.clock.settle()
+    expect(w.statuses.length).toBe(reported)
+    expect(w.statuses.at(-1)).toBe('idle')
+    await $.turn.complete({ ...turnComplete('s1'), agentId: 'sub-1' } as never)
+    await w.clock.settle()
+    expect(w.statuses.at(-1)).toBe('idle')
+    // During a main-loop turn, a subagent's turn ending does not end it.
+    await $.turn.start({ text: 'go', turnId: 't1' })
+    await $.turn.start({ text: 'part', turnId: 's2', agentId: 'sub-2' } as never)
+    await $.turn.complete({ ...turnComplete('s2'), agentId: 'sub-2' } as never)
+    await w.clock.settle()
+    expect(w.statuses.at(-1)).toBe('working')
+    await $.turn.complete(turnComplete('t1'))
+    await w.clock.settle()
+    expect(w.statuses.at(-1)).toBe('idle')
+  })
+
   test('a permission prompt waits until the turn ends', async ($, on) => {
     const w = world(on)
     await $.turn.start({ text: 'go', turnId: 't1' })
