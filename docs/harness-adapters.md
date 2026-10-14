@@ -1044,7 +1044,11 @@ as toasts, and skips with the reason when it cannot. The `PreCompact` hook
 refuses Claude's own compaction should it not answer, so a session never falls
 back to it. Its `Stop` hook starts the background tree builder with the time the
 turn ended. The plugin's Claude source (`sources/claude/`) reads this harness's
-transcripts; the adapter itself has no compaction code. Compaction settings that cannot be used (invalid, or
+transcripts; the adapter itself has no compaction code. A Claude agent launched
+before compaction became a plugin still calls `python -m multiverse.compaction
+guard` from its settings: that module stays for a release and lets Claude
+compact (restart the agent for tree compaction), and `mv2 doctor` names the
+running agents that still use it. Compaction settings that cannot be used (invalid, or
 builder settings Claude rejects) never stop a launch: that launch runs without
 compaction, without the `PreCompact` guard, and records why as its
 `native_mode` fallback, which the inspector shows. The `compaction` capability then reports the error, and

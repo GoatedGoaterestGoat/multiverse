@@ -2,7 +2,7 @@
 import sys
 
 from ..runtime import lifecycle
-from .. import universe
+from .. import compaction, universe
 from ..universe import catalog
 from ..universe.mailbox import inbox
 
@@ -35,6 +35,9 @@ def check(root, notes=None):
                                    else "state is unknown: ") + one_line(reason) + "."))
                 elif item.get('recovery_note') and notes is not None:
                     notes.append(f"{item['name']} reconnected automatically.")
+                if compaction.old_guard(scope / "state" / "agents" / item["id"], runtime):
+                    problem = f"{item['name']} runs the compaction guard from before compaction became a plugin"
+                    found.append((problem, f"{problem}: restart it to use tree compaction."))
                 inbox(scope / "state" / "agents" / item["id"], all_messages=True)
         except (OSError, ValueError, KeyError) as error:
             found.append((f"{scope}: {error}", f"{scope}: {error}"))
