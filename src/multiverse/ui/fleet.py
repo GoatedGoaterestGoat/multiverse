@@ -73,7 +73,7 @@ class FleetView:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
                 table.clear(columns=True)
                 for field in fields:
-                    table.add_column(lookup(field).title, key=field, width=widths[field])
+                    table.add_column(Text(lookup(field).title), key=field, width=widths[field])
                 for key, cells in rendered:
                     table.add_row(*cells, key=key)
                 if keys:

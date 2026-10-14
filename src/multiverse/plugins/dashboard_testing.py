@@ -58,6 +58,7 @@ argument and should not call it; keep what a screen needs in the plugin.
 """
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 from textual.widgets import DataTable, Label, Markdown, Static
 
@@ -160,7 +161,8 @@ class Dashboard:
         return found
 
     def palette(self):
-        return [command.title for command in self.app.get_system_commands(self.app.screen)]
+        return [command.title for command in self.app.get_system_commands(self.app.screen)] + \
+               [title for title, _, _ in self.app.plugin_palette()]
 
     # Doing what a person does ------------------------------------------------
 
@@ -201,6 +203,8 @@ class Dashboard:
 
     async def run_action(self, title):
         entry = next((command for command in self.app.get_system_commands(self.app.screen) if command.title == title), None)
+        if entry is None:
+            entry = next((SimpleNamespace(callback=callback) for name, _, callback in self.app.plugin_palette() if name == title), None)
         if entry is None:
             self.case.fail(f"the command palette has no {title!r}: {self.palette()}")
         before, opens = self.app.screen, title in {f"{plugin}: {name}" for plugin, name in self.app.plugin_screens}

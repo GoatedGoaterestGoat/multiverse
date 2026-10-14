@@ -11,6 +11,7 @@ from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
+from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal
 from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextArea
 
@@ -32,8 +33,24 @@ from .widgets import AgentTable, Breadcrumb, Fleet, HarnessMenu
 HOST_REFRESH = 15.0  # seconds between reads of the plugin host's state
 
 
+class PluginCommands(Provider):
+    """The command palette's plugin entries. A plugin's title is text, so it is shown as Text: Textual's own
+    provider would read `[/x]` in it as markup."""
+
+    async def discover(self):
+        for title, help_text, callback in self.app.plugin_palette():
+            yield DiscoveryHit(Text(title), callback, text=title, help=help_text)
+
+    async def search(self, query):
+        matcher = self.matcher(query)
+        for title, help_text, callback in self.app.plugin_palette():
+            if (score := matcher.match(title)) > 0:
+                yield Hit(score, matcher.highlight(title), callback, text=title, help=help_text)
+
+
 class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     CSS_PATH = "app.tcss"
+    COMMANDS = App.COMMANDS | {PluginCommands}
     TITLE = "Multiverse"
     BINDINGS = [
         Binding("enter", "open", "Open"), Binding("slash", "filter", "Find", priority=True),
@@ -391,13 +408,20 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
+
+    def plugin_palette(self):
+        """[(title, help, callback)] of what plugins add to the command palette, in a stable order.
+
+        The titles are plugin text: PluginCommands shows them as Text, never as markup."""
+        entries = []
         for key in sorted(self.plugin_actions):
             plugin, name = key
-            yield SystemCommand(f"{plugin}: {name}", f"Run {plugin}'s {name} for the selected row or group",
-                                lambda key=key: self.run_plugin_action(key))
+            entries.append((f"{plugin}: {name}", f"{plugin}: run for the selected row or group",
+                            lambda key=key: self.run_plugin_action(key)))
         for (plugin, name), (loaded, reference) in sorted(self.plugin_screens.items()):
-            yield SystemCommand(f"{plugin}: {name}", f"Open {plugin}'s {name} screen",
-                                lambda plugin=plugin, loaded=loaded, reference=reference: self.open_plugin_screen(plugin, loaded, reference))
+            entries.append((f"{plugin}: {name}", f"{plugin}: open its screen",
+                            lambda plugin=plugin, loaded=loaded, reference=reference: self.open_plugin_screen(plugin, loaded, reference)))
+        return entries
 
     def action_plugins(self):
         if self.ready():

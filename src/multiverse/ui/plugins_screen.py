@@ -10,6 +10,7 @@ event loop, and a failure shows on the screen's error line.
 import asyncio
 from pathlib import Path
 
+from rich.text import Text
 from textual import work
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -123,9 +124,10 @@ class PluginsScreen(ModalScreen):
         keep = keep or (self.selected() or {}).get("name")
         table.clear()
         for item in self.items:
-            table.add_row(clean(item["name"]), "on" if item["on"] else "off", state_text(item),
-                          clean(item.get("version") or "—"), str(len(item.get("errors") or ())) if item.get("errors") else "",
-                          key=item["name"])
+            # Text, not str: a plugin's words are never Rich markup.
+            table.add_row(*(Text(cell) for cell in (
+                clean(item["name"]), "on" if item["on"] else "off", state_text(item), clean(item.get("version") or "—"),
+                str(len(item.get("errors") or ())) if item.get("errors") else "")), key=item["name"])
         if keep and any(item["name"] == keep for item in self.items):
             table.move_cursor(row=[item["name"] for item in self.items].index(keep), animate=False)
         self.describe_selected()

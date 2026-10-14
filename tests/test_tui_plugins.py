@@ -273,7 +273,7 @@ class HostTests(DashboardCase):
 
 class PluginDashboardTests(DashboardCase):
     def command(self, title):
-        return next((c for c in self.app.get_system_commands(self.app.screen) if c.title == title), None)
+        return next((SimpleNamespace(callback=callback) for name, _, callback in self.app.plugin_palette() if name == title), None)
 
     async def test_without_plugins_nothing_changes(self):
         async with self.app.run_test(size=(140, 32)) as pilot:
@@ -286,7 +286,7 @@ class PluginDashboardTests(DashboardCase):
             self.app.action_help()
             await pilot.pause(0.1)
             self.assertEqual(self.app.screen.content, KEYS)
-            self.assertEqual([c.title for c in self.app.get_system_commands(self.app.screen) if c.title.startswith("alpha")], [])
+            self.assertEqual([name for name, _, _ in self.app.plugin_palette()], [])
             # Plugins have no keys: nothing binds to a plugin.
             self.assertFalse([b for items in self.app._bindings.key_to_bindings.values() for b in items
                               if "plugin" in b.action and b.action != "plugins"])
@@ -417,7 +417,7 @@ class PluginDashboardTests(DashboardCase):
         async with self.app.run_test(size=(140, 32)) as pilot:
             await self.start(pilot)
             await self.until(pilot, lambda: self.app.plugin_screens, "the registry")
-            titles = [command.title for command in self.app.get_system_commands(self.app.screen)]
+            titles = [command.title for command in self.app.get_system_commands(self.app.screen)] + [name for name, _, _ in self.app.plugin_palette()]
             self.assertIn("Plugins", titles)
             self.assertIn("alpha: board", titles)
             self.assertIn("alpha: Say hello", titles)
@@ -484,7 +484,7 @@ class PluginsScreenTests(DashboardCase):
         async with self.app.run_test(size=(100, 32)) as pilot:
             screen = await self.open_screen(pilot)
             table = screen.query_one("#plugins-table", DataTable)
-            self.assertEqual([table.get_row_at(i)[:3] for i in range(2)], [["alpha", "on", "on"], ["beta", "off", "off"]])
+            self.assertEqual([[str(cell) for cell in table.get_row_at(i)[:3]] for i in range(2)], [["alpha", "on", "on"], ["beta", "off", "off"]])
             self.assertIn("alpha plugin", str(screen.query_one("#plugin-details", Static).render()))
             await pilot.press("down")
             await self.until(pilot, lambda: "beta plugin" in str(screen.query_one("#plugin-details", Static).render()), "beta's details")
@@ -494,7 +494,7 @@ class PluginsScreenTests(DashboardCase):
             screen = await self.open_screen(pilot)
             scans = self.app.scan_count
             await pilot.press("down", "space")
-            await self.until(pilot, lambda: screen.query_one("#plugins-table", DataTable).get_row_at(1)[1] == "on", "beta to be on")
+            await self.until(pilot, lambda: screen.query_one("#plugins-table", DataTable).get_row_at(1)[1].plain == "on", "beta to be on")
             self.assertIn(("enable", self.app.target_scope(), "beta", True), self.service.calls)
             with mock.patch("multiverse.ui.columns.reset_plugin_caches") as reset:
                 await pilot.press("escape")
@@ -508,7 +508,7 @@ class PluginsScreenTests(DashboardCase):
             screen = await self.open_screen(pilot)
             await pilot.press("down", "space")
             await self.until(pilot, lambda: "untrusted" in str(screen.query_one(".cerror", Static).render()), "the reason")
-            self.assertEqual(screen.query_one("#plugins-table", DataTable).get_row_at(1)[1], "off")
+            self.assertEqual(screen.query_one("#plugins-table", DataTable).get_row_at(1)[1].plain, "off")
             self.assertFalse(screen.changed)
 
     async def test_plugin_without_settings_says_so(self):
@@ -713,7 +713,7 @@ class RealPluginTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             return str(app.query_one("#status", Static).render())
 
         def run(title):
-            next(c for c in app.get_system_commands(app.screen) if c.title == title).callback()
+            next(callback for name, _, callback in app.plugin_palette() if name == title)()
 
         async with app.run_test(size=(140, 36)) as pilot:
             await until(lambda: app.snapshot is not None and app.plugin_actions, "the registry")
@@ -748,8 +748,7 @@ class RealPluginTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 if app.plugin_screens:
                     break
                 await pilot.pause(0.02)
-            command = next(c for c in app.get_system_commands(app.screen) if c.title == "greeter: board")
-            command.callback()
+            next(callback for name, _, callback in app.plugin_palette() if name == "greeter: board")()
             for _ in range(200):
                 await app.workers.wait_for_complete()
                 if app.screen.query("#board"):

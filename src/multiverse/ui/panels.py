@@ -48,7 +48,7 @@ class TablePanel(Panel):
 
     def compose(self, view, root, widget, index):
         table = DataTable(id=f"view-table-{index}", classes="view-table", cursor_type="row")
-        table.add_columns(*widget["columns"])
+        table.add_columns(*(Text(column) for column in widget["columns"]))
         for row in widget["rows"]:
             # Literal cells: fixture data must not become Rich markup.
             table.add_row(*(Text(cell) for cell in row))
