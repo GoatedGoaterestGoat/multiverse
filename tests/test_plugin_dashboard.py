@@ -69,15 +69,20 @@ class DashboardPluginTest(PluginTestCase):
         shout, broken = found["loud:shout"], found["loud:broken"]
         self.assertEqual((shout.title, shout.width, shout.plugin), ("Shout", 10, "loud"))
         self.assertIsInstance(found["gone:x"], columns.MissingColumn)
+        self.addCleanup(setattr, columns, "PLUGIN_COLUMNS", {})
+        columns.PLUGIN_COLUMNS = found
         row = {"kind": "agent", "name": "worker", "universe": str(child), "plugins": ["loud"]}
-        self.assertEqual(shout.cell(row), "WORKER")
-        self.assertIsNone(shout.cell({**row, "plugins": []}))
-        self.assertEqual(shout.cell({"name": "child", "path": str(child)}, group=True), "group")
-        self.assertIsNone(broken.cell(row))
-        self.assertIsNone(broken.cell(row))
+        off = {"kind": "agent", "name": "idle", "universe": str(self.root), "plugins": []}
+        columns.fill_cells([row, off])
+        self.assertEqual(row["plugin_cells"], {"loud:shout": "WORKER"})  # broken has no value: nothing, shown as a dash
+        self.assertNotIn("plugin_cells", off)
+        subverse = {"name": "child", "path": str(child), "plugins": ["loud"]}
+        columns.fill_cells([subverse], group=True)
+        self.assertEqual(subverse["plugin_cells"]["loud:shout"], "group")
+        columns.fill_cells([row])
         # Rendering only reads the cells a row carries.
         self.assertEqual(shout.render({**row, "plugin_cells": {"loud:shout": "WORKER"}}).plain, "WORKER")
-        self.assertEqual(shout.render(row).plain, "—")
+        self.assertEqual(shout.render({key: value for key, value in row.items() if key != "plugin_cells"}).plain, "—")
         self.assertEqual(shout.render({"kind": "group", "accent": "#ffffff", "plugin_cells": {"loud:shout": "g"}}).plain, "g")
         log = (child / "state" / "plugins" / "loud" / "errors.log").read_text()
         self.assertEqual(log.count("column broken: ZeroDivisionError: division by zero"), 1)
@@ -143,10 +148,13 @@ class DashboardPluginTest(PluginTestCase):
         column = columns.resolve_plugin_columns([self.root], ["slow:slow"])["slow:slow"]
         module = column.loaded.module
         self.addCleanup(module.GATE.set)
+        self.addCleanup(setattr, columns, "PLUGIN_COLUMNS", {})
+        columns.PLUGIN_COLUMNS = {"slow:slow": column}
         with unittest.mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.2):
             row = {"name": "w", "universe": str(self.root), "plugins": ["slow"]}
-            self.assertIsNone(column.cell(row))
-            self.assertIsNone(column.cell(row))
+            columns.fill_cells([row])
+            columns.fill_cells([row])
+        self.assertEqual(row["plugin_cells"], {"slow:slow": "…"})
         self.assertEqual(len(module.CALLS), 1)
         self.assertEqual(loader.errors()["slow"], ["column slow: TimeoutError: took longer than 0.2 s"])
         module.GATE.set()

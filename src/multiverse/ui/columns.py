@@ -130,17 +130,6 @@ class PluginColumn(Column):
     def group_value(self, row):
         return (row.get("plugin_cells") or {}).get(self.key) or ""
 
-    def cell(self, row, group=False):
-        """This column's text for one snapshot row (agent, or subverse when `group`), or None."""
-        from ..plugins import loader
-        function = self.spec.group if group else self.spec.value
-        if function is None or (not group and self.plugin not in row.get("plugins", ())):
-            return None
-        value = loader.guard(self.loaded, f"column {self.spec.key}", function, dict(row),
-                             root=row.get("path") if group else row.get("universe"), default=None,
-                             timeout=loader.SYNCHRONOUS_BUDGET)
-        return None if value is None else clean(str(value))
-
 
 @dataclass(frozen=True)
 class MissingColumn(Column):
@@ -154,15 +143,60 @@ class MissingColumn(Column):
 PLUGIN_COLUMNS = {}
 
 
-def cells(row, group=False):
-    """{key: text} of every plugin column the view names, for one snapshot row."""
-    found = {}
+# After a column runs out of time, it is not called for this many refreshes; its cells show `…` meanwhile.
+SKIP_REFRESHES = 3
+_skip = {}  # (id(loaded), key, group) -> refreshes left to skip
+
+
+def fill_cells(rows, group=False):
+    """Give each row its `plugin_cells`: {column key: text} for the plugin columns the view names.
+
+    One call per column for all `rows`, inside one time budget (`loader.guarded`), so a slow column costs
+    one budget per refresh however many rows there are. Only rows whose universe has the plugin on are
+    given to it. A row it cannot answer for shows `—`; a column that runs out of time (or is still busy from
+    an earlier refresh) shows `…` and is left alone for SKIP_REFRESHES refreshes.
+    """
+    from ..plugins import loader
     for key, column in PLUGIN_COLUMNS.items():
-        if isinstance(column, PluginColumn):
-            value = column.cell(row, group)
-            if value is not None:
-                found[key] = value
-    return found
+        if not isinstance(column, PluginColumn):
+            continue
+        function = column.spec.group if group else column.spec.value
+        wanted = [row for row in rows if column.plugin in row.get("plugins", ())]
+        if function is None or not wanted:
+            continue
+        state = (id(column.loaded), key, group)
+        what = f"column {column.spec.key}" + (" (subverses)" if group else "")
+        if _skip.get(state, 0) > 0:
+            _skip[state] -= 1
+            show(wanted, key, "…")
+            continue
+
+        def answer(rows=wanted, function=function, what=what):
+            values, failure = [], None
+            for row in rows:
+                try:
+                    value = function(dict(row))
+                except Exception as error:  # one row's trouble is not the others'
+                    failure, value = failure or error, None
+                values.append(value)
+            if failure is not None:
+                loader.record(column.loaded, what, failure, rows[0].get("path") if group else rows[0].get("universe"))
+            return values
+
+        outcome = loader.guarded(column.loaded, what, answer, root=wanted[0].get("path") if group else wanted[0].get("universe"),
+                                 timeout=loader.SYNCHRONOUS_BUDGET)
+        if outcome.state == "ok":
+            for row, value in zip(wanted, outcome.value):
+                if value is not None:
+                    row.setdefault("plugin_cells", {})[key] = clean(str(value))
+        elif outcome.state in ("timeout", "busy"):
+            _skip[state] = SKIP_REFRESHES
+            show(wanted, key, "…")
+
+
+def show(rows, key, text):
+    for row in rows:
+        row.setdefault("plugin_cells", {})[key] = text
 
 
 def reset_plugin_caches():

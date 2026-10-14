@@ -6,15 +6,15 @@ never on the event loop. A plugin's failure is recorded against it by
 text, never as an exception the dashboard has to survive. Tests replace this
 object with a fake.
 """
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as Timeout
 from pathlib import Path
+import time
 from types import SimpleNamespace
 
 from .. import plugins, universe
 from ..plugins import host, loader
 
 ACTION_TIMEOUT = 30.0
-FAILED = object()
+FACTS_BUDGET = 4.0  # seconds for every plugin's inspector lines on one scan
 
 
 class PluginService:
@@ -48,7 +48,7 @@ class PluginService:
         """Start the host unless one runs; raises with the reason when it does not come up."""
         info = host.start(self.host_top(root))
         if not info.get("running"):
-            raise RuntimeError("it did not take its lock within 10 s; see state/plugins/host.log")
+            raise RuntimeError(f"it did not take its lock within 10 s; see {host.host_directory(self.host_top(root)) / 'host.log'}")
         return info
 
     def stop_host(self, root):
@@ -79,45 +79,46 @@ class PluginService:
                     screens.setdefault((loaded.name, name), (loaded, reference))
         return {"actions": actions, "screens": screens}
 
-    def facts(self, root, row):
+    def facts(self, root, row, budget=FACTS_BUDGET):
         """[(plugin, text)] for one agent row: each plugin on in its universe, in name order.
 
-        A fact that raises is recorded and shown as `unavailable`; one that
-        returns nothing is left out.
+        Every fact runs in a daemon thread of its own within what is left of `budget` seconds
+        (loader.guarded), so a fact that never returns costs one parked thread, not one per scan,
+        and never an executor thread. A fact that fails, runs out of time or is still running from
+        an earlier scan shows as `unavailable`; one that returns nothing is left out.
         """
-        lines = []
+        lines, deadline = [], time.monotonic() + budget
         for loaded, fact in plugins.inspector_facts(Path(root)):
-            text = loader.guard(loaded, "inspector", fact, dict(row), root=root, default=FAILED)
-            if text is FAILED:
+            left = max(0.05, min(loader.SYNCHRONOUS_BUDGET, deadline - time.monotonic()))
+            outcome = loader.guarded(loaded, "inspector", fact, dict(row), root=root, timeout=left,
+                                     key=("inspector", getattr(fact, "__qualname__", id(fact))))
+            if outcome.state != "ok":
                 lines.append((loaded.name, "unavailable"))
-            elif text:
-                lines.append((loaded.name, str(text)))
+            elif outcome.value:
+                lines.append((loaded.name, str(outcome.value)))
         return lines
 
     def run_action(self, scope, entry, row):
         """Run one plugin's palette action for `row` in `scope`; returns its status line or None.
 
-        Raises ValueError when the plugin is off in that scope, RuntimeError
-        when the action failed (the loader has the details) or ran too long.
+        The action runs in a daemon thread (loader.guarded), never in an executor: one that never
+        returns is left parked, cannot keep the process from exiting, and is reported as still
+        running if it is run again. Raises ValueError when the plugin is off in that scope and
+        RuntimeError when the action failed, ran too long or is still running.
         """
         plugin, name, loaded, function = entry
         scope = Path(scope)
         if plugin not in plugins.on_here(scope):
             raise ValueError(f"{plugin} is off in {scope.name}: turn it on from the Plugins screen (P)")
         context = SimpleNamespace(row=dict(row) if row else None, scope=scope, app=None)
-        pool = ThreadPoolExecutor(max_workers=1)
-        try:
-            future = pool.submit(loader.guard, loaded, f"action {name}", function, context, root=scope, default=FAILED)
-            try:
-                result = future.result(timeout=ACTION_TIMEOUT)
-            except Timeout:
-                loader.record(loaded, f"action {name}", TimeoutError(f"took longer than {ACTION_TIMEOUT:g} s"), scope)
-                raise RuntimeError(f"{plugin}: {name} took longer than {ACTION_TIMEOUT:g} s") from None
-        finally:
-            pool.shutdown(wait=False)
-        if result is FAILED:
+        outcome = loader.guarded(loaded, f"action {name}", function, context, root=scope, timeout=ACTION_TIMEOUT)
+        if outcome.state == "timeout":
+            raise RuntimeError(f"{plugin}: {name} took longer than {ACTION_TIMEOUT:g} s")
+        if outcome.state == "busy":
+            raise RuntimeError(f"{plugin}: {name} is still running from an earlier try")
+        if outcome.state != "ok":
             raise RuntimeError(f"{plugin}: {name} failed; see mv2 plugins")
-        return None if result is None else str(result)
+        return None if outcome.value is None else str(outcome.value)
 
     def record(self, loaded, what, error, root):
         """Count a failure of plugin code against its plugin (the header shows the total)."""

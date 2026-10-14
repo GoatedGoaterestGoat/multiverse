@@ -41,7 +41,7 @@ class LocalBackend:
             on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
             for member in members:
                 member["plugins"] = on.get(str(member.get("universe")), [])
-                member["plugin_cells"] = columns.cells(member)
+            columns.fill_cells(members)
         else:
             columns.PLUGIN_COLUMNS = {}
         # Plugin panels render here, off the event loop, from this scope's agents; the dashboard only draws the result.
@@ -56,10 +56,12 @@ class LocalBackend:
                 groups.append({**group, "name": style["title"] or data["name"],
                                "description": data.get("description", ""), "accent": style["accent"]})
                 if plugin_columns:
-                    groups[-1]["plugin_cells"] = columns.cells(groups[-1], group=True)
+                    groups[-1]["plugins"] = on[str(scope)]
             except (OSError, ValueError, KeyError) as error:
                 groups.append({**group, "name": scope.name, "description": str(error),
                                "accent": theme.RED, "error": True})
+        if plugin_columns:
+            columns.fill_cells([g for g in groups if "plugins" in g], group=True)
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),
