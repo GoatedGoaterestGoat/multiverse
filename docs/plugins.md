@@ -1117,7 +1117,7 @@ plugin's files are under `src/multiverse/plugins/builtin/compaction/`.
 
 | Before | Now |
 | --- | --- |
-| `compaction/` (model, config, schedule, store, build, pipeline, protocol, `__main__`) | The plugin's `engine/`. The `__main__` actions are `mv.helper` actions, and `multiverse.compaction` keeps only a `-m` forwarding stub for agents launched before the move. |
+| `compaction/` (model, config, schedule, store, build, pipeline, protocol, `__main__`) | The plugin's `engine/`. The `__main__` actions are `mv.helper` actions. The `-m multiverse.compaction` forwarding stub that served agents launched before the move was removed in 79c8761. |
 | `harnesses/claude/compaction/` (transcript, merge, render, images, `ClaudeCompaction`) | The plugin's `sources/claude/`. The plugin picks the source by the agent's harness family; `CompactionSource` stays its internal seam. |
 | `mod/hooks/compaction.ts` (`session.compact`, `classic.Stop`, `classic.SessionStart`, `session.start`) | The plugin's `claude/` directory, a Claude plugin of its own. `/compact` progress uses its own status slot. |
 | The mod's `compaction` status item, read through `compactionLine()` | `status-items/compaction.txt`, written by the plugin, read by the mod like any item |
@@ -1140,10 +1140,23 @@ compaction too.
 
 ### Steps
 
-Progress: steps 1 to 7 are done on `plugin-system`. Step 2 is 4c8aaa3, b52eac2,
-e2f5966, d0a29d1, 6371e15 and ba97471; step 3 86aa026; step 4 6706189;
-step 5 f82f2bb, 42f9bf0 and f7b2ca4; step 6 f1d60ff; step 7 4f6701d. Step 8
-is next.
+Progress: all eight steps are done on `plugin-system`:
+
+| Step | Commits |
+| --- | --- |
+| 2 | 4c8aaa3, b52eac2, e2f5966, d0a29d1, 6371e15, ba97471 |
+| 3 | 86aa026 |
+| 4 | 6706189 |
+| 5 | f82f2bb, 42f9bf0, f7b2ca4 |
+| 6 | f1d60ff |
+| 7 | 4f6701d |
+| 8 | 7721049: `plugins/compaction` at GOAT 5ffb0ed |
+
+After that:
+- 79c8761 removed the transition pieces: the mod's copy of compaction's hooks
+  and the `-m` stub.
+- The first-use conversion of `compaction.json` came in 483a83a.
+- bd24532 dropped the legacy read, pinning GOAT f295d43.
 
 Each step keeps the full suite, `test_compaction.py`,
 `test_claude_compaction.py` (with `DashboardBackendTest`),
@@ -1169,25 +1182,23 @@ import paths changing in tests:
    while no hook answered: `/compact` would be blocked until a restart. So:
    - New launches load the plugin's own `claude/` directory and set
      `MV2_COMPACTION_PLUGIN=1`.
-   - The mod keeps its compaction hooks for one transition period, active only
+   - The mod kept its compaction hooks for one transition period, active only
      when `MV2_COMPACTION=1` and `MV2_COMPACTION_PLUGIN` is unset, so exactly
      one plugin answers `/compact` in every session, old or new.
    - The mod's hooks and the plugin's are the same code. The plugin's is
      validated in a scratch copy on the oldest running Claude (2.1.290 at the
      time of writing) before it is written to the checkout.
-   - Once `mv2 doctor` reports no agent launched before the split (it can tell
-     from `runtime.json`'s `plugins` record), the mod's copy is removed.
+   - Once no launch used it, the mod's copy was removed (79c8761).
 5. **Settings.** `plugins.json` becomes the switch, `plugin-settings/compaction.json`
    the settings, and each universe's `compaction.json` is converted on first
    use (above). The legacy read and the rule that kept a plugin on for its old
    file went once that conversion was in (483a83a, then GOAT f295d43).
 6. **Move the files** into `src/multiverse/plugins/builtin/compaction/` while it
-   is still in this repository. Old module paths stay
-   as forwarding stubs, as `runner.py` and `statusline.py` did after PR #16:
-   `python -m multiverse.compaction install|background|status|worker|guard` is
-   called by running mods, by the `PreCompact` command in their settings, and
-   by the worker spawn. The stubs go once no agent from before the move is
-   left.
+   is still in this repository. The old module path stayed as a forwarding
+   stub, as `runner.py` and `statusline.py` did after PR #16, because running
+   mods, the `PreCompact` command in their settings and the worker spawn called
+   `python -m multiverse.compaction`. It was removed with the mod's copy once no
+   launch used it (79c8761).
 7. **Use only `api`.** The plugin stops importing internals: it finds its
    agent through `mv.universe().agent()` and the session through the agent, and
    uses `api.files` for writes and locks, `api.text` and
@@ -1358,7 +1369,7 @@ against it. Compaction and the remote control come last.
 | **2. Harness side** | Launch contributions, Claude and Pi plugin directories with version gating, the Codex contract (allowlisted config, instructions, MCP servers on spawn, with the bridge's `thread/start` transform), `runtime.json`'s `plugins` record, capabilities and usage points, status-item files read by the mod and the tmux bar, typeahead as a bundled plugin | None visible. Typeahead loads as before. |
 | **3. Events and host** | The event journal with segments, retention and emitters. The host supervisor with per-plugin workers. Services. The `cost-item` and `notifier` examples | A journal under `state/events/`, only in universes with a plugin that handles events, pruned to 7 days and 32 MiB by default. |
 | **4. Distribution** | Checkout plugins (`plugins/*` submodules), Python entry points, `mv2 plugins install`, `mv2 update` updating initialized submodules, `mv2 plugins migrate`, `mv2 plugins new` | None |
-| **5. Compaction** | Steps 2 to 8 of [Moving compaction](#moving-compaction-into-a-plugin), with the transition period for running Claude agents, the settings migration, and finally its own repository as the `plugins/compaction` submodule | None until a universe is migrated, and then the same behaviour from `plugins.json`. Running agents keep working, and stubs and the mod's old hooks are removed after they relaunch. |
+| **5. Compaction** | Steps 2 to 8 of [Moving compaction](#moving-compaction-into-a-plugin): the transition period for running Claude agents, the settings conversion, and its own repository as the `plugins/compaction` submodule. Done. | The same behaviour from `plugins.json` and `plugin-settings/compaction.json`, converted on first use. The transition pieces are gone (79c8761). |
 | **6. Remote control** | Its own repository as the `plugins/remote` submodule, under [its rules](#what-the-remote-control-must-do) | None until enabled |
 
 Step 1 of moving compaction (extension points, each with a core user) is the
@@ -1392,9 +1403,10 @@ Decided by the user on 2026-10-11:
   their own private repositories under `GoatedGoaterestGoat`, included as
   optional submodules: `GOAT` (compaction, keeping its Git history) and
   `mv2-remote-control`. Both are on GitHub, private, with `Silicon23` as a
-  collaborator. `plugins/remote` is a submodule; `plugins/compaction` follows
-  with compaction's switch, after which the user restarts every Claude agent
-  (there is no transition copy of compaction's Claude directory).
+  collaborator. Both are submodules, `plugins/remote` (0b843bc) and
+  `plugins/compaction` (7721049). The user chose to restart the Claude agents
+  after compaction's switch rather than keep a transition copy of its Claude
+  directory.
 - **Codex:** a Codex agent, `plugins-codex`, owns the Codex side of harness
   extensions. Its contract is in [Codex](#codex).
 - **Universe plugins:** allowed, loaded only once trusted at their exact
