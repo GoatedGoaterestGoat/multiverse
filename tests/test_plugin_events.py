@@ -301,3 +301,77 @@ class HostCommandTest(PluginTestCase):
         self.assertIn("mv2 plugins host start", tool.text("enable", enabled))
         with self.assertRaisesRegex(ValueError, "start, stop, status|status, start, stop"):
             tool.run(child, plugin_action="host", name="restart")
+
+
+TWO_HANDLERS = """
+import threading
+RELEASE = threading.Event()
+SEEN = {"slow": [], "fast": []}
+
+def register(mv):
+    @mv.events.on("agent.status")
+    def slow(event):
+        if event.seq == 1:
+            RELEASE.wait(10)  # stuck on the first event until released
+        SEEN["slow"].append(event.seq)
+
+    @mv.events.on("agent.status")
+    def fast(event):
+        SEEN["fast"].append(event.seq)
+"""
+
+
+class DeliveryTest(PluginTestCase):
+    """At-least-once delivery per handler (PR #20 review, item 7)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_plugin("pair", {"module": "plugin", "extends": ["events"], "events": ["agent.status"]},
+                          {"plugin.py": TWO_HANDLERS})
+        self.enable("pair")
+        self.loaded = loader.load(self.entry("pair"))
+        self.module = self.loaded.module
+        self.addCleanup(self.module.RELEASE.set)
+        self.mv = api.Plugin(self.loaded)
+        host._write_cursor(self.root, "pair", 0)
+        for index in range(3):
+            events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"to": str(index)})
+
+    def cursor(self):
+        return host._read_cursor(self.root, "pair")
+
+    def test_a_stuck_handler_holds_the_cursor_and_drops_no_other_handlers_events(self):
+        with mock.patch.object(host, "HANDLER_SECONDS", 0.2):
+            host._deliver(self.loaded, self.mv, self.root, "pair")  # slow is stuck on event 1
+            self.assertEqual(self.cursor(), 0)  # never past an event a handler did not finish
+            self.assertIn(1, self.module.SEEN["fast"])  # the other handler still had it
+            host._deliver(self.loaded, self.mv, self.root, "pair")  # slow still running: busy, nothing lost
+            self.assertEqual(self.cursor(), 0)
+            self.module.RELEASE.set()
+            for _ in range(50):
+                host._deliver(self.loaded, self.mv, self.root, "pair")
+                if self.cursor() == 3:
+                    break
+                time.sleep(0.05)
+        self.assertEqual(self.cursor(), 3)
+        self.assertEqual(sorted(set(self.module.SEEN["slow"])), [1, 2, 3])
+        self.assertEqual(sorted(set(self.module.SEEN["fast"])), [1, 2, 3])
+        self.assertEqual([error for error in self.loaded.errors if "took longer" in error],
+                         ["event agent.status (slow): TimeoutError: took longer than 0.2 s"])
+
+    def test_a_failing_handler_is_recorded_and_passed(self):
+        def broken(event):
+            raise ValueError("bad event")
+        self.loaded.registrations.handlers[0] = ("agent.status", broken)
+        host._deliver(self.loaded, self.mv, self.root, "pair")
+        self.assertEqual(self.cursor(), 3)  # an error is recorded, not retried forever
+        self.assertEqual(self.module.SEEN["fast"], [1, 2, 3])
+        self.assertIn("event agent.status (broken): ValueError: bad event", self.loaded.errors)
+
+    def test_a_removed_subverse_is_never_recreated(self):
+        import shutil
+        child = self.subverse("child")
+        shutil.rmtree(child)
+        host._write_cursor(child, "pair", 5)
+        host._deliver(self.loaded, self.mv, child, "pair")
+        self.assertFalse(child.exists())

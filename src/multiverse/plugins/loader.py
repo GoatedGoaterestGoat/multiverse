@@ -27,6 +27,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 import traceback
 import types
 
@@ -49,6 +50,9 @@ process = "cli"
 _lock = threading.RLock()
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
+_running_lock = threading.Lock()
+_plugin_locks = {}  # resolved plugin directory -> its import lock  # guards _running only: never held while plugin code runs
+_log_lock = threading.Lock()
 _entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
 _generation = 0  # rises whenever a plugin is loaded or fails to load
 SYNCHRONOUS_BUDGET = 2.0
@@ -141,6 +145,7 @@ class Failed:
     manifest: manifests.Manifest
     source: str
     problem: str
+    files: tuple = ()  # the plugin's files when it failed: changed files are tried again
 
 
 @dataclass
@@ -256,8 +261,12 @@ def _signature(root):
     if root is not None:
         parts.append(tuple((path.name, _stat(path)) for path in sorted(Path(root).glob("*.json"))))
         parts.append(tuple((path.name, _stat(path)) for path in sorted((Path(root) / settings_files.DIRECTORY).glob("*.json"))))
+    with _lock:
+        failed = {directory: known.files for directory, known in _loaded.items() if isinstance(known, Failed)}
     for source, directory in _source_directories(root):
         parts.append((source, str(directory), _stat(directory / manifests.FILE)))
+        if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
+            parts.append(_files(directory.resolve()) == failed[directory.resolve()])
         if source == "universe":  # trust covers every file
             parts.append(tuple((str(path), _stat(path)) for path in sorted(directory.rglob("*"))
                                if "__pycache__" not in path.parts))
@@ -330,7 +339,7 @@ def _entry(root, name, on, source, directory, found, shadowed):
         return entry
     with _lock:
         known = _loaded.get(Path(directory).resolve())
-    if isinstance(known, Failed):
+    if isinstance(known, Failed) and known.files == _files(Path(directory).resolve()):
         entry.state, entry.problem = "failed", known.problem
         return entry
     if known is not None:
@@ -386,11 +395,13 @@ def load(found, off=False):
         raise PluginError(found.problem or f"{found.name} is off here")
     from . import api  # the API imports this module
     directory = Path(found.directory).resolve()
-    with _lock:
-        known = _loaded.get(directory)
+    # One lock per plugin: a slow import or register() never holds up another plugin, or any guarded call.
+    with _plugin_lock(directory):
+        with _lock:
+            known = _loaded.get(directory)
         if isinstance(known, Loaded):
             return known
-        if isinstance(known, Failed):
+        if isinstance(known, Failed) and known.files == _files(directory):
             raise PluginError(known.problem)
         package = _package_name(found)
         registrations = Registrations()
@@ -403,14 +414,37 @@ def load(found, off=False):
                 raise PluginError(f"{found.manifest.module} has no register(mv) function")
             if register is not None:
                 register(api.Plugin(loaded))
-        except Exception as error:
+        except (Exception, SystemExit) as error:  # a plugin never ends the process by failing to load
             problem = f"{found.name} failed to load: {_describe(error)}"
-            _loaded[directory] = Failed(found.manifest, found.source, problem)
-            _changed()
+            for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
+                del sys.modules[name]  # tried again from scratch once its files change
+            with _lock:
+                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                _changed()
             raise PluginError(problem) from error
-        _loaded[directory] = loaded
-        _changed()
+        with _lock:
+            _loaded[directory] = loaded
+            _changed()
         return loaded
+
+
+def _plugin_lock(directory):
+    with _lock:
+        return _plugin_locks.setdefault(directory, threading.Lock())
+
+
+def _files(directory):
+    """(path, size, mtime_ns) of a plugin's files, to tell when they changed. Leaves out what Python writes."""
+    found = []
+    for path in sorted(Path(directory).rglob("*")):
+        if "__pycache__" in path.parts or ".git" in path.parts or not path.is_file():
+            continue
+        try:
+            status = path.stat()
+        except OSError:
+            continue
+        found.append((str(path), status.st_size, status.st_mtime_ns))
+    return tuple(found)
 
 
 def _changed():
@@ -436,66 +470,95 @@ def _describe(error):
     return f"{type(error).__name__}: {error}" if str(error) else type(error).__name__
 
 
+ERRORS_LOG_BYTES = 1024 * 1024  # errors.log rotates to errors.log.1 past this
+TRACEBACK_EVERY = 60.0  # seconds: at most one traceback per plugin and call site in this long
+_logged = {}  # (id(Loaded), what) -> (when a traceback was last written, failures not written since)
+
+
 def record(loaded, what, error, root=None):
-    """Keep a plugin's failure: in memory for the dashboard, and in its errors.log in `root` when given."""
+    """Keep a plugin's failure: in memory for the dashboard, and in its errors.log in `root` when given.
+
+    The log has one line per failure, but at most one traceback per call site
+    (`what`) a minute, with the count of the others since, so a column that
+    fails on every row and refresh cannot fill the disk; it rotates at 1 MiB."""
     text = f"{what}: {_describe(error)}"
-    if loaded.errors and loaded.errors[-1] == text:
-        return text  # the same failure again (a column on every refresh): kept once
-    loaded.errors.append(text)
-    del loaded.errors[:-ERRORS_KEPT]
-    if root is not None:
+    if not (loaded.errors and loaded.errors[-1] == text):
+        loaded.errors.append(text)
+        del loaded.errors[:-ERRORS_KEPT]
+    if root is None:
+        return text
+    key, moment = (id(loaded), what), time.monotonic()
+    with _log_lock:
+        last, quiet = _logged.get(key, (None, 0))
+        if last is not None and moment - last < TRACEBACK_EVERY:
+            _logged[key] = (last, quiet + 1)
+            return text
+        _logged[key] = (moment, 0)
         try:
             log = Path(root) / "state" / "plugins" / loaded.name / "errors.log"
             log.parent.mkdir(parents=True, exist_ok=True)
+            if log.exists() and log.stat().st_size > ERRORS_LOG_BYTES:
+                log.replace(log.with_name("errors.log.1"))
             with log.open("a") as handle:
-                handle.write(f"{now()} {text}\n")
+                handle.write(f"{now()} {text}" + (f" ({quiet} more like it not logged)" if quiet else "") + "\n")
                 handle.write("".join(traceback.format_exception(error)).rstrip() + "\n")
         except OSError:
             pass
     return text
 
 
-def guard(loaded, what, function, *args, root=None, default=None, timeout=None, **kwargs):
-    """Call plugin code; an exception is recorded against the plugin and `default` returned.
+@dataclass(frozen=True)
+class Outcome:
+    """How a guarded call into plugin code ended: ok, error (recorded), timeout (recorded) or busy (an earlier call
+    with the same key is still running: nothing started, nothing recorded)."""
+    value: object = None
+    state: str = "ok"
+    error: str | None = None
 
-    With `timeout` (seconds) the call runs in a thread of its own and the caller
-    waits at most that long: past it, "took longer than N s" is recorded and
-    `default` returned. Python cannot stop the thread, so until it ends, later
-    calls of the same plugin and `what` return `default` at once rather than
-    starting another.
-    """
+
+def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET, key=None, **kwargs):
+    """Call plugin code within a time budget; the one way core calls into a plugin where something waits on it.
+
+    The call runs in a daemon thread of its own (never an executor, which a hung
+    call would exhaust and which would hold up the process's exit), and the
+    caller waits at most `timeout` seconds. Python cannot stop the thread: until
+    it ends, a call with the same plugin and `key` (default: `what`) is `busy`.
+    SystemExit and other errors from plugin code are recorded, never raised.
+    With timeout=None the call runs in the calling thread."""
     if timeout is None:
         try:
-            return function(*args, **kwargs)
-        except Exception as error:
-            record(loaded, what, error, root)
-            return default
-    key = (id(loaded), what)
-    with _lock:
-        if key in _running:
-            return default
-        _running.add(key)
-    outcome = {}
+            return Outcome(function(*args, **kwargs))
+        except (Exception, SystemExit) as error:
+            return Outcome(None, "error", record(loaded, what, error, root))
+    running_key = (id(loaded), what if key is None else key)
+    with _running_lock:
+        if running_key in _running:
+            return Outcome(None, "busy")
+        _running.add(running_key)
+    outcome, finished = {}, threading.Event()
 
     def call():
         try:
             outcome["value"] = function(*args, **kwargs)
-        except Exception as error:
+        except BaseException as error:  # SystemExit included: a plugin never ends the process from here
             outcome["error"] = error
         finally:
-            with _lock:
-                _running.discard(key)
+            with _running_lock:
+                _running.discard(running_key)
+            finished.set()
 
-    worker = threading.Thread(target=call, name=f"plugin {loaded.name}: {what}", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        record(loaded, what, TimeoutError(f"took longer than {timeout:g} s"), root)
-        return default
+    threading.Thread(target=call, name=f"plugin {loaded.name}: {what}", daemon=True).start()
+    if not finished.wait(timeout):
+        return Outcome(None, "timeout", record(loaded, what, TimeoutError(f"took longer than {timeout:g} s"), root))
     if "error" in outcome:
-        record(loaded, what, outcome["error"], root)
-        return default
-    return outcome.get("value")
+        return Outcome(None, "error", record(loaded, what, outcome["error"], root))
+    return Outcome(outcome.get("value"))
+
+
+def guard(loaded, what, function, *args, root=None, default=None, timeout=None, **kwargs):
+    """guarded(), returning the call's value, or `default` when it failed, timed out or was busy."""
+    outcome = guarded(loaded, what, function, *args, root=root, timeout=timeout, **kwargs)
+    return outcome.value if outcome.state == "ok" else default
 
 
 def errors():

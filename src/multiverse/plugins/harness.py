@@ -131,16 +131,21 @@ def launch_plan(info, base_settings=None, base_environment=None):
 
 
 def _unusable(root, family):
-    """{name: (version, why) or None} of the plugins on here whose settings cannot be used: (version, why) for
-    those that would have added to a `family` launch, None for the rest."""
+    """{name: (version, why) or None} of the plugins on here that cannot take part: settings that cannot be used,
+    or code that failed to load. (version, why) for those that would have added to a `family` launch (a failed
+    one counts when it extends `launch` or ships something for that harness), None for the rest."""
     found = {}
     for entry in loader.entries(root):
-        if not entry.on or entry.state != "unusable" or entry.manifest is None:
+        if not entry.on or entry.state not in ("unusable", "failed") or entry.manifest is None:
             continue
-        contributes = entry.manifest.harnesses.get(family) or (
-            entry.loaded is not None and entry.loaded.registrations.launch.get(family))
-        detail = (entry.problem or "").split(loader.UNUSABLE, 1)[-1]
-        found[entry.name] = (entry.manifest.version, detail) if contributes else None
+        if entry.state == "unusable":
+            contributes = entry.manifest.harnesses.get(family) or (
+                entry.loaded is not None and entry.loaded.registrations.launch.get(family))
+            why = loader.UNUSABLE + (entry.problem or "").split(loader.UNUSABLE, 1)[-1]
+        else:
+            contributes = entry.manifest.harnesses.get(family) or "launch" in entry.manifest.extends
+            why = "it failed to load: " + (entry.problem or "").split(" failed to load: ", 1)[-1]
+        found[entry.name] = (entry.manifest.version, why) if contributes else None
     return found
 
 
@@ -151,9 +156,9 @@ def _launch_plan(info, plan):
     # cannot be used here is left out of the launch, and the launch says why, as for a plugin that broke.
     unusable = _unusable(info.universe, info.family)
     active = [loaded for loaded in active if loaded.name not in unusable]
-    for name, (version, detail) in sorted((name, found) for name, found in unusable.items() if found):
-        plan.plugins[name] = {"version": version, "state": "skipped", "reason": loader.UNUSABLE + detail}
-        plan.problems.append(f"plugin {name} was left out: {loader.UNUSABLE}{detail}")
+    for name, (version, why) in sorted((name, found) for name, found in unusable.items() if found):
+        plan.plugins[name] = {"version": version, "state": "skipped", "reason": why}
+        plan.problems.append(f"plugin {name} was left out: {why}")
     if callable(info.version):
         wanted = any(loaded.manifest.harnesses.get(info.family) or loaded.registrations.launch.get(info.family)
                      for loaded in active)
@@ -162,7 +167,6 @@ def _launch_plan(info, plan):
         except Exception:
             version = None
         info = replace(info, version=version)
-    plan.status_items = declared_items(info.universe, active)
     for loaded in active:
         manifest = loaded.manifest
         entries = manifest.harnesses.get(info.family, ())
@@ -241,7 +245,26 @@ def _launch_plan(info, plan):
                                  | ({"claude_settings"} if any(c.claude_settings for c in contributions) else set()))
         if any(contribution.problem for contribution in contributions):
             record["problem"] = "; ".join(c.problem for c in contributions if c.problem)
+    # Status-line items only of the plugins that take part in this launch: one left out shows none, and an item
+    # file an earlier launch left behind is removed, so the line never shows what nobody updates.
+    taking_part = [loaded for loaded in active if plan.plugins.get(loaded.name, {}).get("state") != "skipped"]
+    plan.status_items = declared_items(info.universe, taking_part)
+    _remove_stale_items(info, {item["name"] for item in plan.status_items})
     return plan
+
+
+def _remove_stale_items(info, declared):
+    """Remove the item files of an agent's earlier launch that this one does not declare. Never fails a plan."""
+    if not isinstance(info.universe, (str, Path)) or not isinstance(info.agent_id, str) or not info.agent_id \
+            or "/" in info.agent_id or info.agent_id in (".", ".."):
+        return
+    items = Path(info.universe) / "state" / "agents" / info.agent_id / ITEMS
+    try:
+        stale = [path for path in items.glob("*.txt") if path.stem not in declared] if items.is_dir() else []
+        for path in stale:
+            path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 _versions = {}

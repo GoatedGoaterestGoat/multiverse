@@ -73,12 +73,21 @@ class FirstUseTest(PluginTestCase):
         self.assertNotIn("notes", second.stderr)
         self.assertEqual(len(self.backups()), 1)
 
-    def test_a_switch_plugins_json_already_has_is_kept_and_not_claimed(self):
-        self.enable("notes", on=False)
+    def test_the_old_files_on_or_off_wins_over_a_switch_plugins_json_already_has(self):
+        """A template's plugins.json may name the plugin before its old file is converted (PR #20 review, 6)."""
+        self.enable("notes", on=True)
+        self.legacy({"colour": "teal", "enabled": False})
+        line = self.mv2("list").stderr
+        self.assertIn("mv2: notes: converted notes.json to plugin-settings/notes.json, turned it off in plugins.json",
+                      line)
+        self.assertFalse(json.loads((self.root / "plugins.json").read_text())["enabled"]["notes"])
+
+    def test_a_switch_that_already_agrees_is_not_claimed(self):
+        self.enable("notes", on=True)
         self.legacy({"colour": "teal"})
         line = self.mv2("list").stderr
         self.assertIn("mv2: notes: converted notes.json to plugin-settings/notes.json (the old file", line)
-        self.assertFalse(json.loads((self.root / "plugins.json").read_text())["enabled"]["notes"])
+        self.assertTrue(json.loads((self.root / "plugins.json").read_text())["enabled"]["notes"])
 
     def test_a_subverse_is_converted_by_a_command_in_its_parent(self):
         child = self.subverse("child")
@@ -244,7 +253,8 @@ class ConversionSafetyTest(FirstUseTest):
 
     # The FirstUseTest tests are not run again here.
     test_the_first_command_converts_once_and_says_so_on_stderr = None
-    test_a_switch_plugins_json_already_has_is_kept_and_not_claimed = None
+    test_the_old_files_on_or_off_wins_over_a_switch_plugins_json_already_has = None
+    test_a_switch_that_already_agrees_is_not_claimed = None
     test_a_subverse_is_converted_by_a_command_in_its_parent = None
     test_two_processes_at_once_convert_once = None
     test_a_failed_conversion_is_said_once_reported_by_doctor_and_retried_when_the_file_changes = None
@@ -342,7 +352,8 @@ class UpdateConversionTest(FirstUseTest):
 
     # The FirstUseTest tests are not run again here.
     test_the_first_command_converts_once_and_says_so_on_stderr = None
-    test_a_switch_plugins_json_already_has_is_kept_and_not_claimed = None
+    test_the_old_files_on_or_off_wins_over_a_switch_plugins_json_already_has = None
+    test_a_switch_that_already_agrees_is_not_claimed = None
     test_a_subverse_is_converted_by_a_command_in_its_parent = None
     test_two_processes_at_once_convert_once = None
     test_a_failed_conversion_is_said_once_reported_by_doctor_and_retried_when_the_file_changes = None

@@ -1,5 +1,7 @@
 """The harness side of plugins: launch plans, capabilities, usage, status-line items and helper actions."""
 import json
+import threading
+import time
 import os
 from pathlib import Path
 import subprocess
@@ -292,3 +294,57 @@ class LaunchPlanTest(PluginTestCase):
         self.assertIn("mv2 plugin guard crash: helper crash: ZeroDivisionError", result.stderr)
         self.assertEqual(run("guard", "nothing").stderr.strip(), "mv2 plugin guard nothing: guard has no helper action 'nothing'")
         self.assertEqual(run("ghost", "x").returncode, 1)
+
+
+class LoadingAndLaunchReviewTest(PluginTestCase):
+    """PR #20 review: failed imports are said in launches and tried again, items follow the launch, imports are
+    per plugin."""
+
+    def info(self, **changes):
+        values = dict(universe=self.root, agent_id="agent-1", agent_name="worker", mode="spawn", family="claude",
+                      harness="claude", version=(2, 1, 296), bridge=True)
+        values.update(changes)
+        return harness.LaunchInfo(**values)
+
+    def test_a_plugin_that_fails_to_load_is_said_and_tried_again_once_its_files_change(self):
+        directory = self.write_plugin("brittle", {
+            "module": "plugin", "extends": ["launch", "statusline"], "permissions": ["harness.claude"],
+            "harnesses": {"claude": [{"dir": "claude"}]}, "statusline": {"brittle": {"claude": True}}},
+            {"plugin.py": "raise SystemExit(2)\n"})
+        self.enable("brittle")
+        plan = harness.launch_plan(self.info())
+        self.assertEqual(plan.plugins["brittle"]["state"], "skipped")
+        self.assertIn("plugin brittle was left out: it failed to load: SystemExit: 2", plan.problems)
+        self.assertEqual(plan.status_items, [])
+        (directory / "plugin.py").write_text("def register(mv): pass\n")  # fixed: no restart needed
+        plan = harness.launch_plan(self.info())
+        self.assertEqual(plan.plugins["brittle"]["state"], "loaded")
+        self.assertEqual([item["name"] for item in plan.status_items], ["brittle"])
+
+    def test_a_stale_item_file_is_removed_at_launch(self):
+        items = self.root / "state" / "agents" / "agent-1" / harness.ITEMS
+        items.mkdir(parents=True)
+        (items / "compaction.txt").write_text("trees 51/52 · building\n")
+        harness.launch_plan(self.info())
+        self.assertFalse((items / "compaction.txt").exists())
+
+    def test_one_slow_import_holds_up_no_other_plugin(self):
+        slow = self.write_plugin("slow", {"module": "plugin"}, {"plugin.py": (
+            "import os, time\n"
+            "while not os.path.exists(os.environ['RELEASE']):\n    time.sleep(0.02)\n"
+            "def register(mv): pass\n")})
+        self.write_plugin("quick", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("slow")
+        self.enable("quick")
+        release = self.work / "release"
+        os.environ["RELEASE"] = str(release)
+        self.addCleanup(release.touch)
+        thread = threading.Thread(target=lambda: loader.load(self.entry("slow")), daemon=True)
+        thread.start()
+        time.sleep(0.2)
+        started = time.monotonic()
+        loader.load(self.entry("quick"))
+        self.assertLess(time.monotonic() - started, 1)
+        release.touch()
+        thread.join(10)
+        self.assertTrue(slow.exists())

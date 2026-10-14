@@ -526,14 +526,14 @@ class SettingsAccess:
         return function
 
     def migrate(self, function):
-        """function(data, source) brings older settings to this version, for `mv2 plugins migrate`.
+        """function(data, source) brings older settings to this version: on first use, and for `mv2 plugins migrate`.
 
         `source` is the settings version the file was written for (a number), or
         "legacy" for the pre-plugin file plugin.json names (settings.legacy). It
         returns the new settings (with "schema" set to the current version). For
-        "legacy" it may return (settings, on): on (true or false) also turns the
-        plugin on or off in that universe's plugins.json, where it says nothing
-        yet. Usable as a decorator."""
+        "legacy" it may return (settings, on): on (true or false) also sets the
+        plugin's switch in that universe's plugins.json, whatever it said before.
+        It runs with that universe as the API's. Usable as a decorator."""
         self._loaded.registrations.settings_migrate = function
         return function
 

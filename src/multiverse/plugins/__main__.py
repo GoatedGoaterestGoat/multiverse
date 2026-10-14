@@ -5,7 +5,9 @@ agent's own Python ($MV2_PYTHON) and environment: the universe is -u, else
 MV2_UNIVERSE, else the current directory. The plugin must be on there. The
 action's return value is the exit code (None is 0); it prints its own output.
 An action that fails unexpectedly prints `mv2 plugin PLUGIN ACTION: ...` and
-exits 1, with the traceback in the plugin's errors.log. Before the action, a
+exits 1, with the traceback in the plugin's errors.log. mv2's own failures (a
+usage error, a universe or plugin that cannot be used, a plugin that fails to
+load) exit 1, never 2: 2 is left to the action, as a deliberate refusal. Before the action, a
 pre-plugin settings file in the universe is converted, once (stderr says so).
 """
 import argparse
@@ -16,9 +18,17 @@ from .. import universe
 from . import PluginError, entry, loader, migrate_on_first_use
 
 
+class _Parser(argparse.ArgumentParser):
+    """Its own usage errors exit 1: exit 2 is the action's alone, a deliberate refusal (compaction's guard)."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(1, f"{self.prog}: error: {message}\n")
+
+
 def main(argv=None):
-    parser = argparse.ArgumentParser(prog="python -m multiverse.plugins", description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = _Parser(prog="python -m multiverse.plugins", description=__doc__,
+                     formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("-u", "--universe", dest="root")
     commands = parser.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run", help="Run a plugin's helper action")

@@ -1,8 +1,11 @@
 """The plugin core: manifests, discovery, trust, plugins.json, settings, loading and the API."""
 import importlib
 import json
+import threading
+import time
 import os
 from pathlib import Path
+import subprocess
 import sys
 from unittest import mock
 
@@ -466,3 +469,87 @@ class TestingHelpersTest(PluginTestCase):
         self.plugin = self.directory
         self.enable("deep")
         self.assertEqual(self.module("engine.model").VALUE, 42)
+
+
+class GuardedTest(PluginTestCase):
+    """One helper for every call into plugin code: a daemon thread with a time budget (PR #20 review, item 4)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_plugin("calls", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("calls")
+        self.loaded = loader.load(self.entry("calls"))
+        self.release = threading.Event()
+        self.addCleanup(self.release.set)
+
+    def hang(self):
+        self.release.wait(10)
+        return "late"
+
+    def test_timeout_busy_and_keys(self):
+        first = loader.guarded(self.loaded, "column x", self.hang, root=self.root, timeout=0.1)
+        self.assertEqual(first.state, "timeout")
+        busy = loader.guarded(self.loaded, "column x", self.hang, root=self.root, timeout=0.1)
+        self.assertEqual((busy.state, busy.value), ("busy", None))
+        other = loader.guarded(self.loaded, "column y", lambda: 3, root=self.root, timeout=0.1)
+        self.assertEqual((other.state, other.value), ("ok", 3))
+        keyed = loader.guarded(self.loaded, "column x", lambda: 4, root=self.root, timeout=0.1, key="row 2")
+        self.assertEqual((keyed.state, keyed.value), ("ok", 4))  # a key of its own is not busy
+        self.assertEqual(self.loaded.errors, ["column x: TimeoutError: took longer than 0.1 s"])  # once
+        self.release.set()
+
+    def test_system_exit_and_errors_are_contained(self):
+        def leave():
+            raise SystemExit(3)
+        for timeout in (None, 1):
+            with self.subTest(timeout=timeout):
+                outcome = loader.guarded(self.loaded, "action", leave, root=self.root, timeout=timeout)
+                self.assertEqual(outcome.state, "error")
+                self.assertIn("SystemExit", outcome.error)
+                self.assertIsNone(loader.guard(self.loaded, "action", leave, root=self.root, timeout=timeout,
+                                               default=None))
+
+    def test_no_global_lock_while_calling(self):
+        holder = threading.Thread(target=lambda: (loader._lock.acquire(), self.release.wait(10), loader._lock.release()))
+        holder.start()
+        self.addCleanup(holder.join, 10)
+        started = time.monotonic()
+        outcome = loader.guarded(self.loaded, "fact", lambda: 5, root=self.root, timeout=1)
+        self.assertEqual((outcome.state, outcome.value), ("ok", 5))
+        self.assertLess(time.monotonic() - started, 1)
+        self.release.set()
+
+    def test_errors_log_is_throttled_and_rotated(self):
+        log = self.root / "state" / "plugins" / "calls" / "errors.log"
+        for index in range(50):  # a column failing differently on every row, every refresh
+            loader.guard(self.loaded, "column x", lambda index=index: 1 / 0 if index % 2 else int(f"x{index}"),
+                         root=self.root)
+        self.assertEqual(log.read_text().count("Traceback"), 1)  # one traceback per call site and minute
+        with mock.patch.object(loader, "ERRORS_LOG_BYTES", 2000):
+            for index in range(200):
+                loader.record(self.loaded, f"call {index}", ValueError("x" * 50), self.root)
+        self.assertTrue(log.with_name("errors.log.1").exists())
+        self.assertLess(log.stat().st_size, 2000 + 4000)
+
+
+class HelperExitTest(PluginTestCase):
+    """`python -m multiverse.plugins run` exits 2 only when the action returns 2 (PR #20 review)."""
+
+    def run_helper(self, *arguments):
+        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        return subprocess.run([sys.executable, "-m", "multiverse.plugins", *arguments], env=environment,
+                              capture_output=True, text=True, timeout=60).returncode
+
+    def test_only_the_action_exits_2(self):
+        self.write_plugin("guardian", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": (
+            "def register(mv):\n    mv.helper.action('refuse', lambda arguments: 2)\n")})
+        self.write_plugin("broken", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": "raise SystemExit(2)\n"})
+        self.enable("guardian")
+        self.enable("broken")
+        root = str(self.root)
+        self.assertEqual(self.run_helper("-u", root, "run", "guardian", "refuse"), 2)  # deliberate
+        for arguments in ((), ("run",), ("--nope",), ("-u", root, "run", "ghost", "refuse"),
+                          ("-u", root, "run", "broken", "refuse"), ("-u", str(self.work / "none"), "run", "a", "b"),
+                          ("-u", root, "run", "guardian", "missing")):
+            with self.subTest(arguments):
+                self.assertEqual(self.run_helper(*arguments), 1)

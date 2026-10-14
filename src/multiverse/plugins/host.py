@@ -249,6 +249,8 @@ def _read_cursor(scope, name):
 
 
 def _write_cursor(scope, name, sequence):
+    if not (Path(scope) / "universe.json").is_file():
+        return  # removed or moved meanwhile: a cursor must never bring its directories back
     path = _cursor_path(scope, name)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(".events.cursor.tmp")
@@ -345,25 +347,40 @@ class _Services:
 
 
 def _deliver(loaded, mv, scope, name):
+    """Deliver what is new in `scope`'s journal, at least once to each handler.
+
+    The cursor moves past an event only once every matching handler finished
+    with it (or failed, which is recorded): one still running, or out of time,
+    stops the batch there, and the event is delivered again on the next poll.
+    A universe that was removed or moved is left alone."""
+    scope = Path(scope)
+    if not (scope / "universe.json").is_file():
+        return
     after = _read_cursor(scope, name)
     found, gap = events.read(scope, after)
     universe = mv.universe(scope)
     if gap is not None:
-        _dispatch(loaded, universe, {"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, scope)
-        after = gap["to"]
-        _write_cursor(scope, name, after)
+        if not _dispatch(loaded, universe, {"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, scope):
+            return
+        _write_cursor(scope, name, gap["to"])
     for event in found:
-        _dispatch(loaded, universe, event, scope)
+        if not _dispatch(loaded, universe, event, scope):
+            return
         _write_cursor(scope, name, event["seq"])
 
 
 def _dispatch(loaded, universe, event, scope):
-    kind = event.get("type", "")
-    for pattern, handler in loaded.registrations.handlers:
+    """Run every handler that matches `event`; False when one is still running or ran out of time."""
+    kind, finished = event.get("type", ""), True
+    for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
         if fnmatch.fnmatchcase(kind, pattern):
             value = api.Event(kind, event.get("seq", 0), event.get("at", ""), universe, event.get("agent"),
                               event.get("launch"), event.get("data") or {}, _age(event.get("at", "")))
-            loader.guard(loaded, f"event {kind}", handler, value, root=scope, timeout=HANDLER_SECONDS)
+            label = getattr(handler, "__name__", f"handler {index + 1}")
+            outcome = loader.guarded(loaded, f"event {kind} ({label})", handler, value, root=scope,
+                                     timeout=HANDLER_SECONDS, key=f"handler {index}")
+            finished = finished and outcome.state not in ("timeout", "busy")
+    return finished
 
 
 def main(argv=None):

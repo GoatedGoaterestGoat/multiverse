@@ -426,7 +426,9 @@ def migrate(root, item):
     with _in_universe(root):
         settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"], root)
     switches = config.load(root)
-    switch = legacy and on is not None and found.name not in switches.enabled
+    # A legacy file's own on or off always wins: a template's plugins.json may name the plugin before its old
+    # file is converted (the development template turns compaction on), and the old file is what the person chose.
+    switch = legacy and on is not None and switches.enabled.get(found.name) != on
     if switch and switches.problem:
         raise MigrationError(f"{config.path(root).name} cannot be used, so the switch for {found.name} cannot be "
                              f"set: {switches.problem}")
