@@ -381,8 +381,8 @@ class RetryTest(PluginUpdateTest):
             result = update.run()
         self.assertTrue(result["ok"], result)
         self.assertEqual(self.entry(result)["state"], "unavailable")
-        self.assertEqual(len(fetches), 1)
-        self.assertNotIn("protocol.file.allow=always", fetches[0])
+        self.assertEqual(len(fetches), 2)  # refused SHA, then ordinary refs within the same budget
+        self.assertTrue(all("protocol.file.allow=always" not in args for args in fetches))
         self.assertIn("access revoked", update.format_output(result))
 
 

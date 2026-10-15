@@ -9,6 +9,7 @@ is only reported (mv2 plugins install NAME). A plugin that cannot move leaves
 the rest of the update in place, and says how to repair it.
 """
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -16,6 +17,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 
 
 NOTES = [
@@ -28,6 +30,8 @@ SETTINGS_NOTICES = ("converted", "partial", "failed", "not_installed")
 def configure(parser):
     parser.add_argument("--check", action="store_true", help="Fetch and report changes without updating code or environment")
     parser.add_argument("--json", action="store_true", help="Print the result as JSON")
+    parser.add_argument("--plugin-fetch-timeout", type=float, default=PLUGIN_FETCH_TIMEOUT, metavar="SECONDS",
+                        help="Total fetch budget per plugin (default: 120 seconds); increase for slow remotes")
 
 
 def _git(checkout, *args, timeout=120):
@@ -90,6 +94,7 @@ def _clean(checkout, *, allow_dirty=False, plugins=()):
 
 PLUGIN_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
 PLUGIN_TIMEOUT = 600
+PLUGIN_FETCH_TIMEOUT = 120
 
 
 def _must(directory, *args):
@@ -255,8 +260,8 @@ class _PluginUnavailable(ValueError):
     """A plugin pin cannot be fetched; optional code must not block mv2 updates."""
 
 
-def _fetch_plugin(directory, revision):
-    """Fetch missing objects only, with Git's file transport allowed for a configured local remote only."""
+def _fetch_plugin(directory, revision, *, timeout=PLUGIN_FETCH_TIMEOUT):
+    """Fetch the missing pin; a rejected SHA can fall back once within the same overall budget."""
     if _has_commit(directory, revision):
         return
     try:
@@ -270,22 +275,32 @@ def _fetch_plugin(directory, revision):
         # Match local URL support in plugins.install, scoped to these fetches, never global config.
         local = url.startswith(("/", "./", "../", "~", "file:")) or (":" not in url)
         options = ("-c", "protocol.file.allow=always") if local else ()
-        fetched = _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
-                       timeout=PLUGIN_TIMEOUT)
+        deadline = time.monotonic() + timeout
+
+        def fetch(*revisions):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("git fetch", timeout)
+            return _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
+                        *revisions, timeout=remaining)
+
+        fetched = fetch(revision)
         if fetched.returncode:
-            raise ValueError(_detail(fetched))
-        if not _has_commit(directory, revision):
-            fetched = _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
-                           revision, timeout=PLUGIN_TIMEOUT)
+            # Some servers forbid requesting a reachable commit by SHA. Their ordinary refs can still
+            # supply it, but this gets only the budget left by the first attempt. A timeout never retries.
+            fetched = fetch()
             if fetched.returncode:
                 raise ValueError(_detail(fetched))
         if not _has_commit(directory, revision):
             raise ValueError(f"the remote did not provide commit {revision[:7]}")
+    except subprocess.TimeoutExpired as error:
+        raise _PluginUnavailable(f"its fetch did not finish within {timeout:g} s; for a slow remote, retry with "
+                                 "mv2 update --plugin-fetch-timeout SECONDS using a larger budget") from error
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         raise _PluginUnavailable(f"its remote could not supply {revision[:7]}: {error}") from error
 
 
-def _move_plugins(checkout, plan, state, pins):
+def _move_plugins(checkout, plan, state, pins, *, fetch_timeout=PLUGIN_FETCH_TIMEOUT):
     """Move each initialized plugin whose checkout differs from its pin; returns the failures.
 
     Everything for one plugin, its checks included, is inside its own failure
@@ -303,7 +318,7 @@ def _move_plugins(checkout, plan, state, pins):
                 raise ValueError("it changed during the update and was left as it is")
             if _index_pin(checkout, path) != new:
                 raise ValueError("the commit the mv2 checkout pins for it changed during the update; it was left as it is")
-            _fetch_plugin(checkout / path, new)
+            _fetch_plugin(checkout / path, new, timeout=fetch_timeout)
             # Fetching objects never moves work. Recheck the repository and index before any checkout.
             if _plugin_facts(checkout, path) != facts or _index_pin(checkout, path) != new:
                 raise ValueError("it changed during the update and was left as it is")
@@ -335,13 +350,15 @@ def _move_plugins(checkout, plan, state, pins):
     return failures
 
 
-def run(root=None, *, check=False, json=False):
+def run(root=None, *, check=False, json=False, plugin_fetch_timeout=PLUGIN_FETCH_TIMEOUT):
     # root is deliberately unused: -u selects a universe, not mv2's source repository.
     result = {"ok": False, "check": check, "json": json, "checkout": None, "branch": None,
               "upstream": None, "before": None, "after": None, "commits": 0,
               "environment": {"state": "not_run"}, "notes": []}
     refusals = []
     try:
+        if not math.isfinite(plugin_fetch_timeout) or plugin_fetch_timeout <= 0:
+            raise ValueError("--plugin-fetch-timeout must be a positive finite number of seconds.")
         if not shutil.which("git"):
             raise ValueError("Git is not available; install it before updating mv2.")
         checkout = source_checkout()
@@ -418,7 +435,7 @@ def run(root=None, *, check=False, json=False):
                 result["notes"] = list(NOTES)
             if merged.returncode:
                 raise ValueError(f"Could not fast-forward mv2: {_detail(merged)}")
-        plugin_failures = _move_plugins(checkout, plan, state, links)
+        plugin_failures = _move_plugins(checkout, plan, state, links, fetch_timeout=plugin_fetch_timeout)
         moved = [entry["path"] for entry in plan if entry["state"] == "updated"]
         if moved:
             result["notes"] = [*result["notes"], f"Running agents reload the Claude code of {', '.join(moved)} at once; "
@@ -456,6 +473,8 @@ def run(root=None, *, check=False, json=False):
         result["ok"] = True
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         result["reason"] = " ".join(dict.fromkeys([*refusals, str(error)]))
+        if not check and result["environment"]["state"] == "pending":
+            result["environment"] = {"state": "not_run", "reason": "the code update did not complete"}
     return result
 
 
@@ -570,10 +589,11 @@ def format_output(result):
             lines.append(f"Environment sync skipped: {environment['reason']}.")
         elif result["check"]:
             lines.append("The environment would be synced with uv sync --locked.")
-    if not result["ok"] and not result["check"] and result["environment"]["state"] != "not_run":
+    if not result["ok"] and not result["check"] and (environment["state"] != "not_run" or environment.get("reason")):
         environment = result["environment"]
         lines.append({"synced": "Environment synced.", "failed": "Environment sync failed (see above).",
-                      "skipped": f"Environment sync skipped: {environment.get('reason')}."}.get(
+                      "skipped": f"Environment sync skipped: {environment.get('reason')}.",
+                      "not_run": f"Environment not synced: {environment.get('reason')}."}.get(
                           environment["state"], f"Environment: {environment['state']}."))
     for entry in result.get("plugins", []):
         lines.extend(_plugin_lines(result, entry))
