@@ -45,6 +45,11 @@ WORKER_POLL_SECONDS = 0.5
 PRUNE_SECONDS = 3600
 HANDLER_SECONDS = 60.0
 TIMEOUTS_PER_EVENT = 3  # a handler out of time on one event this many times is given up on for that event
+READ_LIMIT = 500  # events one journal read returns
+PAGES_PER_POLL = 4  # reads one poll may make, so handlers ahead of a stuck one keep going
+ABANDONED_PER_WORKER = 2  # calls left running past their deadline before the worker restarts itself
+DELIVERY = "delivery.json"  # state/plugins/NAME/: recent give-ups, which mv2 plugins and doctor show
+GIVE_UPS_SHOWN = 24 * 3600  # seconds a give-up stays in mv2 plugins and doctor
 NEEDS = frozenset({"events", "service"})
 
 
@@ -363,6 +368,13 @@ def work(root, name):
             if loaded.registrations.handlers:
                 for scope in scopes:
                     _deliver(loaded, mv, scope, name)
+                _abandoned[:] = [item for item in _abandoned if loader.still_running(*item)]
+                if len(_abandoned) >= ABANDONED_PER_WORKER:
+                    # Calls that never returned hold threads: a fresh worker has none (the supervisor starts it
+                    # again, at most RESTARTS times in RESTART_WINDOW). Their events are given up on already.
+                    _log(root, f"{name}: {len(_abandoned)} handler calls never returned; restarting its worker")
+                    failed.set()
+                    break
             stopping.wait(WORKER_POLL_SECONDS)
     finally:
         stopping.set()
@@ -412,35 +424,47 @@ def _deliver(loaded, mv, scope, name):
     """Deliver what is new in `scope`'s journal, at least once to each handler.
 
     Each handler goes through the events in order on its own: one still
-    running, or out of time, holds only itself, and its siblings go on. A
-    handler that finished an event never gets it again while a sibling catches
-    up. One out of time on the same event TIMEOUTS_PER_EVENT times is given up
-    on for that event, with "gave up on seq N" recorded. The cursor on disk
-    moves past an event once every matching handler finished with it, failed
-    (recorded) or was given up on. A universe that was removed or moved is left
-    alone."""
+    running, or out of time, holds only itself, and its siblings go on, past
+    one read's worth of events too. A handler that finished an event never gets
+    it again while a sibling catches up. A call counts one try each time it runs
+    out of time and again for each HANDLER_SECONDS it keeps running after that;
+    after TIMEOUTS_PER_EVENT tries the handler is given up on for that event
+    ("gave up" is recorded where mv2 plugins and doctor show it) and its next
+    events run in calls of their own. The cursor on disk moves past an event
+    once every matching handler finished with it, failed (recorded) or was given
+    up on. A universe that was removed or moved is left alone."""
     scope = Path(scope)
     if not (scope / "universe.json").is_file():
         return
     after = _read_cursor(scope, name)
-    found, gap = events.read(scope, after)
-    if gap is not None:
-        found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
-    if found:
-        newest = found[-1]["seq"]
-        for key in [key for key, seq in _finished.items() if key[:2] == (loaded.name, str(scope)) and seq > newest]:
-            del _finished[key]  # the journal started again (its state was removed): nothing here was seen yet
     universe = mv.universe(scope)
-    held, complete = set(), True  # handlers that have not finished an earlier event in this pass
-    for event in found:
-        if not _dispatch(loaded, universe, event, scope, held):
-            complete = False
-        elif complete:
-            _write_cursor(scope, name, event["seq"])
+    held, complete, page_after = set(), True, after  # held: handlers that have not finished an earlier event
+    for page in range(PAGES_PER_POLL):
+        found, gap = events.read(scope, page_after, limit=READ_LIMIT)
+        if page == 0:
+            if gap is not None:
+                found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
+            if found:
+                newest = found[-1]["seq"]
+                for key in [key for key, seq in _finished.items()
+                            if key[:2] == (loaded.name, str(scope)) and seq > newest]:
+                    del _finished[key]  # the journal started again (its state was removed): nothing here was seen
+        if not found:
+            break
+        for event in found:
+            if not _dispatch(loaded, universe, event, scope, held):
+                complete = False
+            elif complete:
+                _write_cursor(scope, name, event["seq"])
+        page_after = found[-1]["seq"]
+        if len(found) < READ_LIMIT:
+            break
 
 
-# Per (plugin, universe, handler): the last seq it finished, and (seq, timeouts) for the event it is on.
-_finished, _timeouts = {}, {}
+# Per (plugin, universe, handler): the last seq it finished; (seq, tries, first try's start) for the event it is
+# on; and the generation of its guard key, raised when a call is left running so the next one can start.
+_finished, _timeouts, _generations = {}, {}, {}
+_abandoned = []  # (Loaded, guard key) of calls given up on while still running, in this process
 
 
 def _dispatch(loaded, universe, event, scope, held=None):
@@ -462,24 +486,61 @@ def _dispatch(loaded, universe, event, scope, held=None):
                           event.get("data") or {}, _age(event.get("at", "")))
         label = getattr(handler, "__name__", f"handler {index + 1}")
         what = f"event {kind} ({label})"
-        outcome = loader.guarded(loaded, what, handler, value, root=scope, timeout=HANDLER_SECONDS,
-                                 key=f"handler {index} in {scope}")
-        if outcome.state == "timeout":
-            on, count = _timeouts.get(key, (seq, 0))
-            count = count + 1 if on == seq else 1
-            _timeouts[key] = (seq, count)
-            if count < TIMEOUTS_PER_EVENT:
+        started = time.monotonic()
+        guard_key = f"handler {index} in {scope} #{_generations.get(key, 0)}"
+        outcome = loader.guarded(loaded, what, handler, value, root=scope, timeout=HANDLER_SECONDS, key=guard_key)
+        if outcome.state in ("timeout", "busy"):
+            on, tries, first = _timeouts.get(key, (seq, 0, started))
+            if on != seq:
+                tries, first = 0, started
+            if outcome.state == "timeout":
+                tries += 1
+            # A call still running counts one more try for every HANDLER_SECONDS since its first started.
+            tries = max(tries, int((time.monotonic() - first) / HANDLER_SECONDS)) if on == seq else tries
+            _timeouts[key] = (seq, tries, first)
+            if tries < TIMEOUTS_PER_EVENT:
                 held.add(index)
                 finished = False
                 continue
-            loader.record(loaded, what, TimeoutError(f"gave up on seq {seq} after {count} timeouts"), scope)
-        elif outcome.state == "busy":  # its call on this or an earlier event still runs
-            held.add(index)
-            finished = False
-            continue
+            why = f"it ran past its {HANDLER_SECONDS:g} s limit {tries} times"
+            loader.record(loaded, what, TimeoutError(f"gave up on seq {seq} after {tries} timeouts"), scope)
+            _gave_up(scope, loaded.name, seq, kind, label, why)
+            # Its call is still running in its thread (a timed-out one too): the next event gets a call of its own.
+            _generations[key] = _generations.get(key, 0) + 1
+            _abandoned.append((loaded, guard_key))
         _finished[key] = seq
         _timeouts.pop(key, None)
     return finished
+
+
+def _gave_up(scope, name, seq, kind, handler, why):
+    """Keep a give-up where mv2 plugins, doctor and the Plugins screen read it (gave_up()); never raises."""
+    path = Path(scope) / "state" / "plugins" / name / DELIVERY
+    try:
+        with lock(path.with_name(".delivery.lock")):
+            try:
+                recorded = json.loads(path.read_text())
+            except (OSError, ValueError):
+                recorded = {}
+            entries = [item for item in recorded.get("gave_up", []) if isinstance(item, dict)][-19:]
+            entries.append({"seq": seq, "type": kind, "handler": handler, "why": why, "at": now()})
+            write(path, {"gave_up": entries})
+    except (OSError, ValueError):
+        pass
+
+
+def gave_up(scope, name):
+    """Sentences for the give-ups of plugin NAME in `scope` within the last GIVE_UPS_SHOWN seconds."""
+    try:
+        recorded = json.loads((Path(scope) / "state" / "plugins" / name / DELIVERY).read_text())
+    except (OSError, ValueError):
+        return []
+    found = []
+    for item in recorded.get("gave_up", []) if isinstance(recorded, dict) else []:
+        if isinstance(item, dict) and _age(str(item.get("at", ""))) <= GIVE_UPS_SHOWN:
+            found.append(f"{name}: gave up on event {item.get('seq')} ({item.get('type')}) in its handler "
+                         f"{item.get('handler')} at {item.get('at')}: {item.get('why')}")
+    return found
 
 
 def main(argv=None):

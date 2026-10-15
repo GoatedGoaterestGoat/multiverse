@@ -678,6 +678,12 @@ def guarded(loaded, what, function, *args, root=None, timeout=SYNCHRONOUS_BUDGET
     return Outcome(outcome.get("value"))
 
 
+def still_running(loaded, key):
+    """Whether a guarded call of `loaded` with this key has not returned yet."""
+    with _running_lock:
+        return (id(loaded), key) in _running
+
+
 def guard(loaded, what, function, *args, root=None, default=None, timeout=None, **kwargs):
     """guarded(), returning the call's value, or `default` when it failed, timed out or was busy."""
     outcome = guarded(loaded, what, function, *args, root=root, timeout=timeout, **kwargs)

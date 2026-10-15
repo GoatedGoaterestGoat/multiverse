@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from . import config, loader, settings as settings_files
+from . import config, loader, manifest as manifests, settings as settings_files
 from .loader import PluginError, entries, entry
 
 CATALOG_KINDS = ("skills", "commands", "workflows")
@@ -124,7 +124,10 @@ def problems(root, reserved=()):
         if failure.get("file") and legacy.is_file() and _fingerprint(legacy) == failure.get("fingerprint"):
             found_problems.append(f"{name}: {failure['file']} could not be converted ({failure.get('reason')}); "
                                   f"it is unchanged: fix it and run mv2 plugins migrate --apply")
+    from . import host
     for found in entries(root):
+        if found.manifest is not None and found.manifest.events:
+            found_problems.extend(host.gave_up(root, found.name))  # a handler given up on, in the last day
         for source, directory, state in found.set_aside:
             if state == "changed":  # a fork the person trusted, edited since: the other copy runs, and they hear so
                 found_problems.append(f"{found.name}: this universe's copy changed since it was trusted, so the "
@@ -230,6 +233,7 @@ def listing(root):
     [{name, on, state, source, version, description, problem, errors, permissions,
       commands, settings: {path, source, problem, schema} or None, shadowed}]
     """
+    from . import host
     recent = loader.errors()
     result = []
     for found in entries(root):
@@ -239,7 +243,8 @@ def listing(root):
                 "version": manifest.version if manifest else None,
                 "description": manifest.description if manifest else "",
                 "default": manifest.default if manifest and found.source == "bundled" else "off",
-                "problem": found.problem, "errors": recent.get(found.name, []),
+                "problem": found.problem, "errors": recent.get(found.name, []) + (
+                    host.gave_up(root, found.name) if manifest is not None and manifest.events else []),
                 "permissions": manifest.permission_texts() if manifest else [],
                 "commands": dict(manifest.commands) if manifest else {},
                 "provides": _provides(found),
@@ -747,6 +752,19 @@ def dashboard_panels(root):
         for kind, reference in sorted(loaded.registrations.panels.items()):
             found.append((loaded, kind, reference))
     return found
+
+
+def universe_copy(root, name):
+    """The directory of this universe's own copy of plugin NAME (in its plugins/), or None: found whatever another
+    source also provides, which entries() would choose while that copy is not trusted."""
+    for directory in loader._plugin_directories(Path(root) / "plugins"):
+        try:
+            if manifests.load(directory).name == name:
+                return directory.resolve()
+        except manifests.ManifestError:
+            if directory.name == name:
+                return directory.resolve()
+    return None
 
 
 def set_enabled(root, name, on):

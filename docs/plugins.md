@@ -158,7 +158,7 @@ mv2 plugins new my-plugin         # a starter plugin: plugin.json, plugin.py and
 mv2 plugins events [--prune]      # the event journal: size, oldest event, cursors
 mv2 plugins disable notifier
 mv2 plugins enable remote -u .multiverse/subverses/ops
-mv2 plugins trust my-plugin       # trust a universe plugin at its current content (below)
+mv2 plugins trust my-plugin       # trust this universe's own copy at its current content (below)
 mv2 plugins check ./my-plugin     # validate a plugin directory without enabling it
 mv2 plugins host start|stop|status
 ```
@@ -338,12 +338,18 @@ where they happen and delivered where plugins run**:
   across host restarts.
   - **At least once:** each handler goes through the events in order on its
     own, guarded on its own in each universe. One still running, or out of
-    time, holds only itself: its siblings go on, and an event a handler
-    finished is never given to it again while a sibling catches up. The same
-    event out of time 3 times is given up on for that handler, with "gave up on
-    seq N" recorded. A handler that raises is recorded and passed. The cursor
-    on disk moves past an event once every matching handler is done with it,
-    so after a restart an event may come again: handlers must be idempotent.
+    time, holds only itself: its siblings go on, past any number of events,
+    and an event a handler finished is never given to it again while a sibling
+    catches up. A call counts one try when it runs out of time and one more for
+    every further 60 s it keeps running; after 3 tries the handler is given up
+    on for that event, and its next events get calls of their own. A give-up
+    is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
+    ("gave up on event N (agent.status) in its handler H"). A worker left with
+    two calls that never returned restarts itself (the supervisor starts a
+    fresh one, which has no stuck threads). A handler that raises is recorded
+    and passed. The cursor on disk moves past an event once every matching
+    handler is done with it, so after a restart an event may come again:
+    handlers must be idempotent.
   - **Stale events:** each event says when it happened, so a handler can skip
     stale ones. The notifier ignores events older than five minutes after a
     restart.
@@ -1076,7 +1082,10 @@ is about consent and blast radius:
    typeahead.
 2. **Universe plugins need trust.** A repository can carry `.multiverse/plugins/`,
    and opening the dashboard in a fresh clone must not run its code.
-   - **Recording trust:** `mv2 plugins trust NAME` records the plugin's path and
+   - **Recording trust:** `mv2 plugins trust NAME` trusts this universe's own
+     copy of NAME, even when a bundled, checkout or other copy has the same
+     name (a local fork of compaction), and says which copy it trusted and
+     what it now overrides. It records the copy's path and
      a SHA-256 over every one of its files in
      `~/.multiverse/trusted-plugins.json`, outside every universe. Only `.git`
      is left out of the hash; compiled bytecode and `node_modules` are

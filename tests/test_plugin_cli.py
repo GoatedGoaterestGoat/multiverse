@@ -170,7 +170,7 @@ class PluginsCommandTest(PluginTestCase):
                                       {"plugin.py": "def register(mv): mv.bootstrap.line('local plugin')\n"},
                                       where=self.root / "plugins")
         self.mv2("plugins", "enable", "local", code=1)
-        self.assertIn("Trusted local", self.mv2("plugins", "trust", "local"))
+        self.assertIn("Trusted this universe's copy of local", self.mv2("plugins", "trust", "local"))
         self.assertIn("Turned local on", self.mv2("plugins", "enable", "local"))
         self.assertEqual(trust.state(directory), "trusted")
         self.assertIn("ready.", self.mv2("plugins", "check", str(directory)))

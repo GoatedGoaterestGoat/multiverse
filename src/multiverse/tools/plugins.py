@@ -150,13 +150,20 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         values, problem, path = plugins.settings_of(root, name)
         return {"universe": str(root), "name": name, "path": str(path), "values": values, "problem": problem,
                 "changed": sorted(changes)}
-    found = plugins.entry(root, name)
-    if found.source != "universe":
+    # This universe's own copy, even when another source has a plugin of that name: while untrusted it hides
+    # nothing, so looking the name up would find the other one.
+    copy = plugins.universe_copy(root, name)
+    if copy is None:
+        found = plugins.entry(root, name)
         raise ValueError(f"{name} is a {found.source} plugin; only plugins in a universe's plugins/ need trust")
     if plugin_action == "trust":
-        return {"name": name, "directory": str(found.directory), "fingerprint": trust.trust(found.directory),
-                "unreadable": trust.compiled(found.directory)}
-    return {"name": name, "directory": str(found.directory), "forgotten": trust.forget(found.directory)}
+        value = trust.trust(copy)
+        after = plugins.entry(root, name)
+        overrides = ([source for source, _ in after.shadowed if source != "universe"]
+                     if after.source == "universe" and Path(after.directory).resolve() == copy else [])
+        return {"name": name, "directory": str(copy), "fingerprint": value, "unreadable": trust.compiled(copy),
+                "overrides": overrides}
+    return {"name": name, "directory": str(copy), "forgotten": trust.forget(copy)}
 
 
 TEMPLATE = '''"""{name}: what it does, in a sentence. See docs/plugins.md for the API."""
@@ -319,7 +326,7 @@ def text(action, result):
                 lines.append(f"  ! {item['problem']}")
             for error in item["errors"][-3:]:
                 lines.append(f"  ! {error}")
-        reported = {item["problem"] for item in rows}
+        reported = {item["problem"] for item in rows} | {error for item in rows for error in item["errors"][-3:]}
         lines.extend(f"! {problem}" for problem in result["problems"] if problem not in reported)
         return "\n".join(lines)
     if action == "info":
@@ -367,7 +374,9 @@ def text(action, result):
         lines.append(json.dumps(result["values"], indent=2, ensure_ascii=False))
         return "\n".join(lines)
     if action == "trust":
-        text = f'Trusted {result["name"]} at its current content ({result["fingerprint"][:19]}…). Any change needs trust again.'
+        text = (f'Trusted this universe\'s copy of {result["name"]} ({result["directory"]}) at its current content '
+                f'({result["fingerprint"][:19]}…). Any change needs trust again.'
+                + "".join(f' It now overrides the {source} {result["name"]}.' for source in result.get("overrides", [])))
         if result.get("unreadable"):
             text += ("\n! It ships code you cannot read as source, which runs with your permissions: "
                      + ", ".join(result["unreadable"]) + ". Trust it only if you trust where these came from.")
