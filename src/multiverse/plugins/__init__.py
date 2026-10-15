@@ -188,10 +188,13 @@ def notes(root):
     with no old settings file waiting (then nothing is lost: it only does not run). The development template
     turns compaction on, and a checkout without access to its repository cannot install it."""
     waiting = dict(not_installed(root))
-    return [f"{found.name} is on here but not installed (an optional plugin: mv2 plugins install {found.name}, "
-            f"which needs access to its repository)"
-            for found in entries(root)
-            if found.on and found.state == "missing" and found.name in KNOWN and found.name not in waiting]
+    unknown = config.load(root).unknown
+    newer = ([f"plugins.json has fields this mv2 does not know: {', '.join(unknown)}; update mv2 to use them"]
+             if unknown else [])
+    return newer + [f"{found.name} is on here but not installed (an optional plugin: mv2 plugins install "
+                    f"{found.name}, which needs access to its repository)"
+                    for found in entries(root)
+                    if found.on and found.state == "missing" and found.name in KNOWN and found.name not in waiting]
 
 
 def doctor(root, universe_for):

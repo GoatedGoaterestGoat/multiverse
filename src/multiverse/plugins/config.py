@@ -26,6 +26,7 @@ class Config:
     problem: str | None = None
     events: dict = field(default_factory=dict)  # journal retention: retain_days, max_mb
     exists: bool = False
+    unknown: tuple = ()  # top-level fields a newer mv2 wrote: kept in the file, not used here
 
     def is_on(self, name, default="off"):
         value = self.enabled.get(name)
@@ -57,9 +58,9 @@ def parse(data, where=FILE):
     """A Config from the file's object; ValueError naming the field otherwise."""
     if data.get("schema", 1) != 1:
         raise ValueError(f"{where}: schema must be 1")
-    unknown = set(data) - KNOWN_FIELDS
-    if unknown:
-        raise ValueError(f"{where}: unknown fields: {', '.join(sorted(unknown))}")
+    # Fields a newer mv2 wrote (its plugins still have their switches here) are kept and left alone: refusing the
+    # file would turn every plugin to its default. notes() says an update would use them.
+    unknown = tuple(sorted(set(data) - KNOWN_FIELDS))
     enabled = data.get("enabled", {})
     if not isinstance(enabled, dict):
         raise ValueError(f"{where}: enabled must map plugin names to true or false")
@@ -76,7 +77,7 @@ def parse(data, where=FILE):
     for key, value in events.items():
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value <= 100000:
             raise ValueError(f"{where}: events.{key} must be a positive number")
-    return Config(enabled=dict(enabled), theme=theme, events=dict(events), exists=True)
+    return Config(enabled=dict(enabled), theme=theme, events=dict(events), exists=True, unknown=unknown)
 
 
 def load(root):

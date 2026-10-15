@@ -143,6 +143,9 @@ Each universe and subverse may have a `plugins.json` at its root:
   it has its own file or the defaults.
 - `theme` picks one theme plugin. A `keys` field, from before plugins lost
   their dashboard keys, is still read and ignored.
+- Fields this mv2 does not know (a newer mv2's additions) are kept in the file
+  and left alone, and `doctor` notes them. They never make the file unusable,
+  so an older mv2 meeting a newer `plugins.json` keeps every plugin's switch.
 
 ```sh
 mv2 plugins                       # every plugin found: source, version, on/off here, problems
