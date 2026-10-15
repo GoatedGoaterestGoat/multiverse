@@ -189,6 +189,11 @@ def measured_usage(native_id):
 
 # The oldest Claude Code the mod and the peer inbox were built and tested on.
 MIN_BRIDGE_VERSION = (2, 1, 280)
+# Resume passes `--system-prompt-snapshot off`, which Claude Code has had since this version. With the
+# snapshot on (its default) a resumed conversation keeps the system prompt recorded at its first request,
+# so a bootstrap changed since then (a plugin's line added or removed, a template update) never applies.
+SNAPSHOT_FLAG = '--system-prompt-snapshot'
+SNAPSHOT_FLAG_VERSION = (2, 1, 267)
 _versions = {}
 
 
@@ -278,7 +283,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         return self._with_bridge(super().spawn(context), context)
 
     def resume(self, session, context):
-        command = super().resume(session, context)
+        command = self._without_unknown_snapshot_flag(super().resume(session, context))
         fresh = None
         if session.native_id and not has_saved_conversation(session.native_id, context.environment):
             fresh = self._reserve_session(command, session.native_id)
@@ -289,6 +294,22 @@ class ClaudeAdapter(ConfiguredAdapter):
         mode = dict(command.native_mode)
         mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
         return replace(command, native_mode=mode)
+
+    def _without_unknown_snapshot_flag(self, command):
+        """The resume command without `--system-prompt-snapshot off` for a Claude known to be too old for it.
+
+        Only where the bridge decision reads the version anyway: a plain launch never asks which
+        version is installed, and a version that cannot be read keeps the flag.
+        """
+        if self.bridge_policy == 'plain' or SNAPSHOT_FLAG not in command.argv:
+            return command
+        version = claude_version(command.argv[0])
+        if version is None or version >= SNAPSHOT_FLAG_VERSION:
+            return command
+        argv = list(command.argv)
+        index = argv.index(SNAPSHOT_FLAG)
+        del argv[index:index + 2]
+        return replace(command, argv=tuple(argv))
 
     @staticmethod
     def _reserve_session(command, native_id):

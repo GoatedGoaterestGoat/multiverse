@@ -396,6 +396,29 @@ class ClaudeBridgeTest(BaseTest):
             with self.subTest(sender=sender):
                 self.assertEqual(native.framed_text(self.root, {'from': sender, 'text': 'hi'}), expected)
 
+    def test_resume_renders_the_system_prompt_fresh_so_a_changed_bootstrap_applies(self):
+        # With Claude's snapshot on, a resumed conversation keeps the system prompt of its first request.
+        for setting in (None, True, False):
+            for version in ((2, 1, 300), (2, 1, 280), None):
+                with self.subTest(setting=setting, version=version):
+                    if setting is True and version is not None and version < (2, 1, 280):
+                        continue
+                    resumed, probe = self.launch(setting, version, 'resume')
+                    argv = list(resumed.argv)
+                    flag = argv.index('--system-prompt-snapshot')
+                    self.assertEqual(argv[flag + 1], 'off')
+                    self.assertEqual(argv[flag - 2], '--append-system-prompt')  # right after the bootstrap
+                    spawned, _ = self.launch(setting, version)
+                    self.assertNotIn('--system-prompt-snapshot', spawned.argv)  # a new conversation records it fresh
+                    if setting is False:
+                        probe.assert_not_called()  # plain still never asks which version is installed
+        # A Claude known to predate the flag (an auto launch that fell back to plain) does not get it.
+        old, _ = self.launch(None, (2, 1, 266), 'resume')
+        self.assertNotIn('--system-prompt-snapshot', old.argv)
+        self.assertIn('--append-system-prompt', old.argv)  # the rest of the command is unchanged
+        older, _ = self.launch(None, (2, 1, 267), 'resume')
+        self.assertIn('--system-prompt-snapshot', older.argv)
+
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):
             for mode in ('spawn', 'resume'):

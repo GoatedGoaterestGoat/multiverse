@@ -24,6 +24,8 @@
     "{session_id}",
     "--append-system-prompt",
     "{bootstrap}",
+    "--system-prompt-snapshot",
+    "off",
     "--add-dir",
     "{agent_dir}"
   ],

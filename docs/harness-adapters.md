@@ -25,7 +25,15 @@ must not guess a recent session. Claude receives an assigned UUID, and resumes i
 with `--resume` only once Claude has saved a transcript for it (it writes none before
 the first message); a session stopped before then restarts fresh under the same
 UUID with `--session-id`, without replaying its task, and says so in the agent's
-details. Pi owns an
+details. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+every resume. Claude Code keeps a conversation's system prompt as recorded at its
+first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
+would leave a resumed agent with the bootstrap it started with: a plugin's
+bootstrap line added or removed since, or a template change, would never reach
+it. Resume therefore passes `--system-prompt-snapshot off`, so the current
+bootstrap applies; an unchanged one keeps the prompt cache, and a changed one is
+cached afresh once. The flag is left out for a Claude Code known to be older
+than 2.1.267 (a plain launch never asks the version). Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
