@@ -268,8 +268,10 @@ def _signature(root):
         if directory.resolve() in failed:  # a plugin that failed to load is tried again once its files change
             parts.append(_files(directory.resolve()) == failed[directory.resolve()])
         if source == "universe":  # trust covers every file but .git, compiled bytecode included
-            parts.append(tuple((str(path), _stat(path)) for path in sorted(directory.rglob("*"))
-                               if ".git" not in path.relative_to(directory).parts))
+            try:
+                parts.append(trust.signature(directory))
+            except OSError:
+                parts.append(None)
     return tuple(parts)
 
 
@@ -405,7 +407,14 @@ def _make_package(name, directory):
     return package
 
 
-def load(found, off=False):
+LOAD_SECONDS = 10.0  # the longest a plugin's import and register() may take; past it, it is left out
+
+
+class StillLoading(PluginError):
+    """The plugin is being loaded by another thread and the caller chose not to wait (longer)."""
+
+
+def load(found, off=False, wait=None):
     """The Loaded plugin for an Entry that is usable, importing and registering it once per process.
 
     A plugin whose settings here are unusable still loads, so its screens can fix
@@ -413,21 +422,48 @@ def load(found, off=False):
     compatible), for what acts before it is turned on, such as migrating its
     pre-plugin settings. Raises PluginError when it cannot be loaded; the failure
     is kept, so later callers get the same answer without importing again.
+
+    The import and register() run in a daemon thread of their own and get
+    LOAD_SECONDS: a plugin that takes longer is left out (failed, tried again in
+    another process or once its files change), and never hangs mv2. While
+    another thread loads the same plugin, this waits at most `wait` seconds
+    (default LOAD_SECONDS), then raises StillLoading.
     """
     if not (found.on and found.state in ("on", "loaded", "unusable")) and not (off and found.state == "off"):
         raise PluginError(found.problem or f"{found.name} is off here")
-    from . import api  # the API imports this module
     directory = Path(found.manifest.directory).resolve()  # a trusted universe plugin runs from its copy
+    with _lock:
+        known = _loaded.get(directory)
+    if isinstance(known, Loaded):
+        return known
     # One lock per plugin: a slow import or register() never holds up another plugin, or any guarded call.
-    with _plugin_lock(directory):
+    lock = _plugin_lock(directory)
+    if not lock.acquire(timeout=LOAD_SECONDS if wait is None else max(0.0, wait)):
+        raise StillLoading(f"{found.name} is still loading")
+    try:
         with _lock:
             known = _loaded.get(directory)
         if isinstance(known, Loaded):
             return known
         if isinstance(known, Failed) and known.files == _files(directory):
             raise PluginError(known.problem)
-        package = _package_name(found)
-        registrations = Registrations()
+        return _load(found, directory)
+    finally:
+        lock.release()
+
+
+def _load(found, directory):
+    from . import api  # the API imports this module
+    package = _package_name(found)
+    registrations = Registrations()
+    _keep_bytecode_out(directory)
+    result, done, gate, abandoned = {}, threading.Event(), threading.Lock(), []
+
+    def forget_modules():
+        for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
+            del sys.modules[name]  # tried again from scratch once its files change
+
+    def run():
         try:
             _make_package(package, directory)
             module = importlib.import_module(f"{package}.{found.manifest.module}") if found.manifest.module else None
@@ -437,18 +473,43 @@ def load(found, off=False):
                 raise PluginError(f"{found.manifest.module} has no register(mv) function")
             if register is not None:
                 register(api.Plugin(loaded))
-        except (Exception, SystemExit) as error:  # a plugin never ends the process by failing to load
-            problem = f"{found.name} failed to load: {_describe(error)}"
-            for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
-                del sys.modules[name]  # tried again from scratch once its files change
-            with _lock:
-                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
-                _changed()
-            raise PluginError(problem) from error
+            result["loaded"] = loaded
+        except BaseException as error:  # SystemExit included: a plugin never ends the process by failing to load
+            result["error"] = error
+        finally:
+            with gate:
+                done.set()
+                if abandoned:  # too late: the caller went on without it
+                    forget_modules()
+
+    threading.Thread(target=run, name=f"plugin {found.name}: load", daemon=True).start()
+    finished = done.wait(LOAD_SECONDS)
+    with gate:
+        if not finished and not done.is_set():
+            abandoned.append(True)
+            result = {"error": TimeoutError(f"took longer than {LOAD_SECONDS:g} s to load")}
+    if "error" in result:
+        error = result["error"]
+        problem = f"{found.name} failed to load: {_describe(error)}"
+        if not abandoned:
+            forget_modules()
         with _lock:
-            _loaded[directory] = loaded
+            _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
             _changed()
-        return loaded
+        raise PluginError(problem) from error
+    with _lock:
+        _loaded[directory] = result["loaded"]
+        _changed()
+    return result["loaded"]
+
+
+def _keep_bytecode_out(directory):
+    """Importing from a universe's own plugin directory (a developer's MV2_PLUGIN_PATH, check --load) never
+    writes __pycache__ there, which would change what was trusted: this process's bytecode goes to
+    ~/.multiverse/pycache instead. Python reads the prefix at every import, lazy ones included."""
+    if sys.pycache_prefix is None and directory.parent.name == "plugins" \
+            and (directory.parent.parent / "universe.json").is_file():
+        sys.pycache_prefix = str(trust.user_directory() / "pycache")
 
 
 def _plugin_lock(directory):
@@ -475,15 +536,19 @@ def _changed():
     _generation += 1
 
 
-def active(root):
-    """The plugins on in this universe, loaded, sorted by name. One that fails to load is left out."""
+def active(root, wait=None):
+    """The plugins on in this universe, loaded, sorted by name. One that fails to load is left out.
+
+    A plugin another thread is loading is waited for at most `wait` seconds (default LOAD_SECONDS), then left out
+    of this answer only: what must include every plugin (a launch plan) waits; what can show it on its next
+    refresh (the dashboard's snapshot) passes wait=0."""
     if safe_mode():
         return []
     result = []
     for found in entries(root):
         if found.usable:
             try:
-                result.append(load(found))
+                result.append(load(found, wait=wait))
             except PluginError:
                 continue
     return result

@@ -24,6 +24,7 @@ from ..store import lock, now, read, write
 
 FILE = "trusted-plugins.json"
 CACHE = "plugin-cache"
+FINGERPRINTS = "plugin-fingerprints.json"  # each trusted directory's fingerprint, by the signature of its files
 COMPLETE = ".mv2-complete"
 # Version control is not part of a plugin; everything else is, whether it runs from source or not.
 SKIPPED = {".git"}
@@ -62,6 +63,58 @@ def fingerprint(directory):
     for relative, path in _files(directory):
         _add(digest, relative, path.read_bytes())
     return "sha256:" + digest.hexdigest()
+
+
+def signature(directory):
+    """A digest of every file's path, size, modification and change times, inode and mode (no contents).
+
+    Cheap: one stat per file. It changes whenever a file is added, removed or
+    written; the change time cannot be set back by hand. Used to skip hashing a
+    directory again, and to tell when a plugin's files changed."""
+    digest = hashlib.sha256()
+    base = str(Path(directory))
+    for top, directories, files in os.walk(base):
+        directories[:] = sorted(name for name in directories if name not in SKIPPED)
+        for name in sorted(files):
+            path = os.path.join(top, name)
+            status = os.lstat(path)
+            digest.update(f"{os.path.relpath(path, base)}\0{status.st_size}\0{status.st_mtime_ns}\0"
+                          f"{status.st_ctime_ns}\0{status.st_ino}\0{status.st_mode}\n".encode())
+    return digest.hexdigest()
+
+
+def current(directory):
+    """The fingerprint of `directory`, hashed again only when its files changed since it was last hashed.
+
+    Safe to trust: what runs is the copy made by cached(), which hashes the
+    bytes again as it copies them and keeps nothing that does not match."""
+    directory = Path(directory).resolve()
+    before = signature(directory)
+    record = _fingerprints().get(str(directory))
+    if isinstance(record, dict) and record.get("signature") == before and isinstance(record.get("fingerprint"), str):
+        return record["fingerprint"]
+    value = fingerprint(directory)
+    if signature(directory) == before:  # unchanged while it was hashed: worth keeping
+        _remember(directory, before, value)
+    return value
+
+
+def _fingerprints():
+    try:
+        data = read(user_directory() / FINGERPRINTS)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _remember(directory, value_signature, value):
+    try:
+        with lock(user_directory() / ".plugin-fingerprints.lock"):
+            records = _fingerprints()
+            records[str(directory)] = {"signature": value_signature, "fingerprint": value}
+            write(user_directory() / FINGERPRINTS, records)
+    except OSError:
+        pass  # only a cache: the next process hashes again
 
 
 def compiled(directory):
@@ -138,7 +191,7 @@ def verify(directory):
     if not isinstance(record, dict):
         return "untrusted", None
     try:
-        value = fingerprint(directory)
+        value = current(directory)
     except (OSError, ValueError):
         return "changed", None
     return ("trusted", value) if record.get("fingerprint") == value else ("changed", None)
@@ -147,7 +200,10 @@ def verify(directory):
 def trust(directory):
     """Trust the plugin at `directory` as it is now; returns its fingerprint."""
     directory = Path(directory).resolve()
+    before = signature(directory)
     value = fingerprint(directory)
+    if signature(directory) == before:
+        _remember(directory, before, value)
     path = user_directory() / FILE
     with lock(user_directory() / ".trusted-plugins.lock"):
         records = _records()

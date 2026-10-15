@@ -44,6 +44,7 @@ SUPERVISE_SECONDS = 2.0
 WORKER_POLL_SECONDS = 0.5
 PRUNE_SECONDS = 3600
 HANDLER_SECONDS = 60.0
+TIMEOUTS_PER_EVENT = 3  # a handler out of time on one event this many times is given up on for that event
 NEEDS = frozenset({"events", "service"})
 
 
@@ -376,37 +377,74 @@ class _Services:
 def _deliver(loaded, mv, scope, name):
     """Deliver what is new in `scope`'s journal, at least once to each handler.
 
-    The cursor moves past an event only once every matching handler finished
-    with it (or failed, which is recorded): one still running, or out of time,
-    stops the batch there, and the event is delivered again on the next poll.
-    A universe that was removed or moved is left alone."""
+    Each handler goes through the events in order on its own: one still
+    running, or out of time, holds only itself, and its siblings go on. A
+    handler that finished an event never gets it again while a sibling catches
+    up. One out of time on the same event TIMEOUTS_PER_EVENT times is given up
+    on for that event, with "gave up on seq N" recorded. The cursor on disk
+    moves past an event once every matching handler finished with it, failed
+    (recorded) or was given up on. A universe that was removed or moved is left
+    alone."""
     scope = Path(scope)
     if not (scope / "universe.json").is_file():
         return
     after = _read_cursor(scope, name)
     found, gap = events.read(scope, after)
-    universe = mv.universe(scope)
     if gap is not None:
-        if not _dispatch(loaded, universe, {"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, scope):
-            return
-        _write_cursor(scope, name, gap["to"])
+        found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
+    if found:
+        newest = found[-1]["seq"]
+        for key in [key for key, seq in _finished.items() if key[:2] == (loaded.name, str(scope)) and seq > newest]:
+            del _finished[key]  # the journal started again (its state was removed): nothing here was seen yet
+    universe = mv.universe(scope)
+    held, complete = set(), True  # handlers that have not finished an earlier event in this pass
     for event in found:
-        if not _dispatch(loaded, universe, event, scope):
-            return
-        _write_cursor(scope, name, event["seq"])
+        if not _dispatch(loaded, universe, event, scope, held):
+            complete = False
+        elif complete:
+            _write_cursor(scope, name, event["seq"])
 
 
-def _dispatch(loaded, universe, event, scope):
-    """Run every handler that matches `event`; False when one is still running or ran out of time."""
-    kind, finished = event.get("type", ""), True
+# Per (plugin, universe, handler): the last seq it finished, and (seq, timeouts) for the event it is on.
+_finished, _timeouts = {}, {}
+
+
+def _dispatch(loaded, universe, event, scope, held=None):
+    """Run each matching handler that has not finished `event`; False while one of them has not finished it.
+
+    A handler in `held` (still on an earlier event) is not called: each handler sees the events in order."""
+    held = set() if held is None else held
+    kind, seq, finished = event.get("type", ""), event.get("seq", 0), True
     for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
-        if fnmatch.fnmatchcase(kind, pattern):
-            value = api.Event(kind, event.get("seq", 0), event.get("at", ""), universe, event.get("agent"),
-                              event.get("launch"), event.get("data") or {}, _age(event.get("at", "")))
-            label = getattr(handler, "__name__", f"handler {index + 1}")
-            outcome = loader.guarded(loaded, f"event {kind} ({label})", handler, value, root=scope,
-                                     timeout=HANDLER_SECONDS, key=f"handler {index}")
-            finished = finished and outcome.state not in ("timeout", "busy")
+        if not fnmatch.fnmatchcase(kind, pattern):
+            continue
+        key = (loaded.name, str(scope), index)
+        if _finished.get(key, -1) >= seq:
+            continue  # it finished this one while a sibling held the cursor
+        if index in held:
+            finished = False
+            continue
+        value = api.Event(kind, seq, event.get("at", ""), universe, event.get("agent"), event.get("launch"),
+                          event.get("data") or {}, _age(event.get("at", "")))
+        label = getattr(handler, "__name__", f"handler {index + 1}")
+        what = f"event {kind} ({label})"
+        outcome = loader.guarded(loaded, what, handler, value, root=scope, timeout=HANDLER_SECONDS,
+                                 key=f"handler {index} in {scope}")
+        if outcome.state == "timeout":
+            on, count = _timeouts.get(key, (seq, 0))
+            count = count + 1 if on == seq else 1
+            _timeouts[key] = (seq, count)
+            if count < TIMEOUTS_PER_EVENT:
+                held.add(index)
+                finished = False
+                continue
+            loader.record(loaded, what, TimeoutError(f"gave up on seq {seq} after {count} timeouts"), scope)
+        elif outcome.state == "busy":  # its call on this or an earlier event still runs
+            held.add(index)
+            finished = False
+            continue
+        _finished[key] = seq
+        _timeouts.pop(key, None)
     return finished
 
 

@@ -333,11 +333,14 @@ where they happen and delivered where plugins run**:
   handler in order. It keeps each plugin's cursor in
   `state/plugins/NAME/events.cursor`, so a handler sees each event at least once
   across host restarts.
-  - **At least once:** each handler is guarded on its own. The cursor moves past
-    an event only once every matching handler finished with it; a handler still
-    running or out of time stops the batch there, and the event is delivered
-    again on the next poll. A handler that raises is recorded and passed.
-    Handlers must be idempotent.
+  - **At least once:** each handler goes through the events in order on its
+    own, guarded on its own in each universe. One still running, or out of
+    time, holds only itself: its siblings go on, and an event a handler
+    finished is never given to it again while a sibling catches up. The same
+    event out of time 3 times is given up on for that handler, with "gave up on
+    seq N" recorded. A handler that raises is recorded and passed. The cursor
+    on disk moves past an event once every matching handler is done with it,
+    so after a restart an event may come again: handlers must be idempotent.
   - **Stale events:** each event says when it happened, so a handler can skip
     stale ones. The notifier ignores events older than five minutes after a
     restart.
@@ -620,6 +623,13 @@ Every call into a plugin is wrapped. An exception drops that contribution for
 that call. It is logged to `state/plugins/NAME/errors.log`, `mv2 plugins` and
 `doctor` show it, and the dashboard header counts it (`1 plugin error`). No
 plugin error can stop a launch, a send, `list` or the dashboard.
+
+Loading has a limit too: a plugin's import and `register(mv)` get 10 s, in a
+thread of their own. One that takes longer is left out as failed (tried again
+by the next process, or once its files change) and never hangs `mv2`. A caller
+that can show a plugin on its next refresh, such as the dashboard's snapshot,
+does not wait for a plugin another thread is still loading
+(`loader.active(root, wait=0)`); a launch plan waits, within the same limit.
 
 What may be slow runs off the dashboard's event loop, with a time budget.
 Inspector lines are computed in the inspector's capture worker and appear when
@@ -1057,7 +1067,10 @@ is about consent and blast radius:
      `~/.multiverse/trusted-plugins.json`, outside every universe. Only `.git`
      is left out of the hash; compiled bytecode and `node_modules` are
      included, and `trust` warns when a plugin ships code that can't be read
-     as source.
+     as source. A plugin is hashed again only when its files change (by each
+     file's size, times and inode, kept in
+     `~/.multiverse/plugin-fingerprints.json`), so a large `node_modules` does
+     not slow every `mv2` call.
    - **Who can trust:** trust is meant to be the person's decision after
      reviewing the plugin, but nothing technical stops an agent from running
      `mv2 plugins trust`, or any process with the user's permissions from
@@ -1076,7 +1089,10 @@ is about consent and blast radius:
      compiled bytecode is not copied, so a `.pyc` planted beside a reviewed
      `.py` never runs. The plugin is imported from that copy and its Claude
      directory loaded from it, so what Claude writes there (`tsconfig.json`,
-     types) never touches the trusted plugin.
+     types) never touches the trusted plugin. `mv2 plugins check --load` uses
+     the copy too, and a process that imports from a universe's plugin
+     directory anyway (a developer's `MV2_PLUGIN_PATH`) writes its bytecode to
+     `~/.multiverse/pycache`, never into the plugin.
 3. **Permissions are declared and enforced at the API.** The `mv` object a
    plugin receives has only what its manifest asks for. Without
    `messages.send` there is no `send`. This catches mistakes and makes a

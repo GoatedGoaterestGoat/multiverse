@@ -119,8 +119,6 @@ def problems(root, reserved=()):
     waiting_uninstalled = dict(not_installed(root))
     found_problems.extend(not_installed_message(name, legacy) for name, legacy in waiting_uninstalled.items())
     for name, failure in sorted(_failed_conversions(root).items()):
-        if failure.get("not_installed"):
-            continue
         legacy = Path(root) / str(failure.get("file", ""))
         if failure.get("file") and legacy.is_file() and _fingerprint(legacy) == failure.get("fingerprint"):
             found_problems.append(f"{name}: {failure['file']} could not be converted ({failure.get('reason')}); "
@@ -261,6 +259,7 @@ def listing(root):
 MIGRATABLE = ("off", "on", "loaded", "unusable")
 MIGRATE_LOCK = ".migrate.lock"
 MIGRATE_FAILED = "migrate-failed.json"
+NOTIFIED = "not-installed-notified.json"  # which old files' "not installed" notice was said, kept apart from failures
 
 
 def _pending_legacy(root):
@@ -328,9 +327,23 @@ def _fingerprint(path):
 
 
 def _failed_conversions(root):
-    """{plugin: {"file", "fingerprint", "reason"}} of conversions that failed and were not retried since."""
+    """{plugin: {"file", "fingerprint", "reason"}} of conversions that failed and were not retried since.
+
+    A "not installed" notice is no failed conversion: an older mv2 kept it here, and such a record is ignored,
+    so installing the plugin later converts its file."""
     try:
         value = json.loads((Path(root) / "state" / "plugins" / MIGRATE_FAILED).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(value, dict):
+        return {}
+    return {name: record for name, record in value.items()
+            if isinstance(record, dict) and not record.get("not_installed")}
+
+
+def _notified(root):
+    try:
+        value = json.loads((Path(root) / "state" / "plugins" / NOTIFIED).read_text())
         return value if isinstance(value, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -378,17 +391,18 @@ def _say_not_installed(scope, where):
     state = Path(scope) / "state" / "plugins"
     lines = []
     with lock_of(state / MIGRATE_LOCK):
-        failed = _failed_conversions(scope)
+        notified = _notified(scope)
         for name, legacy in missing:
             fingerprint = _fingerprint(Path(scope) / legacy)
-            if failed.get(name, {}).get("fingerprint") == fingerprint:
+            if notified.get(name, {}).get("fingerprint") == fingerprint:
                 continue
-            failed[name] = {"file": legacy, "fingerprint": fingerprint, "reason": "not installed", "not_installed": True}
+            notified[name] = {"file": legacy, "fingerprint": fingerprint}
             lines.append(f"mv2: {not_installed_message(name, legacy)}" + (f" ({where.strip()})" if where else ""))
-        try:
-            write(state / MIGRATE_FAILED, failed)
-        except OSError:
-            pass
+        if lines:
+            try:
+                write(state / NOTIFIED, notified)
+            except OSError:
+                pass
     return lines
 
 

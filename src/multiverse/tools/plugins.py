@@ -229,15 +229,16 @@ def check(directory, load=False):
                 settings_files.validate({k: v for k, v in defaults.items() if k != "schema"}, schema)
         except ValueError as error:
             problems.append(f"settings: {error}")
-    registered = None
+    registered, state = None, None
     running = directory
-    if not problems and _universe_plugin(directory) and not load:
+    if not problems and _universe_plugin(directory):
         state, value = trust.verify(directory)
-        if state != "trusted":
+        if state != "trusted" and not load:
             notes.append(f"its code was not imported: it is not trusted (run mv2 plugins trust {found.name} after "
                          f"reviewing it, or check it with --load to import it now)")
             return {"directory": str(directory), "ok": True, "problems": [], "notes": notes, "name": found.name}
-        try:
+    if not problems and _universe_plugin(directory) and state == "trusted":
+        try:  # trusted: checked from its trusted copy, so nothing is written into the universe's directory
             running = trust.cached(directory, value)
             found = manifests.load(running)
         except (OSError, ValueError, manifests.ManifestError) as error:
