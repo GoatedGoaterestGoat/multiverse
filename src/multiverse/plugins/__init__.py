@@ -90,7 +90,8 @@ def catalog_entries(root):
         if "catalog" not in found.manifest.extends:
             continue
         for kind in CATALOG_KINDS:
-            for path in sorted((Path(found.directory) / kind).glob("*/entry.json")):
+            # From the directory it runs from: a trusted universe plugin's copy, never the live folder.
+            for path in sorted((Path(found.manifest.directory) / kind).glob("*/entry.json")):
                 try:
                     meta = read(path)
                 except (OSError, ValueError):
@@ -123,6 +124,12 @@ def problems(root, reserved=()):
         if failure.get("file") and legacy.is_file() and _fingerprint(legacy) == failure.get("fingerprint"):
             found_problems.append(f"{name}: {failure['file']} could not be converted ({failure.get('reason')}); "
                                   f"it is unchanged: fix it and run mv2 plugins migrate --apply")
+    for found in entries(root):
+        for source, directory, state in found.set_aside:
+            if state == "changed":  # a fork the person trusted, edited since: the other copy runs, and they hear so
+                found_problems.append(f"{found.name}: this universe's copy changed since it was trusted, so the "
+                                      f"{found.source} {found.name} runs instead; review it, then run "
+                                      f"mv2 plugins trust {found.name}")
     pending = None
     for found in entries(root):
         legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
@@ -567,6 +574,9 @@ def migrate(root, item):
     try:
         backup.parent.mkdir(parents=True, exist_ok=True)
         backup.write_bytes(previous if previous is not None else source.read_bytes())
+        from ..store import now, write as write_json
+        write_json(backup.parent / trash.RECORD, {"kind": "plugins-migrate", "name": item["plugin"],
+                                                  "origin": str(root), "files": [source.name], "removed_at": now()})
         if legacy:
             source.unlink()
     except OSError as error:
@@ -744,6 +754,7 @@ def set_enabled(root, name, on):
     """
     root = Path(root)
     installed = []
+    was_on = entry(root, name).on
     if on:
         found = entry(root, name)
         if found.state in ("invalid", "untrusted", "changed", "incompatible"):
@@ -751,20 +762,22 @@ def set_enabled(root, name, on):
         if found.manifest is not None and settings_files.install_defaults(root, found.manifest):
             installed.append(str(settings_files.path(root, name)))
     config.set_enabled(root, name, bool(on))
-    if on:
-        anchor_events(root, name)
+    if on and not was_on:
+        anchor_events(root, name, again=True)  # what happened while it was off is not delivered later
     return {"name": name, "on": bool(on), "installed": installed}
 
 
-def anchor_events(root, name):
+def anchor_events(root, name, again=False):
     """When a plugin with event handlers is turned on, its cursor starts at the journal's end now, so the events
-    between this and its host worker's first run are delivered then, not skipped. Never fails the caller."""
+    between this and its host worker's first run are delivered then, not skipped. `again` moves a cursor left from
+    an earlier time it was on, so turning it on again does not replay what happened while it was off. Never fails
+    the caller."""
     try:
         found = entry(root, name)
         if found.manifest is None or not found.manifest.events:
             return
         from . import events, host
-        if host._cursor_path(root, name).exists():
+        if host._cursor_path(root, name).exists() and not again:
             return
         segments = events.segments(root)
         host._write_cursor(root, name, events._last_sequence(segments[-1][1]) if segments else 0)

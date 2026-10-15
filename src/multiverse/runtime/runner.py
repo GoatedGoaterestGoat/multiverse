@@ -299,6 +299,7 @@ def main():
     startup = None
     recovery_monitor = None
     startup_checked = False
+    exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
     request = {}
     diagnostic = {}
@@ -427,6 +428,7 @@ def main():
                        exit_code=code, status="unknown", stopped_at=now(), **diagnostic)
         # Once, here, where the process's end is known; later cleanup writes record nothing.
         from multiverse.runtime.lifecycle import _event
+        exited = True
         _event(agent_dir, 'agent.exited', launch.name, {
             'state': "stopped" if code == 0 or ending else "failed", 'exit_code': code,
             'reason': diagnostic.get('reason')})
@@ -438,6 +440,10 @@ def main():
         print(f"Multiverse launch failed: {error}", file=sys.stderr)
         diagnostic = launch_diagnostic(agent_dir, launch.name, f'Multiverse launch failed: {error}')
         update_runtime(agent_dir, launch.name, state="failed", status="unknown", error=str(error), **diagnostic)
+        if not exited:  # failed before the process ended, or before it could start: still its one exit
+            from multiverse.runtime.lifecycle import _event
+            _event(agent_dir, 'agent.exited', launch.name, {
+                'state': 'failed', 'exit_code': None, 'reason': f'Multiverse launch failed: {error}'})
         return 1
     finally:
         if request.get('resume_message_id') and not startup_checked:

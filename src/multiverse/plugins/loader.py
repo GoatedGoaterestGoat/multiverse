@@ -168,6 +168,7 @@ class Entry:
     problem: str | None = None
     shadowed: list = field(default_factory=list)  # [(source, directory)]
     loaded: Loaded | None = None
+    set_aside: list = field(default_factory=list)  # [(source, directory, state)]: universe copies not trusted now
 
     @property
     def usable(self):
@@ -312,9 +313,11 @@ def _entries_uncached(root):
             shadowed.setdefault(found.name, []).append((source, directory))
         else:
             chosen[found.name] = (source, directory, found)
+    aside = {}
     for name, (source, directory, found, state) in untrusted.items():
         if name in chosen:
             shadowed.setdefault(name, []).append((source, directory))
+            aside.setdefault(name, []).append((source, directory, state))
         else:
             chosen[name] = (source, directory, found)
             trusted[name] = None
@@ -324,6 +327,7 @@ def _entries_uncached(root):
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
         result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        result[name].set_aside = aside.get(name, [])
     for name, (source, directory, problem) in invalid.items():
         if name not in result:
             result[name] = Entry(name, "invalid", settings.is_on(name), source, directory, problem=problem)
@@ -572,11 +576,20 @@ ERRORS_LOG_BYTES = 1024 * 1024  # errors.log rotates to errors.log.1 past this
 LOG_BYTES = 1024 * 1024  # plugin.log, events.log and host.log rotate to NAME.1 past this
 
 
+def log_lock_path(path):
+    path = Path(path)
+    return path.with_name(f".{path.name}.lock")
+
+
 def append_log(path, line):
-    """Append one line to a log, rotating it to NAME.1 (one old file kept) once it is past LOG_BYTES."""
+    """Append one line to a log, rotating it to NAME.1 (one old file kept) once it is past LOG_BYTES.
+
+    The size check, the rotation and the append happen under a file lock, so two processes writing one log never
+    both rotate it (which would overwrite NAME.1, or rename a file that is already gone)."""
+    from ..store import lock
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with _log_lock:
+    with _log_lock, lock(log_lock_path(path)):
         if path.exists() and path.stat().st_size > LOG_BYTES:
             path.replace(path.with_name(path.name + ".1"))
         with path.open("a") as handle:

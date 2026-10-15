@@ -89,7 +89,7 @@ compaction/
 | `module` | The Python module (a file or package in the plugin directory) whose `register(mv)` runs. A plugin with no Python, only catalog entries or a Claude plugin, leaves it out. |
 | `default` | `on` or `off` where `plugins.json` says nothing. Only bundled plugins may be `on`. |
 | `extends` | The extension points it uses. A registration outside this list is refused, so a plugin's footprint is readable without running it. |
-| `permissions` | What it asks to do (see [Trust and safety](#trust-and-safety)). Shown on enable. The API object it receives has only these capabilities. |
+| `permissions` | What it asks to do (see [Trust and safety](#trust-and-safety)). Shown on enable. The API refuses calls that need a permission the manifest does not ask for, and harness entries need theirs; `network.listen` and `models.<harness>` are declared only. None of this sandboxes a plugin's own code. |
 | `commands`, `statusline` | Declared up front, so `mv2 --help`, `statusline.json` and the typeahead know them without importing plugin code. |
 | `harnesses` | Harness extensions, each with the oldest (and optionally newest) harness version it runs on. |
 | `settings` | Its settings file (see [Settings](#settings)): the version of its shape, a JSON Schema, the defaults `mv2 plugins enable` installs when a universe has none, and optionally a file it used before it was a plugin, which `mv2 plugins migrate` moves. |
@@ -353,7 +353,8 @@ where they happen and delivered where plugins run**:
     nothing is new.
   - **Logs:** `events.log`, `host.log` and each plugin's `plugin.log` rotate to
     `.1` at 1 MiB; `errors.log` keeps one traceback per call site a minute and
-    rotates the same way.
+    rotates the same way. A log rotates under a file lock, so two processes
+    never rotate it at once.
 - The dashboard may tail the journal too, to refresh sooner than its 1.5 s poll.
   It need not.
 
@@ -422,9 +423,12 @@ state/events/
   is failing.
 - **Readers that fall behind.** Pruning never waits for a cursor, so a stopped
   host or a disabled plugin cannot make the journal grow without bound. A
-  handler whose cursor points into a deleted segment gets one `events.gap` event
-  (how many events and what time span it missed), then continues from the
-  oldest kept event. Uninstalling a plugin deletes its cursor.
+  plugin whose cursor points into a deleted segment gets one `events.gap` event
+  in each of its handlers, whatever types they subscribe to (how many events
+  and what time span it missed), then continues from the oldest kept event.
+  Turning a plugin on again moves its cursor to the journal's end, so what
+  happened while it was off is not delivered later. An uninstalled plugin's
+  cursor file stays in the universe's state until the plugin is back.
 - **Removal.** A subverse's journal is part of its state, so `mv2 remove` and
   `move` carry it along like the rest.
 
@@ -473,6 +477,10 @@ So the host is a general **supervisor** for plugins' long-running work:
   that started it. Its lock (held while it runs), status and log are under
   `state/plugins/host/` of the top-level universe. There is one per top-level
   universe tree.
+- **Alive.** Its status counts as running while its process is alive and its
+  heartbeat, written every few seconds by a thread of its own, is recent, so a
+  supervisor busy stopping workers or pruning never looks stopped. A second
+  start (another dashboard) finds it, and never overwrites its status.
 - **Stopping.** It exits once no plugin needs it, or on `mv2 plugins host
   stop`, and stops its workers first. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
@@ -1082,9 +1090,14 @@ is about consent and blast radius:
      name from another source; a repository's `plugins/typeahead` cannot turn
      the bundled one off. A trusted copy does take precedence, and says so
      wherever the person looks: `mv2 plugins list` and `info`, and the Plugins
-     screen ("overrides the bundled typeahead").
+     screen ("overrides the bundled typeahead"). Edited after it was trusted,
+     it is set aside again and the other copy runs: `mv2 plugins` and `doctor`
+     say so, with how to trust it again.
    - **What runs:** never the universe's directory itself, but a copy of
-     exactly the trusted bytes in `~/.multiverse/plugin-cache/<sha256>/`. It is
+     exactly the trusted bytes in `~/.multiverse/plugin-cache/<sha256>/`. A
+     copy no trusted plugin points at, and that no launch or load used for 14
+     days, is removed (at trust, untrust and the host's hourly prune), as are
+     staging directories a process left behind. It is
      hashed while copied and left out if anything changed meanwhile, and
      compiled bytecode is not copied, so a `.pyc` planted beside a reviewed
      `.py` never runs. The plugin is imported from that copy and its Claude
@@ -1094,8 +1107,8 @@ is about consent and blast radius:
      directory anyway (a developer's `MV2_PLUGIN_PATH`) writes its bytecode to
      `~/.multiverse/pycache`, never into the plugin.
 3. **Permissions are declared and enforced at the API.** The `mv` object a
-   plugin receives has only what its manifest asks for. Without
-   `messages.send` there is no `send`. This catches mistakes and makes a
+   plugin receives refuses what its manifest does not ask for: without
+   `messages.send`, `send` raises `api.Error`. This catches mistakes and makes a
    plugin's reach reviewable. It is not a security boundary against a plugin
    that imports `subprocess`, and `mv2 plugins info` says that. The permissions
    are `agents.read`, `agents.control`, `messages.send`, `messages.ask`,

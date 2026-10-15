@@ -19,12 +19,15 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import time
 
 from ..store import lock, now, read, write
 
 FILE = "trusted-plugins.json"
 CACHE = "plugin-cache"
-FINGERPRINTS = "plugin-fingerprints.json"  # each trusted directory's fingerprint, by the signature of its files
+FINGERPRINTS = "plugin-fingerprints.json"
+UNUSED_DAYS = 14  # a copy nothing trusts and nothing used for this long is removed
+STAGING_HOURS = 1  # a copy still being made after this long was left by a process that died  # each trusted directory's fingerprint, by the signature of its files
 COMPLETE = ".mv2-complete"
 # Version control is not part of a plugin; everything else is, whether it runs from source or not.
 SKIPPED = {".git"}
@@ -141,6 +144,10 @@ def cached(directory, value):
     copy's own), and the copy is used only once complete."""
     target = cache_directory(value)
     if (target / COMPLETE).is_file():
+        try:
+            os.utime(target / COMPLETE)  # used: kept while anything uses it (prune_cache)
+        except OSError:
+            pass
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".copy-", dir=target.parent))
@@ -167,6 +174,37 @@ def cached(directory, value):
     finally:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
+
+
+def prune_cache():
+    """Remove copies in ~/.multiverse/plugin-cache that no trusted plugin points at and that nothing used for
+    UNUSED_DAYS (a launch or load marks the copy it uses), and staging directories a process left behind.
+    A copy something still trusts is never removed. Returns the paths removed; never raises."""
+    removed = []
+    base = user_directory() / CACHE
+    try:
+        children = list(base.iterdir())
+    except OSError:
+        return removed
+    trusted = {record.get("fingerprint") for record in _records().values() if isinstance(record, dict)}
+    now_ = time.time()
+    for path in children:
+        try:
+            if path.name.startswith(".copy-"):
+                if now_ - path.stat().st_mtime < STAGING_HOURS * 3600:
+                    continue
+            elif "sha256:" + path.name in trusted:
+                continue
+            else:
+                marker = path / COMPLETE
+                used = marker.stat().st_mtime if marker.is_file() else path.stat().st_mtime
+                if now_ - used < UNUSED_DAYS * 86400:
+                    continue
+            shutil.rmtree(path)
+            removed.append(path)
+        except OSError:
+            continue
+    return removed
 
 
 def _records():
@@ -209,6 +247,7 @@ def trust(directory):
         records = _records()
         records[str(directory)] = {"fingerprint": value, "trusted_at": now()}
         write(path, {"schema": 1, "plugins": records})
+    prune_cache()
     return value
 
 
@@ -220,4 +259,5 @@ def forget(directory):
         removed = records.pop(str(directory), None) is not None
         if removed:
             write(user_directory() / FILE, {"schema": 1, "plugins": records})
+    prune_cache()
     return removed

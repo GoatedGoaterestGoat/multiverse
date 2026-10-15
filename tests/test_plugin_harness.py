@@ -276,8 +276,8 @@ class LaunchPlanTest(PluginTestCase):
         mv = api.Plugin(loader.load(self.entry("guard")))
         mv.statusline.write(agent_dir, "trees", "trees 3/4\n· building")
         self.assertEqual(harness.item_path(agent_dir, "trees").read_text(), "trees 3/4 · building\n")
-        runtime = {"plugins": harness.launch_plan(self.info()).record()}
-        self.assertEqual(harness.read_items(agent_dir, runtime), {"trees": "trees 3/4 · building"})
+        record = harness.launch_plan(self.info()).record()  # the mod and the tmux bar read the file it declares
+        self.assertIn("trees", [item["name"] for item in record["status_items"]])
         with self.assertRaisesRegex(api.Error, "declare it in plugin.json"):
             mv.statusline.write(agent_dir, "other", "x")
         mv.statusline.write(agent_dir, "trees", "")

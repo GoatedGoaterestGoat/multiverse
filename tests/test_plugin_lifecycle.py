@@ -238,6 +238,41 @@ class PluginRecordTest(PluginLaunchTest):
         self.assertEqual(exits[0]["data"], {"state": "stopped", "exit_code": 0, "reason": None})
         self.assertEqual(exits[0]["launch"], self.launch)
 
+    def test_a_launch_that_fails_with_an_exception_records_its_exit_once(self):
+        launch, proxy = self.fallback_fixture(False, False)
+        with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
+             patch.object(rpc, "LaunchProxy", return_value=proxy), \
+             patch.object(runner.subprocess, "Popen", side_effect=OSError("no such harness")), \
+             patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
+             patch.object(runner, "launch_diagnostic", return_value={}):
+            self.assertEqual(runner.main(), 1)
+        exits = [event for event in self.agent_events(self.result["id"]) if event["type"] == "agent.exited"]
+        self.assertEqual(len(exits), 1)
+        self.assertEqual(exits[0]["data"]["state"], "failed")
+        self.assertIsNone(exits[0]["data"]["exit_code"])
+        self.assertIn("no such harness", exits[0]["data"]["reason"])
+        self.assertEqual(exits[0]["launch"], self.launch)
+
+    def test_an_exception_after_the_exit_was_recorded_records_no_second_one(self):
+        launch, proxy = self.fallback_fixture(False, False)
+        process = Mock(pid=123)
+        process.poll.return_value = process.wait.return_value = 0
+        real_event = lifecycle._event
+
+        def then_fail(agent_dir, kind, *args, **kwargs):
+            real_event(agent_dir, kind, *args, **kwargs)
+            if kind == "agent.exited":
+                raise RuntimeError("cleanup failed after the exit was recorded")
+        with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
+             patch.object(rpc, "LaunchProxy", return_value=proxy), \
+             patch.object(runner.subprocess, "Popen", return_value=process), \
+             patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
+             patch.object(runner, "launch_diagnostic", return_value={}), \
+             patch.object(lifecycle, "_event", then_fail):
+            runner.main()
+        exits = [event for event in self.agent_events(self.result["id"]) if event["type"] == "agent.exited"]
+        self.assertEqual(len(exits), 1)
+
     def test_usage_is_adjusted_with_the_launch_it_was_measured_in(self):
         measured = {"native_session_id": "n", "total_tokens": 5}
         old_launch = agents.runtime(self.directory)["launch_id"]

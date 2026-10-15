@@ -23,8 +23,10 @@ def configure(parser):
     parser.add_argument("--unset", action="append", default=[], metavar="KEY", dest="removals",
                         help="settings: remove one setting, back to its default; repeatable")
     parser.add_argument("--prune", action="store_true", help="events: delete journal segments past retention now")
-    parser.add_argument("--load", action="store_true",
-                        help="check: import the plugin even when it is a universe plugin that is not trusted")
+    # An optional value, so `check --load DIR` works on every Python (3.11's argparse gives DIR no positional).
+    parser.add_argument("--load", nargs="?", const=True, default=False, metavar="DIR",
+                        help="check: import the plugin even when it is a universe plugin that is not trusted "
+                             "(check DIR --load, or check --load DIR)")
     parser.add_argument("--apply", action="store_true", help="migrate: make the changes (otherwise only show them)")
     parser.add_argument("--recursive", action="store_true", help="migrate: this universe and every subverse")
     parser.add_argument("--dir", dest="directory", help="new: where to create it (default: the current directory)")
@@ -64,9 +66,11 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     if directory and plugin_action != "new":
         raise ValueError("--dir belongs to mv2 plugins new")
     if plugin_action == "check":
+        if isinstance(load, str):  # check --load DIR
+            name, load = name or load, True
         if not name:
             raise ValueError("mv2 plugins check takes the plugin's directory")
-        return check(Path(name), load=load)
+        return check(Path(name), load=bool(load))
     if plugin_action == "new":
         if not name:
             raise ValueError("mv2 plugins new takes the new plugin's name")
@@ -93,17 +97,24 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
         return {"action": action, "universe": str(top), **getattr(host, action)(top)}
     if plugin_action == "migrate":
         scopes = list(universe.tree(root)) if recursive else [root]
-        planned = [{**item, "universe": str(scope)} for scope in scopes for item in plugins.migrations(scope)]
-        done = []
-        if apply:
-            for item in planned:
-                if item.get("problem"):
-                    continue
-                try:
-                    done.append(plugins.migrate(Path(item["universe"]), item))
-                except (OSError, ValueError) as error:
-                    item["problem"] = str(error)
-                    item["unchanged"] = getattr(error, "unchanged", True)
+        planned, done = [], []
+        for scope in scopes:
+            if not apply:
+                planned.extend({**item, "universe": str(scope)} for item in plugins.migrations(scope))
+                continue
+            # The lock a first-use conversion holds: planned again under it, so nothing is converted twice.
+            from ..store import lock
+            with lock(scope / "state" / "plugins" / plugins.MIGRATE_LOCK):
+                here = [{**item, "universe": str(scope)} for item in plugins.migrations(scope)]
+                planned.extend(here)
+                for item in here:
+                    if item.get("problem"):
+                        continue
+                    try:
+                        done.append(plugins.migrate(scope, item))
+                    except (OSError, ValueError) as error:
+                        item["problem"] = str(error)
+                        item["unchanged"] = getattr(error, "unchanged", True)
         result = {"universe": str(root), "planned": planned, "applied": done, "apply": apply,
                   "not_installed": [{"plugin": name, "file": legacy, "universe": str(scope)}
                                     for scope in scopes for name, legacy in plugins.not_installed(scope)]}

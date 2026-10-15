@@ -120,6 +120,17 @@ def _child(where, key):
     return f"{where}.{key}" if where else str(key)
 
 
+def _same(value, other):
+    """JSON equality: unlike Python's, true is not 1 and false is not 0, at any depth."""
+    if isinstance(value, bool) or isinstance(other, bool):
+        return isinstance(value, bool) and isinstance(other, bool) and value == other
+    if isinstance(value, dict) and isinstance(other, dict):
+        return value.keys() == other.keys() and all(_same(value[key], other[key]) for key in value)
+    if isinstance(value, list) and isinstance(other, list):
+        return len(value) == len(other) and all(_same(a, b) for a, b in zip(value, other))
+    return value == other
+
+
 def validate(value, schema, where=""):
     """Raise ValueError naming the first place `value` breaks `schema` (by its key path)."""
     name = where or "settings"
@@ -128,9 +139,9 @@ def validate(value, schema, where=""):
         allowed = kinds if isinstance(kinds, list) else [kinds]
         if not any(_is(kind, value) for kind in allowed):
             raise ValueError(f"{name} must be {' or '.join(allowed)}")
-    if "const" in schema and value != schema["const"]:
+    if "const" in schema and not _same(value, schema["const"]):
         raise ValueError(f"{name} must be {json.dumps(schema['const'])}")
-    if "enum" in schema and value not in schema["enum"]:
+    if "enum" in schema and not any(_same(value, item) for item in schema["enum"]):
         raise ValueError(f"{name} must be one of {', '.join(json.dumps(item) for item in schema['enum'])}")
     if _is("number", value):
         for key, test, words in (("minimum", lambda limit: value >= limit, "at least"),

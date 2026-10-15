@@ -34,8 +34,8 @@ import threading
 import time
 
 from .. import universe as universes
-from ..store import now, write
-from . import api, events, loader
+from ..store import now, write, lock
+from . import api, events, loader, trust
 
 HEARTBEAT_SECONDS = 15.0  # a supervisor whose status is older than this is not running
 RESTARTS = 3
@@ -118,6 +118,8 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     workers, restarts, stopped = {}, {}, {}
     started, pruned = now(), 0.0
     _log(root, f"host started (pid {os.getpid()})")
+    beating = threading.Event()
+    threading.Thread(target=_beat, args=(root, beating), name="host heartbeat", daemon=True).start()
     try:
         while not stopping.is_set():
             try:
@@ -155,11 +157,13 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
                 for scope in universes.tree(root):
                     if events.segments(scope):
                         events.prune(scope)
+                trust.prune_cache()  # trusted copies nothing trusts or used for weeks
             if exit_when_idle and not wanted:
                 _log(root, "host stopped: no plugin here needs it")
                 break
             stopping.wait(SUPERVISE_SECONDS)
     finally:
+        beating.set()
         for process in workers.values():
             _stop_worker(process)
         _write_status(root, started, {}, restarts, stopped, state="stopped")
@@ -177,17 +181,39 @@ def _stop_worker(process):
             process.wait()
 
 
+def _status_lock(root):
+    """One writer of status.json at a time, across processes: the supervisor's loop, its heartbeat, start()."""
+    return lock(host_directory(root) / ".status.lock")
+
+
 def _write_status(root, started, workers, restarts, stopped, state="running"):
     try:
         path = host_directory(root) / "status.json"
-        previous = json.loads(path.read_text()) if path.is_file() else {}
-        write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
-                     "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
-                     "workers": {name: {"pid": process.pid, "state": "running" if process.poll() is None else "exited",
-                                        "restarts": len(restarts.get(name, []))} for name, process in workers.items()},
-                     "stopped": stopped})
+        with _status_lock(root):
+            previous = json.loads(path.read_text()) if path.is_file() else {}
+            write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
+                         "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
+                         "workers": {name: {"pid": process.pid,
+                                            "state": "running" if process.poll() is None else "exited",
+                                            "restarts": len(restarts.get(name, []))}
+                                     for name, process in workers.items()},
+                         "stopped": stopped})
     except (OSError, ValueError):
         pass
+
+
+def _beat(root, stopping):
+    """Keep this supervisor's status fresh every HEARTBEAT_SECONDS / 3, whatever its loop is doing (stopping
+    workers, a slow scan, the hourly prune): status.json says it runs as long as this process does."""
+    path = host_directory(root) / "status.json"
+    while not stopping.wait(HEARTBEAT_SECONDS / 3):
+        try:
+            with _status_lock(root):
+                recorded = json.loads(path.read_text())
+                if recorded.get("state") == "running" and recorded.get("pid") == os.getpid():
+                    write(path, {**recorded, "updated_at": now()})
+        except (OSError, ValueError):
+            continue
 
 
 def status(root):
@@ -224,8 +250,16 @@ def start(root):
         return {**status(root), "started": False}
     path = host_directory(root) / "status.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    write(path, {"state": "starting", "socket": terminal["socket"], "session": terminal["session"],
-                 "pane": terminal["pane"], "updated_at": now()})
+    where = {"socket": terminal["socket"], "session": terminal["session"], "pane": terminal["pane"]}
+    with _status_lock(root):
+        try:
+            recorded = json.loads(path.read_text())
+        except (OSError, ValueError):
+            recorded = {}
+        if recorded.get("state") == "running" and recorded.get("pid") and running(root):
+            write(path, {**recorded, **where})  # the supervisor was quicker: only say where it runs
+        else:
+            write(path, {"state": "starting", **where, "updated_at": now()})
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline and not running(root):
         time.sleep(0.2)
@@ -416,8 +450,8 @@ def _dispatch(loaded, universe, event, scope, held=None):
     held = set() if held is None else held
     kind, seq, finished = event.get("type", ""), event.get("seq", 0), True
     for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
-        if not fnmatch.fnmatchcase(kind, pattern):
-            continue
+        if kind != "events.gap" and not fnmatch.fnmatchcase(kind, pattern):
+            continue  # a gap goes to every handler: each may have missed events of its own types
         key = (loaded.name, str(scope), index)
         if _finished.get(key, -1) >= seq:
             continue  # it finished this one while a sibling held the cursor

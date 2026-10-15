@@ -485,21 +485,5 @@ def write_item(agent_dir, name, text):
     temporary.replace(path)
 
 
-def read_items(agent_dir, runtime):
-    """{name: text} of the plugin items this launch declared (runtime.json `plugins.status_items`)."""
-    record = (runtime or {}).get("plugins") or {}
-    found = {}
-    for item in record.get("status_items") or []:
-        name = item.get("name") if isinstance(item, dict) else None
-        if not isinstance(name, str) or "/" in name or name.startswith("."):
-            continue
-        try:
-            text = item_path(agent_dir, name).read_text()[:ITEM_LENGTH + 1]
-        except OSError:
-            continue
-        found[name] = " ".join(text.split())
-    return found
-
-
 def as_json(plan):
     return json.dumps(plan.record())
