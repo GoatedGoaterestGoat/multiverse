@@ -186,8 +186,7 @@ def _plugin_state(checkout, links):
                 # A failed fetch can leave the pin unknown locally. Do not mistake that for local work:
                 # _move_plugins must fetch and prove ancestry before it can change this checkout.
                 if _has_commit(checkout / path, pin) and not _ancestor(checkout / path, head, pin):
-                    refusals.append(f"{path} {_pin_position(checkout / path, head, pin)}; "
-                                    "choose the intended plugin revision before updating. Its checkout was left unchanged.")
+                    refusals.append(_pin_refusal(checkout, path, head, pin))
             except (OSError, ValueError, subprocess.SubprocessError) as error:
                 refusals.append(f"{path} could not be checked: {error}")
     return state, refusals
@@ -207,9 +206,12 @@ def _ancestor(directory, before, after):
     return process.returncode == 0
 
 
-def _pin_position(directory, head, pin):
-    position = "is ahead of" if _ancestor(directory, pin, head) else "has diverged from"
-    return f"checkout {head[:7]} {position} mv2's pin {pin[:7]}"
+def _pin_refusal(checkout, path, head, pin):
+    position = "is ahead of" if _ancestor(checkout / path, pin, head) else "has diverged from"
+    command = shlex.join(["git", "-C", str(checkout / path), "switch", "--detach", pin])
+    return (f"{path} is detached at {head[:7]} and {position} mv2's pin {pin[:7]}; "
+            f"pin its current revision in mv2, or run {command}, then run mv2 update again. "
+            "Its checkout was left unchanged.")
 
 
 def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
@@ -294,6 +296,7 @@ def _move_plugins(checkout, plan, state, pins):
         if entry["state"] != "would_update":
             continue
         path, old, new = entry["path"], entry["before"], entry["after"]
+        repair = f" Repair it with: git -C {checkout} submodule update --checkout -- {path}"
         try:
             facts = _plugin_facts(checkout, path)
             if facts is None or facts != state[path] or facts[1:3] != (False, False):
@@ -308,7 +311,9 @@ def _move_plugins(checkout, plan, state, pins):
                 previously_pinned = (_has_commit(checkout / path, pins[path])
                                      and _ancestor(checkout / path, old, pins[path]))
                 if not previously_pinned and not _ancestor(checkout / path, old, new):
-                    raise ValueError(_pin_position(checkout / path, old, new) + "; choose the intended plugin revision")
+                    reason = _pin_refusal(checkout, path, old, new)
+                    repair = ""  # This refusal includes the choice of revision and its exact repair command.
+                    raise ValueError(reason)
             # --checkout overrides any submodule.<name>.update (merge, rebase, a command);
             # nested submodules are neither fetched nor updated.
             moved = _git(checkout, "-c", "fetch.recurseSubmodules=false", "submodule", "update", "--checkout",
@@ -326,8 +331,7 @@ def _move_plugins(checkout, plan, state, pins):
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             entry["state"], entry["reason"] = "failed", str(error)
         if entry["state"] == "failed":
-            failures.append(f"mv2 updated, but {path} could not be updated: {entry['reason']}. Repair it with: "
-                            f"git -C {checkout} submodule update --checkout -- {path}")
+            failures.append(f"mv2 updated, but {path} could not be updated: {entry['reason'].rstrip('.')}." + repair)
     return failures
 
 

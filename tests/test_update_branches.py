@@ -1,5 +1,7 @@
 """A user's plugin branch is never detached by mv2 update; all Git repositories are temporary."""
 from pathlib import Path
+import shlex
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +13,26 @@ class BranchUpdateTest(PluginUpdateTest):
     def assert_branch(self, name, commit):
         self.assertEqual(self.git(self.submodule, "symbolic-ref", "--short", "HEAD"), name)
         self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), commit)
+
+    def test_detached_ahead_refusal_has_a_working_repair_for_check_and_update(self):
+        published = self.plugin_commit()
+        self.git(self.submodule, "fetch", "origin")
+        self.git(self.submodule, "switch", "--detach", published)
+        expected = shlex.join(["git", "-C", str(self.submodule), "switch", "--detach", self.old_pin])
+        for check in (True, False):
+            result = update.run(check=check)
+            self.assertFalse(result["ok"], result)
+            self.assertIn(f"is detached at {published[:7]} and is ahead of mv2's pin {self.old_pin[:7]}",
+                          result["reason"])
+            self.assertIn(f"pin its current revision in mv2, or run {expected}, then run mv2 update again",
+                          update.format_output(result))
+            self.assertNotIn("local commits", result["reason"])
+            self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), published)
+        self.assertFalse(self.log.exists())
+        command = result["reason"].split("or run ", 1)[1].split(", then run", 1)[0]
+        subprocess.run(shlex.split(command), check=True, capture_output=True, text=True)
+        self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), self.old_pin)
+        self.assertTrue(update.run()["ok"])
 
     def test_older_branch_is_preserved_when_mv2_is_already_current(self):
         target = self.plugin_commit()

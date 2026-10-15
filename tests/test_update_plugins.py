@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -304,13 +305,20 @@ class RetryTest(PluginUpdateTest):
         result = update.run()
         self.assertFalse(result["ok"], result)
         self.assertIn("has diverged from", result["reason"])
+        repair = shlex.join(["git", "-C", str(self.submodule), "switch", "--detach", new])
+        self.assertIn(f"or run {repair}, then run mv2 update again", self.entry(result)["reason"])
+        self.assertNotIn("Repair it with:", result["reason"])
         self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), local)
         self.assertNotEqual(local, new)
         self.assertEqual((self.submodule / "mine.txt").read_text(), "mine\n")
         # With the pin now fetched the next preflight refuses too, before syncing or moving anything.
         self.log.unlink()
-        self.assertFalse(update.run()["ok"])
+        refused = update.run()
+        self.assertFalse(refused["ok"])
+        self.assertIn(f"or run {repair}, then run mv2 update again", refused["reason"])
         self.assertFalse(self.log.exists())
+        subprocess.run(shlex.split(repair), check=True, capture_output=True, text=True)
+        self.assertTrue(update.run()["ok"])
 
     def test_a_local_remote_fetch_works_without_ambient_file_protocol_permission(self):
         new = self.plugin_commit()
