@@ -1271,11 +1271,12 @@ import paths changing in tests:
    checkout but keep their launch settings. If `compaction.ts` simply left the
    mod, their `PreCompact` guard would still refuse Claude's own compaction
    while no hook answered: `/compact` would be blocked until a restart. So:
-   - New launches load the plugin's own `claude/` directory and set
-     `MV2_COMPACTION_PLUGIN=1`.
+   - New launches loaded the plugin's own `claude/` directory and set a marker
+     variable (`MV2_COMPACTION_PLUGIN=1`, dropped in GOAT f808f56 once nothing
+     read it).
    - The mod kept its compaction hooks for one transition period, active only
-     when `MV2_COMPACTION=1` and `MV2_COMPACTION_PLUGIN` is unset, so exactly
-     one plugin answers `/compact` in every session, old or new.
+     when `MV2_COMPACTION=1` and that marker was unset, so exactly one plugin
+     answered `/compact` in every session, old or new.
    - The mod's hooks and the plugin's are the same code. The plugin's is
      validated in a scratch copy on the oldest running Claude (2.1.290 at the
      time of writing) before it is written to the checkout.
@@ -1372,7 +1373,11 @@ multiverse-v2/
   `git submodule update --checkout`, one plugin at a time, with nested fetches
   off, whatever the user's update
   mode is. Local-path remotes are allowed for that fetch only. `--check` shows
-  which plugins would move without fetching them. An unavailable or revoked
+  which plugins would move without fetching them. Each plugin fetch has a
+  120-second total budget; use `mv2 update --plugin-fetch-timeout SECONDS` to
+  allow longer for a slow remote. mv2 requests the pinned commit first. A server
+  that refuses fetching by commit gets one ordinary fetch using the remaining
+  budget; a timeout stops fetching immediately. An unavailable or revoked
   remote produces a warning: mv2 and its environment still update, the plugin
   stays at its old commit, and the next update retries it. Restore access or
   uninstall the optional plugin: save any local files first, then run the printed
