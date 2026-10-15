@@ -1035,9 +1035,9 @@ without a progress row can read `waiting` until it finishes.
 With the bridge, the `compaction` plugin ([compaction](compaction.md); the
 `plugins/compaction` submodule), where it is installed and on, adds tree
 compaction to Claude launches through its launch contribution:
-`MV2_COMPACTION=1` and `MV2_COMPACTION_PLUGIN=1`, a `PreCompact`
-command hook, and its own Claude plugin directory. That plugin answers the
-session's `/compact` with mv2's compacted turns from the compaction plugin's
+`MV2_COMPACTION=1`, a `PreCompact` command hook, and its own Claude plugin
+directory. That plugin answers the session's `/compact` with mv2's compacted
+turns from the compaction plugin's
 `install` helper action (`python -m multiverse.plugins run compaction
 install`), showing progress and every error in the status line, as notices and
 as toasts, and skips with the reason when it cannot. The `PreCompact` hook
