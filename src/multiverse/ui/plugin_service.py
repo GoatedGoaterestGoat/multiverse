@@ -32,9 +32,7 @@ def plugin_of(error):
         module = str(traceback.tb_frame.f_globals.get("__name__", ""))
         if module.startswith(loader.PACKAGE + "."):
             package = ".".join(module.split(".")[:2])
-            with loader._lock:
-                found = next((item for item in loader._loaded.values()
-                              if isinstance(item, loader.Loaded) and item.package == package), None)
+            found = loader.loaded_by_package(package)
             return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found
         traceback = traceback.tb_next
     return None

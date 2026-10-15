@@ -72,7 +72,7 @@ def _plugin_column_keys(root):
         from .. import plugins
         keys = set()
         for scope in universe.tree(root):
-            for loaded in plugins.loader.active(scope):
+            for loaded in plugins.loader.active(scope, wait=0):
                 for key in loaded.registrations.columns:
                     keys.update((key, f"{loaded.name}:{key}"))
         return keys

@@ -20,14 +20,17 @@ CALLS = []
 GATE = threading.Event()
 DELAY = 0
 
+BLOCK_AT = 0  # the Nth call (in whatever order the rows come) waits on GATE
+PERMITS = None  # a semaphore: each answer needs a permit
+
 def shout(row):
     CALLS.append(("agent", row["name"]))
     if row["name"] == "bad":
         raise RuntimeError("no value for " + row["name"])
-    if row["name"].startswith("slow"):
+    if BLOCK_AT and len([c for c in CALLS if c[0] == "agent"]) == BLOCK_AT:
         GATE.wait(30)
-    if DELAY:
-        time.sleep(DELAY)
+    if PERMITS is not None:
+        PERMITS.acquire(timeout=30)
     return row["name"].upper()
 
 def group(row):
@@ -71,44 +74,55 @@ class ColumnTests(PluginTestCase):
         calls = [call for call in self.mod().CALLS if call[0] == "agent"]
         self.assertEqual(sorted(call[1] for call in calls), ["a", "b", "bad", "c"])
 
+    def answered(self, snapshot):
+        return {name for name, value in self.cells(snapshot).items() if value not in ("…", None)}
+
+    def until(self, check, what, timeout=6.0):
+        deadline = time.monotonic() + timeout
+        while not check():
+            self.assertLess(time.monotonic(), deadline, f"timed out waiting for {what}")
+            time.sleep(0.03)
+
     def test_a_column_that_runs_long_shows_the_rows_it_answered_and_fills_in_as_its_pass_goes_on(self):
-        for name in ("a1", "a2", "a3", "slow4", "a5", "a6", "a7", "a8"):
+        names = ["a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8"]
+        for name in names:
             self.agent(name)
-        agent_calls = lambda: [c[1] for c in self.mod().CALLS if c[0] == "agent"]
-        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.3):
-            started = time.monotonic()
+        module = self.mod()
+        module.BLOCK_AT = 4  # the fourth row asked, whichever it is, takes its time
+        agent_calls = lambda: [c[1] for c in module.CALLS if c[0] == "agent"]
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 1.0):
             first = self.cells(LocalBackend().snapshot(self.root))
-            self.assertLess(time.monotonic() - started, 1.0)  # one budget, not one per row
-            answered = [name for name, value in first.items() if value not in ("…", None)]
-            waiting = [name for name, value in first.items() if value == "…"]
-            self.assertTrue(answered and waiting, first)  # some rows are in, the rest say so
-            self.assertIn("slow4", waiting)
+            answered = {n for n, v in first.items() if v not in ("…", None)}
+            self.assertEqual(len(answered), 3, first)  # the three before the slow one are in
+            self.assertEqual(sorted(v for v in first.values() if v == "…"), ["…"] * 5)
             seen = len(agent_calls())
             again = self.cells(LocalBackend().snapshot(self.root))
             self.assertEqual(len(agent_calls()), seen)  # the pass is still parked: no second pass
-            self.assertEqual({n for n, v in again.items() if v == "…"}, set(waiting))
-        self.mod().GATE.set()
-        deadline = time.monotonic() + 5
-        while self.mod().CALLS and time.monotonic() < deadline and len(agent_calls()) < 8:
-            time.sleep(0.05)
-        time.sleep(0.2)
-        later = self.cells(LocalBackend().snapshot(self.root))
-        self.assertEqual({n: v for n, v in later.items()},
-                         {"a1": "A1", "a2": "A2", "a3": "A3", "slow4": "SLOW4", "a5": "A5", "a6": "A6", "a7": "A7", "a8": "A8"})
+            self.assertEqual({n for n, v in again.items() if v not in ("…", None)}, answered)
+        module.GATE.set()
+        self.until(lambda: len(agent_calls()) >= 8, "the parked pass to finish")
+        self.until(lambda: self.answered(LocalBackend().snapshot(self.root)) == set(names), "every row to have its value")
+        self.assertEqual(self.cells(LocalBackend().snapshot(self.root)), {n: n.upper() for n in names})
 
     def test_a_column_slow_on_every_row_still_shows_values_that_arrive_over_several_refreshes(self):
-        for index in range(12):
-            self.agent(f"s{index:02d}")
-        self.mod().DELAY = 0.05
-        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.25):
-            filled = []
-            for _ in range(6):
-                snapshot = self.cells(LocalBackend().snapshot(self.root))
-                filled.append(len([v for v in snapshot.values() if v not in ("…", None)]))
-                time.sleep(0.2)
-        self.assertGreater(filled[0], 0)  # not all dots, even though the whole pass takes 0.6 s
-        self.assertEqual(filled[-1], 12)  # and every row ends up with its value
-        self.assertEqual(sorted(filled), filled)
+        import threading
+        names = [f"s{index:02d}" for index in range(12)]
+        for name in names:
+            self.agent(name)
+        module = self.mod()
+        module.PERMITS = threading.Semaphore(0)
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.5):
+            LocalBackend().snapshot(self.root)  # the pass starts and parks on its first row
+            counts = []
+            for permits in (4, 4, 40):
+                for _ in range(permits if permits < 40 else 12):
+                    module.PERMITS.release()
+                self.until(lambda: len(self.answered(LocalBackend().snapshot(self.root))) >= min(sum(counts) + permits, 12),
+                           f"{sum(counts) + permits} rows")
+                counts.append(permits)
+                shown = self.answered(LocalBackend().snapshot(self.root))
+                self.assertGreaterEqual(len(shown), min(sum(counts), 12))
+        self.until(lambda: self.answered(LocalBackend().snapshot(self.root)) == set(names), "every row")
 
     def test_a_subverse_row_where_the_plugin_is_off_gets_no_call_and_no_cell(self):
         self.agent("a")
