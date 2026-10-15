@@ -42,6 +42,22 @@ STATUS_ITEMS = frozenset('model model-name model-with-reasoning reasoning curren
     'thread-title workspace-headline task-progress'.split())
 
 
+def _plugin_fingerprint(directory):
+    """Provenance of the selected snapshot, before cache markers/runtime writes.
+
+    A marker in an ordinary plugin is just another source file. Only the
+    canonical content-addressed cache may supply its original trusted hash.
+    """
+    value = 'sha256:' + directory.name
+    if re.fullmatch(r'[0-9a-f]{64}', directory.name) and directory == trust.cache_directory(value).resolve():
+        try:
+            if (directory / trust.COMPLETE).read_text().strip() == value:
+                return value
+        except (OSError, UnicodeError):
+            pass
+    return trust.fingerprint(directory)
+
+
 def version_text(version):
     return '.'.join(map(str, version)) if version is not None else None
 
@@ -367,7 +383,7 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
                 if '\0' in text:
                     raise ValueError('instructions must not contain NUL characters')
                 detail['instructions'] = {'path': fields['instructions'], 'sha256': hashlib.sha256(data).hexdigest()}
-            record['fingerprint'] = trust.fingerprint(plugin_dir)
+            record['fingerprint'] = _plugin_fingerprint(plugin_dir)
         except (OSError, ValueError, TypeError) as error:
             detail.update(state='skipped', reason=str(error))
             continue

@@ -208,6 +208,39 @@ def register(mv):
         self.assertEqual(outgoing['params']['threadId'], self.values['session_id'])
         self.assertEqual(frame['params'], {'threadId': self.values['session_id']})
 
+    def test_cached_plugin_records_the_trusted_source_fingerprint(self):
+        from multiverse.plugins import loader, trust
+        source = self.write_plugin('cached', {'module': 'plugin', 'permissions': ['harness.codex'],
+            'harnesses': {'codex': [{'config': {'model_verbosity': 'low'}}]}},
+            files={'plugin.py': 'def register(mv): pass\n', '__pycache__/source.pyc': 'not imported'},
+            where=self.root / 'plugins')
+        self.enable('cached')
+        expected = trust.trust(source)
+        for bridge in (False, True):
+            with self.subTest(bridge=bridge):
+                command = self.command({'inbox_bridge': bridge})
+                cache = Path(self.entry('cached').manifest.directory)
+                self.assertEqual(cache, trust.cache_directory(expected))
+                self.assertTrue((cache / trust.COMPLETE).is_file())
+                self.assertFalse((cache / '__pycache__' / 'source.pyc').exists())
+                generated = cache / '__pycache__' / 'generated.pyc'
+                generated.parent.mkdir(exist_ok=True)
+                generated.write_bytes(b'generated after cache creation')
+                self.assertNotEqual(trust.fingerprint(cache), expected)
+                self.assertEqual(command.plugins['plugins']['cached']['fingerprint'], expected)
+                loader.reset()
+                repeated = self.command({'inbox_bridge': bridge})
+                self.assertEqual(repeated.plugins['plugins']['cached']['fingerprint'], expected)
+
+    def test_non_cache_plugin_cannot_claim_a_fingerprint_with_a_marker(self):
+        from multiverse.plugins import trust
+        directory = self.write_plugin('a' * 64, {'name': 'demo', 'permissions': ['harness.codex'],
+            'harnesses': {'codex': [{'config': {'model_verbosity': 'low'}}]}},
+            files={trust.COMPLETE: 'sha256:' + 'a' * 64 + '\n'})
+        self.enable('demo')
+        command = self.command()
+        self.assertEqual(command.plugins['plugins']['demo']['fingerprint'], trust.fingerprint(directory))
+
     def test_user_override_forms_and_modes_win(self):
         self.add_plugin(fields={'config': {'model_verbosity': 'low', 'tui.animations': True}})
         for flags in (['-c', 'model_verbosity="high"'], ['--config', 'model_verbosity="high"'],
