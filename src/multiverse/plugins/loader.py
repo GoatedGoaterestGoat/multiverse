@@ -512,6 +512,16 @@ def _keep_bytecode_out(directory):
         sys.pycache_prefix = str(trust.user_directory() / "pycache")
 
 
+def loaded_by_package(package):
+    """The Loaded plugin whose package (`mv2_plugins.NAME`, as in a traceback's module names) is `package`, else
+    None. Never loads anything."""
+    with _lock:
+        for known in _loaded.values():
+            if isinstance(known, Loaded) and (package == known.package or package.startswith(known.package + ".")):
+                return known
+    return None
+
+
 def _plugin_lock(directory):
     with _lock:
         return _plugin_locks.setdefault(directory, threading.Lock())

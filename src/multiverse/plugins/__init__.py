@@ -728,7 +728,7 @@ def dashboard_panels(root):
 
     spec is a loader.DataPanel (render, title, auto) or, for the class form, the "module:Class" string."""
     found = []
-    for loaded in loader.active(root):
+    for loaded in loader.active(root, wait=0):
         for kind, spec in sorted(loaded.registrations.data_panels.items()):
             found.append((loaded, kind, spec))
         for kind, reference in sorted(loaded.registrations.panels.items()):
@@ -808,7 +808,9 @@ def edit_settings(root, name, changes):
 
 
 # The dashboard's extension points. Nothing here imports Textual; screens and
-# panels are imported by the dashboard through Loaded.resolve.
+# panels are imported by the dashboard through Loaded.resolve. What the dashboard asks again on every refresh
+# (columns, data panels, inspector lines) does not wait for a plugin another thread is still loading (wait=0):
+# it shows on the next refresh. What it keeps (palette actions, a class-form panel, the settings screen) waits.
 
 def on_here(root):
     """Names of the plugins on and usable in this universe."""
@@ -818,7 +820,7 @@ def on_here(root):
 def dashboard_columns(root):
     """{"plugin:key": (Loaded, loader.Column)} of plugins on here, and each short key that only one of them uses."""
     result, short = {}, {}
-    for loaded in loader.active(root):
+    for loaded in loader.active(root, wait=0):
         for key, column in loaded.registrations.columns.items():
             result[f"{loaded.name}:{key}"] = (loaded, column)
             short.setdefault(key, []).append((loaded, column))
@@ -867,4 +869,4 @@ def theme_colors(root):
 
 def inspector_facts(root):
     """[(Loaded, fact)] of plugins on here, in plugin-name order; fact(row) gives a line or None."""
-    return [(loaded, fact) for loaded in loader.active(root) for fact in loaded.registrations.inspector]
+    return [(loaded, fact) for loaded in loader.active(root, wait=0) for fact in loaded.registrations.inspector]

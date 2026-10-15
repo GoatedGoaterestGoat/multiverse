@@ -54,3 +54,40 @@ class LoadBudgetTest(PluginTestCase):
         self.release.touch()
         other.join(10)
         self.assertEqual(sorted(loaded.name for loaded in loader.active(self.root)), ["slow", "swift"])
+
+
+COLUMN = """
+import os
+import time
+
+def register(mv):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not os.path.exists(os.environ["SLOW_RELEASE"]):
+        time.sleep(0.02)
+    mv.dashboard.column("late", "Late", 4, lambda row: "x")
+"""
+
+
+class DashboardNeverWaitsTest(PluginTestCase):
+    """The dashboard's wrappers never wait for a plugin another thread is loading; it shows on the next refresh."""
+
+    def test_dashboard_wrappers_skip_a_plugin_still_loading(self):
+        from multiverse import plugins
+        release = self.work / "release"
+        os.environ["SLOW_RELEASE"] = str(release)
+        self.addCleanup(release.touch)
+        self.write_plugin("late", {"module": "plugin", "extends": ["dashboard.column"]}, {"plugin.py": COLUMN})
+        self.enable("late")
+        other = threading.Thread(target=lambda: loader.load(loader.entry(self.root, "late")), daemon=True)
+        other.start()
+        time.sleep(0.2)
+        start = time.monotonic()
+        self.assertEqual(plugins.dashboard_columns(self.root), {})
+        self.assertEqual((plugins.inspector_facts(self.root), plugins.dashboard_panels(self.root)), ([], []))
+        self.assertLess(time.monotonic() - start, 1)
+        release.touch()
+        other.join(10)
+        self.assertIn("late:late", plugins.dashboard_columns(self.root))
+        loaded = loader.entry(self.root, "late").loaded
+        self.assertIs(loader.loaded_by_package(loaded.package + ".plugin"), loaded)
+        self.assertIsNone(loader.loaded_by_package("mv2_plugins.nothing_here"))
