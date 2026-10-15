@@ -14,6 +14,31 @@ class BranchUpdateTest(PluginUpdateTest):
         self.assertEqual(self.git(self.submodule, "symbolic-ref", "--short", "HEAD"), name)
         self.assertEqual(self.git(self.submodule, "rev-parse", "HEAD"), commit)
 
+    def test_branch_at_the_current_pin_is_quiet_and_stays_attached(self):
+        self.git(self.submodule, "checkout", "-b", "at-pin", self.old_pin)
+        for check in (True, False):
+            result = update.run(check=check)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(self.entry(result)["state"], "unchanged")
+            self.assertEqual(self.entry(result)["branch"], "at-pin")
+            self.assertNotIn("Warning:", update.format_output(result))
+            self.assert_branch("at-pin", self.old_pin)
+
+    def test_branch_already_at_the_incoming_pin_is_quiet_through_fast_forward(self):
+        target = self.plugin_commit()
+        self.bump()
+        self.git(self.submodule, "fetch", "origin")
+        self.git(self.submodule, "checkout", "-b", "at-incoming-pin", target)
+        for check in (True, False):
+            result = update.run(check=check)
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(self.entry(result)["state"], "unchanged")
+            self.assertEqual(self.entry(result)["branch"], "at-incoming-pin")
+            self.assertNotIn("Warning:", update.format_output(result))
+            self.assert_branch("at-incoming-pin", target)
+        self.assertNotEqual(result["after"], self.before)
+        self.assertEqual(result["environment"]["state"], "synced")
+
     def test_detached_ahead_refusal_has_a_working_repair_for_check_and_update(self):
         published = self.plugin_commit()
         self.git(self.submodule, "fetch", "origin")

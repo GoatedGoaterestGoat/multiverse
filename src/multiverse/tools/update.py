@@ -231,9 +231,11 @@ def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
         elif path not in state:
             entry["state"] = "not_installed"
         elif len(state[path]) > 4 and state[path][4] is not None:
-            entry["state"], entry["branch"] = "preserved", state[path][4]
-            entry["reason"] = (f"is on branch {entry['branch']} at {state[path][0][:7]}; "
-                               f"mv2 pins {after[path][:7]}. Its checkout is left unchanged.")
+            entry["branch"] = state[path][4]
+            entry["state"] = "unchanged" if state[path][0] == after[path] else "preserved"
+            if entry["state"] == "preserved":
+                entry["reason"] = (f"is on branch {entry['branch']} at {state[path][0][:7]}; "
+                                   f"mv2 pins {after[path][:7]}. Its checkout is left unchanged.")
         elif before[path] == after[path]:
             entry["state"] = "unchanged" if state[path][0] == after[path] else "would_update"
         else:

@@ -1392,8 +1392,9 @@ multiverse-v2/
   checkout and never fetches or initializes one that is not. Before the fetch,
   again before the merge, and again before each plugin moves, mv2 checks for
   tracked changes and conflicts, and refuses to discard local work (untracked
-  files are fine). A clean plugin checkout on a branch is left untouched with a
-  warning, so updating mv2 never detaches the user's plugin branch. A detached
+  files are fine). A clean plugin checkout on a branch is left untouched, with a
+  warning only when its commit differs from mv2's pin, so updating mv2 never
+  detaches the user's plugin branch. A detached
   checkout ahead of or diverged from mv2's pin still blocks the update, with its
   actual relationship to the pin reported rather than a claim that its commits
   are unpublished. Only clean detached checkouts at or behind an older pin move;
