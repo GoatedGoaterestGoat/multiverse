@@ -32,8 +32,11 @@ would leave a resumed agent with the bootstrap it started with: a plugin's
 bootstrap line added or removed since, or a template change, would never reach
 it. Resume therefore passes `--system-prompt-snapshot off`, so the current
 bootstrap applies; an unchanged one keeps the prompt cache, and a changed one is
-cached afresh once. The flag is left out for a Claude Code known to be older
-than 2.1.267 (a plain launch never asks the version). Pi owns an
+cached afresh once. Resuming a Claude agent therefore needs Claude Code 2.1.267
+or newer, the first with that flag: the flag is left out where the version is
+read and known to be older (an auto launch falling back to plain), but a plain
+launch never asks the version, so on an older Claude its resume fails on the
+unknown option, which the failed-launch diagnostics show. Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
