@@ -13,6 +13,33 @@ from types import SimpleNamespace
 from .. import plugins, universe
 from ..plugins import host, loader
 
+def universe_name(root):
+    """The universe's own name from universe.json, else its directory's (a top universe's directory is `.multiverse`)."""
+    from ..store import read
+    try:
+        return str(read(Path(root) / "universe.json").get("name") or Path(root).name)
+    except (OSError, ValueError, AttributeError):
+        return Path(root).name
+
+
+def plugin_of(error):
+    """(plugin name, its Loaded or None) when `error` was raised by code of a loaded plugin, else None.
+
+    A plugin's modules live in a package of their own (mv2_plugins.NAME_digest), so a traceback frame in
+    one says whose code it was, whatever Textual code stands between it and the event loop."""
+    traceback = error.__traceback__
+    while traceback is not None:
+        module = str(traceback.tb_frame.f_globals.get("__name__", ""))
+        if module.startswith(loader.PACKAGE + "."):
+            package = ".".join(module.split(".")[:2])
+            with loader._lock:
+                found = next((item for item in loader._loaded.values()
+                              if isinstance(item, loader.Loaded) and item.package == package), None)
+            return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found
+        traceback = traceback.tb_next
+    return None
+
+
 ACTION_TIMEOUT = 30.0
 FACTS_BUDGET = 4.0  # seconds for every plugin's inspector lines on one scan
 
@@ -109,7 +136,7 @@ class PluginService:
         plugin, name, loaded, function = entry
         scope = Path(scope)
         if plugin not in plugins.on_here(scope):
-            raise ValueError(f"{plugin} is off in {scope.name}: turn it on from the Plugins screen (P)")
+            raise ValueError(f"{plugin} is off in {universe_name(scope)}: turn it on from the Plugins screen (P)")
         context = SimpleNamespace(row=dict(row) if row else None, scope=scope, app=None)
         outcome = loader.guarded(loaded, f"action {name}", function, context, root=scope, timeout=ACTION_TIMEOUT)
         if outcome.state == "timeout":

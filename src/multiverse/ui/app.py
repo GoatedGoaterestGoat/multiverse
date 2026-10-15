@@ -13,6 +13,7 @@ from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal
+from textual.content import Content
 from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextArea
 
 from ..display import clean
@@ -23,7 +24,7 @@ from .editing import TreeEditing
 from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
-from .plugin_service import PluginService
+from .plugin_service import PluginService, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, rate_limits
@@ -44,8 +45,14 @@ class PluginCommands(Provider):
     async def search(self, query):
         matcher = self.matcher(query)
         for title, help_text, callback in self.app.plugin_palette():
-            if (score := matcher.match(title)) > 0:
-                yield Hit(score, matcher.highlight(title), callback, text=title, help=help_text)
+            score, offsets = matcher.fuzzy_search.match(matcher.query, title)
+            if score > 0:
+                # Content(title), not matcher.highlight(title): that reads the title as markup.
+                shown = Content(title)
+                for offset in offsets:
+                    if not title[offset].isspace():
+                        shown = shown.stylize(matcher.match_style, offset, offset + 1)
+                yield Hit(score, shown, callback, text=title, help=help_text)
 
 
 class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
@@ -407,6 +414,33 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.submit_operation(f"{entry[0]}: {entry[1]}", self.plugin_service.run_action, scope, entry, row,
                               after=lambda text: self.set_status(text) if text else None)
 
+    def _handle_exception(self, error):
+        """An exception that came out of a plugin's code on the event loop (its screen composing or mounting, a
+        widget it made) is that plugin's failure, not the dashboard's: record it, close the plugin's screen
+        and say so. Anything else ends the app as Textual does."""
+        found = plugin_of(error)
+        if found is None:
+            return super()._handle_exception(error)
+        name, loaded = found
+        if loaded is not None:
+            self.plugin_service.record(loaded, "screen or widget", error, self.home)
+        self.set_status(f"{name}: its screen or widget failed: {type(error).__name__}: {error}", error=True)
+        self.call_later(self.close_plugin_screens)  # off this call: the failing widget's own loop is still unwinding
+
+    async def close_plugin_screens(self):
+        """Pop every screen on top that is a plugin's class, and take out any widget whose message loop ended with
+        the failure: Textual leaves such a widget attached with nobody to process its messages."""
+        from ..plugins import loader
+        while len(self.screen_stack) > 1 and type(self.screen).__module__.startswith(loader.PACKAGE + "."):
+            await self.pop_screen()
+        for widget in list(self.screen.walk_children(with_self=False)):
+            task = getattr(widget, "_task", None)
+            if task is not None and task.done() and not widget.is_running and widget.is_attached:
+                try:
+                    await widget._message_loop_exit()  # what a widget's loop does when it ends: unmount and detach
+                except Exception:
+                    pass
+
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
         yield SystemCommand("Plugins", "Turn plugins on or off and edit their settings", self.action_plugins)
@@ -448,7 +482,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         try:
             screen = await asyncio.to_thread(self.plugin_service.screen_class, loaded, reference)
             if plugin not in await asyncio.to_thread(self.plugin_service.on_here, root):
-                self.set_status(f"{plugin} is off in {root.name}: turn it on from the Plugins screen", error=True)
+                self.set_status(f"{plugin} is off in {universe_name(root)}: turn it on from the Plugins screen (P)", error=True)
                 return
             self.push_screen(screen(root=root, backend=self.backend), self.plugin_screen_closed)
         except Exception as error:

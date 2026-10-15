@@ -10,6 +10,7 @@ resolves them into PLUGIN_COLUMNS and computes their cells (`plugin_cells`) off
 the event loop, so rendering only reads what a row already carries.
 """
 from dataclasses import dataclass, field
+import threading
 
 from rich.text import Text
 
@@ -143,9 +144,19 @@ class MissingColumn(Column):
 PLUGIN_COLUMNS = {}
 
 
-# After a column runs out of time, it is not called for this many refreshes; its cells show `…` meanwhile.
-SKIP_REFRESHES = 3
-_skip = {}  # (id(loaded), key, group) -> refreshes left to skip
+_runs = {}  # (id(loaded), key, group) -> {"run": a Run still going or None, "last": {row key: text}, "slow": bool}
+
+
+class Run:
+    """One pass of a plugin column over its rows, filled row by row so a pass that outlives its budget still counts."""
+
+    def __init__(self):
+        self.partial = {}  # row key -> text or None (the plugin had no value), as each row is answered
+        self.finished = threading.Event()
+
+
+def row_key(row, group):
+    return str(row.get("path") if group else row.get("id") or row.get("name"))
 
 
 def fill_cells(rows, group=False):
@@ -153,8 +164,10 @@ def fill_cells(rows, group=False):
 
     One call per column for all `rows`, inside one time budget (`loader.guarded`), so a slow column costs
     one budget per refresh however many rows there are. Only rows whose universe has the plugin on are
-    given to it. A row it cannot answer for shows `—`; a column that runs out of time (or is still busy from
-    an earlier refresh) shows `…` and is left alone for SKIP_REFRESHES refreshes.
+    given to it. The rows it answered before the budget ran out are shown; the pass goes on in its thread,
+    later refreshes read what it has by then (and start no second pass meanwhile), and a column that has
+    been slow waits only a moment for the next pass. A row not answered yet shows `…`; one the plugin has
+    no value for shows `—`; a row that makes it raise costs one recorded error.
     """
     from ..plugins import loader
     for key, column in PLUGIN_COLUMNS.items():
@@ -164,39 +177,44 @@ def fill_cells(rows, group=False):
         wanted = [row for row in rows if column.plugin in row.get("plugins", ())]
         if function is None or not wanted:
             continue
-        state = (id(column.loaded), key, group)
         what = f"column {column.spec.key}" + (" (subverses)" if group else "")
-        if _skip.get(state, 0) > 0:
-            _skip[state] -= 1
-            show(wanted, key, "…")
-            continue
+        where = wanted[0].get("path") if group else wanted[0].get("universe")
+        entry = _runs.setdefault((id(column.loaded), key, group), {"run": None, "last": {}, "slow": False})
+        run = entry["run"]
+        if run is not None and run.finished.is_set():  # a pass that ran long has landed: it is the latest full answer
+            entry["last"], entry["run"], run = dict(run.partial), None, None
+        if run is None:
+            run = Run()
 
-        def answer(rows=wanted, function=function, what=what):
-            values, failure = [], None
-            for row in rows:
+            def answer(rows=wanted, function=function, what=what, where=where, run=run):
+                failure = None
                 try:
-                    value = function(dict(row))
-                except Exception as error:  # one row's trouble is not the others'
-                    failure, value = failure or error, None
-                values.append(value)
-            if failure is not None:
-                loader.record(column.loaded, what, failure, rows[0].get("path") if group else rows[0].get("universe"))
-            return values
+                    for row in rows:
+                        try:
+                            value = function(dict(row))
+                        except Exception as error:  # one row's trouble is not the others'
+                            failure, value = failure or error, None
+                        run.partial[row_key(row, group)] = None if value is None else clean(str(value))
+                    if failure is not None:
+                        loader.record(column.loaded, what, failure, where)
+                finally:
+                    run.finished.set()
 
-        outcome = loader.guarded(column.loaded, what, answer, root=wanted[0].get("path") if group else wanted[0].get("universe"),
-                                 timeout=loader.SYNCHRONOUS_BUDGET)
-        if outcome.state == "ok":
-            for row, value in zip(wanted, outcome.value):
-                if value is not None:
-                    row.setdefault("plugin_cells", {})[key] = clean(str(value))
-        elif outcome.state in ("timeout", "busy"):
-            _skip[state] = SKIP_REFRESHES
-            show(wanted, key, "…")
-
-
-def show(rows, key, text):
-    for row in rows:
-        row.setdefault("plugin_cells", {})[key] = text
+            budget = 0.2 if entry["slow"] else loader.SYNCHRONOUS_BUDGET
+            outcome = loader.guarded(column.loaded, what, answer, root=where, timeout=budget)
+            if outcome.state == "busy":  # nothing started: an earlier pass still holds the plugin's call
+                pass
+            elif run.finished.is_set():
+                entry["slow"] = False
+                entry["last"], entry["run"] = dict(run.partial), None
+            else:
+                entry["slow"], entry["run"] = True, run
+        current = entry["run"].partial if entry["run"] is not None else {}
+        for row in wanted:
+            rk = row_key(row, group)
+            value = current[rk] if rk in current else entry["last"].get(rk, "…" if entry["run"] is not None else None)
+            if value is not None:
+                row.setdefault("plugin_cells", {})[key] = value
 
 
 def reset_plugin_caches():

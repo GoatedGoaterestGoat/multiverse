@@ -18,8 +18,8 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
-from ..store import read
 from ..plugins.settings import DELETE
+from .plugin_service import universe_name
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
 
 STATES = {"on": "on", "loaded": "on", "off": "off", "failed": "failed to load", "unusable": "unusable",
@@ -75,14 +75,6 @@ def describe(item):
         lines.append("Settings: " + clean(settings.get("path") or "") + (" (unusable)" if settings.get("problem") else ""))
     lines += ["Error: " + clean(text) for text in (item.get("errors") or [])[-3:]]
     return "\n".join(lines)
-
-
-def universe_name(root):
-    """The universe's own name from universe.json, else its directory's (a top universe's directory is `.multiverse`)."""
-    try:
-        return str(read(Path(root) / "universe.json").get("name") or Path(root).name)
-    except (OSError, ValueError, AttributeError):
-        return Path(root).name
 
 
 class PluginsScreen(ModalScreen):

@@ -60,6 +60,7 @@ import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
+from textual.pilot import WaitForScreenTimeout
 from textual.widgets import DataTable, Label, Markdown, Static
 
 from ..ui.app import MultiverseApp
@@ -106,12 +107,20 @@ class Dashboard:
                 pass
             if asyncio.get_running_loop().time() > deadline:
                 self.case.fail(f"timed out waiting for {what}")
-            await self.pilot.pause(0.02)
+            await self._pause(0.02)
 
     async def settle(self):
         for _ in range(3):
-            await self.pilot.pause(0.03)
+            await self._pause()
             await self.app.workers.wait_for_complete()
+
+    async def _pause(self, delay=0.03):
+        """Let the dashboard draw. A plugin screen that has just failed and is being closed never answers, so
+        Textual's own wait is cut short rather than left to run for its 30 seconds."""
+        try:
+            await asyncio.wait_for(self.pilot.pause(delay), 2.0)
+        except (asyncio.TimeoutError, WaitForScreenTimeout):
+            pass
 
     async def ready(self):
         await self.until(lambda: self.app.snapshot is not None and not self.app.scanning and self.app.visible_rows,

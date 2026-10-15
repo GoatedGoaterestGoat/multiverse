@@ -18,6 +18,7 @@ from pathlib import Path
 
 CALLS = []
 GATE = threading.Event()
+DELAY = 0
 
 def shout(row):
     CALLS.append(("agent", row["name"]))
@@ -25,6 +26,8 @@ def shout(row):
         raise RuntimeError("no value for " + row["name"])
     if row["name"].startswith("slow"):
         GATE.wait(30)
+    if DELAY:
+        time.sleep(DELAY)
     return row["name"].upper()
 
 def group(row):
@@ -68,27 +71,44 @@ class ColumnTests(PluginTestCase):
         calls = [call for call in self.mod().CALLS if call[0] == "agent"]
         self.assertEqual(sorted(call[1] for call in calls), ["a", "b", "bad", "c"])
 
-    def test_a_slow_column_costs_one_budget_per_refresh_not_one_per_row_and_is_skipped_for_a_few_refreshes(self):
-        for name in ("slow1", "slow2", "slow3", "slow4", "slow5"):
+    def test_a_column_that_runs_long_shows_the_rows_it_answered_and_fills_in_as_its_pass_goes_on(self):
+        for name in ("a1", "a2", "a3", "slow4", "a5", "a6", "a7", "a8"):
             self.agent(name)
+        agent_calls = lambda: [c[1] for c in self.mod().CALLS if c[0] == "agent"]
         with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.3):
             started = time.monotonic()
-            first = LocalBackend().snapshot(self.root)
-            elapsed = time.monotonic() - started
-            self.assertLess(elapsed, 1.0)  # not 5 x 0.3
-            self.assertEqual(set(self.cells(first).values()), {"…"})
-            calls = len([c for c in self.mod().CALLS if c[0] == "agent"])
-            for _ in range(columns.SKIP_REFRESHES):
-                started = time.monotonic()
-                again = LocalBackend().snapshot(self.root)
-                self.assertLess(time.monotonic() - started, 0.25)
-                self.assertEqual(set(self.cells(again).values()), {"…"})
-            self.assertEqual(len([c for c in self.mod().CALLS if c[0] == "agent"]), calls)  # no call while skipped
+            first = self.cells(LocalBackend().snapshot(self.root))
+            self.assertLess(time.monotonic() - started, 1.0)  # one budget, not one per row
+            answered = [name for name, value in first.items() if value not in ("…", None)]
+            waiting = [name for name, value in first.items() if value == "…"]
+            self.assertTrue(answered and waiting, first)  # some rows are in, the rest say so
+            self.assertIn("slow4", waiting)
+            seen = len(agent_calls())
+            again = self.cells(LocalBackend().snapshot(self.root))
+            self.assertEqual(len(agent_calls()), seen)  # the pass is still parked: no second pass
+            self.assertEqual({n for n, v in again.items() if v == "…"}, set(waiting))
         self.mod().GATE.set()
-        time.sleep(0.3)
-        self.mod().CALLS.clear()
-        later = LocalBackend().snapshot(self.root)
-        self.assertEqual(set(self.cells(later).values()), {"SLOW1", "SLOW2", "SLOW3", "SLOW4", "SLOW5"})
+        deadline = time.monotonic() + 5
+        while self.mod().CALLS and time.monotonic() < deadline and len(agent_calls()) < 8:
+            time.sleep(0.05)
+        time.sleep(0.2)
+        later = self.cells(LocalBackend().snapshot(self.root))
+        self.assertEqual({n: v for n, v in later.items()},
+                         {"a1": "A1", "a2": "A2", "a3": "A3", "slow4": "SLOW4", "a5": "A5", "a6": "A6", "a7": "A7", "a8": "A8"})
+
+    def test_a_column_slow_on_every_row_still_shows_values_that_arrive_over_several_refreshes(self):
+        for index in range(12):
+            self.agent(f"s{index:02d}")
+        self.mod().DELAY = 0.05
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.25):
+            filled = []
+            for _ in range(6):
+                snapshot = self.cells(LocalBackend().snapshot(self.root))
+                filled.append(len([v for v in snapshot.values() if v not in ("…", None)]))
+                time.sleep(0.2)
+        self.assertGreater(filled[0], 0)  # not all dots, even though the whole pass takes 0.6 s
+        self.assertEqual(filled[-1], 12)  # and every row ends up with its value
+        self.assertEqual(sorted(filled), filled)
 
     def test_a_subverse_row_where_the_plugin_is_off_gets_no_call_and_no_cell(self):
         self.agent("a")
