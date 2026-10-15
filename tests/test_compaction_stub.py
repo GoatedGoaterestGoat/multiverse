@@ -5,6 +5,7 @@ The guard must let Claude compact (such a launch no longer has the hooks that wo
 answer /compact), other actions go to the plugin only where it is installed and on,
 and `mv2 doctor` names the running agents that still use the old guard.
 """
+import io
 import json
 import os
 from pathlib import Path
@@ -46,6 +47,13 @@ class StubTest(BaseTest):
             with patch('multiverse.plugins.entry', side_effect=ValueError('No plugin named compaction here')):
                 self.assertEqual(stub.main(['status', '--agent-dir', str(self.agent)]), 0)  # not installed: nothing
             self.assertEqual(stub.main(['status']), 0)  # no agent, no universe: nothing
+            forwarded.assert_not_called()
+            # install answers an old copy of the hooks still in memory with a failure that says to restart.
+            with patch('multiverse.plugins.entry', side_effect=ValueError('No plugin named compaction here')), \
+                    patch('sys.stdout', new=io.StringIO()) as out:
+                self.assertEqual(stub.main(['install', '--agent-dir', str(self.agent)]), 1)
+            self.assertEqual(json.loads(out.getvalue()),
+                             {'event': 'failed', 'message': 'restart this agent to use tree compaction'})
             forwarded.assert_not_called()
             for state, expected in (('off', 0), ('loaded', 7)):
                 found = type('Entry', (), {'state': state})()
