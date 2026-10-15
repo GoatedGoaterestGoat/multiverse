@@ -17,7 +17,7 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-Tree compaction is the bundled `compaction` plugin (plugins/builtin/compaction):
+Tree compaction is the `compaction` plugin (the plugins/compaction submodule):
 its launch contribution loads its own Claude plugin, which answers the
 session's `/compact` with mv2's compacted conversation, and adds a PreCompact
 hook that refuses Claude's own compaction should that ever fail to answer. Its
@@ -345,17 +345,6 @@ class ClaudeAdapter(ConfiguredAdapter):
         plan = plugins.plan_for(context, 'claude', self.name, version=None, bridge=False,
                                 base_environment=command.environment)
         return replace(command, environment=plan.environment, plugins=plan.record())
-
-    @staticmethod
-    def _universe(agent_dir):
-        """The universe an agent directory belongs to, or None outside one."""
-        if not agent_dir:
-            return None
-        directory = Path(agent_dir)
-        root = directory.parent.parent.parent
-        if directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
-            return None
-        return root
 
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
