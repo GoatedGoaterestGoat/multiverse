@@ -275,15 +275,22 @@ class ClaudeAdapter(ConfiguredAdapter):
         # Like Codex: unset is auto, true requires the bridge, false launches plain. `settings['inbox_bridge']`
         # holds the effective on/off (auto is on) for everything that reads it; the policy is kept apart.
         raw = settings.get('inbox_bridge')
+        # "off" (the default) resumes with --system-prompt-snapshot off, so the current bootstrap applies; "on"
+        # leaves Claude's own snapshot, so a resumed conversation keeps the prompt of its first request.
+        settings = dict(settings)
+        snapshot = settings.pop('system_prompt_snapshot', 'off')
+        if snapshot not in ('off', 'on'):
+            raise ValueError('system_prompt_snapshot must be "off" or "on"')
         adapter = super().configured(name, {**settings, 'inbox_bridge': True if raw is None else raw})
         adapter.bridge_policy = 'auto' if raw is None else 'required' if raw is True else 'plain'
+        adapter.system_prompt_snapshot = snapshot
         return adapter
 
     def spawn(self, context):
         return self._with_bridge(super().spawn(context), context)
 
     def resume(self, session, context):
-        command = self._without_unknown_snapshot_flag(super().resume(session, context))
+        command = self._snapshot_flag(super().resume(session, context))
         fresh = None
         if session.native_id and not has_saved_conversation(session.native_id, context.environment):
             fresh = self._reserve_session(command, session.native_id)
@@ -295,17 +302,22 @@ class ClaudeAdapter(ConfiguredAdapter):
         mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
         return replace(command, native_mode=mode)
 
-    def _without_unknown_snapshot_flag(self, command):
-        """The resume command without `--system-prompt-snapshot off` for a Claude known to be too old for it.
+    def _snapshot_flag(self, command):
+        """The resume command, without `--system-prompt-snapshot off` where it must not be passed.
 
-        Only where the bridge decision reads the version anyway: a plain launch never asks which
-        version is installed, and a version that cannot be read keeps the flag.
+        Left out when the harness keeps Claude's snapshot (`system_prompt_snapshot: "on"`), and for a
+        Claude known to be too old for the flag: only where the bridge decision reads the version
+        anyway, since a plain launch never asks which version is installed and a version that cannot
+        be read keeps the flag.
         """
-        if self.bridge_policy == 'plain' or SNAPSHOT_FLAG not in command.argv:
+        if SNAPSHOT_FLAG not in command.argv:
             return command
-        version = claude_version(command.argv[0])
-        if version is None or version >= SNAPSHOT_FLAG_VERSION:
-            return command
+        if self.system_prompt_snapshot != 'on':
+            if self.bridge_policy == 'plain':
+                return command
+            version = claude_version(command.argv[0])
+            if version is None or version >= SNAPSHOT_FLAG_VERSION:
+                return command
         argv = list(command.argv)
         index = argv.index(SNAPSHOT_FLAG)
         del argv[index:index + 2]

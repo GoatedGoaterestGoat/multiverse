@@ -419,6 +419,26 @@ class ClaudeBridgeTest(BaseTest):
         older, _ = self.launch(None, (2, 1, 267), 'resume')
         self.assertIn('--system-prompt-snapshot', older.argv)
 
+    def test_the_snapshot_can_be_kept_with_a_harness_setting(self):
+        path = self.root / 'harnesses/claude/harness.json'
+        config = read(path)
+        config['settings']['system_prompt_snapshot'] = 'on'
+        write(path, config)
+        for setting in (None, True, False):
+            with self.subTest(setting=setting):
+                resumed, _ = self.launch(setting, (2, 1, 300), 'resume')
+                self.assertNotIn('--system-prompt-snapshot', resumed.argv)  # Claude keeps its recorded prompt
+                self.assertIn('--append-system-prompt', resumed.argv)
+        config['settings']['system_prompt_snapshot'] = 'off'
+        write(path, config)
+        self.assertIn('--system-prompt-snapshot', self.launch(None, (2, 1, 300), 'resume')[0].argv)
+        for bad in ('yes', True, None, ''):
+            with self.subTest(value=bad):
+                config['settings']['system_prompt_snapshot'] = bad
+                write(path, config)
+                with self.assertRaisesRegex(ValueError, 'system_prompt_snapshot must be "off" or "on"'):
+                    harnesses.load(self.root, 'claude')
+
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):
             for mode in ('spawn', 'resume'):

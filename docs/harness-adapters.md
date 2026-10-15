@@ -36,7 +36,16 @@ cached afresh once. Resuming a Claude agent therefore needs Claude Code 2.1.267
 or newer, the first with that flag: the flag is left out where the version is
 read and known to be older (an auto launch falling back to plain), but a plain
 launch never asks the version, so on an older Claude its resume fails on the
-unknown option, which the failed-launch diagnostics show. Pi owns an
+unknown option, which the failed-launch diagnostics show. A Claude harness can
+keep Claude's snapshot instead with `"system_prompt_snapshot": "on"` in its
+`harness.json` settings (default `"off"`): resume then passes no flag, the
+bootstrap applies only to new conversations, and a resumed agent keeps the one it
+started with, including bootstrap lines of plugins disabled or removed since.
+Measured on 2.1.301, the flag costs nothing while the bootstrap is unchanged: git
+changes, within a session or between stop and resume, do not change the rendered
+system prompt. A changed bootstrap re-caches the prompt and the conversation once.
+Passing the flag only when the bootstrap changed is not enough, because a later
+resume without it returns to the prompt recorded at the first request. Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
