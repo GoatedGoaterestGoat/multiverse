@@ -177,8 +177,13 @@ def _parse(directory, data):
         raise ValueError("must be a JSON object")
     if data.get("schema") != 1:
         raise ValueError("schema must be 1")
+    api = parse_api(data.get("api"))
+    from .loader import API_VERSION
+    # Written for a newer plugin API: fields and names this mv2 does not know yet are expected, and the API
+    # check (loader.compatible) says what is wrong, "needs plugin API X.Y; update mv2", not "unknown ...".
+    newer = api[0] == API_VERSION[0] and api > API_VERSION
     unknown = set(data) - KNOWN_FIELDS
-    if unknown:
+    if unknown and not newer:
         raise ValueError(f"unknown fields: {', '.join(sorted(unknown))}")
     name = check_name(data.get("name"))
     if name in RESERVED_NAMES:
@@ -189,7 +194,6 @@ def _parse(directory, data):
     description = data.get("description", "")
     if not isinstance(description, str):
         raise ValueError("description must be a string")
-    api = parse_api(data.get("api"))
     module = data.get("module")
     if module is not None and (not isinstance(module, str)
                                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*", module)):
@@ -201,14 +205,14 @@ def _parse(directory, data):
     if not isinstance(extends, list) or not all(isinstance(item, str) for item in extends):
         raise ValueError("extends must be a list of extension point names")
     unknown_points = sorted(set(extends) - EXTENSION_POINTS)
-    if unknown_points:
+    if unknown_points and not newer:
         raise ValueError(f"extends names extension points this mv2 does not have: {', '.join(unknown_points)}")
     permissions = data.get("permissions", [])
     if not isinstance(permissions, list) or not all(isinstance(item, str) for item in permissions):
         raise ValueError("permissions must be a list of permission names")
     unknown_permissions = sorted(item for item in permissions
                                  if item not in PERMISSIONS and not MODEL_PERMISSION.fullmatch(item))
-    if unknown_permissions:
+    if unknown_permissions and not newer:
         raise ValueError(f"unknown permissions: {', '.join(unknown_permissions)}")
     commands = data.get("commands", {})
     if not isinstance(commands, dict):

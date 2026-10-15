@@ -511,6 +511,9 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 - `api.VERSION` is `(1, 9)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
+- A plugin written for a newer minor version than this mv2 has is reported as
+  "needs plugin API 1.N; update mv2", even when its manifest uses fields,
+  extension points or permissions this mv2 does not know yet.
 - **Stability.** 1.x is promised stable from 1.8, the version compaction uses
   with nothing but the API (step 7 of
   [Moving compaction](#moving-compaction-into-a-plugin), 4f6701d). Every newer
