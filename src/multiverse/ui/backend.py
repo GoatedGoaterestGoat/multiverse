@@ -44,6 +44,7 @@ class LocalBackend:
             columns.fill_cells(members)
         else:
             columns.PLUGIN_COLUMNS = {}
+            columns.forget_cells()
         # Plugin panels render here, off the event loop, from this scope's agents; the dashboard only draws the result.
         widgets = plugin_panels.expand(root, config["widgets"], members, config.get("plugin_panels", "auto"))
         groups = []

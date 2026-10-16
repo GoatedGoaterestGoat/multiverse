@@ -170,6 +170,7 @@ def fill_cells(rows, group=False):
     no value for shows `—`; a row that makes it raise costs one recorded error.
     """
     from ..plugins import loader
+    used = set()
     for key, column in PLUGIN_COLUMNS.items():
         if not isinstance(column, PluginColumn):
             continue
@@ -177,6 +178,7 @@ def fill_cells(rows, group=False):
         wanted = [row for row in rows if column.plugin in row.get("plugins", ())]
         if function is None or not wanted:
             continue
+        used.add((id(column.loaded), key, group))
         what = f"column {column.spec.key}" + (" (subverses)" if group else "")
         where = wanted[0].get("path") if group else wanted[0].get("universe")
         entry = _runs.setdefault((id(column.loaded), key, group), {"run": None, "last": {}, "slow": False})
@@ -215,12 +217,22 @@ def fill_cells(rows, group=False):
             value = current[rk] if rk in current else entry["last"].get(rk, "…" if entry["run"] is not None else None)
             if value is not None:
                 row.setdefault("plugin_cells", {})[key] = value
+    # A column this pass did not use (its plugin went off, or the view stopped naming it) forgets its answers,
+    # so turning it back on starts empty instead of showing what it said before.
+    for stale in [name for name in _runs if name[2] == group and name not in used]:
+        del _runs[stale]
+
+
+def forget_cells():
+    """Forget every plugin column's remembered answers (a pass still running in its thread is simply let go)."""
+    _runs.clear()
 
 
 def reset_plugin_caches():
     """Forget resolved plugin columns and panels, after a plugin or its settings change."""
     global PLUGIN_COLUMNS
     PLUGIN_COLUMNS = {}
+    forget_cells()
     from . import panels
     panels._plugin_panels.clear()
 

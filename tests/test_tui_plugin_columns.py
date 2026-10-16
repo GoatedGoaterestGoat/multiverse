@@ -132,6 +132,24 @@ class ColumnTests(PluginTestCase):
         self.assertIsNone(groups["ops"])
         self.assertEqual([call for call in self.mod().CALLS if call[0] == "group" and call[1] == "ops"], [])
 
+    def test_turning_a_plugin_off_and_on_starts_its_column_empty_not_with_the_old_values(self):
+        import threading
+        names = ["a1", "a2", "a3"]
+        for name in names:
+            self.agent(name)
+        self.assertEqual(self.cells(LocalBackend().snapshot(self.root)), {n: n.upper() for n in names})
+        self.enable("loud", on=False)
+        self.assertEqual(self.cells(LocalBackend().snapshot(self.root)), {n: None for n in names})
+        self.enable("loud")
+        module = self.mod()
+        module.PERMITS = threading.Semaphore(0)  # the column is slow to answer this time
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.3):
+            again = self.cells(LocalBackend().snapshot(self.root))
+        self.assertEqual(again, {n: "…" for n in names}, "stale values from before it was turned off")
+        for _ in names:
+            module.PERMITS.release()
+        self.until(lambda: self.answered(LocalBackend().snapshot(self.root)) == set(names), "the new values")
+
     def test_a_universe_with_the_plugin_off_everywhere_makes_no_call(self):
         self.agent("a")
         module = self.mod()
