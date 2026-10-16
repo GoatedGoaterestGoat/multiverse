@@ -51,11 +51,12 @@ _lock = threading.RLock()
 _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
-_plugin_locks = {}  # resolved plugin directory -> its import lock  # guards _running only: never held while plugin code runs
+_loading = {}  # resolved plugin directory -> (Event set when its load in the background ends, when it started)
 _log_lock = threading.Lock()
 _entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
 _generation = 0  # rises whenever a plugin is loaded or fails to load
 SYNCHRONOUS_BUDGET = 2.0
+REFRESH_WAIT = 0.5  # seconds a dashboard refresh waits, in all, for plugins still loading
 UNUSABLE = "its settings cannot be used: "  # how an `unusable` entry's problem begins, after the plugin's name  # seconds a guarded call may take where a person waits on it
 
 
@@ -220,22 +221,66 @@ def installed_directories():
     """
     global _installed
     if _installed is None:
-        found = []
-        try:
-            from importlib.metadata import entry_points
-            for point in sorted(entry_points(group=ENTRY_POINTS), key=lambda point: point.name):
-                try:
-                    spec = importlib.util.find_spec(point.module)
-                except (ImportError, ValueError):
-                    continue
-                locations = list(spec.submodule_search_locations or []) if spec else []
-                directory = Path(locations[0]) if locations else (Path(spec.origin).parent if spec and spec.origin else None)
-                if directory is not None and (directory / manifests.FILE).is_file():
-                    found.append(directory)
-        except Exception:
-            found = []
-        _installed = found
+        _installed = _installed_remembered()
     return list(_installed)
+
+
+INSTALLED = "installed-plugins.json"  # in ~/.multiverse: the last scan, per Python environment
+
+
+def _environment_signature():
+    """The directories this Python finds packages in (not the current directory) and their modification times,
+    which change whenever a package is installed or removed there."""
+    parts = []
+    for entry in sys.path[1:]:
+        try:
+            parts.append([entry, os.stat(entry).st_mtime_ns])
+        except OSError:
+            continue
+    return parts
+
+
+def _installed_remembered():
+    """installed_directories, from the last scan when nothing was installed or removed since: importing
+    importlib.metadata to scan costs every mv2 command more than the rest of plugin discovery together."""
+    from ..store import read, write
+    path, key, signature = trust.user_directory() / INSTALLED, sys.executable, _environment_signature()
+    try:
+        remembered = read(path).get("environments", {}).get(key) or {}
+    except (OSError, ValueError, AttributeError):
+        remembered = {}
+    directories = remembered.get("directories")
+    if remembered.get("signature") == signature and isinstance(directories, list) and all(
+            isinstance(item, str) and (Path(item) / manifests.FILE).is_file() for item in directories):
+        return [Path(item) for item in directories]
+    found = _scan_installed()
+    try:
+        data = read(path) if path.is_file() else {}
+        environments = data.get("environments") if isinstance(data, dict) else None
+        environments = environments if isinstance(environments, dict) else {}
+        environments[key] = {"signature": signature, "directories": [str(item) for item in found]}
+        write(path, {"schema": 1, "environments": environments})
+    except (OSError, ValueError):
+        pass  # unremembered: scanned again next time
+    return found
+
+
+def _scan_installed():
+    found = []
+    try:
+        from importlib.metadata import entry_points
+        for point in sorted(entry_points(group=ENTRY_POINTS), key=lambda point: point.name):
+            try:
+                spec = importlib.util.find_spec(point.module)
+            except (ImportError, ValueError):
+                continue
+            locations = list(spec.submodule_search_locations or []) if spec else []
+            directory = Path(locations[0]) if locations else (Path(spec.origin).parent if spec and spec.origin else None)
+            if directory is not None and (directory / manifests.FILE).is_file():
+                found.append(directory)
+    except Exception:
+        found = []
+    return found
 
 
 def compatible(manifest):
@@ -274,6 +319,52 @@ def _signature(root):
             except OSError:
                 parts.append(None)
     return tuple(parts)
+
+
+@dataclass(frozen=True)
+class Declared:
+    """One plugin manifest a universe can see, and whether plugins.json (or the plugin's default) turns it on."""
+    name: str
+    source: str
+    directory: Path
+    manifest: manifests.Manifest
+    on: bool
+
+
+_declared = {}  # root -> (signature, [Declared])
+
+
+def declared(root):
+    """Every plugin manifest this universe can see, every copy, whatever its trust or state, with whether it is on.
+
+    What plugins say, from small JSON files only: no trust check (which hashes
+    a universe plugin's files), no import. For the checks every mv2 command
+    makes (an old settings file to convert, an event someone subscribes to, a
+    usage adjuster), which must cost a built-in command nothing measurable: a
+    caller uses it only to see that nothing needs doing, and goes through
+    entries() (trust included) for anything it then does. Kept while no
+    manifest, plugin directory or plugins.json changes."""
+    root = Path(root) if root is not None else None
+    found = _source_directories(root)
+    signature = (os.environ.get("MV2_PLUGIN_PATH", ""), safe_mode(),
+                 _stat(config.path(root)) if root is not None else None,
+                 tuple((source, str(directory), _stat(directory / manifests.FILE)) for source, directory in found))
+    with _lock:
+        cached = _declared.get(root)
+    if cached and cached[0] == signature:
+        return list(cached[1])
+    settings = config.load(root) if root is not None else config.Config()
+    result = []
+    for source, directory in found:
+        try:
+            manifest = manifests.load(directory)
+        except manifests.ManifestError:
+            continue
+        default = manifest.default if source == "bundled" else "off"
+        result.append(Declared(manifest.name, source, directory, manifest, settings.is_on(manifest.name, default)))
+    with _lock:
+        _declared[root] = (signature, result)
+    return list(result)
 
 
 def entries(root):
@@ -427,11 +518,14 @@ def load(found, off=False, wait=None):
     pre-plugin settings. Raises PluginError when it cannot be loaded; the failure
     is kept, so later callers get the same answer without importing again.
 
-    The import and register() run in a daemon thread of their own and get
+    The import and register() always run in a daemon thread and get
     LOAD_SECONDS: a plugin that takes longer is left out (failed, tried again in
-    another process or once its files change), and never hangs mv2. While
-    another thread loads the same plugin, this waits at most `wait` seconds
-    (default LOAD_SECONDS), then raises StillLoading.
+    another process or once its files change), and never hangs mv2. A caller
+    waits for that load until at most `wait` seconds after it started (default:
+    until it ends), then StillLoading says it goes on in the background. So
+    wait=0 never waits, and many callers with a short wait (a dashboard refresh)
+    pay for a slow register() once, not once each: the dashboard's first screen
+    is drawn while plugins load, and shows each one on the refresh after it is.
     """
     if not (found.on and found.state in ("on", "loaded", "unusable")) and not (off and found.state == "off"):
         raise PluginError(found.problem or f"{found.name} is off here")
@@ -440,20 +534,46 @@ def load(found, off=False, wait=None):
         known = _loaded.get(directory)
     if isinstance(known, Loaded):
         return known
-    # One lock per plugin: a slow import or register() never holds up another plugin, or any guarded call.
-    lock = _plugin_lock(directory)
-    if not lock.acquire(timeout=LOAD_SECONDS if wait is None else max(0.0, wait)):
+    files = _files(directory) if isinstance(known, Failed) else None
+    if isinstance(known, Failed) and known.files == files:
+        raise PluginError(known.problem)
+    done, started = _start_loading(found, directory, files)
+    if not done.wait(LOAD_SECONDS + 1 if wait is None else max(0.0, started + wait - time.monotonic())):
         raise StillLoading(f"{found.name} is still loading")
-    try:
-        with _lock:
-            known = _loaded.get(directory)
-        if isinstance(known, Loaded):
-            return known
-        if isinstance(known, Failed) and known.files == _files(directory):
-            raise PluginError(known.problem)
-        return _load(found, directory)
-    finally:
-        lock.release()
+    with _lock:
+        known = _loaded.get(directory)
+    if isinstance(known, Loaded):
+        return known
+    raise PluginError(known.problem if isinstance(known, Failed) else f"{found.name} did not load")
+
+
+def _start_loading(found, directory, files):
+    """(Event set when this plugin's load ends, when it started): one load at a time per plugin, in a daemon
+    thread, started here unless one runs or the plugin is already loaded (or failed with these same files)."""
+    with _lock:
+        running = _loading.get(directory)
+        if running is not None:
+            return running
+        known = _loaded.get(directory)
+        if isinstance(known, Loaded) or (isinstance(known, Failed) and files is not None and known.files == files):
+            done = threading.Event()
+            done.set()
+            return done, time.monotonic()
+        done, started = threading.Event(), time.monotonic()
+        _loading[directory] = (done, started)
+
+    def run():
+        try:
+            _load(found, directory)
+        except BaseException:
+            pass  # kept as Failed: callers say why
+        finally:
+            with _lock:
+                _loading.pop(directory, None)
+            done.set()
+
+    threading.Thread(target=run, name=f"plugin {found.name}: loading", daemon=True).start()
+    return done, started
 
 
 def _load(found, directory):
@@ -526,11 +646,6 @@ def loaded_by_package(package):
     return None
 
 
-def _plugin_lock(directory):
-    with _lock:
-        return _plugin_locks.setdefault(directory, threading.Lock())
-
-
 def _files(directory):
     """(path, size, mtime_ns) of a plugin's files, to tell when they changed. Leaves out what Python writes."""
     found = []
@@ -550,21 +665,34 @@ def _changed():
     _generation += 1
 
 
+def generation():
+    """A number that rises whenever a plugin finishes loading or fails to: what keeps plugin registrations (the
+    dashboard's palette and screens) reads them again when it changes, for plugins that loaded in the background."""
+    return _generation
+
+
 def active(root, wait=None):
     """The plugins on in this universe, loaded, sorted by name. One that fails to load is left out.
 
-    A plugin another thread is loading is waited for at most `wait` seconds (default LOAD_SECONDS), then left out
-    of this answer only: what must include every plugin (a launch plan) waits; what can show it on its next
-    refresh (the dashboard's snapshot) passes wait=0."""
+    Every plugin not loaded yet starts loading at once, side by side, and this waits for them at most `wait`
+    seconds in all (default: until each load ends, within LOAD_SECONDS); one still loading then is left out of
+    this answer only. What must include every plugin (a launch plan) waits; what shows a plugin on its next
+    refresh (the dashboard) waits REFRESH_WAIT, so a register() that hangs costs its first screen that at most."""
     if safe_mode():
         return []
+    usable = [found for found in entries(root) if found.usable]
+    for found in usable:
+        try:
+            load(found, wait=0)  # starts its load in the background, unless it is loaded already
+        except PluginError:
+            pass
+    deadline = None if wait is None else time.monotonic() + max(0.0, wait)
     result = []
-    for found in entries(root):
-        if found.usable:
-            try:
-                result.append(load(found, wait=wait))
-            except PluginError:
-                continue
+    for found in usable:
+        try:
+            result.append(load(found, wait=None if deadline is None else max(0.0, deadline - time.monotonic())))
+        except PluginError:
+            continue
     return result
 
 
@@ -581,8 +709,8 @@ def log_lock_path(path):
     return path.with_name(f".{path.name}.lock")
 
 
-def append_log(path, line):
-    """Append one line to a log, rotating it to NAME.1 (one old file kept) once it is past LOG_BYTES.
+def append_log(path, line, limit=None):
+    """Append text to a log, rotating it to NAME.1 (one old file kept) once it is past `limit` (LOG_BYTES).
 
     The size check, the rotation and the append happen under a file lock, so two processes writing one log never
     both rotate it (which would overwrite NAME.1, or rename a file that is already gone)."""
@@ -590,7 +718,7 @@ def append_log(path, line):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with _log_lock, lock(log_lock_path(path)):
-        if path.exists() and path.stat().st_size > LOG_BYTES:
+        if path.exists() and path.stat().st_size > (LOG_BYTES if limit is None else limit):
             path.replace(path.with_name(path.name + ".1"))
         with path.open("a") as handle:
             handle.write(line.rstrip("\n") + "\n")
@@ -617,16 +745,12 @@ def record(loaded, what, error, root=None):
             _logged[key] = (last, quiet + 1)
             return text
         _logged[key] = (moment, 0)
-        try:
-            log = Path(root) / "state" / "plugins" / loaded.name / "errors.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
-            if log.exists() and log.stat().st_size > ERRORS_LOG_BYTES:
-                log.replace(log.with_name("errors.log.1"))
-            with log.open("a") as handle:
-                handle.write(f"{now()} {text}" + (f" ({quiet} more like it not logged)" if quiet else "") + "\n")
-                handle.write("".join(traceback.format_exception(error)).rstrip() + "\n")
-        except OSError:
-            pass
+    entry = (f"{now()} {text}" + (f" ({quiet} more like it not logged)" if quiet else "") + "\n"
+             + "".join(traceback.format_exception(error)).rstrip())
+    try:
+        append_log(Path(root) / "state" / "plugins" / loaded.name / "errors.log", entry, ERRORS_LOG_BYTES)
+    except OSError:
+        pass
     return text
 
 
@@ -708,5 +832,7 @@ def reset():
     with _lock:
         _loaded.clear()
         _entries.clear()
+        _declared.clear()
+        _loading.clear()
         for name in [name for name in sys.modules if name == PACKAGE or name.startswith(PACKAGE + ".")]:
             del sys.modules[name]

@@ -447,6 +447,8 @@ def adjust_usage(info, value):
     value stays as the adapter measured it or the last good adjustment left
     it, and the failure is recorded against the plugin. None means no change.
     """
+    if not any(found.on and "usage" in found.manifest.extends for found in loader.declared(info.universe)):
+        return value  # no plugin here adjusts usage: no trust check or import for every listed agent
     try:
         current = json.loads(json.dumps(value))
     except (TypeError, ValueError):

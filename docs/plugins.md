@@ -304,7 +304,14 @@ starts as fast as now. `mv.process` says which process it is (`cli`,
 files. It imports a plugin's module only when the command needs it: a plugin
 command is found from the global options and the action before argparse is
 built (`-u` selects the universe, and everything after the action belongs to
-the command), and `mv2 --help` lists plugin commands from their manifests. The
+the command), and `mv2 --help` lists plugin commands from their manifests.
+A built-in command (`send`, `report`, `list`, …) costs nothing measurable for
+plugins: it looks up no plugin commands, and the checks it does make (an old
+settings file to convert, an event someone subscribes to, a usage adjuster)
+read manifests only, never the trust check that hashes a universe plugin's
+files. The list of pip-installed plugins is remembered per Python environment
+in `~/.multiverse/installed-plugins.json`, scanned again when a package is
+installed or removed (the package directories on `sys.path` change). The
 one exception is `mv2 NAME --help` for a plugin's command: its options come from
 its `configure`, so that help imports the plugin. A plugin command that fails
 in a way it did not mean to (anything but `ValueError`, `OSError`, `KeyError`
@@ -323,6 +330,9 @@ where they happen and delivered where plugins run**:
   effort: a failed append is logged and never fails the operation that caused
   it. A universe writes a journal only while a plugin that is on there
   subscribes to that type of event, so a universe that uses none writes nothing.
+  Subscriptions are read from manifests, so a plugin that is on but cannot run
+  yet (not trusted, say) has its events recorded for when it can; the host
+  checks trust before it delivers anything.
 - What recording promises about locks: it takes only the journal's lock, waits
   at most 0.2 s for it (then drops the event and logs it), and imports and runs
   no plugin code. The emitters for runtime records, messages and reports
@@ -362,8 +372,9 @@ where they happen and delivered where plugins run**:
     nothing is new.
   - **Logs:** `events.log`, `host.log` and each plugin's `plugin.log` rotate to
     `.1` at 1 MiB; `errors.log` keeps one traceback per call site a minute and
-    rotates the same way. A log rotates under a file lock, so two processes
-    never rotate it at once.
+    rotates the same way. Every log, `errors.log` included, is checked,
+    rotated and written under a file lock, so two processes never rotate one
+    at once and no line or `.1` file is lost.
 - The dashboard may tail the journal too, to refresh sooner than its 1.5 s poll.
   It need not.
 
@@ -644,12 +655,17 @@ that call. It is logged to `state/plugins/NAME/errors.log`, `mv2 plugins` and
 `doctor` show it, and the dashboard header counts it (`1 plugin error`). No
 plugin error can stop a launch, a send, `list` or the dashboard.
 
-Loading has a limit too: a plugin's import and `register(mv)` get 10 s, in a
-thread of their own. One that takes longer is left out as failed (tried again
-by the next process, or once its files change) and never hangs `mv2`. A caller
-that can show a plugin on its next refresh, such as the dashboard's snapshot,
-does not wait for a plugin another thread is still loading
-(`loader.active(root, wait=0)`); a launch plan waits, within the same limit.
+Loading has a limit too: a plugin's import and `register(mv)` always run in a
+thread of their own and get 10 s. One that takes longer is left out as failed
+(tried again by the next process, or once its files change), and the Plugins
+screen, `mv2 plugins` and `doctor` say so; it never hangs `mv2`. A caller waits
+for a plugin still loading only up to a deadline counted from when its load
+started: a launch plan waits until it ends; the dashboard's refreshes (columns,
+panels, inspector lines) wait at most `loader.REFRESH_WAIT` (0.5 s) in all, so
+its first screen is drawn while a slow plugin loads, and the plugin shows on
+the refresh after it has. A theme plugin is the one loaded before the first
+screen, alone, for at most 2 s; one that takes longer leaves the dashboard its
+own colors.
 
 What may be slow runs off the dashboard's event loop, with a time budget.
 Inspector lines are computed in the inspector's capture worker and appear when
@@ -1087,10 +1103,13 @@ is about consent and blast radius:
      name (a local fork of compaction), and says which copy it trusted and
      what it now overrides. It records the copy's path and
      a SHA-256 over every one of its files in
-     `~/.multiverse/trusted-plugins.json`, outside every universe. Only `.git`
-     is left out of the hash; compiled bytecode and `node_modules` are
-     included, and `trust` warns when a plugin ships code that can't be read
-     as source. A plugin is hashed again only when its files change (by each
+     `~/.multiverse/trusted-plugins.json`, outside every universe. Left out of the
+     hash is only what is not part of a plugin and never runs: `.git`, and
+     the caches Python and test tools write (`__pycache__`, `.pyc`, `.pyo`,
+     `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.coverage`), so running a
+     plugin's own tests leaves it trusted. `node_modules` and native libraries
+     are included, and `trust` warns when a plugin ships code that can't be
+     read as source. A plugin is hashed again only when its files change (by each
      file's size, times and inode, kept in
      `~/.multiverse/plugin-fingerprints.json`), so a large `node_modules` does
      not slow every `mv2` call.
@@ -1113,9 +1132,9 @@ is about consent and blast radius:
      copy no trusted plugin points at, and that no launch or load used for 14
      days, is removed (at trust, untrust and the host's hourly prune), as are
      staging directories a process left behind. It is
-     hashed while copied and left out if anything changed meanwhile, and
-     compiled bytecode is not copied, so a `.pyc` planted beside a reviewed
-     `.py` never runs. The plugin is imported from that copy and its Claude
+     hashed while copied and left out if anything changed meanwhile, and what
+     the hash leaves out is not copied either, so a `.pyc` planted beside a
+     reviewed `.py` never runs: Python compiles the copy's own. The plugin is imported from that copy and its Claude
      directory loaded from it, so what Claude writes there (`tsconfig.json`,
      types) never touches the trusted plugin. `mv2 plugins check --load` uses
      the copy too, and a process that imports from a universe's plugin

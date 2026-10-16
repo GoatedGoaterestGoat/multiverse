@@ -320,6 +320,15 @@ def waiting_settings(root):
 awaiting_migration = waiting_settings  # the name refresh has used
 
 
+def _old_file_here(root):
+    """Whether any pre-plugin settings file a plugin could convert is here: KNOWN's and every manifest's (any
+    copy, any state), from manifests alone, so the check before every command makes no trust check."""
+    names = {known["legacy"] for known in KNOWN.values()}
+    names.update(found.manifest.settings.legacy for found in loader.declared(root)
+                 if found.manifest.settings is not None and found.manifest.settings.legacy)
+    return any((Path(root) / name).is_file() for name in names)
+
+
 def not_installed(root):
     """[(name, old file)] of KNOWN plugins whose pre-plugin settings file is here while no copy of the plugin is
     found: their settings are not used until it is installed."""
@@ -383,6 +392,8 @@ def migrate_on_first_use(root):
         root = Path(root)
         for scope in universe.tree(root):
             try:
+                if not _old_file_here(scope):
+                    continue  # the case for every command once a universe is converted: a few stats, no trust check
                 lines.extend(_say_not_installed(scope, "" if scope == root else _where(root, scope)))
                 pending = _pending_legacy(scope)
                 failed = _failed_conversions(scope) if pending else {}
@@ -746,7 +757,7 @@ def dashboard_panels(root):
 
     spec is a loader.DataPanel (render, title, auto) or, for the class form, the "module:Class" string."""
     found = []
-    for loaded in loader.active(root, wait=0):
+    for loaded in loader.active(root, wait=loader.REFRESH_WAIT):
         for kind, spec in sorted(loaded.registrations.data_panels.items()):
             found.append((loaded, kind, spec))
         for kind, reference in sorted(loaded.registrations.panels.items()):
@@ -843,8 +854,9 @@ def edit_settings(root, name, changes):
 
 # The dashboard's extension points. Nothing here imports Textual; screens and
 # panels are imported by the dashboard through Loaded.resolve. What the dashboard asks again on every refresh
-# (columns, data panels, inspector lines) does not wait for a plugin another thread is still loading (wait=0):
-# it shows on the next refresh. What it keeps (palette actions, a class-form panel, the settings screen) waits.
+# (columns, data panels, inspector lines) waits for plugins still loading at most loader.REFRESH_WAIT in all: one
+# that takes longer, even a register() that never returns, shows on a later refresh. What it keeps (palette
+# actions, a class-form panel, the settings screen) waits; the dashboard reads those off its event loop.
 
 def on_here(root):
     """Names of the plugins on and usable in this universe."""
@@ -854,7 +866,7 @@ def on_here(root):
 def dashboard_columns(root):
     """{"plugin:key": (Loaded, loader.Column)} of plugins on here, and each short key that only one of them uses."""
     result, short = {}, {}
-    for loaded in loader.active(root, wait=0):
+    for loaded in loader.active(root, wait=loader.REFRESH_WAIT):
         for key, column in loaded.registrations.columns.items():
             result[f"{loaded.name}:{key}"] = (loaded, column)
             short.setdefault(key, []).append((loaded, column))
@@ -891,16 +903,24 @@ def dashboard_panel(root, kind):
 
 
 def theme_colors(root):
-    """(plugin name, its palette) for the theme plugins.json names here, or None."""
+    """(Loaded, its palette) for the theme plugins.json names here, or None.
+
+    Asked before the dashboard's first screen, so it loads that one plugin only, and waits for it at most
+    loader.SYNCHRONOUS_BUDGET: a theme plugin that takes longer (or fails) leaves the dashboard its own colors,
+    while its load goes on in the background (and the Plugins screen says if it fails)."""
     chosen = config.load(root).theme
     if chosen is None:
         return None
-    for loaded in loader.active(root):
-        if loaded.name == chosen:
-            return loaded, dict(loaded.registrations.theme or {})
-    return None
+    found = entry(root, chosen)
+    if found is None or not found.usable:
+        return None
+    try:
+        loaded = loader.load(found, wait=loader.SYNCHRONOUS_BUDGET)
+    except PluginError:
+        return None
+    return loaded, dict(loaded.registrations.theme or {})
 
 
 def inspector_facts(root):
     """[(Loaded, fact)] of plugins on here, in plugin-name order; fact(row) gives a line or None."""
-    return [(loaded, fact) for loaded in loader.active(root, wait=0) for fact in loaded.registrations.inspector]
+    return [(loaded, fact) for loaded in loader.active(root, wait=loader.REFRESH_WAIT) for fact in loaded.registrations.inspector]

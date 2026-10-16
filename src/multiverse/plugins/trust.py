@@ -29,14 +29,25 @@ FINGERPRINTS = "plugin-fingerprints.json"
 UNUSED_DAYS = 14  # a copy nothing trusts and nothing used for this long is removed
 STAGING_HOURS = 1  # a copy still being made after this long was left by a process that died  # each trusted directory's fingerprint, by the signature of its files
 COMPLETE = ".mv2-complete"
-# Version control is not part of a plugin; everything else is, whether it runs from source or not.
-SKIPPED = {".git"}
+# Not part of a plugin: version control, and the caches Python and test tools write while a plugin is developed or
+# its tests run. None of it runs: mv2 runs a trusted plugin from a copy that leaves these out too, and Python
+# compiles that copy's own bytecode. Everything else is part of the plugin, whether it runs from source or not.
+SKIPPED = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+SKIPPED_FILES = {".coverage"}
+SKIPPED_SUFFIXES = (".pyc", ".pyo")
 # Code a reviewer cannot read: trust warns about it.
-COMPILED = (".pyc", ".pyo", ".so", ".dylib", ".dll", ".pyd", ".node", ".wasm")
+COMPILED = (".so", ".dylib", ".dll", ".pyd", ".node", ".wasm")
 
 
 def user_directory():
     return Path.home() / ".multiverse"
+
+
+def _skipped(relative):
+    """Whether a path inside a plugin is not part of it (SKIPPED)."""
+    relative = Path(relative)
+    return (any(part in SKIPPED for part in relative.parts) or relative.name in SKIPPED_FILES
+            or relative.suffix in SKIPPED_SUFFIXES)
 
 
 def _files(directory):
@@ -44,7 +55,7 @@ def _files(directory):
     directory = Path(directory)
     for path in sorted(directory.rglob("*")):
         relative = path.relative_to(directory)
-        if any(part in SKIPPED for part in relative.parts):
+        if _skipped(relative):
             continue
         if path.is_symlink():
             raise ValueError(f"{path}: plugins in a universe may not contain symbolic links")
@@ -57,7 +68,8 @@ def _add(digest, relative, data):
 
 
 def fingerprint(directory):
-    """SHA-256 over every file's relative path and bytes, in a fixed order: everything but `.git`.
+    """SHA-256 over every file's relative path and bytes, in a fixed order: everything but what is not part of a
+    plugin (SKIPPED: `.git`, bytecode, test caches).
 
     Raises ValueError for a symbolic link, as templates do: trust covers the
     plugin's own files, never something a link points to.
@@ -80,6 +92,8 @@ def signature(directory):
         directories[:] = sorted(name for name in directories if name not in SKIPPED)
         for name in sorted(files):
             path = os.path.join(top, name)
+            if _skipped(os.path.relpath(path, base)):
+                continue
             status = os.lstat(path)
             digest.update(f"{os.path.relpath(path, base)}\0{status.st_size}\0{status.st_mtime_ns}\0"
                           f"{status.st_ctime_ns}\0{status.st_ino}\0{status.st_mode}\n".encode())
@@ -140,8 +154,9 @@ def cached(directory, value):
 
     The bytes are hashed as they are copied, so the copy is exactly what was
     trusted: if the plugin changed meanwhile, nothing is kept and ValueError
-    says so. Compiled bytecode is hashed but not copied (Python compiles the
-    copy's own), and the copy is used only once complete."""
+    says so. What is not part of a plugin (SKIPPED: bytecode and test caches)
+    is neither hashed nor copied, so Python compiles the copy's own; the copy
+    is used only once complete."""
     target = cache_directory(value)
     if (target / COMPLETE).is_file():
         try:
@@ -156,8 +171,6 @@ def cached(directory, value):
         for relative, path in _files(directory):
             data = path.read_bytes()
             _add(digest, relative, data)
-            if "__pycache__" in relative.parts or relative.suffix in (".pyc", ".pyo"):
-                continue
             copy = staging / relative
             copy.parent.mkdir(parents=True, exist_ok=True)
             copy.write_bytes(data)

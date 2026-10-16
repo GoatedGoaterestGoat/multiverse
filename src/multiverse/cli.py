@@ -87,8 +87,13 @@ def parser(argv=None):
         module = tool(action)
         module.configure(commands.add_parser(action, help=module.__doc__, aliases=ALIASES.get(action, [])))
     if argv is not None:
-        selected, offered = plugin_commands(argv)
         _, invoked, wants_help = _selection(argv)
+        # Plugin commands are looked up only for the top-level help, which lists them, or a name mv2 does not have:
+        # a built-in command, or the dashboard with no command, never pays for plugins.
+        if wants_help or (invoked is not None and invoked not in RESERVED):
+            selected, offered = plugin_commands(argv)
+        else:
+            selected, offered = None, {}
         for name, (plugin, text) in sorted(offered.items()):
             command = commands.add_parser(name, help=f"{text} (plugin {plugin})")
             # Help asked for before the command is the top-level help: manifests only.

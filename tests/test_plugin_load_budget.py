@@ -48,12 +48,52 @@ class LoadBudgetTest(PluginTestCase):
         other.start()
         time.sleep(0.2)  # the other thread is inside slow's register()
         start = time.monotonic()
-        names = [loaded.name for loaded in loader.active(self.root, wait=0)]
+        names = [loaded.name for loaded in loader.active(self.root, wait=loader.REFRESH_WAIT)]
         self.assertLess(time.monotonic() - start, 1)
         self.assertEqual(names, ["swift"])
         self.release.touch()
         other.join(10)
         self.assertEqual(sorted(loaded.name for loaded in loader.active(self.root)), ["slow", "swift"])
+
+
+class BackgroundLoadTest(PluginTestCase):
+    """A dashboard is drawn while plugins load: nothing it asks on a refresh waits out a register()."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = self.work / "release"
+        os.environ["SLOW_RELEASE"] = str(self.release)
+        self.addCleanup(self.release.touch)
+        self.write_plugin("slow", {"module": "plugin"}, {"plugin.py": SLOW})
+        self.write_plugin("swift", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
+        self.enable("slow")
+        self.enable("swift")
+
+    def test_waiting_zero_never_loads_in_the_callers_thread(self):
+        start = time.monotonic()
+        self.assertEqual(loader.active(self.root, wait=0), [])  # nobody was loading them: both start now
+        self.assertLess(time.monotonic() - start, 0.3)
+        for _ in range(100):  # swift finishes on its own, in the background
+            if loader.entry(self.root, "swift").state == "loaded":
+                break
+            time.sleep(0.02)
+        self.assertEqual([loaded.name for loaded in loader.active(self.root, wait=0)], ["swift"])
+
+    def test_one_shared_deadline_however_many_plugins_still_load(self):
+        self.write_plugin("slow2", {"module": "plugin"}, {"plugin.py": SLOW})
+        self.enable("slow2")
+        start = time.monotonic()
+        names = [loaded.name for loaded in loader.active(self.root, wait=0.4)]
+        self.assertLess(time.monotonic() - start, 0.9)  # not 0.4 s per plugin still loading
+        self.assertEqual(names, ["swift"])
+
+    def test_a_register_that_never_returns_is_failed_after_the_limit_and_says_so(self):
+        with mock.patch.object(loader, "LOAD_SECONDS", 0.3):
+            loader.active(self.root, wait=0)
+            time.sleep(0.8)
+            found = loader.entry(self.root, "slow")
+        self.assertEqual(found.state, "failed")
+        self.assertIn("took longer than 0.3 s to load", found.problem)
 
 
 COLUMN = """
@@ -91,3 +131,43 @@ class DashboardNeverWaitsTest(PluginTestCase):
         loaded = loader.entry(self.root, "late").loaded
         self.assertIs(loader.loaded_by_package(loaded.package + ".plugin"), loaded)
         self.assertIsNone(loader.loaded_by_package("mv2_plugins.nothing_here"))
+
+
+THEME = "def register(mv):\n    mv.dashboard.theme({'accent': '#112233'})\n"
+
+
+class ThemeBeforeTheFirstScreenTest(PluginTestCase):
+    """The theme is applied before the dashboard opens: only the theme plugin loads then, for a bounded time."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = self.work / "release"
+        os.environ["SLOW_RELEASE"] = str(self.release)
+        self.addCleanup(self.release.touch)
+        self.write_plugin("slow", {"module": "plugin"}, {"plugin.py": SLOW})
+        self.write_plugin("look", {"module": "plugin", "extends": ["dashboard.theme"]}, {"plugin.py": THEME})
+        self.enable("slow")
+        self.enable("look")
+
+    def choose(self, name):
+        import json
+        data = json.loads((self.root / "plugins.json").read_text())
+        (self.root / "plugins.json").write_text(json.dumps({**data, "theme": name}))
+        loader.reset()
+
+    def test_another_plugin_still_loading_does_not_hold_up_the_theme(self):
+        from multiverse import plugins
+        self.choose("look")
+        start = time.monotonic()
+        loaded, colors = plugins.theme_colors(self.root)
+        self.assertLess(time.monotonic() - start, 1)
+        self.assertEqual((loaded.name, colors), ("look", {"accent": "#112233"}))
+
+    def test_a_theme_plugin_that_hangs_leaves_the_dashboard_its_own_colors_in_time(self):
+        from multiverse import plugins
+        self.choose("slow")
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.3):
+            start = time.monotonic()
+            self.assertIsNone(plugins.theme_colors(self.root))
+            self.assertLess(time.monotonic() - start, 1)
+

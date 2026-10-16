@@ -62,11 +62,16 @@ def segments(root):
 
 
 def subscribers(root, kind):
-    """Names of the plugins on here whose manifest subscribes to events of `kind`."""
+    """Names of the plugins on here whose manifest subscribes to events of `kind`.
+
+    From manifests alone (loader.declared), so recording costs a command no
+    trust check: a plugin that is on but cannot run yet (not trusted, say) has
+    its events recorded too, for when it can; the host verifies trust before it
+    delivers anything."""
     if loader.safe_mode():
         return []
-    return [found.name for found in loader.entries(root)
-            if found.usable and any(fnmatch.fnmatchcase(kind, pattern) for pattern in found.manifest.events)]
+    return sorted({found.name for found in loader.declared(root)
+                   if found.on and any(fnmatch.fnmatchcase(kind, pattern) for pattern in found.manifest.events)})
 
 
 def emit(root, kind, agent=None, launch=None, data=None):

@@ -46,10 +46,10 @@ class TrustTest(PluginTestCase):
         self.assertFalse(self.marker.exists(), "the trusted plugin.py, not the planted bytecode, must run")
         self.assertIn("plugin-cache", loaded.module.__file__)
 
-    def test_compiled_files_and_node_modules_count(self):
+    def test_node_modules_and_native_code_count(self):
         trust.trust(self.directory)
         self.assertEqual(self.entry("local").state, "on")
-        for added in ("__pycache__/extra.cpython-312.pyc", "node_modules/dep/index.js"):
+        for added in ("node_modules/dep/index.js", "native.so"):
             with self.subTest(added):
                 path = self.directory / added
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,6 +59,19 @@ class TrustTest(PluginTestCase):
                 path.unlink()
                 loader.reset()
                 self.assertEqual(self.entry("local").state, "on")
+
+    def test_bytecode_and_test_caches_are_not_part_of_the_plugin(self):
+        trust.trust(self.directory)
+        for added in ("__pycache__/extra.cpython-312.pyc", "tests/__pycache__/t.cpython-313.pyc", "stray.pyc",
+                      ".pytest_cache/v/cache/lastfailed", ".coverage"):
+            path = self.directory / added
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        loader.reset()
+        self.assertEqual(self.entry("local").state, "on")
+        copy = Path(loader.load(self.entry("local")).module.__file__).parent
+        for added in ("__pycache__/extra.cpython-312.pyc", "stray.pyc", ".pytest_cache", ".coverage"):
+            self.assertFalse((copy / added).exists(), added)  # never copied, so never run
 
     def test_trust_warns_about_compiled_files_and_node_modules(self):
         from multiverse.tools import plugins as tool
