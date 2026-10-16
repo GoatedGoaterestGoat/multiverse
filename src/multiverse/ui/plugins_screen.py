@@ -18,6 +18,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Footer, Label, Static
 
 from ..display import clean
+from ..plugins import loader
 from ..plugins.settings import DELETE
 from .plugin_service import universe_name
 from .settings import BOOL_OPTIONS, MISSING, NULL, FieldScreen, convert, field, shown
@@ -104,7 +105,15 @@ class PluginsScreen(ModalScreen):
     def on_mount(self):
         self.service = self.service or self.app.plugin_service
         self.query_one("#plugins-table", DataTable).add_columns("Plugin", "Here", "State", "Version", "Errors")
+        self.generation = loader.generation()
         self.load()
+        self.set_interval(1.0, self.follow_loading)
+
+    def follow_loading(self):
+        """A plugin that finished loading (or failed to) since the list was read changes its state here."""
+        if loader.generation() != self.generation and not self.busy:
+            self.generation = loader.generation()
+            self.load()
 
     def error(self, message=""):
         self.query_one(".cerror", Static).update(clean(message))

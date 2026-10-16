@@ -18,6 +18,7 @@ from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextAr
 from textual.worker import WorkerFailed
 
 from ..display import clean
+from ..plugins import loader
 from . import columns, theme
 from .backend import LocalBackend
 from .commands import AgentCommands
@@ -77,6 +78,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         super().__init__()
         self.plugin_service = plugin_service or PluginService()
         self.plugin_actions, self.plugin_screens = {}, {}
+        self.registry_generation = None  # loader.generation() when the palette was last read
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
         self.host_user_stopped = False  # stopped from the Plugins screen with h: do not start it again until h does
@@ -168,6 +170,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         return True
 
     def refresh_snapshot(self):
+        if self.registry_generation is not None and loader.generation() != self.registry_generation:
+            self.load_plugin_registry()  # a plugin finished loading (or failed to) since: its palette entries
         if not self.scanning:
             self.scanning = True
             self.scan()
@@ -392,6 +396,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         """Find the palette actions and screens of the plugins on in this tree, off the event loop."""
         # From the opened root, not the portal being shown: the palette stays the same as you move between
         # subverses, and each entry says "<plugin> is off in <scope>" where it is off.
+        self.registry_generation = loader.generation()
         try:
             registry = await asyncio.to_thread(self.plugin_service.registry, self.home)
         except Exception as error:

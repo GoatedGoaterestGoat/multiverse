@@ -98,12 +98,14 @@ def panel(kind, root=None):
         # a refresh never imports again.
         from .. import plugins
         try:
-            loaded, reference = plugins.dashboard_panel(root, kind)
+            loaded, reference = plugins.dashboard_panel(root, kind, wait=plugins.loader.REFRESH_WAIT)
             _plugin_panels[key] = made = loaded.resolve(reference)()
             try:
                 made.mv_plugin_package = loaded.package  # LocalView tags what it composes, so a failure can take it out
             except AttributeError:
                 pass
+        except plugins.loader.StillLoading as error:
+            raise ValueError(str(error)) from None  # not kept: the widget appears on a refresh once its plugin has loaded
         except plugins.PluginError as error:
             _plugin_panels[key] = ValueError(str(error))
         except Exception as error:

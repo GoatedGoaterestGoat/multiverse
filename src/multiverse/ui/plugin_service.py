@@ -104,9 +104,11 @@ class PluginService:
         """
         actions, screens = {}, {}
         for scope in universe.tree(Path(root)):
-            for loaded, name, function in plugins.dashboard_actions(scope):
-                actions.setdefault((loaded.name, name), (loaded.name, name, loaded, function))
-            for loaded in loader.active(scope):
+            # A plugin still loading (a slow register()) is left out for now; the dashboard reads this again
+            # when loader.generation() changes, so it fills in once the plugin has loaded.
+            for loaded in loader.active(scope, wait=loader.REFRESH_WAIT):
+                for name, function in sorted(loaded.registrations.actions.items()):
+                    actions.setdefault((loaded.name, name), (loaded.name, name, loaded, function))
                 for name, reference in loaded.registrations.screens.items():
                     screens.setdefault((loaded.name, name), (loaded, reference))
         return {"actions": actions, "screens": screens}
