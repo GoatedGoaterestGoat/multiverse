@@ -663,7 +663,8 @@ for a plugin still loading only up to a deadline counted from when its load
 started: a launch plan waits until it ends; the dashboard's refreshes (columns,
 panels, inspector lines) wait at most `loader.REFRESH_WAIT` (0.5 s) in all, so
 its first screen is drawn while a slow plugin loads, and the plugin shows on
-the refresh after it has. A theme plugin is the one loaded before the first
+the refresh after it has. Meanwhile the Plugins screen lists it as `loading`,
+and a view widget it provides says it is still loading. A theme plugin is the one loaded before the first
 screen, alone, for at most 2 s; one that takes longer leaves the dashboard its
 own colors.
 

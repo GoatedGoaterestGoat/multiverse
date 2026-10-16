@@ -171,3 +171,49 @@ class ThemeBeforeTheFirstScreenTest(PluginTestCase):
             self.assertIsNone(plugins.theme_colors(self.root))
             self.assertLess(time.monotonic() - start, 1)
 
+
+WIDGETS = """
+import os
+import time
+
+def register(mv):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not os.path.exists(os.environ["SLOW_RELEASE"]):
+        time.sleep(0.02)
+    mv.dashboard.panel("thing", "plugin:Thing")
+    mv.dashboard.settings(screen="plugin:Screen")
+"""
+
+
+class StillLoadingOnTheDashboardTest(PluginTestCase):
+    """What the dashboard reads about a plugin still loading answers at once: listed `loading`, its widget
+    'still loading' (not a failure), its settings screen offered once it has loaded."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = self.work / "release"
+        os.environ["SLOW_RELEASE"] = str(self.release)
+        self.addCleanup(self.release.touch)
+        self.write_plugin("slow", {"module": "plugin", "extends": ["dashboard.panel", "dashboard.settings"],
+                                   "settings": {"version": 1, "defaults": "defaults.json"}},
+                          {"plugin.py": WIDGETS, "defaults.json": '{"schema": 1}'})
+        self.enable("slow")
+
+    def test_a_widget_and_the_plugins_list_never_wait_for_it(self):
+        from multiverse import plugins
+        start = time.monotonic()
+        with self.assertRaisesRegex(loader.StillLoading, "needs plugin slow, which is still loading"):
+            plugins.dashboard_panel(self.root, "slow:thing", wait=loader.REFRESH_WAIT)
+        [item] = plugins.listing(self.root)
+        self.assertLess(time.monotonic() - start, 1.5)
+        self.assertEqual((item["state"], item["settings"]["screen"]), ("loading", None))
+        generation = loader.generation()
+        self.release.touch()
+        for _ in range(250):
+            if loader.generation() != generation:
+                break
+            time.sleep(0.02)
+        self.assertEqual(plugins.dashboard_panel(self.root, "slow:thing", wait=0)[1], "plugin:Thing")
+        [item] = plugins.listing(self.root)
+        self.assertEqual((item["state"], item["settings"]["screen"]), ("loaded", "plugin:Screen"))
+

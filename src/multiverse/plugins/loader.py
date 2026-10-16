@@ -665,6 +665,14 @@ def _changed():
     _generation += 1
 
 
+def loading(found):
+    """Whether this plugin's load is running in the background now (an Entry with a manifest)."""
+    if found.manifest is None:
+        return False
+    with _lock:
+        return Path(found.manifest.directory).resolve() in _loading
+
+
 def generation():
     """A number that rises whenever a plugin finishes loading or fails to: what keeps plugin registrations (the
     dashboard's palette and screens) reads them again when it changes, for plugins that loaded in the background."""

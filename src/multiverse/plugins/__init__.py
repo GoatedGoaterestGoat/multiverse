@@ -232,13 +232,16 @@ def listing(root):
 
     [{name, on, state, source, version, description, problem, errors, permissions,
       commands, settings: {path, source, problem, schema} or None, shadowed}]
-    """
+
+    It never waits out a slow register(): a plugin whose load is still running is `loading`, and its own
+    settings screen is offered once it has loaded (loader.generation() rises then)."""
     from . import host
     recent = loader.errors()
     result = []
     for found in entries(root):
         manifest = found.manifest
-        item = {"name": found.name, "on": found.on, "state": found.state, "source": found.source,
+        state = "loading" if found.usable and found.loaded is None and loader.loading(found) else found.state
+        item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
                 "description": manifest.description if manifest else "",
@@ -824,7 +827,7 @@ def _settings_screen(found):
     if loaded is None and found.on and found.state in ("on", "unusable") and found.manifest is not None \
             and "dashboard.settings" in found.manifest.extends:
         try:
-            loaded = loader.load(found)
+            loaded = loader.load(found, wait=loader.REFRESH_WAIT)  # still loading: offered once it has
         except PluginError:
             return None
     return loaded.registrations.settings_screen if loaded is not None else None
@@ -874,16 +877,25 @@ def dashboard_columns(root):
     return result
 
 
-def dashboard_panel(root, kind):
-    """(Loaded, "module:Class") for a view widget type of a plugin on here, or a PluginError saying what it needs."""
+def dashboard_panel(root, kind, wait=None):
+    """(Loaded, "module:Class") for a view widget type of a plugin on here, or a PluginError saying what it needs.
+
+    `wait` bounds how long a plugin still loading is waited for (loader.load); past it, loader.StillLoading (a
+    PluginError) says the widget's plugin is still loading, which is not a failure to remember."""
     plugin, _, name = kind.rpartition(":")
-    owners = []
+    owners, pending = [], []
     for found in entries(root):
         if plugin and found.name != plugin:
             continue
         if found.usable:
             try:
-                loaded = loader.load(found)
+                loaded = loader.load(found, wait=wait)
+            except loader.StillLoading:
+                if plugin:
+                    raise loader.StillLoading(f"widget type {kind} needs plugin {plugin}, which is still loading") \
+                        from None
+                pending.append(found.name)
+                continue
             except PluginError as error:
                 if plugin:
                     raise PluginError(f"widget type {kind} needs plugin {plugin}, which failed to load: {error}") from None
@@ -895,6 +907,8 @@ def dashboard_panel(root, kind):
                               + (f": {found.problem}" if found.problem else ", which is off here"))
     if len(owners) == 1:
         return owners[0]
+    if not owners and pending:
+        raise loader.StillLoading(f"widget type {kind}: plugins still loading may provide it ({', '.join(pending)})")
     if plugin and not owners and not any(found.name == plugin for found in entries(root)):
         raise PluginError(f"widget type {kind} needs plugin {plugin}, which is not installed")
     raise PluginError(f"unknown widget type: {kind}" if not owners else
