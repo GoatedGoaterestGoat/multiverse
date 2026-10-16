@@ -15,6 +15,7 @@ from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal
 from textual.content import Content
 from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextArea
+from textual.worker import WorkerFailed
 
 from ..display import clean
 from . import columns, theme
@@ -414,32 +415,62 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         self.submit_operation(f"{entry[0]}: {entry[1]}", self.plugin_service.run_action, scope, entry, row,
                               after=lambda text: self.set_status(text) if text else None)
 
+    async def run_action(self, action, default_namespace=None, namespaces=None):
+        """Run an action (a key binding, a button). One a plugin's screen or widget raises is that plugin's
+        failure: it is contained here, because an exception that reaches the app's message loop ends the loop
+        and with it the dashboard, with no message."""
+        try:
+            return await super().run_action(action, default_namespace, namespaces)
+        except Exception as error:
+            if plugin_of(error) is None:
+                raise
+            self._handle_exception(error)
+            return True
+
     def _handle_exception(self, error):
-        """An exception that came out of a plugin's code on the event loop (its screen composing or mounting, a
-        widget it made) is that plugin's failure, not the dashboard's: record it, close the plugin's screen
-        and say so. Anything else ends the app as Textual does."""
+        """An exception that came out of a plugin's code on the event loop (its screen composing, mounting or
+        handling a key, a worker or a widget it made, one that cannot render) is that plugin's failure, not the
+        dashboard's: record it, close the plugin's screen, take its failing widgets out and say so. Anything else
+        ends the app as Textual does."""
         found = plugin_of(error)
         if found is None:
             return super()._handle_exception(error)
         name, loaded = found
+        error = getattr(error, "error", error) if isinstance(error, WorkerFailed) else error  # say what the worker raised
         if loaded is not None:
             self.plugin_service.record(loaded, "screen or widget", error, self.home)
-        self.set_status(f"{name}: its screen or widget failed: {type(error).__name__}: {error}", error=True)
-        self.call_later(self.close_plugin_screens)  # off this call: the failing widget's own loop is still unwinding
+        message = f"{name}: its screen or widget failed: {type(error).__name__}: {error}"
+        self.set_status(message, error=True)
+        self.call_later(self.close_plugin_screens, loaded, message)  # off this call: the failing widget is still unwinding
 
-    async def close_plugin_screens(self):
-        """Pop every screen on top that is a plugin's class, and take out any widget whose message loop ended with
-        the failure: Textual leaves such a widget attached with nobody to process its messages."""
+    async def close_plugin_screens(self, loaded=None, message=""):
+        """Pop every screen on top that is a plugin's class and take out the plugin's widgets on the screen that stays.
+
+        A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
+        messages, and one that cannot render fails every layout; either keeps the screen from ever settling. Where a
+        plugin's widgets were part of the local view, one line says what happened in their place."""
         from ..plugins import loader
         while len(self.screen_stack) > 1 and type(self.screen).__module__.startswith(loader.PACKAGE + "."):
             await self.pop_screen()
+        package = loaded.package + "." if loaded is not None else None
+        views = []
         for widget in list(self.screen.walk_children(with_self=False)):
             task = getattr(widget, "_task", None)
-            if task is not None and task.done() and not widget.is_running and widget.is_attached:
+            ours = package is not None and (type(widget).__module__.startswith(package)
+                                            or str(getattr(widget, "mv_plugin_package", "")) + "." == package)
+            if not widget.is_attached:
+                continue
+            if ours and isinstance(widget.parent, LocalView) and widget.parent not in views:
+                views.append(widget.parent)
+            if task is not None and task.done() and not widget.is_running:
                 try:
                     await widget._message_loop_exit()  # what a widget's loop does when it ends: unmount and detach
                 except Exception:
                     pass
+            elif ours:
+                await widget.remove()
+        for view in views:
+            await view.mount(Static(message, markup=False, classes="view-error"))
 
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)

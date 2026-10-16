@@ -96,3 +96,4 @@ Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background
 #plugin-settings-body { height: 1fr; scrollbar-size: 1 1; }
 #inspect-plugins { height: auto; max-height: 4; color: $mv-subtext0; }
 #inspect-plugins { display: none; }
+.view-error { height: auto; color: $mv-red; padding: 0 1; }

@@ -10,6 +10,8 @@ from pathlib import Path
 import time
 from types import SimpleNamespace
 
+from textual.worker import WorkerFailed
+
 from .. import plugins, universe
 from ..plugins import host, loader
 
@@ -27,14 +29,19 @@ def plugin_of(error):
 
     A plugin's modules live in a package of their own (mv2_plugins.NAME_digest), so a traceback frame in
     one says whose code it was, whatever Textual code stands between it and the event loop."""
-    traceback = error.__traceback__
-    while traceback is not None:
-        module = str(traceback.tb_frame.f_globals.get("__name__", ""))
-        if module.startswith(loader.PACKAGE + "."):
-            package = ".".join(module.split(".")[:2])
-            found = loader.loaded_by_package(package)
-            return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found
-        traceback = traceback.tb_next
+    seen = set()
+    while error is not None and id(error) not in seen:  # a worker's failure wraps the plugin's error as its cause
+        seen.add(id(error))
+        traceback = error.__traceback__
+        while traceback is not None:
+            module = str(traceback.tb_frame.f_globals.get("__name__", ""))
+            if module.startswith(loader.PACKAGE + "."):
+                package = ".".join(module.split(".")[:2])
+                found = loader.loaded_by_package(package)
+                return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found
+            traceback = traceback.tb_next
+        wrapped = error.error if isinstance(error, WorkerFailed) else None  # Textual's worker error keeps the real one here
+        error = wrapped or error.__cause__ or error.__context__
     return None
 
 

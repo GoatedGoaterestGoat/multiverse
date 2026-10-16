@@ -99,7 +99,11 @@ def panel(kind, root=None):
         from .. import plugins
         try:
             loaded, reference = plugins.dashboard_panel(root, kind)
-            _plugin_panels[key] = loaded.resolve(reference)()
+            _plugin_panels[key] = made = loaded.resolve(reference)()
+            try:
+                made.mv_plugin_package = loaded.package  # LocalView tags what it composes, so a failure can take it out
+            except AttributeError:
+                pass
         except plugins.PluginError as error:
             _plugin_panels[key] = ValueError(str(error))
         except Exception as error:
@@ -212,7 +216,11 @@ class LocalView(VerticalScroll):
         children = []
         for index, widget in enumerate(widgets):
             try:
-                shown = panel(widget["type"], root).compose(self, root, widget, index)
+                made = panel(widget["type"], root)
+                shown = made.compose(self, root, widget, index)
+                package = getattr(made, "mv_plugin_package", None)
+                for item in shown if package else ():
+                    item.mv_plugin_package = package
             except Exception as error:
                 widget = error_widget(f"Widget {index + 1} error", error)
                 shown = PANELS["markdown"].compose(self, root, widget, index)
