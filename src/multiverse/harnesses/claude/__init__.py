@@ -1,6 +1,6 @@
 """Claude native terminal lifecycle; steering through the session's peer inbox ("auto" by default).
 
-In the native-backends model (docs/harness-adapters.md, "Claude: a terminal-hosted bridge") Claude has no
+In the native-backends model (docs/design/harness-adapters.md, "Claude: a terminal-hosted bridge") Claude has no
 native service, an exact session (the assigned UUID), a terminal attachment (the `claude` process in the agent's
 pane, which does the work) and, optionally, a bridge: the multiverse mod and the inbox it hosts. The bridge is part
 of the Claude process and ends with it, so it carries delivery, receipts, `ask` and status without implying an

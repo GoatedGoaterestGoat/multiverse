@@ -166,7 +166,7 @@ def run(root=None, *, plugin_action="list", name=None, assignments=(), removals=
     return {"name": name, "directory": str(copy), "forgotten": trust.forget(copy)}
 
 
-TEMPLATE = '''"""{name}: what it does, in a sentence. See docs/plugins.md for the API."""
+TEMPLATE = '''"""{name}: what it does, in a sentence. See docs/develop/plugins.md for the API."""
 
 
 def shout(row):
@@ -314,7 +314,7 @@ def text(action, result):
     if action == "list":
         rows = result["plugins"]
         if not rows:
-            return "No plugins found. See docs/plugins.md to write or install one."
+            return "No plugins found. See docs/use/plugins.md to install one, or docs/develop/plugins.md to write one."
         width = max(len(item["name"]) for item in rows)
         lines = []
         for item in rows:
