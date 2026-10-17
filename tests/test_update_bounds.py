@@ -108,19 +108,26 @@ class FetchBudgetTest(PluginUpdateTest):
 
     def test_real_stalled_fetch_is_killed_within_the_custom_budget(self):
         self.prepare_pin()
-        real, fetches = update._git, []
+        real, fetches, waited = update._git, [], []
 
         def stalled(directory, *args, **kwargs):
             if Path(directory) == self.submodule and "fetch" in args:
                 fetches.append(args)
-                return subprocess.run([sys.executable, "-c", "import time; time.sleep(10)"],
-                                      timeout=kwargs["timeout"], capture_output=True, text=True)
+                began = time.monotonic()
+                try:
+                    return subprocess.run([sys.executable, "-c", "import time; time.sleep(10)"],
+                                          timeout=kwargs["timeout"], capture_output=True, text=True)
+                finally:
+                    waited.append(time.monotonic() - began)
             return real(directory, *args, **kwargs)
 
         started = time.monotonic()
         with patch.object(update, "_git", side_effect=stalled):
             result = update.run(plugin_fetch_timeout=0.15)
-        self.assertLess(time.monotonic() - started, 3)
+        # The stalled fetch itself is cut at its budget; the update's other git calls slow down under load,
+        # but nothing in the whole call waits out the 10 s stall.
+        self.assertLess(waited[0], 3)
+        self.assertLess(time.monotonic() - started, 9)
         self.assertTrue(result["ok"], result)
         self.assertEqual(len(fetches), 1)
         self.assertEqual(self.entry(result)["state"], "unavailable")
