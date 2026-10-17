@@ -152,7 +152,7 @@ class TargetEnvironmentTest(PluginLaunchTest):
         parent = {"MV2_AGENT_ID": "parent-agent", "MV2_LAUNCH_ID": "parent-launch", "MV2_TMUX_SOCKET": "/parent.sock",
                   "MV2_UNIVERSE": "/parent", "AMBIENT_SETTING": "kept"}
         with patch.dict(os.environ, parent), patch.object(lifecycle, "_cli_path", return_value="/opt/mv2/bin/mv2"):
-            result = lifecycle.start(self.root, **start)
+            result = lifecycle.start(self.root, socket_path="/parent.sock", **start)
         self.addCleanup(shutil.rmtree, Path("/tmp") / ("mv2-native-" + result["runtime"]["launch_id"]), True)
         return result, [call[-1] for call in self.adapter.calls if call[0] in ("spawn", "resume")]
 
