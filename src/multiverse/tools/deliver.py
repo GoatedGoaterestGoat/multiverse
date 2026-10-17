@@ -29,10 +29,13 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         tracking = message['tracking']
         state = tracking['submission_state']
         # An accepted submission can gain receipt evidence while the launch that
-        # took it runs; check it until one is recorded. A resume prompt has no
+        # took it runs; check it until consumption is confirmed. A queue acceptance
+        # receipt is not transcript evidence. A resume prompt has no
         # receipt to correlate.
         attempts = tracking.get('attempts') or [{}]
-        accepted = (not retry and state == 'accepted' and tracking.get('native_receipt') is None
+        evidence = tracking.get('native_receipt')
+        confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True
+        accepted = (not retry and state == 'accepted' and not confirmed
                     and tracking.get('delivery_method') != 'resume_prompt'
                     and attempts[-1].get('launch_id') == launch_id)
         if not accepted and state not in (('failed',) if retry else ('pending', 'submitting', 'unknown')):

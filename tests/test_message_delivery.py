@@ -202,7 +202,7 @@ class InboxDeliveryTest(BaseTest):
         adapter = harnesses.load(self.root, 'claude')
         with patch.object(adapter, 'get_delivery', side_effect=check):
             result = deliver.run(self.root, agent=self.agent, check=True)
-        self.assertEqual(checked, [unknown['id'], pending['id']])
+        self.assertEqual(checked, [accepted['id'], unknown['id'], pending['id']])
         self.assertTrue(result['ok'])
         self.assertTrue(all(m['transcript_confirmed'] for m in result['messages']))
         for message in (accepted, failed, unknown, pending):
@@ -248,3 +248,24 @@ class InboxDeliveryTest(BaseTest):
         self.assertTrue(result['ok'])
         self.assertEqual(len(result['messages']), 55)
         self.assertEqual(len(self.calls), 55)
+
+    def test_check_reports_an_accepted_message_still_waiting_in_the_native_queue(self):
+        self.behavior = NativeResult('native_queued', 'Accepted by native after-turn queue',
+                                    {'queued_submission_id': 'native-queue-entry'})
+        message = self.send(delivery='follow-up')
+        self.behavior = NativeResult('native_queued', 'Message remains in native queue',
+                                    {'queued_submission_id': 'native-queue-entry', 'transcript_confirmed': False})
+        presented = []
+        for _ in range(2):
+            result = deliver.run(self.root, agent=self.agent, check=True, _present=presented.append)
+            self.assertEqual(len(result['messages']), 1)
+            self.assertEqual(result['messages'][0]['state'], 'native_queued')
+            self.assertFalse(result['messages'][0]['transcript_confirmed'])
+        self.assertTrue(all('message is queued for its next turn' in line for line in presented))
+        self.assertEqual(len(self.calls), 1, 'Checking a waiting entry must never send another copy')
+        self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
+        self.assertEqual(len(self.calls), 1)
+        self.behavior = NativeResult('native_queued', 'Message observed in native thread history',
+                                    {'transcript_confirmed': True})
+        self.assertEqual(len(deliver.run(self.root, agent=self.agent, check=True)['messages']), 1)
+        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True)['messages'], [])

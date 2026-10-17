@@ -143,7 +143,8 @@ class MessagingCliTest(BaseTest):
         self.behavior = self.accepted()
         send.run(self.root, agent='first', text='another private message')
         self.behavior = NativeResult('native_queued', 'Message observed in native thread history', {'transcript_confirmed': True})
-        self.assertEqual(self.output('deliver', 'first', '--check'), 'first: message confirmed in its conversation.\n')
+        # Both the earlier waiting queue entry and the new acceptance need confirmation.
+        self.assertEqual(self.output('deliver', 'first', '--check'), 'first: message confirmed in its conversation.\n' * 2)
         self.assertEqual(len(self.calls), 3)
         self.assertEqual(self.output('deliver', 'first', '--check'), 'first: no messages to check.\n')
 

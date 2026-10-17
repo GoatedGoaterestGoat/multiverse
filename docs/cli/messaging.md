@@ -65,6 +65,11 @@ mv2 deliver worker --retry    # resend messages that definitely failed
 
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
 
+An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
+until its message is confirmed in the conversation. The check reports an entry
+that is still queued without resending it. `--retry` selects definite failures;
+it never resends an accepted or uncertain submission.
+
 ## Read an inbox
 
 Agents check their inbox at startup, between steps and before finishing. You can read any agent's inbox too.
