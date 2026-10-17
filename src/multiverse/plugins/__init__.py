@@ -4,7 +4,7 @@ Plugins themselves import only `multiverse.plugins.api`. Core calls the
 functions here, always with the universe the question is about, so a plugin
 counts only where that universe's plugins.json turns it on. Every call into
 plugin code is guarded: a failure is recorded against the plugin and the
-answer goes on without it. See docs/plugins.md.
+answer goes on without it. See docs/develop/plugins.md.
 """
 from contextlib import contextmanager
 from dataclasses import asdict
