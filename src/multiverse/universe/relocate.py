@@ -26,6 +26,9 @@ def _stopped(agent_dir):
     if state["live"] not in ('stopped', 'dormant'):
         raise ValueError(f'Agent {properties["name"]} is {state["live"]}; stop it first'
                          + (f' ({state["reason"]})' if state["reason"] else ""))
+    from ..runtime import attachments
+    if closing := attachments.problem(agent_dir, facts):
+        raise ValueError(closing + '; retry after attachment cleanup finishes')
     if state['live'] == 'stopped' and facts.get('tmux'):
         # A moved/trashed record must not leave an unreachable terminal wrapper.
         backend, pane = owned(properties, facts, states=('stopped',))

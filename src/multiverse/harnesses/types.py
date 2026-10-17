@@ -108,6 +108,18 @@ class RpcProxySpec:
 
 
 @dataclass(frozen=True)
+class AgentIdentitySpec:
+    """Adapter-declared authority of tools in one agent's shared conversation.
+
+    This does not authorize runner callbacks or attachment control. The native
+    marker and storage names are provider-owned; core validates persisted scope.
+    """
+    mode: str
+    native_id_env: str
+    storage_env: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """`environment` is set for the launched process; core identity variables win."""
     argv: tuple[str, ...]
@@ -122,6 +134,7 @@ class CommandSpec:
     # What the plugins on in the agent's universe added to this launch, as the adapter applied them
     # (multiverse.plugins.harness.LaunchPlan.record()); lifecycle stores it as runtime.json `plugins`.
     plugins: Mapping[str, Any] | None = None
+    agent_identity: AgentIdentitySpec | None = None
 
 
 @dataclass(frozen=True)
@@ -155,6 +168,7 @@ class LaunchContext:
     endpoint: NativeEndpoint | None = None
     executor: 'Executor | None' = None
     resume_prompt: str | None = None
+    agent_environment: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -275,8 +275,8 @@ class LaunchIsolationTest(unittest.TestCase):
         message = append_message(agent, 'must remain unread', {})
         validated, errors = threading.Event(), []
         original = inbox_tool.callback
-        def callback(*args):
-            value = original(*args)
+        def callback(*args, **kwargs):
+            value = original(*args, **kwargs)
             validated.set()
             return value
         def consume():

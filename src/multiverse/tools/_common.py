@@ -23,11 +23,33 @@ def add_wait(parser):
                         help='Readiness limit with --wait, in seconds (default: 60)')
 
 
-def callback(root, agent):
+def callback(root, agent, *, agent_scoped=False):
     root = universe.resolve(root)
     if not agent:
         raise ValueError("Specify --agent outside an agent session")
     directory = agents.directory(root, agent)
+    from ..runtime.agent_identity import actor
+    caller = actor()
+    if caller is not None:
+        if not agent_scoped:
+            raise ValueError('This integration callback requires the exact terminal launch; agent identity cannot authorize it')
+        if caller.directory.resolve() != directory.resolve():
+            raise ValueError('Agent identity cannot report or read another agent\'s inbox')
+        return root, directory, None
+    if agent_scoped:
+        from .. import harnesses
+        from ..runtime.native import adapter_hook
+        from ..harnesses.types import SessionHandle
+        try:
+            from ..store import read
+            properties = read(directory / 'properties.json')
+            adapter = harnesses.load(root, properties['harness'])
+            describe = adapter_hook(adapter, 'agent_identity_problem')
+            problem = describe(SessionHandle.from_records(properties, agents.runtime(directory), directory), os.environ) if describe else None
+        except (OSError, KeyError):
+            problem = None
+        if problem:
+            raise ValueError(problem)
     launch_id = os.environ.get("MV2_LAUNCH_ID")
     if launch_id and agents.runtime(directory).get("launch_id") != launch_id:
         raise ValueError("Outdated launch")

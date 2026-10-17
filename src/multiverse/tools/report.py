@@ -1,6 +1,7 @@
 """Report agent phase and current work."""
 from ..universe import agents
 from ..universe import mailbox
+from ..store import lock
 from ._common import add_agent, callback
 
 def configure(parser):
@@ -10,8 +11,10 @@ def configure(parser):
 
 
 def run(root=None, *, agent=None, phase=None, summary=None):
-    root, directory, launch_id = callback(root, agent)
-    return agents.report(root, agent, phase, summary)
+    root, directory, launch_id = callback(root, agent, agent_scoped=True)
+    with lock(directory / '.launch.lock'):
+        callback(root, agent, agent_scoped=True)
+        return agents.report(root, agent, phase, summary)
 
 
 def unread(directory):
@@ -29,7 +32,7 @@ def cli_run(root=None, *, agent=None, phase=None, summary=None):
     """`Reported working.`, and how many inbox-only messages wait when there are any."""
     record = run(root, agent=agent, phase=phase, summary=summary)
     line = f"Reported {record.get('phase') or 'unknown'}."
-    count = unread(callback(root, agent)[1])
+    count = unread(callback(root, agent, agent_scoped=True)[1])
     if count:
         line += f" You have {count} unread inbox {'message' if count == 1 else 'messages'}."
     return line

@@ -5,6 +5,7 @@ submits a prompt, cancels native work or modifies message receipts.
 """
 from datetime import datetime, timezone
 from pathlib import Path
+import os
 import signal
 import subprocess
 import sys
@@ -19,6 +20,8 @@ from ..universe import agents
 from ..universe.mailbox import inbox
 from . import lifecycle, rpc
 from .native import recovery_unavailable
+from . import attachments
+from .process import process_started
 
 PROOF_AGE = 15
 BACKOFF = (0, 1, 2, 4, 8)
@@ -59,6 +62,8 @@ def in_flight(directory, facts, native_id, since=None):
 
 
 def eligibility(properties, facts):
+    if facts.get('native_refusal'):
+        return 'Native launch was refused; a new explicit resume is required'
     proof = facts.get('recovery_snapshot') or {}
     session = SessionHandle.from_records(properties, facts, Path('.'))
     if reason := recovery_unavailable(session):
@@ -96,6 +101,8 @@ def check(properties, facts, directory):
     if (not isinstance(specification, RpcSpec) or session.service.endpoint.transport != 'unix-websocket'
             or specification.socket_path != session.service.endpoint.address):
         return NativeResult('unavailable', 'Attachment observation targets a different or unsupported service')
+    # Both production callers own a monitor/worker role until this bounded
+    # read-only connection closes. It cannot retain a conversation subscription.
     result = rpc.execute(specification, timeout=3)
     observed = result.value
     if result.state != 'ok':
@@ -121,7 +128,9 @@ class RecoveryMonitor:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native recovery observation is still closing')
 
     def _run(self):
         while not self.stopped.wait(1):
@@ -188,11 +197,14 @@ def schedule(directory, launch_id):
             agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + reason)
             return
         agents.record_recovery(directory, launch_id, 'checking', 'Checking for safe automatic reconnect', attempts=0)
+        worker = attachments.Role(directory / 'launches' / launch_id, 'recovery worker', pending=True)
+        agents.update_runtime(directory, launch_id, recovery_worker=str(worker.path.relative_to(directory)))
         try:
-            subprocess.Popen([sys.executable, '-m', 'multiverse.runtime.recovery', str(directory), launch_id],
+            subprocess.Popen([sys.executable, '-m', 'multiverse.runtime.recovery', str(directory), launch_id, str(worker.path)],
                              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                              start_new_session=True)
         except OSError as error:
+            worker.close()
             agents.record_recovery(directory, launch_id, 'failed', f'Could not start automatic reconnect: {error}')
 
 
@@ -201,7 +213,26 @@ def frontend_children(pid):
     return any(len(fields := line.split()) == 2 and fields[1] == str(pid) for line in result.stdout.splitlines())
 
 
-def run(directory, launch_id):
+def run(directory, launch_id, role_path=None):
+    try:
+        with existing_lock(directory / '.launch.lock'):
+            facts = agents.runtime(directory)
+            if facts.get('launch_id') != launch_id or not (directory / 'properties.json').is_file():
+                return
+            role_path = role_path or (directory / facts['recovery_worker'] if facts.get('recovery_worker') else None)
+            if role_path and Path(role_path).resolve().parent != (directory / 'launches' / launch_id / 'roles').resolve():
+                raise ValueError('Recovery worker belongs to a different launch')
+            worker = attachments.Role.existing(role_path) if role_path else attachments.Role(directory / 'launches' / launch_id, 'recovery worker')
+            worker.claimed(os.getpid(), process_started(os.getpid()))
+    except FileNotFoundError:
+        return
+    try:
+        return _run(directory, launch_id, worker)
+    finally:
+        worker.close()
+
+
+def _run(directory, launch_id, worker):
     root = directory.parents[2]
     def current():
         facts = agents.runtime(directory)
@@ -269,6 +300,9 @@ def run(directory, launch_id):
                 time.sleep(.1)
             else:
                 raise TimeoutError('Idle terminal did not exit; wrapper retained for manual recovery')
+            # Qualification has finished and all of its RPC contexts are closed.
+            # Release this old-launch role before requesting the new attachment.
+            worker.close()
             result = lifecycle.start(root, resume=directory.name, wait=True, wait_timeout=30,
                                   _recovery={'launch_id': launch_id, 'terminal': facts['tmux'],
                                              'service': facts['native_service'],
@@ -295,4 +329,4 @@ def reconnected(directory, launch_id):
 
 
 if __name__ == '__main__':
-    run(Path(sys.argv[1]), sys.argv[2])
+    run(Path(sys.argv[1]), sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else None)

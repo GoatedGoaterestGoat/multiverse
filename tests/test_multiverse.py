@@ -227,13 +227,17 @@ class TerminalTest(TerminalBase):
             agents.update_runtime(agent_dir, row["runtime"]["launch_id"], status="idle")
 
     def test_wrong_launch_tag_refuses_control(self):
-        result, _ = self.spawn()
+        result, directory = self.spawn()
         pane = result["runtime"]["tmux"]["pane"]
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
         self.assertEqual(lifecycle.listing(self.root)[0]["live"], "dormant")
         with self.assertRaises(ValueError):
             lifecycle.terminal_action(self.root, result["id"], "inspect")
-        self.assertEqual(lifecycle.terminal_action(self.root, result["id"], "stop")['state'], 'dormant')
+        # The pane was retagged, not exited: the old owned runner is still live.
+        self.assertEqual(read(directory / 'launches' / result['runtime']['launch_id'] / 'cleanup.json')['state'], 'active')
+        with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
+            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                lifecycle.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_hostname_change_preserves_owned_pane_and_duplicate_launch_guard(self):
@@ -248,7 +252,10 @@ class TerminalTest(TerminalBase):
         self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
         with self.assertRaises(ValueError):
             lifecycle.terminal_action(self.root, result['id'], 'inspect')
-        self.assertEqual(lifecycle.terminal_action(self.root, result['id'], 'stop')['state'], 'dormant')
+        self.assertEqual(read(agent_dir / 'launches' / result['runtime']['launch_id'] / 'cleanup.json')['state'], 'active')
+        with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
+            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                lifecycle.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
 
     def test_missing_pane_after_hostname_change_can_resume_same_session(self):

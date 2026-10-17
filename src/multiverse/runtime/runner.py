@@ -166,7 +166,9 @@ class StatusWatcher:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native status connection is still closing')
 
     def _run(self):
         try:
@@ -219,7 +221,9 @@ class StatusWatcher:
                     if specification is None:
                         return
                     native_id = session.native_id
-                    task = asyncio.create_task(rpc.watch(*specification, self._publish))
+                    from multiverse.runtime.attachments import connection_logger
+                    task = asyncio.create_task(rpc.watch(*specification, self._publish,
+                                              record_connection=connection_logger(self.agent_dir / 'launches' / self.launch_id)))
                 await asyncio.sleep(1)
         finally:
             if task is not None:
@@ -241,7 +245,9 @@ class StartupDelivery:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Startup delivery is still closing')
 
     def _run(self):
         from multiverse.runtime import lifecycle
@@ -279,6 +285,59 @@ class StartupDelivery:
                 pass
 
 
+class RefusalMonitor:
+    """Observe only this owned pane's current visible native startup screen."""
+    def __init__(self, agent_dir, launch_id, root, adapter, executable):
+        self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
+        self.describe, self.executable = adapter.launch_refusal, executable
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='native-launch-refusal', daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def close(self):
+        self.stopped.set()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native refusal observation is still closing')
+
+    def _run(self):
+        from multiverse.plugins.harness import version_of
+        from multiverse.runtime import native, refusal
+        from multiverse.terminal.tmux import owned
+        facts = runtime(self.agent_dir)
+        version = (facts.get('native_versions') or {}).get('cli') or version_of(self.executable)
+        while not self.stopped.is_set():
+            try:
+                # Never wait behind a long send/stop. The snapshot is exact and
+                # contains no scrollback, command transcript or inferred status.
+                with native._snapshot_lock(self.agent_dir):
+                    facts = runtime(self.agent_dir)
+                    if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
+                            or facts.get('state') not in ('starting', 'running') or facts.get('native_refusal')):
+                        return
+                    if ((facts.get('attachment') or {}).get('readiness') in ('binding', 'legacy-binding')
+                            and facts.get('state') == 'running'
+                            and (facts.get('native_relay') or {}).get('state') == 'ready'):
+                        return  # Structured binding succeeded; later navigation is not a launch refusal.
+                    properties = read(self.agent_dir / 'properties.json')
+                    backend, pane = owned(properties, facts)
+                    text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
+                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}')
+                    # Recheck tags after both observations as well as before.
+                    owned(properties, facts)
+                evidence = self.describe({'cli_version': version, 'text': text,
+                                          'cursor_visible': {'0': False, '1': True}.get(cursor),
+                                          'native_id': properties.get('native_session_id')})
+                if evidence is not None:
+                    refusal.record(self.agent_dir, self.launch_id, evidence)
+                    return
+            except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
+                pass  # Unavailable or unknown evidence cannot identify a refusal.
+            self.stopped.wait(.25)
+
+
 def launch_environment(request):
     env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
     for key in request.get('unset_env', []):
@@ -299,11 +358,15 @@ def main():
     proxy = None
     startup = None
     recovery_monitor = None
+    refusal_monitor = None
     startup_checked = False
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
     request = {}
     diagnostic = {}
+    roles = {}
+    from multiverse.runtime import attachments, refusal
+    attachments.begin(launch, process_started(os.getpid()))
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -334,13 +397,16 @@ def main():
             from multiverse.runtime.native import legacy_attachment
             attachment = asdict(legacy_attachment(request.get('shared_service')))
         update_runtime(agent_dir, launch.name, state="starting" if attachment.get('readiness') in ('binding', 'legacy-binding') else "running", status="unknown",
-                       runner_pid=os.getpid(), startup_checked=False, attachment=attachment or None)
+                       runner_pid=os.getpid(), runner_started=read(launch / 'cleanup.json')['pid_started'],
+                       startup_checked=False, attachment=attachment or None)
         if request.get('rpc_proxy'):
             from multiverse import harnesses
             from multiverse.runtime import rpc
             properties = read(agent_dir / 'properties.json')
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), properties['harness'])
             def bound(native_id):
+                if runtime(agent_dir).get('native_refusal'):
+                    raise ValueError(runtime(agent_dir)['native_refusal']['message'])
                 if not request['rpc_proxy'].get('binds_session') and attachment.get('readiness') != 'legacy-binding':
                     raise ValueError('Relay did not declare validated session binding')
                 bind_session(Path(env['MV2_UNIVERSE']), agent_dir.name, native_id, launch.name)
@@ -350,7 +416,10 @@ def main():
             proxy = rpc.LaunchProxy(request['rpc_proxy'], adapter.launch_proxy(request['rpc_proxy']['settings']),
                 bound,
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
-                UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name))
+                UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name),
+                record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
+                record_connection=attachments.connection_logger(launch))
+            roles['relay'] = attachments.Role(launch, 'relay')
             try:
                 proxy.start()
             except Exception as error:
@@ -358,6 +427,7 @@ def main():
                 if fallback is None or getattr(proxy.protocol, 'bound', False):
                     raise
                 proxy.close()
+                roles['relay'].close()
                 proxy = None
                 selection = {**(fallback.get('native_mode') or {}), 'fallback_reason': f'Native launch relay unavailable: {error}'}
                 request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
@@ -387,6 +457,17 @@ def main():
                                    native_service=None, attachment=fallback.get('attachment'),
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
                                    plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
+                    with lock(agent_dir / '.properties.lock'):
+                        current_properties = read(agent_dir / 'properties.json')
+                        if request.get('previous_agent_identity') is None:
+                            current_properties.pop('agent_identity', None)
+                        else:
+                            current_properties['agent_identity'] = request['previous_agent_identity']
+                        if request.get('previous_agent_environment') is None:
+                            current_properties.pop('agent_environment', None)
+                        else:
+                            current_properties['agent_environment'] = request['previous_agent_environment']
+                        write(agent_dir / 'properties.json', current_properties)
                     from multiverse.universe.mailbox import end_startup_messages
                     end_startup_messages(agent_dir, launch.name,
                         'Launch selected plain mode before delivery; message saved. '
@@ -397,23 +478,34 @@ def main():
                 attachment = fallback.get('attachment') or {}
         process = subprocess.Popen(request["argv"], env=env)
         update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=process_started(process.pid))
+        if request.get('observe_refusal'):
+            from multiverse import harnesses
+            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
+            refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
+            roles['refusal observer'] = attachments.Role(launch, 'refusal observer')
+            refusal_monitor.start()
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
                                       proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
+            roles['startup delivery'] = attachments.Role(launch, 'startup delivery')
             startup.start()
         if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            roles['status observer'] = attachments.Role(launch, 'status observer')
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
             from multiverse.runtime.recovery import RecoveryMonitor
             recovery_monitor = RecoveryMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
+            roles['recovery monitor'] = attachments.Role(launch, 'recovery monitor')
             recovery_monitor.start()
         try:
             code = process.wait(timeout=STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
             startup_checked = True
-            finish_wake(agent_dir, launch.name, request.get('resume_message_id'), True)
+            native_refusal = runtime(agent_dir).get('native_refusal')
+            finish_wake(agent_dir, launch.name, request.get('resume_message_id'), not native_refusal,
+                        native_refusal['message'] if native_refusal else '', uncertain=bool(native_refusal))
             update_runtime(agent_dir, launch.name, startup_checked=True)
             from multiverse.runtime.lifecycle import note_ready
             note_ready(Path(env['MV2_UNIVERSE']), agent_dir, launch.name)
@@ -435,6 +527,7 @@ def main():
             'reason': diagnostic.get('reason')})
         if watcher is not None:
             watcher.close()
+            roles['status observer'].close()
             watcher = None
         return code
     except Exception as error:
@@ -447,23 +540,36 @@ def main():
                 'state': 'failed', 'exit_code': None, 'reason': f'Multiverse launch failed: {error}'})
         return 1
     finally:
+        cleanup_errors = []
         if request.get('resume_message_id') and not startup_checked:
-            from multiverse.universe.mailbox import finish_wake
-            finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
-                        diagnostic.get('reason') or 'Runner ended before launch readiness',
-                        uncertain=process is not None)
+            try:
+                from multiverse.universe.mailbox import finish_wake
+                finish_wake(agent_dir, launch.name, request['resume_message_id'], False,
+                            diagnostic.get('reason') or 'Runner ended before launch readiness',
+                            uncertain=process is not None)
+            except Exception as error:
+                cleanup_errors.append('startup bookkeeping: ' + str(error))
+        def close_role(name, instance):
+            if instance is None:
+                return
+            try:
+                instance.close()
+                roles[name].close()
+            except Exception as error:
+                cleanup_errors.append(f'{name}: {error}')
         if startup is not None:
-            startup.close()
+            close_role('startup delivery', startup)
         elif request.get('control_endpoint'):
-            from multiverse.runtime.native import flush_startup
-            flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
-                          diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
-        if proxy is not None:
-            proxy.close()
-        if watcher is not None:
-            watcher.close()
-        if recovery_monitor is not None:
-            recovery_monitor.close()
+            try:
+                from multiverse.runtime.native import flush_startup
+                flush_startup(Path(request['env']['MV2_UNIVERSE']), agent_dir, launch.name,
+                              diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
+            except Exception as error:
+                cleanup_errors.append('startup bookkeeping: ' + str(error))
+        close_role('refusal observer', refusal_monitor)
+        close_role('relay', proxy)
+        close_role('status observer', watcher)
+        close_role('recovery monitor', recovery_monitor)
         if process is not None and process.poll() is None:
             process.terminate()
             try:
@@ -474,6 +580,7 @@ def main():
         # Shared services deliberately outlive terminal clients and monitors.
         if service_dir:
             shutil.rmtree(service_dir, ignore_errors=True)
+        attachments.finish(launch, cleanup_errors)
         if remove_wrapper:
             schedule_wrapper_cleanup(launch)
         for signum, handler in previous_handlers.items():

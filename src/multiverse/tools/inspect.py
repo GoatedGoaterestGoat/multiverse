@@ -44,7 +44,7 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
         answer, note = "", str(error)
     capture = answer if live else ""
     note = None if live else (answer or note or row.get("reason") or "it is not running")  # kept for --json
-    error = row.get("connection_error") or row.get("launch_error")
+    error = (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
     fallback = (row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason")
     if json:
         result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],

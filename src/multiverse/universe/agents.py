@@ -36,11 +36,18 @@ def update_runtime(agent_dir, launch_id, **changes):
         if data.get("launch_id") != launch_id:
             raise ValueError("Outdated launch; refusing to update current runtime")
         before = data.get("status")
+        primary = data.get('native_refusal')
         data.update(changes, observed_at=now())
+        if primary or data.get('native_refusal'):
+            data['native_refusal'] = primary or data['native_refusal']
+            data['reason'] = data['error'] = data['native_refusal']['message']
+            data['startup_delivery'] = 'failed'
+            data['delivery_error'] = data['reason']
+            data['status'] = 'unknown'
         write(agent_dir / "runtime.json", data)
-    if "status" in changes and changes["status"] != before:
+    if data.get('status') != before:
         # After the lock: recording an event never holds up the runtime record.
-        _event(agent_dir, "agent.status", launch_id, {"from": before, "to": changes["status"]})
+        _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})
     return data
 
 
@@ -65,6 +72,8 @@ def bind_session(root, reference, session_id, launch_id=None):
             raise ValueError("This agent is already bound to a different native session")
         sessions.claim(root, agent_dir, data, session_id)
         data.update(native_session_id=session_id, updated_at=now())
+        if data.get('agent_identity'):
+            data['agent_identity'] = {**data['agent_identity'], 'native_id': session_id}
         write(agent_dir / "properties.json", data)
     return data
 

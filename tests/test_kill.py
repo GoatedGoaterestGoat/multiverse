@@ -107,8 +107,9 @@ class KillTest(TerminalBase):
         pane = launched['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'foreign')
         with patch.object(Tmux, 'signal_child') as signal_child:
-            result = lifecycle.terminal_action(self.root, launched['id'], 'stop')
-            self.assertEqual(result['native_cancellation']['reason'], 'No native process was running')
+            with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
+                with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                    lifecycle.terminal_action(self.root, launched['id'], 'stop')
             self.assertIn(pane, self.backend.snapshot()[0])
             self.backend.run('kill-pane', '-t', pane)
             result = lifecycle.terminal_action(self.root, launched['id'], 'stop')

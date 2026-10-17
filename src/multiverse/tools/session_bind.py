@@ -1,6 +1,10 @@
 """Record a native session UUID for exact resume."""
 from ..universe import agents
 from ._common import add_agent, callback
+from ..runtime.agent_identity import actor
+from ..harnesses.types import normalize_session_id
+from ..store import lock, read
+from .. import universe
 
 def configure(parser):
     add_agent(parser)
@@ -8,6 +12,16 @@ def configure(parser):
 
 
 def run(root=None, *, agent=None, session_id):
+    caller = actor()
+    if caller:
+        root = universe.resolve(root)
+        directory = agents.directory(root, agent)
+        with lock(directory / '.launch.lock'):
+            actor()
+            data = read(directory / 'properties.json')
+            if directory.resolve() != caller.directory.resolve() or normalize_session_id(session_id) != data.get('native_session_id'):
+                raise ValueError('Agent identity can only verify its existing session binding; the runner owns binding changes')
+            return data  # Cached bridge bootstrap: exact-existing verification, no writes.
     root, directory, launch_id = callback(root, agent)
     return agents.bind_session(root, agent, session_id, launch_id)
 

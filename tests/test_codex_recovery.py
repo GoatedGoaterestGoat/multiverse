@@ -116,6 +116,7 @@ class RecoveryWorkerTest(unittest.TestCase):
         write(self.directory / 'runtime.json', self.facts)
         (self.directory / '.launch.lock').touch()
         self.popen = self.enterContext(patch.object(recovery.subprocess, 'Popen'))
+        self.enterContext(patch.object(recovery, 'process_started', return_value=None))
 
     def publish_loss(self):
         RelayPublisher(self.directory, self.launch)('upstream disappeared')

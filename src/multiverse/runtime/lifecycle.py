@@ -17,7 +17,9 @@ from ..terminal.tmux import Tmux, observe, owned
 from ..universe import agents, catalog, mailbox
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native
+from . import native, attachments, agent_identity
+
+TEARDOWN_TIMEOUT = 10
 
 def listing(root, recursive=False, only=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none."""
@@ -50,7 +52,8 @@ def listing(root, recursive=False, only=None):
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
-                             "connection_error": (relay.get('reason') if relay.get('state') == 'lost' else None)
+                             "connection_error": (facts.get('native_refusal') or {}).get('message')
+                                 or (relay.get('reason') if relay.get('state') == 'lost' else None)
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
@@ -112,6 +115,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     if not workdir.is_dir():
         raise ValueError(f"Workspace does not exist: {workdir}")
     properties["workspace"] = str(workdir)
+    if resume:
+        previous = runtime(agent_dir)
+        if previous and observe(properties, previous)['live'] in ('stopped', 'dormant'):
+            attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
     if _recovery:
         launch_lock = existing_lock
     else:
@@ -133,6 +140,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             _check_recovery(previous, properties, _recovery)
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
+        if previous and (closing := attachments.problem(agent_dir, previous)):
+            raise RuntimeError(closing + '; retry after terminal cleanup finishes')
         if resume_message_id is not None:
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
@@ -152,9 +161,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
                   "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
                   "MV2_PYTHON": sys.executable, "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
+        policy_hook = native.adapter_hook(adapter, 'agent_identity_policy')
+        policy_spec = policy_hook() if policy_hook else None
+        agent_environment = agent_identity.environment(target, policy_spec, properties.get('agent_environment'))
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
-        context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt)
+        context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt,
+                                agent_environment=agent_environment)
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
@@ -260,7 +273,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             executor = None
             if command.shared_service:
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
-            context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt)
+            context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
+                                    agent_environment=agent_environment)
             if command.shared_service:
                 try:
                     command = adapter.resume(session, context) if resume else adapter.spawn(context)
@@ -280,6 +294,17 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
                 raise ValueError('Native relay targets a different service endpoint')
             command = replace(command, attachment=native.launch_attachment(command))
+            previous_agent_identity = properties.get('agent_identity')
+            previous_agent_environment = properties.get('agent_environment')
+            if command.agent_identity is not None:
+                if command.agent_identity != policy_spec or agent_environment.get('MV2_IDENTITY_MODE') != policy_spec.mode:
+                    raise ValueError('Adapter changed its agent identity policy during launch preparation')
+                policy = agent_identity.record(command.agent_identity, properties, service)
+                with lock(agent_dir / '.properties.lock'):
+                    properties = read(agent_dir / 'properties.json')
+                    properties['agent_identity'] = policy
+                    properties['agent_environment'] = dict(agent_environment)
+                    write(agent_dir / 'properties.json', properties)
             if command.fallback is not None:
                 # The runner may still switch to the fallback; it records this, never the discarded plan.
                 command = replace(command, fallback=replace(command.fallback, plugins=plugins_record(root, command.fallback)))
@@ -299,7 +324,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
-            write(launch / "request.json", _request(argv, env, command, endpoint, resume_message_id))
+            write(launch / "request.json", {**_request(argv, env, command, endpoint, resume_message_id),
+                                           'previous_agent_identity': previous_agent_identity,
+                                           'previous_agent_environment': previous_agent_environment,
+                                           'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None})
             if resume_message_id is not None:
                 # The runner cannot start until ready exists. Persist uncertainty
                 # first so a crash can never silently replay this command-line input.
@@ -561,7 +589,7 @@ def terminal_action(root, reference, action):
     return backend, pane
 
 
-def kill(root, reference):
+def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference)
     with lock(agent_dir / '.launch.lock'):
@@ -581,7 +609,11 @@ def kill(root, reference):
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
         update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
         try:
-            cancellation = native.stop(root, reference)
+            cancellation = (NativeResult('ok', 'Only this terminal attachment was closed; conversation work was not cancelled')
+                            if attachment_only else native.stop(root, reference))
+            if attachment_only:
+                mailbox.end_startup_messages(agent_dir, launch_id,
+                    'Terminal attachment closed before delivery; saved for explicit retry')
         except Exception as error:
             if live not in ('stopped', 'dormant'):
                 update_runtime(agent_dir, launch_id, state=facts.get('state', 'running'),
@@ -594,6 +626,7 @@ def kill(root, reference):
             cancellation = NativeResult('unknown',
                 f'Native cancellation unconfirmed: {error}. Retry stop when the native service is reachable.',
                 {'cancelled_startup_messages': cancelled})
+        update_runtime(agent_dir, launch_id, native_cancellation=cancellation.to_dict() if cancellation else None)
 
     # The runner's relay can be binding under .launch.lock during startup or
     # shutdown. Never hold that lock while waiting for the child/runner to exit.
@@ -624,8 +657,11 @@ def kill(root, reference):
             except TimeoutError:
                 backend.signal_child(properties, current(), signal.SIGKILL)
                 wait_for_exit(5)
+        attachments.wait(agent_dir, launch_id, TEARDOWN_TIMEOUT)
         with lock(agent_dir / '.launch.lock'):
             latest = current()
+            if closing := attachments.problem(agent_dir, latest):
+                raise RuntimeError(closing)
             live = observe(properties, latest)['live']
             if live == 'stopped':
                 backend, pane = owned(properties, latest, states=('stopped',))

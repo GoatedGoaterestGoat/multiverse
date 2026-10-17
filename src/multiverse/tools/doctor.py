@@ -28,7 +28,7 @@ def check(root, notes=None):
                 recovery = runtime.get('auto_recovery') or {}
                 connection_error = item.get('connection_error')
                 if item["live"] == "unknown" or failed or connection_error or recovery.get('state') in ('failed', 'skipped'):
-                    reason = connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
+                    reason = (runtime.get('native_refusal') or {}).get('message') or connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
                     found.append((f'{item["name"]}: {reason}', f"{item['name']}'s " +
                                   ("last launch failed: " if failed else "connection was lost: " if connection_error
                                    else "automatic reconnect failed: " if recovery.get('state') in ('failed', 'skipped')

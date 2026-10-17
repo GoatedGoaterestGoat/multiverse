@@ -42,7 +42,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         raise ValueError('--timeout requires --wait')
     seconds = timeout_seconds(timeout)
     deadline = time.monotonic() + seconds if seconds is not None else None
-    root, directory, launch_id = callback(root, agent)
+    root, directory, launch_id = callback(root, agent, agent_scoped=True)
     def public_result(result):
         if all_messages:
             return result
@@ -73,6 +73,7 @@ def run(root=None, *, agent=None, after=None, all_messages=False, peek=False,
         # Serialize output/read position with launch replacement, but release
         # both locks between polls so senders and resume can make progress.
         with store.lock(directory / '.launch.lock'):
+            callback(root, agent, agent_scoped=True)
             if launch_id and agents.runtime(directory).get('launch_id') != launch_id:
                 raise ValueError('Outdated launch')
             if wait and not (directory / 'properties.json').is_file():

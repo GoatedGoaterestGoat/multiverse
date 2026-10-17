@@ -283,6 +283,7 @@ class NativeBackendTest(BaseTest):
                 self.backend.run.reset_mock()
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
+                     patch.object(runner, 'process_started', return_value=None), \
                      patch.object(runner.subprocess, 'Popen') as child, \
                      patch('multiverse.terminal.tmux.owned', side_effect=ValueError('Foreign pane')) as owned, \
                      patch.object(runner, 'launch_diagnostic', return_value={}), patch.object(native, 'flush_startup'):

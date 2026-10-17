@@ -6,6 +6,7 @@ resumes, interrupts or stops a native server, and never answers native requests.
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import json
+from uuid import uuid4
 
 from websockets.asyncio.client import unix_connect
 from websockets.exceptions import WebSocketException
@@ -43,8 +44,11 @@ async def _exchange(connection, plan, request, max_requests, send):
     return False, None
 
 
-async def _execute(spec, timeout):
+async def _execute(spec, timeout, record_connection=None):
     plan = spec.plan()
+    connection_id = str(uuid4())
+    if record_connection:
+        record_connection({'id': connection_id, 'role': 'control RPC', 'endpoint': spec.socket_path, 'state': 'opening'})
     try:
         async with asyncio.timeout(timeout):
             async with unix_connect(spec.socket_path, compression=None, open_timeout=timeout,
@@ -71,9 +75,11 @@ async def _execute(spec, timeout):
         raise TimeoutError('Native RPC timed out; acceptance may be unknown') from error
     finally:
         plan.close()
+        if record_connection:
+            record_connection({'id': connection_id, 'role': 'control RPC', 'endpoint': spec.socket_path, 'state': 'closed'})
 
 
-def execute(spec, timeout=10):
+def execute(spec, timeout=10, record_connection=None):
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -82,17 +88,20 @@ def execute(spec, timeout=10):
         # Shared synchronous tools may be called by a TUI event handler.
         # Keep the bounded protocol on its own loop in that case.
         with ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(asyncio.run, _execute(spec, timeout)).result()
-    return asyncio.run(_execute(spec, timeout))
+            return executor.submit(asyncio.run, _execute(spec, timeout, record_connection)).result()
+    return asyncio.run(_execute(spec, timeout, record_connection))
 
 
-async def watch(spec, interpret, publish, timeout=5):
+async def watch(spec, interpret, publish, timeout=5, *, record_connection=None):
     """Run an adapter's bounded snapshot plan, then consume passive notifications.
 
     The caller cancels this task at launch end. Connection loss or protocol errors
     invalidate the observation; no reconnect, server startup or request replies.
     """
     plan = spec.plan()
+    connection_id = str(uuid4())
+    if record_connection:
+        record_connection({'id': connection_id, 'role': 'status stream', 'endpoint': spec.socket_path, 'state': 'opening'})
     try:
         async with unix_connect(spec.socket_path, compression=None, open_timeout=timeout,
                                 close_timeout=0.2, ping_interval=20, ping_timeout=20,
@@ -123,6 +132,8 @@ async def watch(spec, interpret, publish, timeout=5):
         pass  # Status is optional; native terminal execution remains authoritative.
     finally:
         plan.close()
+        if record_connection:
+            record_connection({'id': connection_id, 'role': 'status stream', 'endpoint': spec.socket_path, 'state': 'closed'})
         publish('unknown')
 
 
@@ -135,12 +146,15 @@ class LaunchProxy:
     POST_BIND_TIMEOUT = 3
 
     def __init__(self, spec, protocol, bind, record_error=lambda error: None,
-                 publish_usage=lambda usage: None, record_lost=lambda reason: None):
+                 publish_usage=lambda usage: None, record_lost=lambda reason: None,
+                 record_refusal=lambda evidence: None, record_connection=None):
         import threading
         self.spec, self.protocol, self.bind = spec, protocol, bind
         self.record_error = record_error
         self.publish_usage = publish_usage
         self.record_lost = record_lost
+        self.record_refusal = record_refusal
+        self.record_connection = record_connection
         self.owner = None
         self.lost = None
         self.stopped, self.ready = threading.Event(), threading.Event()
@@ -157,7 +171,9 @@ class LaunchProxy:
 
     def close(self):
         self.stopped.set()
-        self.thread.join()
+        self.thread.join(5)
+        if self.thread.is_alive():
+            raise TimeoutError('Native launch relay is still closing')
 
     def _record_error(self, error):
         try:
@@ -197,6 +213,10 @@ class LaunchProxy:
             return
         ended = None
         failure = None
+        connection_id = str(uuid4())
+        if self.record_connection:
+            self.record_connection({'id': connection_id, 'role': 'terminal relay',
+                                    'endpoint': self.spec['upstream_path'], 'state': 'opening'})
         try:
             async with unix_connect(self.spec['upstream_path'], compression=None, open_timeout=5,
                                     close_timeout=.2, max_size=self.MAX_MESSAGE_SIZE,
@@ -224,7 +244,16 @@ class LaunchProxy:
                                         'code': -32602, 'message': f'Native launch preparation failed: {error}'}}))
                                     continue
                             else:
-                                native_id = self.protocol.incoming(value)
+                                try:
+                                    native_id = self.protocol.incoming(value)
+                                except (ValueError, TypeError, KeyError) as error:
+                                    if not getattr(self.protocol, 'bound', False):
+                                        self.record_refusal({'source': 'adapter-validation', 'method': 'binding',
+                                                             'code': None, 'message': str(error), 'native_id': None})
+                                    raise
+                                refusal = getattr(self.protocol, 'launch_refusal', None)
+                                if refusal is not None:
+                                    self.record_refusal(refusal)
                                 if native_id is not None:
                                     self.bind(native_id)
                                     self.owner = client
@@ -233,7 +262,7 @@ class LaunchProxy:
                                         try:
                                             spec = after_bind(self.spec['upstream_path'])
                                             if spec is not None:
-                                                observed = await _execute(spec, self.POST_BIND_TIMEOUT)
+                                                observed = await _execute(spec, self.POST_BIND_TIMEOUT, self.record_connection)
                                                 if observed.state != 'ok':
                                                     raise ValueError(observed.reason)
                                         except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
@@ -275,6 +304,9 @@ class LaunchProxy:
             # A relay never fabricates answers to native approval requests.
             await client.close(code=1011, reason='Native launch relay failed; see runtime.json')
         finally:
+            if self.record_connection:
+                self.record_connection({'id': connection_id, 'role': 'terminal relay',
+                                        'endpoint': self.spec['upstream_path'], 'state': 'closed'})
             # Only the bound TUI connection owns launch health. A secondary
             # client's failure must not strand a healthy primary connection.
             normal_exit = ended and ended[0] == 'terminal' and ended[1] in (1000, 1001)

@@ -19,8 +19,9 @@ class CatalogJsonTest(BaseTest):
     def setUp(self):
         super().setUp()
         self.env = {**os.environ, 'PYTHONPATH': str(PROJECT / 'src')}
-        for name in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_LAUNCH_ID'):
-            self.env.pop(name, None)
+        for name in [name for name in self.env if name.startswith('MV2_')]:
+            self.env.pop(name)
+        self.env.pop('CODEX_THREAD_ID', None)
         # An entry without a description, which both forms must show as empty.
         write(self.root / 'commands/bare/entry.json', {})
         (self.root / 'commands/bare/prompt.md').write_text('Bare.')

@@ -160,6 +160,8 @@ class NativeExecutor:
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
+        if self.facts.get('native_refusal') and not self.stopping:
+            raise ValueError(self.facts['native_refusal']['message'])
         if self.facts.get('binding_conflict') and not self.stopping:
             raise ValueError(self.facts['binding_conflict'])
         if self.stopping and observe(self.properties, self.facts)['live'] == 'dormant':
@@ -581,6 +583,10 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 receipt = {**receipt, 'state': 'unknown', 'reason': 'Previous submission was interrupted; acceptance unknown'}
                 update_message(directory, message_id, submission_state='unknown')
             return {**receipt, 'reused': True, 'ok': receipt['state'] not in ('error', 'unavailable', 'unknown')}
+        if executor.facts.get('native_refusal'):
+            receipt = {'state': 'error', 'ok': False, 'reason': executor.facts['native_refusal']['message']}
+            update_message(directory, message_id, submission_state='failed', attempts=[*previous, receipt])
+            return receipt
         tracking = retarget_message(directory, executor.properties, message, tracking)
         target = tracking.get('target_session') or message.get('target_session')
         relay_lost = (session.native_relay or {}).get('state') == 'lost'
