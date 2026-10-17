@@ -64,6 +64,19 @@ class NativeRefusalTest(unittest.TestCase):
 
 
 class PlainRefusalTest(unittest.TestCase):
+    def test_version_support_gate_accepts_only_tested_layouts(self):
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        capture = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
+        for version in ('0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
+            with self.subTest(version=version):
+                self.assertTrue(adapter.supports_launch_refusal(version))
+                self.assertIsNotNone(adapter.launch_refusal({**capture, 'cli_version': version}))
+        for version in (None, '', '0.162.1', '0.164.0', 'codex-cli 0.163.0-dev',
+                        {}, [0, 163], [False, 163, False], (0, '163', 0), True):
+            with self.subTest(version=version):
+                self.assertFalse(adapter.supports_launch_refusal(version))
+                self.assertIsNone(adapter.launch_refusal({**capture, 'cli_version': version}))
+
     def evidence(self, width=120):
         import textwrap
         lines = ['  >_ OpenAI Codex (v0.163.0)', '  fixture workspace', '']

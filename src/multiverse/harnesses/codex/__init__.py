@@ -33,6 +33,10 @@ class CodexAdapter(ConfiguredAdapter):
                     '(mv2 kill, then mv2 resume) with no other client attached.')
         return None
 
+    def supports_launch_refusal(self, cli_version):
+        from .refusal import supports_plain_refusal
+        return supports_plain_refusal(cli_version)
+
     def launch_refusal(self, evidence):
         from .refusal import plain_refusal
         return plain_refusal(evidence)

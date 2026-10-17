@@ -6,6 +6,14 @@ OPEN_ELSEWHERE = 'This conversation is open in another app'
 CLOSE_ELSEWHERE = 'Close it there and press R to continue here.'
 
 
+def supports_plain_refusal(version):
+    """Whether a current-pane refusal layout is known for this CLI version."""
+    if isinstance(version, str):
+        return version in ('0.163.0', 'codex-cli 0.163.0')
+    return (isinstance(version, (tuple, list)) and len(version) == 3
+            and all(type(part) is int for part in version) and tuple(version) == (0, 163, 0))
+
+
 def plain_refusal(evidence):
     """Recognize the active 0.163.0 read-only widget, never scrollback prose.
 
@@ -14,8 +22,7 @@ def plain_refusal(evidence):
     action row. Matching a headline alone would misclassify quoted history.
     Unknown versions/layouts intentionally provide no refusal evidence.
     """
-    version = evidence.get('cli_version')
-    if version not in ('0.163.0', 'codex-cli 0.163.0', (0, 163, 0), [0, 163, 0]):
+    if not supports_plain_refusal(evidence.get('cli_version')):
         return None
     text = evidence.get('text')
     if (evidence.get('cursor_visible') is not False or not isinstance(text, str)
