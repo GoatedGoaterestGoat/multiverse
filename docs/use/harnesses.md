@@ -88,7 +88,7 @@ A running `/compact` shows its progress on the same line. `mv2 refresh --apply` 
 
 The live connection runs through Codex's shared app-server daemon. There is one daemon per OS user and Codex home, shared by every agent, project and dashboard. Spawn and resume start or reuse it with `codex app-server daemon start`, then connect the agent's terminal through a private relay. mv2 never stops, restarts or updates the daemon. Closing the dashboard leaves it running.
 
-**Codex home.** Set `CODEX_HOME` (and `CODEX_SQLITE_HOME`, if you use it) in the environment you run mv2 from, not in harness `env`. Each agent remembers its Codex home, and mv2 refuses to resume it under a different one.
+**Codex home.** Set `CODEX_HOME` (and `CODEX_SQLITE_HOME`, if you use it) in the environment you run mv2 from, not in harness `env`. A connected agent remembers its Codex home and keeps using it on resume. If you pass a different `CODEX_HOME`, the resume result names the saved home and the ignored override. Spawn another agent to use a different home. Other changes to the saved native storage scope are still refused.
 
 **Fallback.** With `inbox_bridge` unset, the agent starts launch-only in these cases:
 

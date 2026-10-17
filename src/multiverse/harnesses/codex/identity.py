@@ -1,5 +1,6 @@
 """The conversation's stable tool identity, separate from its terminal launch."""
 from pathlib import Path
+import json
 
 from ..types import AgentIdentitySpec
 
@@ -12,6 +13,22 @@ POLICY = AgentIdentitySpec('codex-agent-v1', 'CODEX_THREAD_ID', ('CODEX_HOME', '
 VOLATILE = frozenset({'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'})
 STABLE = frozenset({'MV2_IDENTITY_MODE', 'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
                     'MV2_CLI', 'MV2_PYTHON', 'PATH'})
+
+
+def resume_notice(caller_environment, effective_environment):
+    """Explain a caller override discarded by the saved native environment."""
+    requested = caller_environment.get('CODEX_HOME')
+    saved = effective_environment.get('CODEX_HOME')
+    if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+        return None
+    try:
+        kept = Path(saved).expanduser().resolve()
+        if Path(requested).expanduser().resolve() == kept:
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None  # A diagnostic cannot claim an unverified storage choice.
+    return (f'Kept its saved Codex home {json.dumps(str(kept))}; '
+            f'ignored CODEX_HOME={json.dumps(requested)}.')
 
 
 def storage_environment(context):

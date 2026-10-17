@@ -25,6 +25,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .identity import POLICY
         return POLICY
 
+    def resume_notice(self, session, caller_environment, effective_environment):
+        from .identity import resume_notice
+        return resume_notice(caller_environment, effective_environment)
+
     def agent_identity_problem(self, session, environment):
         if (environment.get('MV2_IDENTITY_MODE') is None and environment.get('MV2_LAUNCH_ID')
                 and environment.get('CODEX_THREAD_ID') and environment.get('MV2_AGENT_ID') == session.agent_id
