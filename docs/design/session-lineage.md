@@ -82,7 +82,10 @@ agent checks its earlier generations as well as its current ID.
 A damaged journal belonging to another agent blocks a claim only when its
 readable bytes mention the requested ID, including a torn row. Unrelated damage
 does not block new agents. A journal that cannot be read or safely inspected
-still refuses the claim, naming the agent and file to repair. Historical storage
+still refuses a potentially overlapping or unknown namespace, naming the agent
+and file to repair. Explicitly different providers, or the same known provider
+with different recorded storage homes, are excluded before reading journals.
+Missing or malformed scope is never proof of separation. Historical storage
 homes keep the absolute scope recorded at the transition; reading history never
 follows a parent directory that became a symlink later.
 

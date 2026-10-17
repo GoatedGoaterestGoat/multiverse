@@ -99,12 +99,19 @@ def recover(directory, data):
     return updated, rows[-1] if repaired else None
 
 
+def _recorded_provider(data):
+    value = data.get('native_session_provider')
+    if value is None:
+        identity = data.get('native_service_identity')
+        value = identity.get('provider') if isinstance(identity, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def provider(root, data):
-    if data.get('native_session_provider'):
-        return data['native_session_provider']
-    identity = data.get('native_service_identity') or {}
-    if identity.get('provider'):
-        return identity['provider']
+    if known := _recorded_provider(data):
+        return known
+    if data.get('native_session_provider') is not None or data.get('native_service_identity') is not None:
+        return None  # Malformed stored scope is unknown, never a different namespace.
     if not data.get('harness'):
         return None  # Minimal old records have no known provider namespace.
     # Legacy aliases predate the stored provider. Reading configuration is not
@@ -112,7 +119,7 @@ def provider(root, data):
     from .. import harnesses
     try:
         family = getattr(harnesses.load(root, data['harness']), 'family', '')
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError):
         return None  # Binding alone never requires a surviving harness definition.
     return family if isinstance(family, str) and family else data['harness']
 
@@ -142,6 +149,19 @@ def claim(root, directory, data, native_id, home=None):
             if path.parent.resolve() == own_directory:
                 continue
             other = read(path)
+            # A valid lineage cannot change its provider or storage scope. Exclude
+            # known disjoint namespaces before touching potentially unreadable
+            # journals. Unknown legacy/malformed scope still needs inspection.
+            other_provider = _recorded_provider(other)
+            if own_provider and other_provider:
+                if other_provider != own_provider:
+                    continue
+                try:
+                    different_home = _stored_home(own_home) != _stored_home(other.get('native_session_home'))
+                except ValueError:
+                    different_home = False
+                if different_home:
+                    continue
             try:
                 other, rows = effective(path.parent, other)
             except (OSError, ValueError, TypeError) as error:

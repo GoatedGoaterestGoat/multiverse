@@ -232,3 +232,60 @@ class SessionLineageTest(BaseTest):
         self.assertEqual(effective['native_session_id'], target)
         self.assertEqual(rows[0]['home'], self.home, 'Historical storage is not reinterpreted through a new symlink')
 
+
+    def test_unreadable_journal_is_skipped_only_for_a_known_disjoint_namespace(self):
+        peer, previous = self.make_agent('permission-peer')
+        agents.rebind_session(self.root, peer.name, previous, str(uuid4()), 'clear', 'launch', home=self.home)
+        journal, original = peer / 'sessions.jsonl', Path.open
+        data = read(peer / 'properties.json')
+        reads = []
+        def opened(path, *args, **kwargs):
+            if path == journal:
+                reads.append(path)
+                raise PermissionError('permission denied')
+            return original(path, *args, **kwargs)
+        for provider, home, allowed in (('pi', self.home + '-pi', True),
+                                        ('fixture', self.home + '-other', True),
+                                        ('pi', self.home, True),
+                                        ('fixture', self.home, False),
+                                        (None, self.home + '-other', False),
+                                        ([], self.home + '-other', False),
+                                        ('fixture', None, False),
+                                        ('fixture', 'relative/home', False)):
+            with self.subTest(provider=provider, home=home):
+                # Keep the core-written journal intact. Only its permissions are unavailable.
+                value = {**data, 'native_session_provider': provider, 'native_session_home': home}
+                if provider is None or provider == []:
+                    value.pop('harness', None)  # Truly unknown provider, not an alias resolved by config.
+                write(peer / 'properties.json', value)
+                reads.clear()
+                with patch.object(Path, 'open', opened):
+                    target = str(uuid4())
+                    if allowed:
+                        with sessions.namespace(self.root):
+                            sessions.claim(self.root, self.agent, read(self.agent / 'properties.json'), target, self.home)
+                        self.assertEqual(reads, [])
+                    else:
+                        with self.assertRaisesRegex(ValueError, 'permission-peer.*sessions.jsonl.*read'):
+                            with sessions.namespace(self.root):
+                                sessions.claim(self.root, self.agent, read(self.agent / 'properties.json'), target, self.home)
+                        self.assertTrue(reads)
+
+    def test_disjoint_preflight_keeps_historical_home_when_parent_becomes_symlink(self):
+        parent = self.work / 'old-parent'
+        old_home = parent / 'home'
+        old_home.mkdir(parents=True)
+        peer, previous = self.make_agent('old-scope', home=str(old_home))
+        agents.rebind_session(self.root, peer.name, previous, str(uuid4()), 'clear', 'launch', home=str(old_home))
+        parent.rename(self.work / 'moved-parent')
+        replacement = self.work / 'replacement-parent'
+        (replacement / 'home').mkdir(parents=True)
+        parent.symlink_to(replacement, target_is_directory=True)
+        journal, original = peer / 'sessions.jsonl', Path.open
+        def opened(path, *args, **kwargs):
+            if path == journal:
+                raise AssertionError('A historical home must not be resolved through its later symlink')
+            return original(path, *args, **kwargs)
+        with patch.object(Path, 'open', opened), sessions.namespace(self.root):
+            sessions.claim(self.root, self.agent, read(self.agent / 'properties.json'), str(uuid4()),
+                           str(replacement / 'home'))
