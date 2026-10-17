@@ -170,6 +170,11 @@ def problems(root, reserved=(), wait=None):
             found_problems.append(f"{', '.join(owners)} declares mv2 {name}, which mv2 itself uses; it is ignored")
         elif len(owners) > 1:
             found_problems.append(f"{' and '.join(owners)} both declare mv2 {name}; neither is used")
+    from . import host
+    stopped = host.left_stopped(root)
+    for found in usable:
+        if found.name in stopped:
+            found_problems.append(_left_stopped(found.name, stopped[found.name]))
     for found in usable:  # `wait`: how long a plugin still loading is waited for (the dashboard: a short wait)
         try:
             loader.load(found, wait=wait)
@@ -241,6 +246,7 @@ def listing(root):
     settings screen is offered once it has loaded (loader.generation() rises then)."""
     from . import host
     recent = loader.errors()
+    stopped = host.left_stopped(root)
     result = []
     for found in entries(root):
         manifest = found.manifest
@@ -251,7 +257,8 @@ def listing(root):
                 "description": manifest.description if manifest else "",
                 "default": manifest.default if manifest and found.source == "bundled" else "off",
                 "problem": found.problem, "errors": recent.get(found.name, []) + (
-                    host.gave_up(root, found.name) if manifest is not None and manifest.events else []),
+                    host.gave_up(root, found.name) if manifest is not None and manifest.events else []) + (
+                    [_left_stopped(found.name, stopped[found.name])] if found.name in stopped else []),
                 "permissions": manifest.permission_texts() if manifest else [],
                 "commands": dict(manifest.commands) if manifest else {},
                 "provides": _provides(found),
@@ -275,6 +282,10 @@ def listing(root):
                                            if found.loaded and found.loaded.registrations.settings_fields else None)}
         result.append(item)
     return result
+
+
+def _left_stopped(name, why):
+    return f"{name}: the plugin host left it stopped: {why}"
 
 
 # A plugin whose settings may be converted: listed, trusted and compatible (on or off).
@@ -819,7 +830,8 @@ def anchor_events(root, name, again=False):
         if host._cursor_path(root, name).exists() and not again:
             return
         segments = events.segments(root)
-        host._write_cursor(root, name, events._last_sequence(segments[-1][1]) if segments else 0)
+        host._write_cursor(root, name, events._last_sequence(segments[-1][1]) if segments else 0,
+                           events.journal_id(root))
     except Exception:
         pass
 

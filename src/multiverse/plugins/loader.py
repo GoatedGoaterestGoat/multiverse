@@ -52,6 +52,7 @@ _loaded = {}  # resolved plugin directory -> Loaded or Failed
 _running = set()  # (id(Loaded), what) of guarded calls still running past their time budget
 _running_lock = threading.Lock()
 _loading = {}  # resolved plugin directory -> (Event set when its load in the background ends, when it started)
+_attempts = {}  # resolved plugin directory -> loads started for it in this process
 _log_lock = threading.Lock()
 _entries = {}  # root -> (signature, entries): entries() is asked for on every dashboard refresh
 _generation = 0  # rises whenever a plugin is loaded or fails to load
@@ -585,17 +586,30 @@ def _load(found, directory):
     it ends (a slow cold import on a slow disk is loaded then; an error replaces the timeout). A hang is also
     remembered against the plugin's files (LOAD_TIMEOUTS), so the next process does not wait the limit again."""
     from . import api  # the API imports this module
-    package = _package_name(found)
+    with _lock:
+        attempt = _attempts.get(directory, 0)
+        _attempts[directory] = attempt + 1
+    # Every attempt after the first imports under a package of its own: one still running late (or what it left in
+    # sys.modules) can never hand a later attempt, after an edit, the code it started with.
+    package = _package_name(found) + (f"_{attempt}" if attempt else "")
     registrations = Registrations()
     _keep_bytecode_out(directory)
-    outcome, done, gate, late = {}, threading.Event(), threading.Lock(), []
+    outcome, done, gate, late, timed_out = {}, threading.Event(), threading.Lock(), [], []
+    files_at_start = _files(directory)
 
     def forget_modules():
         for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
             del sys.modules[name]  # tried again from scratch once its files change
 
     def land(loaded=None, error=None):
-        """Keep what a load ended with."""
+        """Keep what a load ended with. One that ends late is kept only while it is still the plugin's latest
+        attempt and its files are still those it started with."""
+        if late:
+            with _lock:
+                superseded = not timed_out or _loaded.get(directory) is not timed_out[0]
+            if superseded or _files(directory) != files_at_start:
+                forget_modules()  # this attempt's own package: a later one has its own
+                return None
         if error is not None:
             forget_modules()
             problem = f"{found.name} failed to load: {_describe(error)}"
@@ -635,8 +649,9 @@ def _load(found, directory):
             late.append(True)
             error = TimeoutError(f"took longer than {LOAD_SECONDS:g} s to load")
             problem = f"{found.name} failed to load: {_describe(error)}"
+            timed_out.append(Failed(found.manifest, found.source, problem, files_at_start))
             with _lock:
-                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                _loaded[directory] = timed_out[0]
                 _changed()
             _remember_slow(directory, _files(directory))
             raise PluginError(problem) from error
@@ -648,6 +663,8 @@ def _load(found, directory):
 
 LOAD_TIMEOUTS = "plugin-load-timeouts.json"  # in ~/.multiverse: plugins whose load ran past LOAD_SECONDS
 KNOWN_SLOW_WAIT = 0.5  # seconds a caller that would wait in full waits for a plugin that hung before
+KNOWN_SLOW_FOR = 600  # seconds a hang is remembered: then one caller waits in full again (a short process such as
+# `mv2 spawn` ends before a load it waited 0.5 s for could clear the mark)
 
 
 def _digest(files):
@@ -671,7 +688,7 @@ def _remember_slow(directory, files):
                     return
                 plugins.pop(str(directory), None)
             else:
-                plugins[str(directory)] = {"files": _digest(files), "at": now()}
+                plugins[str(directory)] = {"files": _digest(files), "at": now(), "until": time.time() + KNOWN_SLOW_FOR}
             write(path, {"schema": 1, "plugins": plugins})
     except (OSError, ValueError):
         pass
@@ -686,7 +703,9 @@ def _known_slow(found):
         return False
     directory = Path(found.manifest.directory).resolve()
     item = recorded.get(str(directory))
-    return isinstance(item, dict) and item.get("files") == _digest(_files(directory))
+    until = item.get("until") if isinstance(item, dict) else None
+    return (isinstance(until, (int, float)) and not isinstance(until, bool) and until > time.time()
+            and item.get("files") == _digest(_files(directory)))
 
 
 def _keep_bytecode_out(directory):
@@ -904,5 +923,6 @@ def reset():
         _entries.clear()
         _declared.clear()
         _loading.clear()
+        _attempts.clear()
         for name in [name for name in sys.modules if name == PACKAGE or name.startswith(PACKAGE + ".")]:
             del sys.modules[name]

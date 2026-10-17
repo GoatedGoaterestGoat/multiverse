@@ -351,8 +351,11 @@ where they happen and delivered where plugins run**:
     time, holds only itself: its siblings go on, past any number of events,
     and an event a handler finished is never given to it again while a sibling
     catches up, however many polls that takes. A journal whose state was
-    removed starts again with a new id (`state/events/journal-id`), and only
-    then does the host forget what its handlers finished. A call counts one try when it runs out of time and one more for
+    removed starts again with a new id (`state/events/journal-id`, kept in its
+    counter file too, so a lost or unreadable id file is not taken for a new
+    journal), and only then does the host forget what its handlers finished.
+    A plugin's cursor names its journal, so a journal that started again is
+    delivered from its start, whatever the old cursor said. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
     on for that event, and its next events get calls of their own. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
@@ -360,9 +363,11 @@ where they happen and delivered where plugins run**:
     two calls that never returned restarts itself (the supervisor starts a
     fresh one, which has no stuck threads). Each worker runs in a process group
     of its own, and the supervisor ends that group with it, so a stuck call's
-    child processes (a hung `subprocess.run`) go too. Such restarts are counted
-    however far apart they are: after 3, the plugin is left stopped, and
-    `mv2 plugins` says its handlers kept hanging. What each handler finished is
+    child processes (a hung `subprocess.run`) go too; a worker whose supervisor
+    died (`kill -9`) ends its own group as it stops. Such restarts are counted
+    over a day, however long each run takes: after 3, the plugin is left
+    stopped, and `mv2 plugins`, `doctor` and the Plugins screen say its
+    handlers kept hanging. What each handler finished is
     kept next to the cursor (`state/plugins/NAME/handlers.json`, for that
     journal), so a fresh worker never gives a handler an event it finished.
     Handlers that are not held read on from their own place, so siblings keep
@@ -670,10 +675,13 @@ thread of their own and get 10 s. One that takes longer is left out as failed
 for now, and the Plugins screen, `mv2 plugins` and `doctor` say so; it never
 hangs `mv2`. Its load goes on: what it ends with lands when it ends, so a slow
 cold import is loaded then. The hang is also remembered against the plugin's
-files (`~/.multiverse/plugin-load-timeouts.json`): later processes wait for it
-at most 0.5 s, and a launch leaves it out while it still loads, saying so in
-the launch's `plugins` record and fallback reason, until it loads or its files
-change. A caller waits
+files (`~/.multiverse/plugin-load-timeouts.json`): for the next 10 minutes,
+processes wait for it at most 0.5 s, and a launch leaves it out while it still
+loads, saying so in the launch's `plugins` record and fallback reason; it is
+forgotten once it loads, its files change or the 10 minutes pass. A late
+result is kept only while it is still the plugin's latest attempt with the
+files it started with: after an edit, the new code loads (under a package of
+its own), and the old load's result is dropped when it ends. A caller waits
 for a plugin still loading only up to a deadline counted from when its load
 started: a launch plan waits until it ends; the dashboard's refreshes (columns,
 panels, inspector lines) wait at most `loader.REFRESH_WAIT` (0.5 s) in all, so
