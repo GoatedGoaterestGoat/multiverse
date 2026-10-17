@@ -80,3 +80,20 @@ class PluginTestCaseGuardsTest(PluginTestCase):
     def test_plugin_test_cases_run_guarded(self):
         self.assertTrue(testing._protected)
         self.assertEqual(testing._current, self.id())
+
+
+class PluginModuleTest(StandInHome):
+    """plugin_module() at a test module's import, before any test has a home, loads exactly the plugin it is given:
+    no plugin discovery, so no installed-plugins scan and no cache write to the home it finds (compaction's
+    measurement: test_tui_compaction's import wrote ~/.multiverse/installed-plugins.json)."""
+
+    def test_plugin_module_writes_nothing_to_the_home(self):
+        directory = self.write_plugin("imported", {"module": "plugin"},
+                                      {"plugin.py": "def register(mv):\n    pass\n", "engine.py": "VALUE = 7\n"},
+                                      where=self.work / "elsewhere")
+        with mock.patch.dict(os.environ, {"HOME": str(self.real)}), mock.patch.object(loader, "_installed", None), \
+                mock.patch.object(loader, "_environment_signature", return_value=[["/a/new/path", 1]]):
+            module = testing.plugin_module(directory, "engine")
+        self.assertEqual(module.VALUE, 7)
+        self.assertEqual(self.new_violations(), [])
+        self.assertFalse((self.real / ".multiverse").exists())

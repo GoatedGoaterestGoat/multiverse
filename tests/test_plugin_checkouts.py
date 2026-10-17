@@ -8,9 +8,22 @@ directory and adds nothing, so a plain clone's suite is unchanged.
 A plugin test module that has the name of one of mv2's own (tests/test_x.py in
 both) cannot be imported next to it in one run; that plugin's tests are not
 loaded, and one failure names both files.
+
+A plugin's test modules are imported with HOME in a directory of their own:
+some load their plugin at import (plugin_module), before any test has a home,
+and plugin discovery's cache must not be written into the real ~/.multiverse.
 """
+import atexit
+from contextlib import contextmanager
+import os
 from pathlib import Path
+import shutil
+import tempfile
 import unittest
+from unittest import mock
+
+import home_safety  # before anything moves HOME: the guard keeps the real ~/.multiverse
+home_safety.install()
 
 TESTS = Path(__file__).resolve().parent
 PLUGINS = TESTS.parent / "plugins"
@@ -29,8 +42,19 @@ def checkout_suites(test_loader, plugins=PLUGINS, own=TESTS):
             suite.addTest(_failure(f"{manifest.parent.name}: its tests {', '.join(clashes)} have the names of "
                                    f"mv2's own tests in {own}; rename one of each so both can run"))
             continue
-        suite.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
+        with _home_of_its_own():
+            suite.addTests(test_loader.discover(str(directory), top_level_dir=str(directory)))
     return suite
+
+
+@contextmanager
+def _home_of_its_own():
+    """HOME in a new directory while a plugin's test modules are imported; removed when the process ends, since a
+    load started at import may still be writing there."""
+    home = tempfile.mkdtemp(prefix="mv2-checkout-import-home-")
+    atexit.register(shutil.rmtree, home, True)
+    with mock.patch.dict(os.environ, {"HOME": home}):
+        yield
 
 
 def _failure(reason):
@@ -74,6 +98,24 @@ class CheckoutSuitesTest(unittest.TestCase):
         for module, body in tests.items():
             (directory / "tests" / module).write_text(body)
         return directory
+
+    def test_a_plugins_tests_are_imported_with_a_home_of_their_own(self):
+        from multiverse.plugins import testing as guard
+        real = self.work / "real-home"
+        protected = home_safety.install(home=real / ".multiverse")
+        self.addCleanup(guard._protected.difference_update, {str(protected), str(real / ".multiverse")})
+        before = len(home_safety.violations())
+        # A test module that writes the home at import, as plugin discovery's cache does through plugin_module().
+        plugins = self.work / "plugins"
+        self.plugin("writer", {"test_writes.py": "import os\nos.makedirs(os.path.expanduser('~/.multiverse'), "
+                                                 "exist_ok=True)\n"})
+        with mock.patch.dict(os.environ, {"HOME": str(real)}):
+            checkout_suites(unittest.TestLoader(), plugins=plugins, own=self.own)
+        found = home_safety.violations()[before:]
+        for item in guard._violations[before:]:
+            item["unreported"] = False
+        self.assertEqual(found, [], "a plugin test module wrote the home it found at import")
+        self.assertFalse((real / ".multiverse").exists())
 
     def run_suite(self, suite):
         result = unittest.TestResult()

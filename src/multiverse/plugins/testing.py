@@ -38,11 +38,13 @@ def plugin_module(directory, name):
     For test modules that import a plugin's own modules at module level, before
     any test's universe exists. Its relative imports work as they do in mv2."""
     directory = Path(directory).resolve()
-    plugin = json.loads((directory / "plugin.json").read_text())["name"]
-    with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(directory)}):
-        found = loader.entry(None, plugin)
-    if Path(found.directory).resolve() != directory:
-        raise RuntimeError(f"mv2 found {plugin} at {found.directory}, not {directory}")
+    # Exactly this directory, as a developer's (MV2_PLUGIN_PATH) plugin: no plugin discovery, which would scan
+    # installed packages and cache that in the home of whatever runs it (the real one, at a test module's import).
+    from .manifest import load as load_manifest
+    if not (directory / "plugin.json").is_file():
+        raise FileNotFoundError(f"{directory / 'plugin.json'}: no such plugin")
+    manifest = load_manifest(directory)
+    found = loader._entry(None, manifest.name, False, "path", directory, manifest, [])
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
