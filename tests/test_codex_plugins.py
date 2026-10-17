@@ -398,8 +398,8 @@ def register(mv):
         path = shutil.which('codex')
         import subprocess
         output = subprocess.run([path, '--version'], capture_output=True, text=True, check=True).stdout
-        if output.strip() != 'codex-cli 0.162.1':
-            self.skipTest('native evidence pinned to Codex 0.162.1')
+        if output.strip() not in ('codex-cli 0.162.1', 'codex-cli 0.163.0'):
+            self.skipTest('native evidence pinned to Codex 0.162.1 and 0.163.0')
         mcp_output = self.work / 'mcp-env.json'
         helper = """import json, os, pathlib, sys
 pathlib.Path(sys.argv[1]).write_text(json.dumps({key: os.environ.get(key) for key in ('APP_TOKEN', 'OTHER_API_KEY', 'MV2_AGENT_ID')}))
@@ -466,8 +466,8 @@ for line in sys.stdin:
         install()
         executable = shutil.which('codex')
         version = subprocess.run([executable, '--version'], capture_output=True, text=True, check=True).stdout.strip()
-        if version != 'codex-cli 0.162.1':
-            self.skipTest('native evidence pinned to Codex 0.162.1')
+        if version not in ('codex-cli 0.162.1', 'codex-cli 0.163.0'):
+            self.skipTest('native evidence pinned to Codex 0.162.1 and 0.163.0')
 
         async def probe(bridge):
             home = isolated_home(self.work / ('shell-bridge-home' if bridge else 'shell-plain-home'))

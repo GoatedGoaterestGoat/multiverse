@@ -317,7 +317,7 @@ The native daemon and other threads stay running. See the
 [app-server protocol](https://learn.chatgpt.com/docs/app-server) and the
 [0.159.3 unload implementation](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server/src/request_processors/thread_lifecycle.rs).
 
-Verification uses an installed Codex 0.159.3 TUI, a disposable native home and
+Verification uses an installed Codex 0.163.0 TUI, a disposable native home and
 a local scripted provider: a plain full-access launch and two successive
 explicit bridge resumes kept the same native UUID, wrote inside `.git` and
 bound a Unix socket. Existing no-flag native timing tests retain their
@@ -574,6 +574,67 @@ thread/workspace binding and effective permission checks still apply. Invalid
 version metadata is a preparation error. `SharedServiceSpec.require_matching_versions`
 defaults to `true` for other services; the Codex adapter explicitly sets it to
 `false`. mv2 never updates or restarts the daemon to align versions.
+
+### Codex 0.163.0 compatibility audit
+
+The CLI flags and bridge were rechecked against **0.163.0**. Live fixtures use
+`native_safety.install()`, disposable `CODEX_HOME` directories, disabled native
+updates, and local scripted providers or no model turn. They never connect to the
+developer's daemon. The plugin native fixtures explicitly accept 0.162.1 and
+0.163.0; `CONFIG_VERSION = (0, 159, 3)` and `MCP_VERSION = (0, 162, 1)` remain
+minimum support floors, not the last tested version.
+
+The audit generated schemas from the official 0.159.3, 0.162.1 and 0.163.0
+binaries with `codex app-server generate-json-schema --experimental --out DIR`
+and compared them with descriptions and titles removed. Relative to 0.159.3,
+0.163.0 adds 12 schema files and changes 41 existing files; relative to 0.162.1 it
+adds five and changes 14. Neither comparison removes a schema file.
+
+| Surface used by mv2 | 0.163.0 finding |
+| --- | --- |
+| Initialize, status and token-usage notifications | Wire shapes unchanged from 0.159.3, including active wait flags and last/total token breakdowns. |
+| Thread start, read, turns/list, naming, queue add/list/start/delete, steer, interrupt and terminal cleanup request parameters | Unchanged from 0.159.3. Resume's top-level parameters are unchanged; nested raw history content types evolved. |
+| Thread replies | `thread/read` adds optional `readState`; turn data adds optional `rootTurnId`, `partial_answer` message phase and item/error variants since 0.159.3. mv2 reads only the fields it needs and tolerates these additions. |
+| CLI | `--remote unix://PATH`, `--cd`, `--add-dir`, `--model`, sandbox/approval flags, bypass, `-c`, and `resume [SESSION_ID] [PROMPT]` remain available. Sandbox values remain `read-only`, `workspace-write`, `danger-full-access`; approval CLI values remain `on-request`, `never`. |
+| Config passed by mv2 | `check_for_update_on_startup`, `developer_instructions`, `shell_environment_policy.exclude/set`, `sandbox_workspace_write`, and `tui.status_line` remain supported. |
+| Plugin allowlist | All currently allowed config keys, status-line items/aliases and MCP fields remain valid. The new `daybreak` status item is outside mv2's conservative allowlist; no new plugin key is implicitly authorized. |
+
+The [versioned config schema](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/core/config.schema.json)
+retains the allowlisted config types and enums and the MCP server config shape.
+The [status-line item definitions](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/bottom_pane/status_line_setup.rs)
+retain the existing names and aliases. CLI help and native fixtures cover the
+launch flags, resume prompt, environment forwarding, naming, update suppression,
+status, usage, queue delivery and effective permissions.
+
+Release notes from [0.160.0](https://github.com/openai/codex/releases/tag/rust-v0.160.0)
+through [0.163.0](https://github.com/openai/codex/releases/tag/rust-v0.163.0)
+include saved-permission restoration, server model-default preservation,
+explicit-feature-only daemon compatibility checks and cold-resume permission
+fixes. These do not eliminate mv2's relay transforms:
+[remote startup](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/startup_orchestration.rs)
+still rejects `--add-dir` and writable-root config overrides, and
+[remote resume construction](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app_server_session.rs)
+clears sandbox/permission and approval overrides. Bootstrap instructions still
+need injection into the thread request. Already-loaded threads can still retain
+their existing configuration; the effective-reply checks remain necessary.
+
+Native `/new` and `/clear` request `thread/start`; selecting another conversation
+through `/resume` requests `thread/resume` on the existing transport. This follows
+the 0.163.0 [slash-command dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/chatwidget/slash_dispatch.rs),
+[event dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/event_dispatch.rs)
+and [session lifecycle](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/session_lifecycle.rs).
+The bridge refuses a second start, a fork or a resume with a different native ID;
+it never adopts that conversation. An offline relay regression checks that these
+requests cannot reach the daemon, cannot replace the stored binding, and leave
+the original connection usable. An isolated 0.163.0 TUI probe also exercised
+`/new`, `/clear` and a resume to another native UUID without permission CLI flags:
+all displayed the relay refusal, retained the saved UUID and allowed subsequent
+native inbox delivery. With explicit launch permission flags, the TUI instead
+refuses in-TUI resume during its
+[remote permission preflight](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/resume_config.rs),
+before reaching the relay. Neither path silently changes mv2's conversation.
+
+### Codex shared daemon
 
 `SharedServiceSpec.cwd` optionally selects the service startup directory; other
 services retain the launch workspace when it is absent. Codex selects the OS

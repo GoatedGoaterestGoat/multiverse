@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.299; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.163.0 and Claude Code 2.1.299; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -229,7 +229,7 @@ EOF
 
 When no `--text`, `--file` or `--stdin` is supplied, `send` automatically reads piped or redirected stdin. Quoting `EOF` preserves quotes, apostrophes, dollar signs and backticks without escaping. Choose a delimiter that does not occur alone on a message line. `--stdin` remains an explicit alternative, `--file PATH` reads a file and `--text` accepts short messages. Empty messages are errors; terminal stdin without a message option reports an error instead of waiting for input.
 
-`send` prints one short result per recipient without echoing the message. Use `send first,second,third` to message several agents; stdin or a file is read once, and failures do not block the other recipients. `send --json` keeps the full original single-recipient record; batch JSON contains `recipients` and an overall `ok`. `deliver` also prints short results, or the original records with `--json`.
+`send` prints one short result per recipient without echoing the message: confirmations go to stdout, failures and uncertain delivery go to stderr. For broken messaging on a running agent, it advises `mv2 kill AGENT`, then `mv2 resume AGENT` before retrying. Use `send first,second,third` to message several agents; stdin or a file is read once, and failures do not block the other recipients. `send --json` keeps the full original single-recipient record on stdout; batch JSON contains `recipients` and an overall `ok`. `deliver` also prints short results, or the original records with `--json`.
 
 `send` durably saves each message, then submits its sender line and text with `--delivery steer` or `--delivery follow-up`. Core retains delivery attempts and native receipts. `inbox` prints unread inbox-only messages as sender/content blocks, with full text and no metadata, and marks them read only after successful output. `inbox --peek` leaves them unread. `inbox --all` browses readable history without consuming it; add `--last 20` or `--since 2h` (or an ISO timestamp) for recent messages. `--json` keeps structured output for scripts, including raw history and delivery evidence with `--all`; cursor paging uses `--all --json --after CURSOR`. Use `--delivery inbox-only` (or `--queue-only`) for manual delivery. `deliver AGENT --retry` retries the recipient's definite failures, never uncertain or accepted submissions. `deliver AGENT --check` reconciles pending or uncertain native receipts, and records receipts for messages the current launch accepted, without submitting. Native acceptance is not proof of reading or an answer. See [the adapter contract](docs/harness-adapters.md).
 

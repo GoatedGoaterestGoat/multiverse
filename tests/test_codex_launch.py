@@ -322,6 +322,29 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await self.client.send('{"id":8,"method":"future/method"}')
         self.assertEqual(await self.receive(), '{"id":8,"method":"future/method"}')
 
+    async def test_native_navigation_cannot_replace_bound_conversation(self):
+        await self.bind_primary()
+        # Codex 0.163.0 /new and /clear issue thread/start; /resume issues
+        # thread/resume on this same transport. Reject before the daemon sees it.
+        for request_id, method, params, reason in (
+            (10, 'thread/start', {}, 'already owns'),
+            (11, 'thread/resume', {'threadId': str(uuid4())}, 'does not match'),
+            (12, 'thread/fork', {'threadId': self.native_id}, 'separate Multiverse launch'),
+        ):
+            await self.client.send(json.dumps({'id': request_id, 'method': method, 'params': params}))
+            response = json.loads(await asyncio.wait_for(self.client.recv(), 2))
+            self.assertEqual(response['id'], request_id)
+            self.assertIn(reason, response['error']['message'])
+            self.assertTrue(self.received.empty())
+            self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
+        # A rejected navigation leaves the original session usable.
+        request = {'id': 13, 'method': 'turn/start', 'params': {'threadId': self.native_id, 'input': []}}
+        await self.client.send(json.dumps(request))
+        self.assertEqual(json.loads(await self.receive()), request)
+        await self.upstream.send('{"id":13,"result":{"turn":{"id":"original-turn"}}}')
+        self.assertEqual(json.loads(await self.client.recv())['result']['turn']['id'], 'original-turn')
+        self.assertEqual(self.losses, [])
+
     async def test_missing_daemon_before_binding_reports_lost(self):
         Path(self.spec['upstream_path']).unlink()
         await self.connect(expect_upstream=False)
