@@ -1525,7 +1525,10 @@ multiverse-v2/
   universe made from the base template with the plugin (its `plugin`
   directory) found and turned on. It also gives a temporary home, a temporary
   `CLAUDE_CONFIG_DIR`, a `bin/` directory first on `PATH` and no inherited
-  agent identity. Nothing in it starts an agent, tmux or a harness. Its
+  agent identity. Nothing in it starts an agent, tmux or a harness. It runs
+  guarded: a write under your real `~/.multiverse` (the one before any test
+  moved `HOME`), by the test or by a thread it left running, is refused with
+  `PermissionError` and fails the test, or the test process at its end. Its
   helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it
     would load it. Its `registrations` hold what `register` added, such as

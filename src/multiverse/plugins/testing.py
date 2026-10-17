@@ -16,11 +16,14 @@ executables, no inherited agent identity, and `plugin` found through
 MV2_PLUGIN_PATH and turned on. Nothing here starts an agent, tmux or a native
 harness: `agent()` writes an agent's records and `executable()` a fake program.
 """
+import atexit
 import importlib
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -43,6 +46,106 @@ def plugin_module(directory, name):
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
+# The guard: no test writes under the real ~/.multiverse. An audit hook (in native_safety's style) refuses
+# writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
+# changed, and records each one, so the test fails (check(), which PluginTestCase calls when it ends) or, for a
+# thread that outlived its test, the process exits 1 at its end.
+
+_protected = set()  # absolute directories no test may change
+_violations = []  # {"path", "event", "test", "thread", "unreported"}
+_current = None  # the test running now
+_installed = False
+_WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
+           "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
+_REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
+
+
+def install(home=None):
+    """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
+    ~/.multiverse as it was when this module was imported. Returns the directory now protected."""
+    global _installed
+    given = os.path.normpath(os.path.abspath(home if home is not None else _REAL_HOME))
+    directory = os.path.realpath(given)
+    _protected.update({given, directory})  # as written and as resolved (/tmp, /var are links on macOS)
+    if not _installed:
+        _installed = True
+        sys.addaudithook(_hook)
+        atexit.register(_at_exit)
+    return Path(directory)
+
+
+def running(name):
+    """Name the test running now (None between tests): violations say which test they happened in."""
+    global _current
+    _current = name
+
+
+def violations():
+    """Every write the guard refused since install(), as copies."""
+    return [dict(item) for item in _violations]
+
+
+def check():
+    """Raise AssertionError for refused writes not reported yet, and mark them reported."""
+    found = [item for item in _violations if item["unreported"]]
+    for item in found:
+        item["unreported"] = False
+    if found:
+        raise AssertionError("a test wrote under the real ~/.multiverse (refused): " + "; ".join(
+            f"{item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})" for item in found))
+
+
+def _record(event, path):
+    _violations.append({"path": path, "event": event, "test": _current,
+                        "thread": threading.current_thread().name, "unreported": True})
+
+
+def _hook(event, args):
+    if event == "open":
+        if len(args) < 3 or not _writes(args[1], args[2]):
+            return
+        paths = args[:1]
+    elif event in _WRITES:
+        paths = args[:2] if event in ("os.rename", "os.link", "os.symlink", "shutil.copyfile", "shutil.move") \
+            else args[:1]
+    else:
+        return
+    for path in paths:
+        where = _absolute(path)
+        if where is not None and any(where == top or where.startswith(top + os.sep) for top in _protected):
+            _record(event, where)
+            raise PermissionError(f"a test may not change the real ~/.multiverse: {where}")
+
+
+def _writes(mode, flags):
+    if isinstance(mode, str):
+        return any(letter in mode for letter in "wax+")
+    return isinstance(flags, int) and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+
+
+def _absolute(path):
+    if isinstance(path, int) or path is None:
+        return None
+    try:
+        path = os.fsdecode(os.fspath(path))
+    except TypeError:
+        return None
+    return os.path.normpath(os.path.join(os.getcwd(), path)) if not os.path.isabs(path) else os.path.normpath(path)
+
+
+def _at_exit():
+    found = [item for item in _violations if item["unreported"]]
+    if not found:
+        return
+    print("mv2 tests: writes under the real ~/.multiverse were refused but never reported:", file=sys.stderr)
+    for item in found:
+        print(f"  {item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})",
+              file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1)
+
+
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
            "MV2_PLUGIN_PATH", "CLAUDE_CONFIG_DIR", "CODEX_HOME", loader.SAFE_MODE)
 
@@ -56,6 +159,10 @@ class PluginTestCase(unittest.TestCase):
 
     def setUp(self):
         super().setUp()
+        install()  # before anything here moves HOME; checked last, once everything else is cleaned up
+        running(self.id())
+        self.addCleanup(check)
+        self.addCleanup(running, None)
         temp = tempfile.TemporaryDirectory(prefix="mv2-plugin-test-", dir="/tmp")
         self.addCleanup(temp.cleanup)
         self.work = Path(temp.name).resolve()

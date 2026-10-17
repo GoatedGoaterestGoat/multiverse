@@ -564,10 +564,11 @@ def _start_loading(found, directory, files):
             return done, time.monotonic()
         done, started = threading.Event(), time.monotonic()
         _loading[directory] = (done, started)
+    home = trust.user_directory()  # read here, in the caller's thread: the load may start after HOME changed
 
     def run():
         try:
-            _load(found, directory)
+            _load(found, directory, home)
         except BaseException:
             pass  # kept as Failed: callers say why
         finally:
@@ -579,7 +580,7 @@ def _start_loading(found, directory, files):
     return done, started
 
 
-def _load(found, directory):
+def _load(found, directory, home=None):
     """Import and register a plugin in a thread of its own, waiting LOAD_SECONDS for it.
 
     A load past the limit is failed for now, not for good: its thread goes on, and what it ends with lands when
@@ -596,6 +597,8 @@ def _load(found, directory):
     _keep_bytecode_out(directory)
     outcome, done, gate, late, timed_out = {}, threading.Event(), threading.Lock(), [], []
     files_at_start = _files(directory)
+    # What this load records goes to the home it was asked for under (the caller's), never a later one.
+    home = trust.user_directory() if home is None else home
 
     def forget_modules():
         for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
@@ -620,7 +623,7 @@ def _load(found, directory):
         with _lock:
             _loaded[directory] = loaded
             _changed()
-        _remember_slow(directory, None)
+        _remember_slow(directory, None, home)
         return None
 
     def run():
@@ -653,7 +656,7 @@ def _load(found, directory):
             with _lock:
                 _loaded[directory] = timed_out[0]
                 _changed()
-            _remember_slow(directory, _files(directory))
+            _remember_slow(directory, _files(directory), home)
             raise PluginError(problem) from error
     if "error" in outcome:
         raise PluginError(land(error=outcome["error"])) from outcome["error"]
@@ -671,13 +674,21 @@ def _digest(files):
     return hashlib.sha256(repr(files).encode()).hexdigest()
 
 
-def _remember_slow(directory, files):
-    """Record (files given) or forget (None) that this plugin's load ran past the limit. Never raises."""
+def _remember_slow(directory, files, home=None):
+    """Record (files given) or forget (None) that this plugin's load ran past the limit, in `home` (the
+    ~/.multiverse the load started under), and never in a home that is gone (a test's, removed). Never raises."""
     from ..store import lock, read, write
-    path = trust.user_directory() / LOAD_TIMEOUTS
+    home = Path(home) if home is not None else trust.user_directory()
+    if not home.parent.is_dir():
+        return
+    path = home / LOAD_TIMEOUTS
     try:
-        if files is None and not path.is_file():
-            return
+        if files is None:  # forgetting: nothing is written (not even the lock) unless the plugin is there
+            try:
+                if str(directory) not in (read(path).get("plugins") or {}):
+                    return
+            except (OSError, ValueError, AttributeError):
+                return
         with lock(path.with_name(f".{LOAD_TIMEOUTS}.lock")):
             try:
                 plugins = read(path).get("plugins") or {}
