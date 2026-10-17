@@ -141,13 +141,16 @@ class PlainStartupTest(unittest.TestCase):
                 self.assertIsNone(self.adapter.launch_refusal(frame))
 
     def test_loading_and_refused_native_composers_do_not_confirm_startup(self):
-        for name in ('loading-0.163.0.json', 'refusal-0.163.0.json'):
+        for name in ('loading-0.163.0.json', 'resuming-0.163.0.json', 'refusal-0.163.0.json'):
             for frame in self.capture(name):
                 with self.subTest(fixture=name, width=frame['width']):
                     self.assertFalse(self.adapter.launch_started(frame))
         loading = self.capture('loading-0.163.0.json')[0]
         self.assertFalse(self.adapter.launch_started({**loading,
             'text': loading['text'] + '\n  fixture default · /fixture/workspace\n'}))
+        pending = self.capture('resuming-0.163.0.json')[0]
+        self.assertFalse(self.adapter.launch_started({**pending, 'text': pending['text'].replace(
+            'Resuming session…', 'Forking session…') + '\n  fixture default · /fixture/workspace\n'}))
 
     def test_cursor_history_and_malformed_evidence_do_not_confirm_startup(self):
         frame = self.capture('started-0.163.0.json')[1]
@@ -161,6 +164,7 @@ class PlainStartupTest(unittest.TestCase):
             {**frame, 'text': frame['text'] + '\n› A different composer below\n'},
             {**frame, 'text': frame['text'].split('  fixture default')[0]},
             {**frame, 'text': frame['text'].replace(' · ', ' unknown-footer ')},
+            {**frame, 'text': frame['text'].split('  fixture default')[0] + '  ? for shortcuts\n'},
             {**frame, 'cursor_y': frame['cursor_y'] - 1}]
         for index, value in enumerate(variants):
             with self.subTest(case=index):

@@ -18,9 +18,10 @@ def supports_plain_refusal(version):
 def plain_started(evidence):
     """End startup observation at the tested active, configured empty composer.
 
-    A placeholder also appears while loading, so require the cursor on its exact
-    row plus the ordinary footer. This is UI evidence only, never a binding or
-    native permission check. Unknown layouts retain the bounded observer.
+    A placeholder also appears while loading/resuming, so require the cursor on
+    its exact row plus the configured status footer with no pending indicator.
+    This is UI evidence only, never a binding or native permission check.
+    Unknown layouts retain the bounded observer.
     """
     if not isinstance(evidence, Mapping) or not supports_plain_refusal(evidence.get('cli_version')):
         return False
@@ -32,11 +33,11 @@ def plain_started(evidence):
         return False
     lines = text.rstrip().splitlines()
     if (y >= len(lines) or lines[y] != '› Ask Codex to do anything'
-            or any(line.strip() == 'loading' for line in lines[:y])):
+            or any(line.strip() in ('loading', 'Resuming session…', 'Forking session…') for line in lines[:y])):
         return False
     footer = [line for line in lines[y + 1:] if line.strip()]
     return (0 < len(footer) <= 2 and all(line.startswith('  ') for line in footer)
-            and any(' · ' in line or line.strip() == '? for shortcuts' for line in footer))
+            and any(' · ' in line for line in footer))
 
 
 def plain_refusal(evidence):
