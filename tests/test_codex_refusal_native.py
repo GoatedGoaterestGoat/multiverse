@@ -3,15 +3,14 @@ import json
 import os
 from pathlib import Path
 import shutil
-import signal
 import subprocess
-import time
 import unittest
 from unittest.mock import patch
 
 from websockets.sync.client import unix_connect
 
 from native_safety import isolated_home
+from native_processes import PrivateProcessGroup
 from multiverse import harnesses
 from multiverse.runtime import lifecycle, native
 from multiverse.store import write
@@ -42,36 +41,31 @@ class NativeRefusalTest(TerminalBase):
         owner = subprocess.Popen(['codex', 'app-server', '--listen', 'unix://' + str(owner_socket)],
             cwd=self.work, env=environment, stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        owner_group = PrivateProcessGroup(owner.pid)
         owner_closed = False
         def stop_owner():
             nonlocal owner_closed
             if owner_closed:
                 return  # Explicit writer release is followed by unittest cleanup.
-            # Include the foreground server's own native registry/git helpers.
-            for ending in (signal.SIGTERM, signal.SIGKILL):
-                try:
-                    os.killpg(owner.pid, ending)
-                except ProcessLookupError:
-                    break
-                for _ in range(100):
-                    owner.poll()  # Reap the group leader before checking for helpers.
-                    groups = subprocess.check_output(['ps', '-axo', 'pgid='], text=True).split()
-                    if str(owner.pid) not in groups:
-                        break
-                    time.sleep(.02)
-                else:
-                    continue
-                break
-            else:
-                self.fail('Private native writer helpers did not exit')
+            owner_group.close(reap=owner.poll)
             owner.wait(timeout=5)
             owner_closed = True
             owner.stdin.close()
         self.addCleanup(stop_owner)
+        daemon_group = None
         def stop_private_daemon():
-            subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=environment,
-                           capture_output=True, timeout=30, check=True)
+            try:
+                subprocess.run(['codex', 'app-server', 'daemon', 'stop'], env=environment,
+                               capture_output=True, timeout=30, check=True)
+            finally:
+                if daemon_group is not None:
+                    daemon_group.close()
         self.addCleanup(stop_private_daemon)
+        # Start only this home's daemon explicitly so cleanup knows its exact
+        # group before mv2 reuses it. Native stop alone leaves clone helpers alive.
+        started = subprocess.run(['codex', 'app-server', 'daemon', 'start'], env=environment,
+                                 capture_output=True, text=True, timeout=30, check=True)
+        daemon_group = PrivateProcessGroup(json.loads(started.stdout)['pid'])
         until(owner_socket.exists)
         client = self.enterContext(unix_connect(str(owner_socket)))
         identifier = 0
