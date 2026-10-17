@@ -130,6 +130,8 @@ Window and session names are only labels, so renaming them changes nothing. Ever
 
 The runner and native frontend receive the agent's IDs and this launch's `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` and `MV2_TMUX_SOCKET`. Connected Codex tools instead receive agent-stable identity, including `MV2_IDENTITY_MODE`, without those three launch-specific values. `report`, `inbox` and the sender of `send` validate that identity against the exact native thread and saved storage scope. `session-bind` can only confirm the existing binding in this mode. Runner updates and control calls retain their launch checks. Child launches find the calling agent's tmux socket in its verified runtime record. See [environment](../reference/environment.md) and [session isolation](../design/session-isolation.md).
 
+Each launch requests current `MV2_CLI`, `MV2_PYTHON` and `PATH` values from the launching installation. Core records that request in `request.json.agent_environment` and the agent's latest `properties.json.agent_environment`. Those maps do not attest to a shared native conversation's cached environment. Executable paths are not part of agent authority. See [environment](../reference/environment.md) for reloading the conversation after an installation moves.
+
 ## How the dashboard is built
 
 `ui/app.py` holds the Textual app: layout, bindings, refreshing from the backend and moving between scopes. Its table (`fleet.py`), tree editing (`editing.py`) and agent commands (`commands.py`) are mixins of the app, so their actions stay app actions. `backend.py` is the dashboard's only path to the tools. File and tmux work runs in Textual workers, off the event loop.

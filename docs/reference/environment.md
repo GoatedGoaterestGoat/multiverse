@@ -31,6 +31,8 @@ mv2 removes every inherited `MV2_*` variable before it starts an agent, then set
 
 Connected Codex tools keep the same agent identity when another Codex client drives the conversation. They do not receive `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` or `MV2_TMUX_SOCKET`. Codex supplies `CODEX_THREAD_ID`; mv2 also checks the saved native storage paths. A child agent still launches on its parent's tmux server, using the parent's current runtime record rather than a socket saved in the conversation.
 
+Each new launch requests `MV2_CLI`, `MV2_PYTHON` and `PATH` from the mv2 installation starting it. These paths are tool settings, not identity proof. The saved environment maps describe the requested values, not measured values in an existing native conversation. While another client is attached, a shared Codex conversation can keep its previous paths. To reload them after moving an installation, close the other clients, then run `mv2 kill NAME` and `mv2 resume NAME`.
+
 Outside an agent session, leave `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID` and `MV2_IDENTITY_MODE` unset. In an agent context, `send` signs as that agent and `inbox` reads its inbox. Copying only part of the identity fails validation.
 
 ## Plugin variables
