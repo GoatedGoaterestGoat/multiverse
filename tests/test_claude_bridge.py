@@ -439,6 +439,40 @@ class ClaudeBridgeTest(BaseTest):
                 with self.assertRaisesRegex(ValueError, 'system_prompt_snapshot must be "off" or "on"'):
                     harnesses.load(self.root, 'claude')
 
+    def test_a_snapshot_flag_the_user_passes_wins_and_is_never_removed(self):
+        path = self.root / 'harnesses/claude/harness.json'
+        def flags(argv):
+            argv = list(argv)
+            end = argv.index('--') if '--' in argv else len(argv)
+            return [(argv[i], argv[i + 1]) if argv[i] == '--system-prompt-snapshot' else (argv[i], None)
+                    for i in range(end) if argv[i].startswith('--system-prompt-snapshot')]
+        for snapshot in ('off', 'on'):
+            for version in ((2, 1, 300), (2, 1, 266), None):
+                for key, user in (('resume_args', ['--system-prompt-snapshot', 'on']), ('args', ['--system-prompt-snapshot=on']),
+                                  ('resume_args', ['--system-prompt-snapshot', 'off'])):
+                    with self.subTest(snapshot=snapshot, version=version, key=key, user=user):
+                        config = read(path)
+                        config['settings'].update({'system_prompt_snapshot': snapshot, key: user})
+                        config['settings'].pop('resume_args' if key == 'args' else 'args', None)
+                        write(path, config)
+                        resumed, _ = self.launch(None, version, 'resume')
+                        # Exactly the user's own flag, as they wrote it; mv2 adds none beside it.
+                        expected = [tuple(user)] if len(user) == 2 else [(user[0], None)]
+                        self.assertEqual(flags(resumed.argv), expected)
+        # Without a flag of the user's, mv2's own follows its settings as before.
+        config = read(path)
+        config['settings'].pop('resume_args', None); config['settings'].pop('args', None)
+        config['settings']['system_prompt_snapshot'] = 'off'
+        write(path, config)
+        self.assertEqual(flags(self.launch(None, (2, 1, 300), 'resume')[0].argv), [('--system-prompt-snapshot', 'off')])
+        self.assertEqual(flags(self.launch(None, (2, 1, 266), 'resume')[0].argv), [])
+        # A user's own bootstrap text and flag before mv2's: still only mv2's own flag is the one dropped.
+        config['settings']['args'] = ['--append-system-prompt', 'mine', '--system-prompt-snapshot', 'off']
+        write(path, config)
+        resumed = self.launch(None, (2, 1, 300), 'resume')[0]
+        self.assertEqual(flags(resumed.argv), [('--system-prompt-snapshot', 'off')])
+        self.assertEqual(list(resumed.argv).count('--append-system-prompt'), 2)
+
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):
             for mode in ('spawn', 'resume'):

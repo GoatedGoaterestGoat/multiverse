@@ -303,25 +303,42 @@ class ClaudeAdapter(ConfiguredAdapter):
         return replace(command, native_mode=mode)
 
     def _snapshot_flag(self, command):
-        """The resume command, without `--system-prompt-snapshot off` where it must not be passed.
+        """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.
 
-        Left out when the harness keeps Claude's snapshot (`system_prompt_snapshot: "on"`), and for a
-        Claude known to be too old for the flag: only where the bridge decision reads the version
-        anyway, since a plain launch never asks which version is installed and a version that cannot
-        be read keeps the flag.
+        mv2's flag is removed, never a user's, when the harness keeps Claude's snapshot
+        (`system_prompt_snapshot: "on"`), when the user passes the flag themselves in `args` or
+        `resume_args` (theirs wins), and for a Claude known to be too old for it: only where the
+        bridge decision reads the version anyway, since a plain launch never asks which version is
+        installed and a version that cannot be read keeps the flag.
         """
-        if SNAPSHOT_FLAG not in command.argv:
-            return command
-        if self.system_prompt_snapshot != 'on':
-            if self.bridge_policy == 'plain':
-                return command
-            version = claude_version(command.argv[0])
-            if version is None or version >= SNAPSHOT_FLAG_VERSION:
-                return command
         argv = list(command.argv)
-        index = argv.index(SNAPSHOT_FLAG)
-        del argv[index:index + 2]
+        own = self._own_snapshot_flag(argv)
+        if own is None:
+            return command
+        end = argv.index('--') if '--' in argv else len(argv)
+        theirs = any(index not in (own, own + 1) and (arg == SNAPSHOT_FLAG or arg.startswith(SNAPSHOT_FLAG + '='))
+                     for index, arg in enumerate(argv[:end]))
+        keep = not theirs and self.system_prompt_snapshot != 'on'
+        if keep and self.bridge_policy != 'plain':
+            version = claude_version(argv[0])
+            keep = version is None or version >= SNAPSHOT_FLAG_VERSION
+        if keep:
+            return command
+        del argv[own:own + 2]
         return replace(command, argv=tuple(argv))
+
+    @staticmethod
+    def _own_snapshot_flag(argv):
+        """Where mv2's own `--system-prompt-snapshot off` is, or None: right after the recipe's bootstrap.
+
+        A user's `args` and `resume_args` go in right after the executable, so the recipe's
+        `--append-system-prompt` is the last one before any `--`.
+        """
+        end = argv.index('--') if '--' in argv else len(argv)
+        bootstrap = max((index for index in range(end) if argv[index] == '--append-system-prompt'), default=None)
+        if bootstrap is not None and argv[bootstrap + 2:bootstrap + 4] == [SNAPSHOT_FLAG, 'off']:
+            return bootstrap + 2
+        return None
 
     @staticmethod
     def _reserve_session(command, native_id):

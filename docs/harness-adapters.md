@@ -41,6 +41,8 @@ keep Claude's snapshot instead with `"system_prompt_snapshot": "on"` in its
 `harness.json` settings (default `"off"`): resume then passes no flag, the
 bootstrap applies only to new conversations, and a resumed agent keeps the one it
 started with, including bootstrap lines of plugins disabled or removed since.
+A `--system-prompt-snapshot` the harness passes itself in `args` or
+`resume_args` wins: mv2 then adds none, and never removes it.
 Measured on 2.1.301, the flag costs nothing while the bootstrap is unchanged: git
 changes, within a session or between stop and resume, do not change the rendered
 system prompt. A changed bootstrap re-caches the prompt and the conversation once.
