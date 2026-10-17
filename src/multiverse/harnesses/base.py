@@ -161,6 +161,14 @@ class ConfiguredAdapter:
             return NativeResult('ok', 'No native process was running')
         return NativeResult('ok', 'Core stops the owned terminal process')
 
+    def connection_problem(self, session: SessionHandle) -> str | None:
+        """Optional cheap, read-only diagnostic for this exact live launch."""
+        return None
+
+    def session_home(self, environment) -> str | None:
+        """Optional native storage root, resolved from the launch's environment."""
+        return None
+
     def capabilities(self, session: SessionHandle, executor: Executor | None = None) -> dict[str, Capability]:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}

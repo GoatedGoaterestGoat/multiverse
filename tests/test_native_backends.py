@@ -260,6 +260,7 @@ class NativeBackendTest(BaseTest):
                     return process
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                      patch.object(rpc, 'LaunchProxy', return_value=proxy), \
+                     patch.object(runner, 'process_started', return_value=None), \
                      patch.object(runner.subprocess, 'Popen', side_effect=start) as child, \
                      patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
                      patch.object(runner, 'launch_diagnostic', return_value={}):
@@ -433,6 +434,7 @@ class NativeBackendTest(BaseTest):
         process.wait.side_effect = waited
         with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
              patch.object(rpc, 'LaunchProxy') as factory, \
+             patch.object(runner, 'process_started', return_value=None), \
              patch.object(runner.subprocess, 'Popen', return_value=process), \
              patch.object(runner, 'launch_diagnostic', return_value={}), \
              patch.object(runner, 'StartupDelivery'), patch.object(runner, 'StatusWatcher'), \
@@ -460,6 +462,7 @@ class NativeBackendTest(BaseTest):
         process = Mock(pid=123)
         process.poll.return_value = process.wait.return_value = 0
         with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+             patch.object(runner, 'process_started', return_value=None), \
              patch.object(runner.subprocess, 'Popen', return_value=process), \
              patch.object(rpc, 'LaunchProxy'), patch.object(runner, 'StatusWatcher') as status, \
              patch.object(recovery, 'RecoveryMonitor') as monitor, patch.object(runner, 'StartupDelivery'), \

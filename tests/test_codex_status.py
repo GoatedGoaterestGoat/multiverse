@@ -257,6 +257,7 @@ class RunnerLifetimeTest(unittest.TestCase):
                 return 0
             process.wait.side_effect = waited
             with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                 patch.object(runner, 'process_started', return_value=None), \
                  patch.object(runner.subprocess, 'Popen', return_value=process), \
                  patch('multiverse.harnesses.load'), patch('multiverse.runtime.rpc.LaunchProxy') as proxy_factory:
                 self.assertEqual(runner.main(), 0)
@@ -282,6 +283,7 @@ class RunnerLifetimeTest(unittest.TestCase):
                     process.wait.return_value = outcome
                 watcher = Mock()
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                     patch.object(runner, 'process_started', return_value=None), \
                      patch.object(runner.subprocess, 'Popen', return_value=process), \
                      patch.object(runner, 'StatusWatcher', return_value=watcher) as factory:
                     if isinstance(outcome, BaseException):

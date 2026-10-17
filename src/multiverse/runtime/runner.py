@@ -14,6 +14,7 @@ if __package__ in (None, ""):
 
 from multiverse.universe.agents import update_runtime, bind_session, runtime
 from multiverse.store import lock, now, read, write
+from multiverse.runtime.process import process_started
 
 
 STARTUP_SECONDS = 2
@@ -395,7 +396,7 @@ def main():
                     service_dir = None
                 attachment = fallback.get('attachment') or {}
         process = subprocess.Popen(request["argv"], env=env)
-        update_runtime(agent_dir, launch.name, pid=process.pid)
+        update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=process_started(process.pid))
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),

@@ -11,10 +11,14 @@ import os
 import subprocess
 import time
 import re
+from contextlib import contextmanager
+import fcntl
+import inspect
 
 from .. import harnesses
 from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message, NativeEndpoint,
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
+from ..harnesses.types import ObservedBinding, normalize_session_id
 from ..store import lock, now, read
 from ..terminal.tmux import owned, observe
 from ..universe import agents
@@ -156,6 +160,8 @@ class NativeExecutor:
     def check_session(self):
         if self.properties is None or self.facts is None:
             raise ValueError('No running session selected')
+        if self.facts.get('binding_conflict') and not self.stopping:
+            raise ValueError(self.facts['binding_conflict'])
         if self.stopping and observe(self.properties, self.facts)['live'] == 'dormant':
             return  # Adapter validates exact native identity; no pane control.
         owned(self.properties, self.facts, states=('alive', 'ending', 'stopped') if self.stopping else ('alive',))
@@ -245,11 +251,101 @@ def framed_text(root, message):
     return f'Message from {name}{origin}:\n{message["text"]}'
 
 
-def context(root, reference):
+@contextmanager
+def _snapshot_lock(directory):
+    # UI measurements must never wait behind a long native operation. A read
+    # whose binding needs repair is unavailable until it can be reconciled.
+    with (directory / '.launch.lock').open('a') as stream:
+        try:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('Native session identity is updating; retry shortly') from None
+        try:
+            yield
+        finally:
+            fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def adapter_hook(adapter, name):
+    """Optional contracts must be declared, not synthesized by __getattr__."""
+    try:
+        inspect.getattr_static(adapter, name)
+    except AttributeError:
+        return None
+    hook = getattr(adapter, name)
+    return hook if callable(hook) else None
+
+
+def _observed(adapter, session):
+    observer = adapter_hook(adapter, 'observed_binding')
+    observed = observer(session) if observer else None
+    if observed is not None:
+        if (not isinstance(observed, ObservedBinding) or not isinstance(observed.evidence, str)
+                or not observed.evidence or len(observed.evidence) > 128):
+            raise ValueError('Invalid native session observation')
+        normalize_session_id(observed.native_id)
+        home = agents.sessions.canonical_home(observed.home)
+        if session.home is not None and home != session.home:
+            raise ValueError('Observed native storage differs from this launch')
+    return observed
+
+
+def session_snapshot(root, directory, properties, facts, *, adapter=None, launch_locked=False):
+    """Reconcile adapter evidence before using a native ID. No native probes.
+
+    A provider owns the evidence checks. Core owns launch fencing, the CAS,
+    storage scope, ownership and the durable transition.
+    """
+    if not properties.get('harness') or not properties.get('workspace'):
+        # Legacy/minimal records have no observation contract. Resume supplies
+        # its normal workspace fallback before opting into this path.
+        return properties, facts
+    adapter = adapter or harnesses.load(root, properties['harness'])
+    if adapter_hook(adapter, 'observed_binding') is None and not (directory / 'sessions.jsonl').exists():
+        return properties, facts
+    session = SessionHandle.from_records(properties, facts, directory)
+    observed = _observed(adapter, session)
+    effective, _ = agents.sessions.effective(directory, properties)
+    changed = observed is not None and normalize_session_id(observed.native_id) != session.native_id
+    if effective == properties and not changed and not (observed and facts.get('binding_conflict')):
+        return properties, facts
+    if not launch_locked:
+        with _snapshot_lock(directory):
+            return session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
+    current_facts = agents.runtime(directory)
+    if current_facts.get('launch_id') != facts.get('launch_id'):
+        raise ValueError('Launch changed while reading native session identity; retry')
+    current = agents.session_properties(root, directory, launch_locked=True)
+    observed = _observed(adapter, SessionHandle.from_records(current, current_facts, directory))
+    if observed is not None:
+        target = normalize_session_id(observed.native_id)
+        if target != current.get('native_session_id'):
+            current = agents._rebind_session(root, directory, current.get('native_session_id'), target, 'detected',
+                                            current_facts.get('launch_id'), home=observed.home)
+        elif current_facts.get('binding_conflict'):
+            agents.update_runtime(directory, current_facts['launch_id'], binding_conflict=None)
+    return current, agents.runtime(directory)
+
+
+def connection_problem(root, properties, facts):
+    """A provider diagnostic cannot erase a valid listing row."""
+    try:
+        adapter = harnesses.load(root, properties['harness'])
+        hook = adapter_hook(adapter, 'connection_problem')
+        result = hook(SessionHandle.from_records(properties, facts, root / 'state' / 'agents' / properties['id'])) if hook else None
+        return result if isinstance(result, str) and result else None
+    except Exception:
+        return None
+
+
+def context(root, reference, *, reconcile=False):
     directory = agents.directory(root, reference)
     properties = read(directory / 'properties.json')
     facts = agents.runtime(directory)
-    return (directory, harnesses.load(root, properties['harness']),
+    adapter = harnesses.load(root, properties['harness'])
+    if reconcile:
+        properties, facts = session_snapshot(root, directory, properties, facts, adapter=adapter, launch_locked=True)
+    return (directory, adapter,
             SessionHandle.from_records(properties, facts, directory),
             NativeExecutor(properties['workspace'], properties, facts))
 
@@ -275,7 +371,9 @@ def stop(root, reference):
 
 
 def capabilities(root, reference, run_probe=False):
-    _, adapter, session, executor = context(root, reference)
+    directory = agents.directory(root, reference)
+    with lock(directory / '.launch.lock'):
+        _, adapter, session, executor = context(root, reference, reconcile=True)
     result = adapter.capabilities(session, executor if run_probe else None)
     # The same runtime snapshot the session came from, never a newer launch's.
     result.update(_plugin_capabilities(adapter, session, executor.facts, result))
@@ -314,6 +412,9 @@ def usage_snapshot(root, properties, facts):
     try:
         adapter = harnesses.load(root, properties['harness'])
         directory = root / 'state' / 'agents' / properties['id']
+        properties, facts = session_snapshot(root, directory, properties, facts, adapter=adapter)
+        if facts.get('binding_conflict'):
+            return NativeResult('unavailable', facts['binding_conflict']).to_dict()
         session = SessionHandle.from_records(properties, facts, directory)
         result = adapter.get_usage(session).to_dict()
     except Exception as error:
@@ -327,7 +428,9 @@ def operation(root, reference, name, question=''):
         if name == 'ask' and not question.strip():
             raise ValueError('A side question is required')
         with lock(directory / '.launch.lock'):
-            _, adapter, session, executor = context(root, directory.name)
+            _, adapter, session, executor = context(root, directory.name, reconcile=True)
+            if executor.facts.get('binding_conflict'):
+                return NativeResult('unavailable', executor.facts['binding_conflict']).to_dict()
             if name == 'get_usage':
                 result = adapter.get_usage(session, executor).to_dict()
                 facts = executor.facts  # the launch the measurement belongs to
@@ -385,7 +488,7 @@ def deliver(root, reference, message_id, retry=False, check=False):
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
         try:
-            _, adapter, session, executor = context(root, directory.name)
+            _, adapter, session, executor = context(root, directory.name, reconcile=True)
         except Exception as error:
             receipt = {'state': 'error', 'ok': False, 'message_id': message_id,
                        'reason': f'Cannot load recipient adapter: {error}', 'at': now()}
@@ -485,7 +588,7 @@ def send_or_wake(root, reference, message_id, retry=False):
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
-        _, adapter, session, executor = context(root, reference)
+        _, adapter, session, executor = context(root, reference, reconcile=True)
         live = observe(executor.properties, executor.facts)['live']
         state = tracking.get('submission_state', 'pending')
         eligible = state == 'pending' or (retry and state == 'failed')

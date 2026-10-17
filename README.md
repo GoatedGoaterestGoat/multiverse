@@ -269,6 +269,8 @@ Spawn accepts an optional initial prompt (`--prompt`, with `--task` retained as 
 
 Built-in implementations live in separate source packages under `src/multiverse/harnesses/`. Native services, exact conversations and terminal attachments have separate contracts: adapters declare where work runs, how binding is validated and whether safe attachment recovery is supported. Core runs transports, monitors and tmux; it never owns a shared service's lifetime. Codex supplies its app-server protocol and storage scope, while Claude, Pi and plain adapters retain terminal execution and no automatic attachment recovery. New universes keep declarative schema-2 adapter references and preferences in `harnesses/NAME/harness.json`. See [the adapter contract, capability matrix and extension guide](docs/harness-adapters.md). Custom local command harnesses can still use schema 1 without registering Python code.
 
+Adapters can report verified native session changes without replacing the mv2 agent. Core records [session lineage](docs/session-lineage.md), keeps earlier conversations owned by that agent, and follows the current conversation for delivery, usage and resume. Adapters that do not report changes keep their existing exact-session behavior.
+
 A legacy/custom manifest declares `schema: 1`, `spawn` and optional `resume` argv arrays, optional `model_args`, `bootstrap` text, `unset_env` names, `env` variables and a docs URL. Arguments are passed directly to the process, never through a shell. Model flags are inserted before a `--` terminator when present, so prompts beginning with a hyphen remain literal. Available substitutions:
 
 | Value | Meaning |

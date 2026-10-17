@@ -194,6 +194,9 @@ class SessionHandle:
     native_relay: Mapping[str, Any] | None = None
     service: NativeServiceHandle | None = None
     attachment: AttachmentSpec | None = None
+    home: str | None = None
+    pid: int | None = None
+    pid_started: str | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
@@ -205,7 +208,20 @@ class SessionHandle:
                    runtime.get('native_bridge'), runtime.get('status', 'unknown'), runtime.get('native_mode'),
                    runtime.get('native_versions'), runtime.get('native_relay'),
                    NativeServiceHandle.from_record(runtime.get('native_service')),
-                   AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None)
+                   AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None,
+                   properties.get('native_session_home'), runtime.get('pid'), runtime.get('pid_started'))
+
+
+@dataclass(frozen=True, kw_only=True)
+class ObservedBinding:
+    """Adapter-verified identity of the exact launch process, never history inference."""
+    native_id: str
+    home: str
+    evidence: str
+
+
+class BindingObserver(Protocol):
+    def observed_binding(self, session: SessionHandle) -> ObservedBinding | None: ...
 
 @dataclass(frozen=True)
 class Message:

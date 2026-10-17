@@ -11,6 +11,7 @@ import os
 
 from . import exact, parent, trash, tree, workspace
 from .agents import directory, runtime, update_runtime
+from . import sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
 
@@ -42,6 +43,22 @@ def _hold(stack, agent_dirs):
     for agent_dir in agent_dirs:
         stack.enter_context(lock(agent_dir / ".launch.lock"))
         _stopped(agent_dir)
+
+
+def _session_namespaces(stack, *roots):
+    for root in sorted({sessions.top(root) for root in roots}):
+        stack.enter_context(sessions.namespace(root))
+
+
+def _session_claims(root, directory):
+    data, rows = sessions.effective(directory, read(directory / 'properties.json'))
+    data['native_session_provider'] = sessions.provider(directory.parents[2], data)
+    claims = {(data.get('native_session_id'), data.get('native_session_home')),
+              *((row[key], row['home']) for row in rows for key in ('from', 'to'))}
+    for native_id, home in claims:
+        if native_id:
+            sessions.claim(root, directory, data, native_id, home)
+    return data
 
 
 def _pin_workspaces(scope):
@@ -80,11 +97,19 @@ def move_agent(root, reference, destination):
     target = destination / "state" / "agents" / agent_dir.name
     with ExitStack() as stack:
         _hold(stack, [agent_dir])
+        _session_namespaces(stack, root, destination)
+        moved = _session_claims(destination, agent_dir)
+        # Spawn publishes names under the same namespace before agents.lock.
+        stack.enter_context(lock(destination / 'state' / '.agents.lock'))
+        for path in (destination / 'state' / 'agents').glob('*/properties.json'):
+            if read(path)['name'] == properties['name']:
+                raise ValueError(f'The destination already has an agent named {properties["name"]}')
         target.parent.mkdir(parents=True, exist_ok=True)
         agent_dir.rename(target)
         with lock(target / ".properties.lock"):
             data = read(target / "properties.json")
-            data.update(universe_id=read(destination / "universe.json")["id"], updated_at=now())
+            data.update(universe_id=read(destination / "universe.json")["id"], updated_at=now(),
+                        native_session_provider=moved['native_session_provider'])
             write(target / "properties.json", data)
     # Both journals: subscribers where it left and where it arrived.
     for scope in (root, destination):
@@ -113,6 +138,9 @@ def move_subverse(path, destination):
         raise ValueError(f"The destination already has a subverse named {path.name}")
     with ExitStack() as stack:
         _hold(stack, _agents(path))
+        _session_namespaces(stack, path, destination)
+        for directory in _agents(path):
+            _session_claims(destination, directory)
         _pin_workspaces(path)
         target.parent.mkdir(exist_ok=True)
         path.rename(target)
@@ -126,6 +154,7 @@ def remove_agent(root, reference):
     properties = read(agent_dir / "properties.json")
     with ExitStack() as stack:
         _hold(stack, [agent_dir])
+        _session_namespaces(stack, root)
         entry = trash.entry(root, f'{properties["name"]}-{agent_dir.name[:8]}')
         agent_dir.rename(entry)
     record = {"kind": "agent", "name": properties["name"], "id": agent_dir.name,
@@ -141,6 +170,7 @@ def remove_subverse(path):
     with ExitStack() as stack:
         agent_dirs = _agents(path)
         _hold(stack, agent_dirs)
+        _session_namespaces(stack, path)
         # Absolute workspaces keep the entry valid if it is moved back.
         _pin_workspaces(path)
         entry = trash.entry(parent(path), path.name)

@@ -110,6 +110,7 @@ class PluginLaunchTest(NativeBackendTest):
                 process.poll.return_value = process.wait.return_value = 0
                 with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
                      patch.object(rpc, "LaunchProxy", return_value=proxy), \
+                     patch.object(runner, "process_started", return_value=None), \
                      patch.object(runner.subprocess, "Popen", return_value=process), \
                      patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
                      patch.object(runner, "launch_diagnostic", return_value={}):
@@ -229,6 +230,7 @@ class PluginRecordTest(PluginLaunchTest):
         process.poll.return_value = process.wait.return_value = 0
         with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
              patch.object(rpc, "LaunchProxy", return_value=proxy), \
+             patch.object(runner, "process_started", return_value=None), \
              patch.object(runner.subprocess, "Popen", return_value=process), \
              patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
              patch.object(runner, "launch_diagnostic", return_value={}):
@@ -265,6 +267,7 @@ class PluginRecordTest(PluginLaunchTest):
                 raise RuntimeError("cleanup failed after the exit was recorded")
         with patch.object(runner.sys, "argv", ["runner", str(launch)]), \
              patch.object(rpc, "LaunchProxy", return_value=proxy), \
+             patch.object(runner, "process_started", return_value=None), \
              patch.object(runner.subprocess, "Popen", return_value=process), \
              patch("multiverse.terminal.tmux.owned", return_value=(self.backend, "%1")), \
              patch.object(runner, "launch_diagnostic", return_value={}), \

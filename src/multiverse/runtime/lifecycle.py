@@ -34,6 +34,12 @@ def listing(root, recursive=False, only=None):
             try:
                 properties = read(path)
                 facts = runtime(path.parent)
+                identity_problem = None
+                try:
+                    properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
+                except Exception as error:
+                    identity_problem = str(error)
+                    facts = runtime(path.parent)
                 observation = observe(properties, facts, snapshots)
                 measured = native.usage_snapshot(scope, properties, facts)
                 relay = facts.get('native_relay') or {}
@@ -44,7 +50,9 @@ def listing(root, recursive=False, only=None):
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
                                        if observation["live"] == "alive" else "-",
-                             "connection_error": relay.get('reason') if relay.get('state') == 'lost' else None,
+                             "connection_error": (relay.get('reason') if relay.get('state') == 'lost' else None)
+                                 or facts.get('binding_conflict') or identity_problem
+                                 or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
                              "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
@@ -110,6 +118,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         agent_dir.mkdir(parents=True, exist_ok=True)
         launch_lock = lock
     with launch_lock(agent_dir / ".launch.lock"):
+        if resume:
+            # _record's snapshot predates this lock; a /clear report may have
+            # rebound the conversation while we waited for it.
+            properties = agents.session_properties(root, agent_dir, launch_locked=True)
+            properties.setdefault('workspace', str(workdir))
+            properties, _ = native.session_snapshot(root, agent_dir, properties, runtime(agent_dir),
+                                                     adapter=adapter, launch_locked=True)
+            workdir = Path(properties['workspace']).resolve()
+            if not workdir.is_dir():
+                raise ValueError(f'Workspace does not exist: {workdir}')
         previous = runtime(agent_dir)
         if _recovery:
             _check_recovery(previous, properties, _recovery)
@@ -137,6 +155,20 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
         context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt)
+        home_hook = native.adapter_hook(adapter, 'session_home')
+        home = home_hook(context.environment) if home_hook else None
+        if home is not None:
+            home = agents.sessions.canonical_home(home)
+            if properties.get('native_session_home') not in (None, home):
+                raise ValueError('Native session storage differs from the saved conversation')
+            properties['native_session_home'] = home
+            if session is not None:
+                session = replace(session, home=home)
+        family = getattr(adapter, 'family', '')
+        provider = family if isinstance(family, str) and family else harness
+        if properties.get('native_session_provider') not in (None, provider):
+            raise ValueError('Native provider differs from the saved conversation')
+        properties['native_session_provider'] = provider
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
@@ -167,12 +199,22 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             properties['native_environment'] = dict(command.shared_service.environment)
         properties.update(model=model, updated_at=now())
         if resume:
-            write(agent_dir / "properties.json", properties)
+            with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
+                current = read(agent_dir / 'properties.json')
+                current.update({key: properties[key] for key in ('model', 'workspace', 'native_environment',
+                               'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
+                                if key in properties})
+                properties = current
+                write(agent_dir / "properties.json", properties)
         else:
             # Publish a name atomically across spawns, before starting any
             # native service or terminal. Resume keeps its existing record.
-            with lock(root / "state" / ".agents.lock"):
+            with agents.sessions.namespace(root), lock(root / "state" / ".agents.lock"):
+                if read(root / 'universe.json')['id'] != properties['universe_id']:
+                    raise ValueError('Universe changed before the agent could be published')
                 check_available_name(root, name)
+                if properties.get('native_session_id'):
+                    agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
                 write(agent_dir / "properties.json", properties)
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",

@@ -81,13 +81,26 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
+        binding_error = None
         with lock(directory / '.launch.lock'):
-            target = read(directory / 'properties.json').get('native_session_id')
+            properties = read(directory / 'properties.json')
+            if delivery != 'inbox-only':
+                try:
+                    properties, _ = native.session_snapshot(root, directory, properties, agents.runtime(directory),
+                                                            launch_locked=True)
+                except Exception as error:
+                    binding_error = str(error)
+            target = properties.get('native_session_id')
             message = append_message(directory, text, sender, delivery, target_session=target)
         result = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
         if delivery == 'inbox-only':
             return ({**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}, {})
+        if binding_error:
+            receipt = {'state': 'error', 'reason': binding_error}
+            update_message(directory, message['id'], submission_state='failed', attempts=[receipt])
+            return ({**result, 'state': 'error', 'saved': True, 'ok': False,
+                     'native_delivery': delivery_summary(receipt)}, receipt)
         try:
             receipt = native.send_or_wake(root, directory.name, message['id'])
         except Exception as error:

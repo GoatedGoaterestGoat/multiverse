@@ -1,6 +1,7 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
+from . import sessions
 
 
 def directory(root, reference):
@@ -55,16 +56,55 @@ def _event(agent_dir, kind, launch=None, data=None, properties=None):
 def bind_session(root, reference, session_id, launch_id=None):
     """Record a harness-reported session without guessing from global history."""
     agent_dir = directory(root, reference)
-    with lock(agent_dir / ".launch.lock"), lock(agent_dir / ".properties.lock"):
+    with lock(agent_dir / ".launch.lock"), sessions.namespace(root), lock(agent_dir / ".properties.lock"):
         if launch_id and runtime(agent_dir).get("launch_id") != launch_id:
             raise ValueError("Outdated launch")
-        data = read(agent_dir / "properties.json")
+        data, _ = sessions.recover(agent_dir, read(agent_dir / "properties.json"))
         session_id = normalize_session_id(session_id)
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
+        sessions.claim(root, agent_dir, data, session_id)
         data.update(native_session_id=session_id, updated_at=now())
         write(agent_dir / "properties.json", data)
     return data
+
+
+def session_properties(root, agent_dir, *, launch_locked=False):
+    """Finish a durable session transition before using the current native ID."""
+    if not launch_locked:
+        with lock(agent_dir / '.launch.lock'):
+            return session_properties(root, agent_dir, launch_locked=True)
+    with sessions.namespace(root), lock(agent_dir / '.properties.lock'):
+        data, repaired = sessions.recover(agent_dir, read(agent_dir / 'properties.json'))
+    if repaired:
+        _session_event(agent_dir, repaired)
+    return data
+
+
+def _session_event(directory, row):
+    _event(directory, 'agent.session', row['launch'], {key: row[key] for key in ('from', 'to', 'reason')})
+
+
+def _rebind_session(root, agent_dir, previous, session_id, reason, launch_id, *, home=None):
+    """Internal form: caller already holds this agent's launch lock."""
+    try:
+        data, row = sessions.transition(root, agent_dir, previous, session_id, reason, launch_id, home)
+    except sessions.SessionConflict as error:
+        if runtime(agent_dir).get('binding_conflict') != str(error):
+            update_runtime(agent_dir, launch_id, binding_conflict=str(error))
+        raise
+    if row:
+        _session_event(agent_dir, row)
+    if runtime(agent_dir).get('binding_conflict'):
+        update_runtime(agent_dir, launch_id, binding_conflict=None)
+    return data
+
+
+def rebind_session(root, reference, previous, session_id, reason, launch_id, *, home=None):
+    """CAS a native session for an exact launch; retain its earlier generations."""
+    agent_dir = directory(root, reference)
+    with lock(agent_dir / '.launch.lock'):
+        return _rebind_session(root, agent_dir, previous, session_id, reason, launch_id, home=home)
 
 
 def report(root, reference, phase=None, summary=None):

@@ -213,6 +213,7 @@ class LaunchIsolationTest(unittest.TestCase):
                 patch.dict(os.environ, {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale",
                                         "MV2_STALE": "parent", "CODEX_THREAD_ID": "parent-session"}), \
                 patch.object(runner, "update_runtime"), \
+                patch.object(runner, "process_started", return_value=None), \
                 patch.object(runner.subprocess, "Popen", return_value=process) as popen:
             self.assertEqual(runner.main(), 0)
         env = popen.call_args.kwargs["env"]
@@ -313,6 +314,7 @@ class LaunchIsolationTest(unittest.TestCase):
                         patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-codex", "CLAUDECODE": "parent-claude",
                                                 "NO_COLOR": "1", "TERM": "tmux-256color"}, clear=True), \
                         patch.object(runner, "update_runtime"), \
+                        patch.object(runner, "process_started", return_value=None), \
                         patch.object(runner.subprocess, "Popen", return_value=process) as popen:
                     self.assertEqual(runner.main(), 0)
                 env = popen.call_args.kwargs["env"]
