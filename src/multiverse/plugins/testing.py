@@ -60,6 +60,7 @@ _current = None  # the test running now
 _installed = False
 _strict = False  # whether writes no check() reported make the process exit 1 (the default once installed)
 _TEST = "_mv2_test"  # on a Thread: the test it was started in (threads it starts carry it on)
+_open_context = threading.local()  # the dir_fd of the os.open call running in this thread: its audit event lacks it
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
@@ -86,6 +87,7 @@ def install(home=None, strict=True):
             setattr(thread, _TEST, getattr(threading.current_thread(), _TEST, None) or _current)
             return start(thread, *args, **kwargs)
         threading.Thread.start = tagged_start
+        os.open = _open_with_context(os.open)
         sys.addaudithook(_hook)
         atexit.register(_at_exit)
     return Path(directory)
@@ -131,7 +133,7 @@ def _hook(event, args):
     if event == "open":
         if len(args) < 3 or not _writes(args[1], args[2]):
             return
-        targets = [(args[0], None)]
+        targets = [(args[0], getattr(_open_context, "dir_fd", None))]
     elif event in _TARGETS:
         targets = [(args[at] if at < len(args) else None, args[fd] if fd is not None and fd < len(args) else None)
                    for at, fd in _TARGETS[event]]
@@ -151,6 +153,20 @@ def _hook(event, args):
 
 def _guarded(where):
     return any(where == top or where.startswith(top + os.sep) for top in _protected) and not _allowed(where)
+
+
+def _open_with_context(real):
+    """os.open, noting its dir_fd for the length of the call: the "open" audit event carries the name only, so
+    the hook would otherwise judge a name relative to a directory descriptor by the working directory."""
+    def open(path, flags, mode=0o777, *, dir_fd=None):
+        previous = getattr(_open_context, "dir_fd", None)
+        _open_context.dir_fd = dir_fd
+        try:
+            return real(path, flags, mode, dir_fd=dir_fd)
+        finally:
+            _open_context.dir_fd = previous
+    open.__doc__, open.__wrapped__ = real.__doc__, real
+    return open
 
 
 def _allowed(where):

@@ -258,3 +258,38 @@ class SymlinkAliasTest(StandInHome):
         (alias / "fine.txt").write_text("x")
         self.assertEqual(self.new_violations(), [])
 
+
+
+class OsOpenWithDirectoryFdTest(StandInHome):
+    """Reviewer item 4: the open audit event carries no dir_fd, so os.open(name, O_CREAT, dir_fd=fd) was judged by
+    the working directory, missing a write inside the home and refusing one outside it."""
+
+    def setUp(self):
+        super().setUp()
+        with self.unguarded():
+            (self.real / ".multiverse").mkdir()
+
+    def test_a_file_made_relative_to_a_directory_fd_in_the_home_is_refused_from_outside_it(self):
+        inside = os.open(self.real / ".multiverse", os.O_RDONLY)
+        self.addCleanup(os.close, inside)
+        self.assertFalse(os.getcwd().startswith(str(self.real)))  # the working directory is elsewhere
+        with self.assertRaises(PermissionError):
+            os.open("made.json", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=inside)
+        self.assertEqual([item["path"] for item in self.new_violations()],
+                         [os.path.join(os.path.realpath(self.real / ".multiverse"), "made.json")])
+        self.assertEqual(os.listdir(self.real / ".multiverse"), [])
+
+    def test_a_file_made_relative_to_a_directory_fd_elsewhere_is_fine_from_inside_the_home(self):
+        elsewhere = Path(tempfile.mkdtemp(prefix="mv2-elsewhere-"))
+        self.addCleanup(__import__("shutil").rmtree, elsewhere)
+        outside = os.open(elsewhere, os.O_RDONLY)
+        self.addCleanup(os.close, outside)
+        previous = os.getcwd()
+        os.chdir(self.real / ".multiverse")
+        self.addCleanup(os.chdir, previous)
+        os.close(os.open("made.json", os.O_WRONLY | os.O_CREAT, 0o600, dir_fd=outside))
+        self.assertTrue((elsewhere / "made.json").is_file())
+        self.assertEqual(self.new_violations(), [])
+        with self.assertRaises(PermissionError):  # and a plain relative name here is still this directory
+            os.open("here.json", os.O_WRONLY | os.O_CREAT, 0o600)
+        self.assertEqual(len(self.new_violations()), 1)
