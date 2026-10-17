@@ -902,12 +902,27 @@ launch.
     argv.
   - **Agent identity:** a server that needs it declares `env_vars` such as
     `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_UNIVERSE`, `MV2_CLI` or `MV2_PYTHON`.
+    In bridge mode the launch-specific `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET`
+    and `MV2_TMUX_SOCKET` are refused: a bridged conversation outlives a
+    launch, so its tools carry the agent's identity, never one launch's.
+    Refused entries keep their reason in the launch record. `CODEX_HOME`,
+    `CODEX_SQLITE_HOME` and `CODEX_THREAD_ID` references are forbidden;
+    declaring identity references does not grant an MCP helper the
+    conversation shell's authority.
   - **Tool environment:** the variables the harness and plugins set for tools
     go through the bridge session RPC, and through the process environment in
     a plain launch. An exact, normal, exclusive resume of an idle thread
     applies them; rejoining a native thread that is subscribed or active may
     keep its old config, and mv2 never forces an unload or restart to change
-    that.
+    that. Bridge tool identity is per agent, through the session RPC: the same shared
+    conversation is one agent. Restart running Codex bridge agents once after
+    updating: `mv2 kill NAME`, then `mv2 resume NAME`, with no other client
+    attached so Codex can reload the conversation environment. There is no
+    automatic adoption or update hook.
+  - **Sharing and refusals:** same-server sharing that Codex accepts is
+    normal. A separate-writer native refusal is retained as the launch's
+    primary error, even if native retry later succeeds; only a successful new
+    `mv2 resume` clears it.
 
   This is the only v1 way for a plugin to add MCP config, and
   `config.mcp_servers` is refused.

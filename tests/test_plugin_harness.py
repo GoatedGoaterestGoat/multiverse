@@ -210,7 +210,9 @@ class LaunchPlanTest(PluginTestCase):
         self.assertTrue(harness.may_set("compaction", "CLAUDE_CODE_SOMETHING"))
         for plugin, key in (("compaction", "MV2_COMPACTIONS"), ("compaction", "MV2_AGENT_ID"), ("agent", "MV2_AGENT_ID"),
                             ("plugins", "MV2_PLUGINS"), ("x", "BAD-NAME"), ("x", ""), ("x", "HOME"), ("x", "PATH"),
-                            ("x", "CODEX_HOME"), ("x", "CODEX_SQLITE_HOME"), ("x", "CLAUDE_CONFIG_DIR")):
+                            ("x", "CODEX_HOME"), ("x", "CODEX_SQLITE_HOME"), ("x", "CLAUDE_CONFIG_DIR"),
+                            # The adapter's declared shared-agent authority: never a plugin's, even one named so.
+                            ("identity", "MV2_IDENTITY_MODE"), ("x", "MV2_IDENTITY_MODE")):
             with self.subTest(plugin=plugin, key=key):
                 self.assertFalse(harness.may_set(plugin, key))
 

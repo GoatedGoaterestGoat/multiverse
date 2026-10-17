@@ -22,6 +22,8 @@ from . import loader
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
 CORE_ENVIRONMENT = frozenset({"MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
                               "MV2_CLI", "MV2_PYTHON", "MV2_TMUX_SOCKET", "MV2_PLUGINS", "MV2_PLUGIN_PATH",
+                              # The shared-agent authority an adapter declares: a plugin never overrides it.
+                              "MV2_IDENTITY_MODE",
                               # Where a session's account, history and executables come from: core and the
                               # user decide these, never a plugin.
                               "HOME", "PATH", "CODEX_HOME", "CODEX_SQLITE_HOME", "CLAUDE_CONFIG_DIR",
