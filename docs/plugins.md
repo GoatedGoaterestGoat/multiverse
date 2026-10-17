@@ -311,7 +311,10 @@ settings file to convert, an event someone subscribes to, a usage adjuster)
 read manifests only, never the trust check that hashes a universe plugin's
 files. The list of pip-installed plugins is remembered per Python environment
 in `~/.multiverse/installed-plugins.json`, scanned again when a package is
-installed or removed (the package directories on `sys.path` change). The
+installed or removed (the package directories on `sys.path` change). It keeps
+the last 4 `sys.path` signatures per Python, the least recently used dropped,
+so processes started differently (a runner, the CLI) do not make each other
+scan again. The
 one exception is `mv2 NAME --help` for a plugin's command: its options come from
 its `configure`, so that help imports the plugin. A plugin command that fails
 in a way it did not mean to (anything but `ValueError`, `OSError`, `KeyError`

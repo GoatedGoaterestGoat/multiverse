@@ -241,29 +241,60 @@ def _environment_signature():
     return parts
 
 
+INSTALLED_KEPT = 4  # sys.path signatures remembered per Python: processes started differently (a runner, the CLI)
+USED_EVERY = 3600  # seconds between noting that a remembered signature was used again (a write)
+
+
 def _installed_remembered():
-    """installed_directories, from the last scan when nothing was installed or removed since: importing
-    importlib.metadata to scan costs every mv2 command more than the rest of plugin discovery together."""
-    from ..store import read, write
+    """installed_directories, from an earlier scan when nothing was installed or removed since: importing
+    importlib.metadata to scan costs every mv2 command more than the rest of plugin discovery together.
+
+    Up to INSTALLED_KEPT signatures are kept per Python executable, the least recently used dropped, so processes
+    whose sys.path differs do not make each other scan and rewrite in turn. The newest stays in the entry's own
+    fields, which older mv2 reads; the others are in its `recent`, which it ignores."""
+    from ..store import read
     path, key, signature = trust.user_directory() / INSTALLED, sys.executable, _environment_signature()
     try:
-        remembered = read(path).get("environments", {}).get(key) or {}
+        data = read(path)
+        entry = data.get("environments", {}).get(key)
     except (OSError, ValueError, AttributeError):
-        remembered = {}
-    directories = remembered.get("directories")
-    if remembered.get("signature") == signature and isinstance(directories, list) and all(
-            isinstance(item, str) and (Path(item) / manifests.FILE).is_file() for item in directories):
-        return [Path(item) for item in directories]
+        data, entry = {}, None
+    entries = _installed_entries(entry)
+    for item in entries:
+        directories = item.get("directories")
+        if item.get("signature") == signature and isinstance(directories, list) and all(
+                isinstance(found, str) and (Path(found) / manifests.FILE).is_file() for found in directories):
+            if time.time() - item.get("used", 0) > USED_EVERY:  # noted now and then, not on every command
+                item["used"] = time.time()
+                _write_installed(path, data, key, entries)
+            return [Path(found) for found in directories]
     found = _scan_installed()
+    fresh = {"signature": signature, "directories": [str(item) for item in found], "used": time.time()}
+    kept = sorted([item for item in entries if item.get("signature") != signature],
+                  key=lambda item: item.get("used", 0), reverse=True)[:INSTALLED_KEPT - 1]
+    _write_installed(path, data, key, [fresh, *kept])
+    return found
+
+
+def _installed_entries(entry):
+    """The signatures remembered for one Python, newest first: the entry itself, then its `recent`."""
+    if not isinstance(entry, dict):
+        return []
+    recent = entry.get("recent") if isinstance(entry.get("recent"), list) else []
+    first = {name: entry[name] for name in ("signature", "directories", "used") if name in entry}
+    return [item for item in [first, *recent] if isinstance(item, dict) and "signature" in item]
+
+
+def _write_installed(path, data, key, entries):
+    from ..store import write
     try:
-        data = read(path) if path.is_file() else {}
         environments = data.get("environments") if isinstance(data, dict) else None
         environments = environments if isinstance(environments, dict) else {}
-        environments[key] = {"signature": signature, "directories": [str(item) for item in found]}
+        entries = sorted(entries, key=lambda item: item.get("used", 0), reverse=True)
+        environments[key] = {**entries[0], "recent": entries[1:]}
         write(path, {"schema": 1, "environments": environments})
-    except (OSError, ValueError):
+    except (OSError, ValueError, IndexError):
         pass  # unremembered: scanned again next time
-    return found
 
 
 def _scan_installed():
