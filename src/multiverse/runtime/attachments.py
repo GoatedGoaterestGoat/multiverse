@@ -6,13 +6,15 @@ prompts or outside clients. No service is stopped to complete a handover.
 import os
 import fcntl
 import logging
+from datetime import datetime, timezone
+from functools import lru_cache
 from contextlib import contextmanager
 from pathlib import Path
 import time
 
 from ..store import existing_lock, lock, now, read, uid, write
 from ..universe import agents
-from .process import process_started, process_snapshot
+from .process import START, process_started, process_snapshot, process_command
 
 
 def begin(launch, started):
@@ -27,6 +29,8 @@ def finish(launch, errors=()):
 
 
 CLOSED_CONNECTION_LIMIT = 100
+PENDING_ROLE_SECONDS = 60
+_UNSET = object()
 
 
 @contextmanager
@@ -56,13 +60,14 @@ def _prune_connections(launch):
         path.with_suffix('.lock').unlink(missing_ok=True)
 
 
-def connection_logger(launch):
+def connection_logger(launch, *, started=_UNSET):
     """Only endpoint/role/timing metadata; keep at most 100 closed connections.
 
     One connection-journal lock serializes updates, pruning and observation. Active, pending and unknown
     records are never pruned. Read-only recovery checks use their enclosing
     monitor/worker role rather than a durable record per short connection.
     """
+    started = process_started(os.getpid()) if started is _UNSET else started
     warned = False
     def record(value):
         nonlocal warned
@@ -75,7 +80,7 @@ def connection_logger(launch):
                 previous = read(path) if path.exists() else {}
                 write(path, {**previous, 'schema': 1, 'launch_id': launch.name, 'role': value['role'],
                              'endpoint': value['endpoint'], 'state': 'closed' if value['state'] == 'closed' else 'active',
-                             'pid': os.getpid(), 'at': previous.get('at') or now(),
+                             'pid': os.getpid(), 'pid_started': started, 'at': previous.get('at') or now(),
                              **({'closed_at': now()} if value['state'] == 'closed' else {})})
                 if value['state'] == 'closed':
                     _prune_connections(launch)
@@ -94,7 +99,9 @@ def connection_logger(launch):
 
 class Role:
     """One owned launch role; no core lock is ever acquired by this ledger."""
-    def __init__(self, launch, name, *, pending=False, started=None):
+    def __init__(self, launch, name, *, pending=False, started=_UNSET):
+        if not pending and started is _UNSET:
+            started = process_started(os.getpid())
         self.path = launch / 'roles' / (uid() + '.json')
         self.record = {'schema': 1, 'launch_id': launch.name, 'role': name,
                        'state': 'pending' if pending else 'active', 'at': now(),
@@ -107,7 +114,7 @@ class Role:
         with existing_lock(self.path.with_suffix('.lock')):
             current = read(self.path)
             if current['state'] != 'closed':
-                write(self.path, {**current, 'state': 'active', 'pid': pid, 'pid_started': started})
+                write(self.path, {**current, 'state': 'active', 'pid': pid, 'pid_started': started, 'at': now()})
 
     def close(self):
         try:
@@ -126,17 +133,72 @@ class Role:
         return role
 
 
-def _gone(pid, started=None):
+def _at(value):
+    try:
+        value = datetime.fromisoformat(value)
+        return value.timestamp() if value.tzinfo is not None else None
+    except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _start_time(value):
+    if not isinstance(value, str) or not START.fullmatch(value):
+        return None
+    try:
+        _, month, day, clock, year = value.split()
+        hour, minute, second = map(int, clock.split(':'))
+        return datetime(int(year), 'Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec'.split().index(month) + 1,
+                        int(day), hour, minute, second, tzinfo=timezone.utc).timestamp()
+    except (ValueError, OverflowError):
+        return None
+
+
+def _observation(pid, observations):
+    if pid not in observations:
+        try:
+            os.kill(pid, 0)  # Observation only. Never signal a cleanup process.
+        except ProcessLookupError:
+            observations[pid] = (True, None)
+        except PermissionError:
+            observations[pid] = (False, process_snapshot(pid))
+        else:
+            observations[pid] = (False, process_snapshot(pid))
+    return observations[pid]
+
+
+def _gone(pid, started=None, *, recorded_at=None, observations=None):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    try:
-        os.kill(pid, 0)  # Observation only. Never signal a cleanup process.
-    except ProcessLookupError:
+    absent, snapshot = _observation(pid, observations if observations is not None else {})
+    if absent or (snapshot and snapshot[1][0] in ('Z', 'X')):
         return True
-    except PermissionError:
-        pass  # Process identity can still prove exit or PID reuse without permission to signal it.
-    snapshot = process_snapshot(pid)
-    return bool(snapshot and (snapshot[1][0] in ('Z', 'X') or (started and snapshot[0] != started)))
+    if not snapshot:
+        return False
+    if started is not None:
+        # Corrupt tokens are not proof of a different process.
+        return _start_time(started) is not None and snapshot[0] != started
+    boundary, current = _at(recorded_at), _start_time(snapshot[0])
+    return boundary is not None and current is not None and current > boundary
+
+
+@lru_cache(maxsize=128)
+def _command(pid, started):
+    # Command name only, never arguments, environment or conversation content.
+    return process_command(pid) or 'unknown (process inspection unavailable)'
+
+
+def _blocked(label, path, pid, started, observations):
+    valid_pid = isinstance(pid, int) and not isinstance(pid, bool) and pid > 0
+    snapshot = observations.get(pid, (False, None))[1] if valid_pid else None
+    current = snapshot[0] if snapshot else 'unknown (process inspection unavailable)'
+    command = _command(pid, current) if snapshot else process_command(pid) or 'unknown'
+    why = ('its recorded process identity is still live' if started and started == current else
+           'mv2 cannot prove that this process is unrelated to the old launch')
+    return (f'The previous terminal is still closing its {label}: PID {pid}, command {command}, '
+            f'started {current}; {why}. Record: {path}. '
+            'Inspect that PID and the record; wait for the verified old process to exit, then retry. '
+            'If the identity is unavailable or the record is damaged, restore process inspection or repair '
+            'the record only after verifying the old process has exited')
 
 
 def problem(directory, facts):
@@ -145,35 +207,54 @@ def problem(directory, facts):
         return None
     launch = directory / 'launches' / launch_id
     path = launch / 'cleanup.json'
+    observations = {}  # One identity sample per PID per scan, never a cross-launch cache.
+    def gone(record, boundary):
+        return _gone(record.get('pid'), record.get('pid_started'), recorded_at=boundary,
+                     observations=observations)
+    # stopped_at/observed exit postdate process creation; started_at does not.
+    exited = isinstance(facts.get('exit_code'), int) and not isinstance(facts.get('exit_code'), bool)
+    exit_at = facts.get('stopped_at') or (facts.get('observed_at') if exited else None)
     if path.exists():
-        record = read(path)
+        try:
+            record = read(path)
+        except (OSError, ValueError):
+            return f'The previous terminal cleanup record cannot be read: {path}; repair it before retrying'
         if not isinstance(record, dict) or record.get('launch_id') != launch_id or record.get('schema') != 1:
-            return 'The previous terminal has an invalid cleanup record'
+            return f'The previous terminal has an invalid cleanup record: {path}; repair it before retrying'
         complete = record.get('state') == 'complete'
-        gone = _gone(record.get('pid'), record.get('pid_started'))
-        if not complete and not gone:
-            return 'The previous terminal is still closing its native connections'
-        if not complete and facts.get('pid') and not _gone(facts['pid'], facts.get('pid_started')):
-            return 'The previous terminal child has not finished exiting'
-    elif facts.get('runner_pid') and not _gone(facts['runner_pid'], facts.get('runner_started')):
-        return 'The previous terminal is still closing (older runner has no cleanup record)'
-    elif not path.exists() and facts.get('runner_pid') and facts.get('pid') and not _gone(facts['pid'], facts.get('pid_started')):
-        return 'The previous terminal child is still running (older runner has no cleanup record)'
-    # A completed runner closes all its in-process roles before publishing the
-    # marker. A separately spawned recovery worker also needs to have drained.
+        if not complete and not gone(record, record.get('at')):
+            return _blocked('native connections', path, record.get('pid'), record.get('pid_started'), observations)
+        if not complete and facts.get('pid') and not gone(facts, exit_at):
+            return _blocked('child process', path, facts['pid'], facts.get('pid_started'), observations)
+    else:
+        runner = {'pid': facts.get('runner_pid'), 'pid_started': facts.get('runner_started')}
+        if runner['pid'] and not gone(runner, exit_at):
+            return _blocked('older runner (no cleanup record)', path, runner['pid'], runner['pid_started'], observations)
+        if runner['pid'] and facts.get('pid') and not gone(facts, exit_at):
+            return _blocked('older child (no cleanup record)', path, facts['pid'], facts.get('pid_started'), observations)
     try:
         with _connections_lock(launch):
             for path in (launch / 'roles').glob('*.json'):
-                role = read(path)
+                try:
+                    role = read(path)
+                except FileNotFoundError:
+                    raise
+                except (OSError, ValueError):
+                    return f'The previous terminal connection record cannot be read: {path}; repair it before retrying'
                 if not isinstance(role, dict) or role.get('launch_id') != launch_id or role.get('schema') != 1:
-                    return 'The previous terminal has an invalid connection record'
-                if role.get('state') != 'closed' and not _gone(role.get('pid'), role.get('pid_started')):
-                    return 'The previous terminal is still closing its ' + str(role.get('role', 'native connection'))
+                    return f'The previous terminal has an invalid connection record: {path}; repair it before retrying'
+                if role.get('state') == 'closed':
+                    continue
+                at = _at(role.get('at'))
+                if (role.get('state') == 'pending' and role.get('pid') is None and at is not None
+                        and datetime.now(timezone.utc).timestamp() - at >= PENDING_ROLE_SECONDS):
+                    continue  # An unclaimed worker cannot own a connection; late claims recheck launch.lock.
+                if not gone(role, role.get('at')):
+                    return _blocked(str(role.get('role', 'native connection')), path,
+                                    role.get('pid'), role.get('pid_started'), observations)
     except FileNotFoundError:
         if launch.exists():
-            raise  # A role disappeared without a serialized, proven-close prune.
-        # Legacy fixtures/records may have no launch directory at all. Existing
-        # runner/child checks above still require any recorded process to exit.
+            raise
     return None
 
 

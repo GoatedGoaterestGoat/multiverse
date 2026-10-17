@@ -29,6 +29,11 @@ def process_snapshot(pid):
     return (started, state) if START.fullmatch(started) and state and state[0].isalpha() else None
 
 
+def process_command(pid):
+    """Executable name for a blocked-cleanup diagnostic; no arguments or environment."""
+    return _query(pid, 'comm=')
+
+
 def _query(pid, fields):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None

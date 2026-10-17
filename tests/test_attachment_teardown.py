@@ -350,6 +350,9 @@ class AttachmentTeardownTest(BaseTest):
                     self.assertEqual(connection.recv(1), b'')
                     record = read(launch / 'cleanup.json')
                     self.assertEqual((record['launch_id'], record['state']), (launch_id, 'complete'))
+                    self.assertIsNotNone(record['pid_started'])
+                    for path in (launch / 'roles').glob('*.json'):
+                        self.assertEqual(read(path)['pid_started'], record['pid_started'])
             finally:
                 (self.work / 'release').touch()
                 if process.poll() is None:

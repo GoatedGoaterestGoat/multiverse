@@ -59,6 +59,8 @@ mv2 resume worker --model opus --wait
 
 `kill --attachment-only` closes only mv2's terminal and connection. The conversation's work keeps running, which matters when another client is working in a shared Codex conversation.
 
+Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, start time and record path. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
+
 A `steer` or `follow-up` message to a stopped agent also resumes it, with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 ## Move and remove

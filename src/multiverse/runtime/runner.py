@@ -400,7 +400,8 @@ def main():
     diagnostic = {}
     roles = {}
     from multiverse.runtime import attachments, refusal, registration
-    attachments.begin(launch, process_started(os.getpid()))
+    runner_started = process_started(os.getpid())
+    attachments.begin(launch, runner_started)
 
     def stop(_signum, _frame):
         raise SystemExit(128 + _signum)
@@ -427,7 +428,7 @@ def main():
             from multiverse.runtime.native import legacy_attachment
             attachment = asdict(legacy_attachment(request.get('shared_service')))
         update_runtime(agent_dir, launch.name, state="starting" if attachment.get('readiness') in ('binding', 'legacy-binding') else "running", status="unknown",
-                       runner_pid=os.getpid(), runner_started=read(launch / 'cleanup.json')['pid_started'],
+                       runner_pid=os.getpid(), runner_started=runner_started,
                        startup_checked=False, attachment=attachment or None)
         if request.get('rpc_proxy'):
             from multiverse import harnesses
@@ -448,8 +449,8 @@ def main():
                 lambda error: update_runtime(agent_dir, launch.name, error='Native launch relay: ' + error),
                 UsagePublisher(agent_dir, launch.name), RelayPublisher(agent_dir, launch.name),
                 record_refusal=lambda evidence: refusal.record(agent_dir, launch.name, evidence),
-                record_connection=attachments.connection_logger(launch))
-            roles['relay'] = attachments.Role(launch, 'relay')
+                record_connection=attachments.connection_logger(launch, started=runner_started))
+            roles['relay'] = attachments.Role(launch, 'relay', started=runner_started)
             try:
                 proxy.start()
             except Exception as error:
@@ -513,22 +514,22 @@ def main():
             from multiverse import harnesses
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
             refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
-            roles['refusal observer'] = attachments.Role(launch, 'refusal observer')
+            roles['refusal observer'] = attachments.Role(launch, 'refusal observer', started=runner_started)
             refusal_monitor.start()
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),
                                       proxy.protocol if proxy is not None and request.get('resume_message_id') else None)
-            roles['startup delivery'] = attachments.Role(launch, 'startup delivery')
+            roles['startup delivery'] = attachments.Role(launch, 'startup delivery', started=runner_started)
             startup.start()
         if attachment.get('observe_status'):
             watcher = StatusWatcher(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
-            roles['status observer'] = attachments.Role(launch, 'status observer')
+            roles['status observer'] = attachments.Role(launch, 'status observer', started=runner_started)
             watcher.start()
         if attachment.get('recovery') == 'idle-existing-service':
             from multiverse.runtime.recovery import RecoveryMonitor
             recovery_monitor = RecoveryMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']))
-            roles['recovery monitor'] = attachments.Role(launch, 'recovery monitor')
+            roles['recovery monitor'] = attachments.Role(launch, 'recovery monitor', started=runner_started)
             recovery_monitor.start()
         try:
             code = process.wait(timeout=STARTUP_SECONDS)

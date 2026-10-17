@@ -873,7 +873,13 @@ Before a manual resume or completed stop, mv2 waits for the previous launch's
 owned relay, status, recovery and startup roles to close. A bounded cleanup
 failure remains visible and blocks handover. Per-launch cleanup and connection
 records contain role, endpoint and timing metadata, never conversation content;
-outside clients and the native daemon are left running.
+outside clients and the native daemon are left running. Each role and connection
+records its owner's PID and UTC process start once, so PID reuse and unreaped
+zombies do not block a handover. Older records use their post-creation timestamp
+(or a recorded terminal exit) to rule out later processes; launch start time is
+not such proof. Unclaimed recovery roles expire after 60 seconds. Unknown process
+identities still block with the PID, command, start time and record path so the
+operator can inspect the cause; no cleanup check signals an unrelated process.
 
 `report` (including `status`) and every `inbox` form address that one agent;
 `send` records its stable sender identity, including cross-universe sends. These

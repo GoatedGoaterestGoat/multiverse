@@ -230,8 +230,9 @@ def run(directory, launch_id, role_path=None):
             role_path = role_path or (directory / facts['recovery_worker'] if facts.get('recovery_worker') else None)
             if role_path and Path(role_path).resolve().parent != (directory / 'launches' / launch_id / 'roles').resolve():
                 raise ValueError('Recovery worker belongs to a different launch')
-            worker = attachments.Role.existing(role_path) if role_path else attachments.Role(directory / 'launches' / launch_id, 'recovery worker')
-            worker.claimed(os.getpid(), process_started(os.getpid()))
+            started = process_started(os.getpid())
+            worker = attachments.Role.existing(role_path) if role_path else attachments.Role(directory / 'launches' / launch_id, 'recovery worker', started=started)
+            worker.claimed(os.getpid(), started)
     except FileNotFoundError:
         return
     try:
