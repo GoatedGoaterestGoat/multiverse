@@ -1536,7 +1536,8 @@ multiverse-v2/
   outlived its test) are printed at the end and fail the run. A path given
   relative to a directory file descriptor (as `shutil.rmtree` removes files)
   is resolved through that descriptor, so the working directory never decides
-  it. The plugin under test's own directory, and Python's bytecode in a
+  it, and every path is checked as written and as resolved, so a write through
+  a link elsewhere that points into the home is refused too. The plugin under test's own directory, and Python's bytecode in a
   personal plugin (`~/.multiverse/plugins/NAME`), are not guarded: a personal
   plugin runs its tests from its own directory. Its helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it

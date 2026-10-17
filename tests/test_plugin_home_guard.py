@@ -33,6 +33,20 @@ class StandInHome(PluginTestCase):
         self.addCleanup(testing._protected.difference_update, {str(self.protected), str(self.real / ".multiverse")})
         self.before = len(testing.violations())
 
+    def unguarded(self):
+        """The stand-in home without its protection, to set it up as a real one would be."""
+        import contextlib
+
+        @contextlib.contextmanager
+        def lifted():
+            homes = {str(self.protected), str(self.real / ".multiverse")}
+            testing._protected.difference_update(homes)
+            try:
+                yield
+            finally:
+                testing._protected.update(homes)
+        return lifted()
+
     def new_violations(self):
         for item in testing._violations[self.before:]:  # this test's own, made on purpose: not reported again
             item["unreported"] = False
@@ -156,19 +170,6 @@ class WorkingDirectoryInsideTheHomeTest(StandInHome):
         os.chdir(self.personal)
         self.addCleanup(os.chdir, previous)
 
-    def unguarded(self):
-        """The stand-in home without its protection, to set it up as a real one would be."""
-        import contextlib
-
-        @contextlib.contextmanager
-        def lifted():
-            homes = {str(self.protected), str(self.real / ".multiverse")}
-            testing._protected.difference_update(homes)
-            try:
-                yield
-            finally:
-                testing._protected.update(homes)
-        return lifted()
 
     def test_removing_a_directory_elsewhere_by_fd_relative_names_is_not_a_write_here(self):
         elsewhere = Path(tempfile.mkdtemp(prefix="mv2-elsewhere-"))
@@ -224,4 +225,36 @@ class WorkingDirectoryInsideTheHomeTest(StandInHome):
                              env={**os.environ, "HOME": str(self.real), "PYTHONPATH": str(SOURCE)},
                              capture_output=True, text=True, timeout=120)
         self.assertEqual(run.returncode, 0, run.stderr[-3000:])
+
+
+class SymlinkAliasTest(StandInHome):
+    """PR #23 independent review (b): a write through a link elsewhere that points into the home is a write there."""
+
+    def setUp(self):
+        super().setUp()
+        with self.unguarded():
+            (self.real / ".multiverse").mkdir()
+
+    def test_a_write_through_a_link_into_the_home_is_refused(self):
+        alias = self.work / "alias"
+        alias.symlink_to(self.real / ".multiverse")  # outside the home: making the link itself is fine
+        chained = self.work / "chained"
+        chained.symlink_to(alias)
+        for attempt in (lambda: (alias / "state.json").write_text("{}"),  # a new file whose parent is a link
+                        lambda: (alias / "sub").mkdir(),
+                        lambda: (chained / "other.json").write_text("{}")):  # a link to a link
+            with self.assertRaises(PermissionError):
+                attempt()
+        real = os.path.realpath(self.real / ".multiverse")
+        self.assertEqual([item["path"] for item in self.new_violations()],
+                         [os.path.join(real, name) for name in ("state.json", "sub", "other.json")])
+        self.assertEqual(os.listdir(self.real / ".multiverse"), [])
+
+    def test_a_link_to_somewhere_else_is_left_alone(self):
+        elsewhere = Path(tempfile.mkdtemp(prefix="mv2-elsewhere-"))
+        self.addCleanup(__import__("shutil").rmtree, elsewhere)
+        alias = self.work / "to-elsewhere"
+        alias.symlink_to(elsewhere)
+        (alias / "fine.txt").write_text("x")
+        self.assertEqual(self.new_violations(), [])
 

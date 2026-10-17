@@ -403,15 +403,18 @@ def _write_cursor(scope, name, sequence, journal=None):
         return  # removed or moved meanwhile: a cursor must never bring its directories back
     path = _cursor_path(scope, name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # The number first, then the journal it belongs to. Interrupted between the two, a new journal's number is
+    # paired with the old journal, which reads as "this journal started again": its events come again from its
+    # start (at least once). The other order would pair an old, higher number with the new journal and skip them.
+    temporary = path.with_name(".events.cursor.tmp")
+    temporary.write_text(f"{sequence}\n")
+    temporary.replace(path)
     mark = _cursor_journal_path(scope, name)
     if journal and (_cursor_journals.get(str(path)) != journal or not mark.is_file()):
         temporary = mark.with_name(".events.cursor.journal.tmp")
         temporary.write_text(f"{journal}\n")
         temporary.replace(mark)
         _cursor_journals[str(path)] = journal
-    temporary = path.with_name(".events.cursor.tmp")
-    temporary.write_text(f"{sequence}\n")
-    temporary.replace(path)
 
 
 _cursor_journals = {}  # cursor path -> the journal last written beside it by this process

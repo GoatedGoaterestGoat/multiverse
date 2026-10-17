@@ -139,10 +139,18 @@ def _hook(event, args):
         return
     for path, directory in targets:
         where = _absolute(path, directory)
-        if where is not None and any(where == top or where.startswith(top + os.sep) for top in _protected) \
-                and not _allowed(where):
-            _record(event, where)
-            raise PermissionError(f"a test may not change the real ~/.multiverse: {where}")
+        if where is None:
+            continue
+        # As written and as resolved: a link elsewhere may point into the home. realpath resolves the links that
+        # exist and keeps a new file's own name, so a file about to be made through one is judged by where it goes.
+        for candidate in dict.fromkeys((where, os.path.realpath(where))):
+            if _guarded(candidate):
+                _record(event, candidate)
+                raise PermissionError(f"a test may not change the real ~/.multiverse: {candidate}")
+
+
+def _guarded(where):
+    return any(where == top or where.startswith(top + os.sep) for top in _protected) and not _allowed(where)
 
 
 def _allowed(where):

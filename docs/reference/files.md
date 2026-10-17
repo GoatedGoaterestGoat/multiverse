@@ -120,7 +120,7 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/errors.log` | The plugin's recorded errors with tracebacks, rotated to `errors.log.1` at 1 MiB. |
 | `NAME/plugin.log` | Lines the plugin logs. |
 | `NAME/events.cursor` | The last event the plugin's handlers finished in this universe. |
-| `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Older mv2 ignores it. |
+| `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Written after the cursor: an interrupted write delivers again, never skips. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
 | `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
 | `events.log` | Events that could not be recorded. |
