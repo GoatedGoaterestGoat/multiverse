@@ -8,6 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse.universe import templates
 from multiverse.store import read, write
+from isolation import isolate
 
 # The mod's defaults (hooks/statusline.ts DEFAULTS, asserted there too), in display order.
 DEFAULT_ITEMS = {'agent': False, 'phase': True, 'summary': False, 'inbox': True, 'compaction': True}
@@ -18,6 +19,7 @@ TMUX_ITEMS = {'agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'contex
 
 class StatusLineFileTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.work = Path(self.temporary.name)

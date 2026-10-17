@@ -16,10 +16,12 @@ from multiverse.universe import relocate
 from multiverse.universe import trash
 from multiverse.cli import parser, run
 from multiverse.store import read, write
+from isolation import isolate
 
 
 class RelocateTests(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory()
         self.work = Path(self.temp.name) / "work"
         self.work.mkdir()

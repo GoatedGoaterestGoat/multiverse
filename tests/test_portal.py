@@ -15,10 +15,12 @@ from multiverse.ui.tree import group_key
 from multiverse.ui.views import DEFAULT_COLUMNS, view
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.panels import ArtifactPreview, LocalView, TablePanel, artifact_path
+from isolation import isolate
 
 
 class PortalTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        isolate(self)
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)

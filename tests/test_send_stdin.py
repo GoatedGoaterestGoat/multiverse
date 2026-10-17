@@ -17,6 +17,7 @@ from multiverse import cli
 from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import send
+from isolation import isolate
 
 
 class TerminalInput(io.StringIO):
@@ -29,6 +30,7 @@ class TerminalInput(io.StringIO):
 
 class SendStdinTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)

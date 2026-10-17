@@ -12,9 +12,13 @@ from textual.widgets import Input, Static
 from multiverse.plugins import ui
 from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
+from isolation import isolate
 
 
 class ContractTests(unittest.TestCase):
+    def setUp(self):
+        isolate(self)
+
     def test_exactly_these_names_are_exported(self):
         self.assertEqual(sorted(ui.__all__), ["BOOL_OPTIONS", "Field", "FieldScreen", "MISSING", "convert", "field"])
         for name in ui.__all__:
@@ -81,6 +85,9 @@ class Settings(ui.FieldScreen):
 
 
 class ScreenTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        isolate(self)
+
     async def test_a_screen_on_the_contract_edits_validates_hides_rows_and_reports_back(self):
         backend = DemoBackend()
         app = MultiverseApp(backend.root, backend, refresh_interval=0)

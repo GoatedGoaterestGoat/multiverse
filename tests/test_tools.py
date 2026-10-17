@@ -16,10 +16,12 @@ from multiverse.universe import templates
 from multiverse.ui.backend import LocalBackend
 from multiverse.store import read, write
 from multiverse.tools import spawn
+from isolation import isolate
 
 
 class ToolsTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)

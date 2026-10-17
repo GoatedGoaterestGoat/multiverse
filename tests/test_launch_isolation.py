@@ -22,10 +22,12 @@ from multiverse.cli import parser, run
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write, lock
 from multiverse.tools import runtime_update
+from isolation import isolate
 
 
 class LaunchIsolationTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name).resolve()

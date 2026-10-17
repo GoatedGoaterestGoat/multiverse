@@ -19,10 +19,12 @@ from multiverse import cli
 from multiverse.universe import templates
 from multiverse.universe.mailbox import append_message, inbox
 from multiverse.store import read, write
+from isolation import isolate
 
 
 class LabHarnessContracts(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         temporary = tempfile.TemporaryDirectory(prefix='mv2-offline-')
         self.addCleanup(temporary.cleanup)
         self.work = Path(temporary.name)

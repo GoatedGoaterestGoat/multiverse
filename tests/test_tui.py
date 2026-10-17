@@ -17,6 +17,7 @@ from multiverse.ui.drafts import SubverseDraft
 from multiverse.ui.screens import Details, Form, KEYS
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.columns import COLUMNS
+from isolation import isolate
 
 
 class RecordingBackend(DemoBackend):
@@ -44,6 +45,7 @@ class RecordingBackend(DemoBackend):
 
 class DashboardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        isolate(self)
         self.backend = RecordingBackend()
         self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
         self.review = self.backend.root / "subverses/pr-review"

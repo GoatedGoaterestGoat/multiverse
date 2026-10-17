@@ -15,10 +15,12 @@ from multiverse.ui.tree import agent_key, group_key
 from multiverse.store import read, write
 from multiverse.ui.screens import Form
 from multiverse.ui.app import MultiverseApp
+from isolation import isolate
 
 
 class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory()
         self.work = Path(self.temp.name)
         self.root = templates.create(self.work / ".multiverse", "top", workdir=self.work)

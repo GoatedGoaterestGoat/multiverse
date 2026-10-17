@@ -9,9 +9,13 @@ from multiverse import universe
 from multiverse.universe import catalog
 from multiverse.universe import templates
 from multiverse.store import read, write
+from isolation import isolate
 
 
 class RoleTemplatesTest(unittest.TestCase):
+    def setUp(self):
+        isolate(self)
+
     def test_install_has_fresh_identity_empty_state_and_declarative_adapter(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory).resolve()

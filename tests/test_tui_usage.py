@@ -14,6 +14,7 @@ from multiverse.ui.views import view
 from multiverse.ui.tree import agent_key
 from multiverse.ui.app import MultiverseApp
 from tui_demo import DemoBackend
+from isolation import isolate
 
 
 def reading(tokens=None, window=None, percent=None, cost=None, limits=(), at="2026-09-30T10:00:00Z"):
@@ -27,6 +28,9 @@ def reading(tokens=None, window=None, percent=None, cost=None, limits=(), at="20
 
 
 class UsageDisplayTests(unittest.TestCase):
+    def setUp(self):
+        isolate(self)
+
     def test_context_reads_the_latest_request_never_the_cumulative_total(self):
         self.assertEqual(display.context_display(reading(82000, 200000, 41)), "82k/200k")
         self.assertEqual(display.context_display(reading(820000, 1000000)), "820k/1.0m")
@@ -67,6 +71,7 @@ class UsageDisplayTests(unittest.TestCase):
 
 class UsageDashboardTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        isolate(self)
         self.backend = DemoBackend()
         self.app = MultiverseApp(self.backend.root, self.backend, refresh_interval=0)
 

@@ -11,10 +11,12 @@ from multiverse import cli
 from multiverse.universe import templates
 from multiverse.store import read, write
 from multiverse.tools import refresh
+from isolation import isolate
 
 
 class RefreshTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name).resolve()

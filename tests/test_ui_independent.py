@@ -16,9 +16,13 @@ from multiverse.ui.tree import group_key, agent_key
 from tui_demo import DemoBackend
 from multiverse.ui.app import MultiverseApp
 from multiverse.universe.templates import create
+from isolation import isolate
 
 
 class IndependentPortalTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        isolate(self)
+
     @contextmanager
     def watch_global_actions(self, app):
         with ExitStack() as stack:
