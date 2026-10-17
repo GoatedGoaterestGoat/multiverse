@@ -58,9 +58,9 @@ class TreeEditing:
         if event.key == "escape":
             self.cancel_draft()
         elif event.key == "enter" and self.draft.active == "harness":
+            # Enter creates the agent with the chosen harness; the model is optional, one Tab away.
             if self.draft.values["harness"] in self.draft.harnesses:
-                self.draft.focus("model")
-                self.populate_table()
+                self.commit_draft()
         elif event.key in ("enter", "ctrl+enter"):
             self.commit_draft()
         else:

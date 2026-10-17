@@ -141,7 +141,7 @@ class FleetView:
         if row and row["kind"] == "draft":
             if self.draft.active == "harness":
                 value = clean(self.draft.values["harness"])
-                hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
+                hint = "↑↓ choose · Enter create · Tab model" if self.draft.harnesses else "No harnesses configured in this group"
                 self.update_selection(f"Harness: {value} ▾ · {hint}")
                 return
             label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
