@@ -155,14 +155,14 @@ class RunnerTest(unittest.TestCase):
                 def test_fine(self): pass
             """)
         start = time.monotonic()
-        result = self.run_tests("--timeout", "3")
+        result = self.run_tests("--timeout", "10")  # far past any start-up, however loaded the machine
         self.assertLess(time.monotonic() - start, 60)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("FAIL: test_wrong", result.stdout)
         self.assertIn("the planted failure", result.stdout)
         self.assertIn("the planted import error", result.stdout)
         self.assertIn("test_hangs: 1 tests", result.stdout)
-        self.assertIn("stopped after 3 s", result.stdout)
+        self.assertIn("stopped after 10 s", result.stdout)
         self.assertIn("Stopped: stopped by tests/run.py", result.stdout)
         self.assertTrue(cleaned.exists())  # the hung test still ran its cleanups
         fine = [line for line in result.stdout.splitlines() if "] test_fine: 1 tests in" in line]
@@ -179,10 +179,10 @@ class RunnerTest(unittest.TestCase):
                     time.sleep(600)
             """)
         start = time.monotonic()
-        result = self.run_tests("--timeout", "2", "--grace", "1")
-        self.assertLess(time.monotonic() - start, 30)
+        result = self.run_tests("--timeout", "10", "--grace", "1")
+        self.assertLess(time.monotonic() - start, 40)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("killed after 2 s, its cleanups not done in 1 s", result.stdout)
+        self.assertIn("killed after 10 s, its cleanups not done in 1 s", result.stdout)
         self.assertEqual(result.stdout.splitlines()[-1], "FAILED (units without a result=1)")
 
     def test_a_write_under_a_guarded_home_fails_its_unit_even_when_the_code_swallows_the_refusal(self):
@@ -288,25 +288,33 @@ class RunnerTest(unittest.TestCase):
             time.sleep(0.05)
         return path.exists()
 
+    def stopped_once(self, started, *args):
+        """Run the runner until a test writes `started`, then press Ctrl-C; return its exit status and output."""
+        runner = subprocess.Popen(self.command(*args), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: runner.poll() is None and runner.kill())
+        self.assertTrue(self.wait_for(started))
+        runner.send_signal(signal.SIGINT)
+        output = runner.communicate(timeout=60)[0]
+        return runner.returncode, output
+
     def test_a_stop_is_not_swallowed_by_a_broad_except_and_cleanups_still_run(self):
-        cleaned = self.work / "cleaned"
+        started, cleaned = self.work / "started", self.work / "cleaned"
         self.module("test_swallows", f"""
             import time, unittest
             from pathlib import Path
             class Swallows(unittest.TestCase):
                 def test_retries_whatever_goes_wrong(self):
                     self.addCleanup(Path({str(cleaned)!r}).write_text, "cleaned")
+                    Path({str(started)!r}).write_text("started")
                     while True:
                         try:
                             time.sleep(600)
                         except Exception:
                             pass
             """)
-        result = self.run_tests("--timeout", "2", "--grace", "5")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("stopped after 2 s", result.stdout)
-        self.assertIn("Stopped: stopped by tests/run.py", result.stdout)
-        self.assertTrue(cleaned.exists())
+        code, output = self.stopped_once(started, "--grace", "20")
+        self.assertEqual(code, 130, output)
+        self.assertTrue(cleaned.exists(), output)  # swallowed, it would have been killed after 20 s, uncleaned
 
     def test_a_stop_during_a_cleanup_lets_that_cleanup_finish(self):
         cleaning, cleaned = self.work / "cleaning", self.work / "cleaned"
@@ -348,11 +356,10 @@ class RunnerTest(unittest.TestCase):
                     time.sleep(600)
             """)
         self.addCleanup(subprocess.run, ["tmux", "-S", str(socket), "kill-server"], capture_output=True)
-        result = self.run_tests("--timeout", "2", "--grace", "1")
+        code, output = self.stopped_once(started, "--grace", "1")  # its cleanups never run: it ignores the stop
         daemon = int(started.read_text())
         self.addCleanup(self.kill_if_running, daemon)
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("killed after 2 s", result.stdout)
+        self.assertEqual(code, 130, output)
         tmux = subprocess.run(["tmux", "-S", str(socket), "list-sessions"], capture_output=True)
         self.assertNotEqual(tmux.returncode, 0)  # the server is gone
         deadline = time.monotonic() + 10
@@ -407,12 +414,20 @@ class RunnerTest(unittest.TestCase):
         run = subprocess.Popen(self.command("--budget", "1"), text=True, stdout=subprocess.PIPE,
                                stderr=subprocess.STDOUT)
         self.addCleanup(lambda: run.poll() is None and run.kill())
-        time.sleep(1.5)
-        self.assertFalse(log.exists())  # nothing has started
+        lines = []
+        reader = threading.Thread(target=lambda: lines.extend(run.stdout), daemon=True)
+        reader.start()
+        waiting = "Waiting for a slot: other runs of the suite are using some of this machine's 1.\n"
+        deadline = time.monotonic() + 30
+        while waiting not in lines and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertIn(waiting, lines)
+        self.assertFalse(log.exists())  # nothing has started while the slot is held
         held.close()
-        output = run.communicate(timeout=60)[0]
-        self.assertEqual(run.returncode, 0, output)
-        self.assertIn("Waiting for a slot: other runs of the suite are using some of this machine's 1.", output)
+        run.wait(timeout=60)
+        reader.join(timeout=30)
+        run.stdout.close()
+        self.assertEqual(run.returncode, 0, "".join(lines))
         self.assertEqual(len(self.intervals(log)), 2)
 
     def test_a_slots_directory_others_could_change_is_refused(self):
@@ -460,19 +475,19 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(discovered.stderr.splitlines()[-1], "FAILED (errors=1, skipped=1)")
 
     def test_a_stopped_async_test_still_runs_its_cleanups(self):
-        cleaned = self.work / "cleaned"
+        started, cleaned = self.work / "started", self.work / "cleaned"
         self.module("test_async_waits", f"""
             import asyncio, unittest
             from pathlib import Path
             class AsyncWaits(unittest.IsolatedAsyncioTestCase):
                 async def test_awaits(self):
                     self.addCleanup(Path({str(cleaned)!r}).write_text, "cleaned")
+                    Path({str(started)!r}).write_text("started")
                     await asyncio.sleep(600)
             """)
-        result = self.run_tests("--timeout", "3")
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn("stopped after 3 s", result.stdout)
-        self.assertTrue(cleaned.exists(), result.stdout)
+        code, output = self.stopped_once(started, "--grace", "20")
+        self.assertEqual(code, 130, output)
+        self.assertTrue(cleaned.exists(), output)
 
     def test_ending_what_a_unit_tracked_spares_reused_pids_zombies_and_damaged_lines(self):
         sys.path.insert(0, str(RUNNER.parent))
