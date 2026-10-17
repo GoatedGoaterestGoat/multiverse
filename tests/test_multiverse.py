@@ -15,6 +15,7 @@ from unittest.mock import patch
 
 from native_safety import install as install_native_safety
 install_native_safety()
+from isolation import isolate
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -50,6 +51,7 @@ def until(predicate, seconds=15):
 
 class BaseTest(unittest.TestCase):
     def setUp(self):
+        isolate(self)
         self.temp = tempfile.TemporaryDirectory(prefix="mv2-test-", dir="/tmp")
         self.addCleanup(self.temp.cleanup)
         self.work = Path(self.temp.name).resolve()
