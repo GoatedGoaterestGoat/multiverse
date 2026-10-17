@@ -36,6 +36,7 @@
   "unset_env": [
     "CODEX_THREAD_ID",
     "CLAUDECODE",
+    "CLAUDE_CODE_CHILD_SESSION",
     "NO_COLOR"
   ],
   "docs": "https://code.claude.com/docs/en/cli-reference"

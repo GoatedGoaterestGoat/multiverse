@@ -473,6 +473,21 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(flags(resumed.argv), [('--system-prompt-snapshot', 'off')])
         self.assertEqual(list(resumed.argv).count('--append-system-prompt'), 2)
 
+    def test_an_inherited_child_session_marker_never_reaches_the_agent(self):
+        # Claude Code (2.1.301+) saves no transcript when it inherits CLAUDE_CODE_CHILD_SESSION=1, the marker
+        # it sets for its own tool subprocesses; a tmux server first started from one passes it to every pane.
+        from multiverse.runtime import runner
+        for setting in (None, True, False):
+            for mode in ('spawn', 'resume'):
+                with self.subTest(setting=setting, mode=mode):
+                    command, _ = self.launch(setting, (2, 1, 302), mode)
+                    self.assertIn('CLAUDE_CODE_CHILD_SESSION', command.unset_env)
+                    inherited = {'CLAUDE_CODE_CHILD_SESSION': '1', 'PATH': '/usr/bin'}
+                    with patch.dict(os.environ, inherited):
+                        env = runner.launch_environment({'unset_env': list(command.unset_env),
+                                                         'env': {**command.environment, 'MV2_CLI': '/mv2/bin/mv2'}})
+                    self.assertNotIn('CLAUDE_CODE_CHILD_SESSION', env)
+
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):
             for mode in ('spawn', 'resume'):
