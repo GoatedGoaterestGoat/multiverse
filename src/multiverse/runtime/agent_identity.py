@@ -59,6 +59,34 @@ class AgentActor:
         return {'agent_id': self.identity, 'universe': str(self.root), 'name': self.name}
 
 
+def calling_socket(environment=None):
+    """Resolve an agent's current terminal server without trusting cached native socket values."""
+    env = os.environ if environment is None else environment
+    caller = actor(env)
+    if caller is not None:
+        directory = caller.directory
+    elif env.get('MV2_AGENT_ID'):
+        if not env.get('MV2_UNIVERSE') or not env.get('MV2_LAUNCH_ID'):
+            raise ValueError('Calling agent identity is incomplete; cannot select its tmux server')
+        root = Path(env['MV2_UNIVERSE']).resolve()
+        identity = normalize_session_id(env['MV2_AGENT_ID'])
+        directory = root / 'state' / 'agents' / identity
+        properties = read(directory / 'properties.json')
+        if (properties.get('id') != identity or properties.get('universe_id') != read(root / 'universe.json')['id']
+                or (env.get('MV2_AGENT_DIR') and Path(env['MV2_AGENT_DIR']).resolve() != directory.resolve())):
+            raise ValueError('Calling agent identity does not match its saved record')
+    else:
+        return env.get('MV2_TMUX_SOCKET')
+    facts = read(directory / 'runtime.json')
+    if caller is None and facts.get('launch_id') != env['MV2_LAUNCH_ID']:
+        raise ValueError('Outdated launch; cannot select the calling agent\'s tmux server')
+    terminal = facts.get('tmux')
+    socket = terminal.get('socket') if isinstance(terminal, dict) else None
+    if not isinstance(socket, str) or not socket or '\0' in socket:
+        raise ValueError('Calling agent has no recorded tmux server')
+    return socket
+
+
 def actor(environment=None):
     """Validate explicit stable mode. Old launch contexts are never adopted.
 

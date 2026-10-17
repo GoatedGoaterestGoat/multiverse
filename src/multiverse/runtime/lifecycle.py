@@ -98,6 +98,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         raise ValueError('A resume prompt requires an exact saved agent')
     if _recovery and (not resume or resume_prompt is not None or resume_message_id is not None):
         raise ValueError('Automatic recovery requires an exact resume without a prompt')
+    socket_path = (_recovery['terminal']['socket'] if _recovery else
+                   socket_path if socket_path is not None else agent_identity.calling_socket())
     agent_dir, properties, harness, model = _record(root, name, task, harness, model, resume)
     universe.slug(harness)
     harness_dir = root / "harnesses" / harness
@@ -232,7 +234,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
               _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
-        backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
+        backend = Tmux(socket_path)
         terminal = None
         progress = None
         service_directory_created = False
