@@ -1,0 +1,196 @@
+# Troubleshooting
+
+Each problem below gives the symptom, the cause and the fix. If you don't know the cause yet, start with the two commands in the next section.
+
+## Start here
+
+```sh
+mv2 doctor
+mv2 inspect NAME
+```
+
+`doctor` checks the universe and every subverse below it. It covers workspaces, catalog entries, plugins and their settings, and every agent's last launch. It prints `No problems.` or one sentence per problem, such as `1 problem: worker's last launch failed: ...`. It exits non-zero when it finds a problem.
+
+`inspect` shows one agent's key facts, then the last 30 lines of its terminal (`--lines N` for more):
+
+```text
+worker · Codex, bridge · waiting
+Reported: working — Checking the launch permissions
+
+Terminal (last 30 lines):
+...
+```
+
+The first line gives the name, the harness and its mode, and the state. The mode is `bridge` for a live connection and `plain` for launch-only. When present, `Last error:` gives the launch error, and `Note:` gives the reason for a plain fallback. `mv2 list --wide` shows every agent with its full errors. `mv2 capabilities --agent NAME` says why each operation is or isn't available.
+
+## Launches
+
+### A spawn or resume failed
+
+`spawn` or `resume` prints `mv2: NAME did not start: REASON` (or `did not resume`). `mv2 list` shows `! REASON` under the agent. Without `--wait`, `spawn` returns once the launch is registered. A program that exits during startup therefore shows up in `mv2 list` a few seconds later.
+
+| Reason starts with | Cause | Fix |
+| --- | --- | --- |
+| `Native process exited with code N` | The program quit; the last lines of its terminal follow | Read them in `mv2 inspect NAME`. The cause is often a login, trust or flag problem, so run the program once by hand |
+| `Timed out after 60s waiting for launch readiness` | `--wait` gave up; the launch is still running | Run `mv2 inspect NAME`, and attach to answer a login or trust prompt |
+| `Harness executable not found` | The program isn't on `PATH` | Install it, or set `executable` in `harness.json` |
+| `Workspace does not exist` | The universe's workspace or the agent's saved one is gone | Restore the directory |
+| `tmux is required to spawn agents`, `error connecting to` | tmux is missing or its socket is unusable | See [tmux problems](#tmux-socket-or-permission-problems) |
+
+If `mv2 list` shows the failed agent, mv2 has kept its record and its name. After fixing the cause, retry it:
+
+| Harness | Retry |
+| --- | --- |
+| Claude | `mv2 resume NAME`. An agent that never got its first message starts fresh under the same session ID. |
+| Codex | `mv2 resume NAME` if it recorded a session. If resume says `No native session ID recorded`, see below. |
+| Pi | `mv2 resume NAME` if its session file exists; otherwise remove it and spawn again. |
+
+To start over under the same name, run `mv2 remove NAME` and then spawn again. `remove` moves the failed record to the trash. If you use a custom tmux socket, set the same `MV2_TMUX_SOCKET` for every retry.
+
+### Resume says "No native session ID recorded"
+
+A launch-only Codex agent records its session by running `mv2 session-bind` at startup, and this one never did. mv2 never guesses a session from Codex's history. If Codex did start a session, find its ID with `/status` in that Codex session or in its exit message. Then bind it and resume:
+
+```sh
+mv2 session-bind --agent NAME --session-id UUID
+mv2 resume NAME
+```
+
+If no session ever started, remove the agent and spawn again.
+
+### The bootstrap is stale after a refresh
+
+`mv2 refresh --apply` prints `running agents keep their old bootstrap until relaunched`. This is because each launch copies `bootstrap.md` when it starts. The same holds for `harness.json`, plugins turned on or off, and new mv2 code after `mv2 update`. Relaunch the agent to pick up the changes, which keeps its conversation:
+
+```sh
+mv2 kill NAME
+mv2 resume NAME
+```
+
+## Agent state
+
+### An agent shows unknown or dormant
+
+| Shows | Cause | Fix |
+| --- | --- | --- |
+| LIVE `dormant` | No tmux pane: the program exited, it was killed, or the tmux server stopped, for example after a reboot | `mv2 resume NAME`, or send it a message, which resumes it |
+| LIVE `stopped` | The program exited and its pane was kept, usually with a startup error | `mv2 inspect NAME`, then fix and resume |
+| LIVE `unknown` | mv2 couldn't ask tmux; `mv2 doctor` says `state is unknown: REASON` | Fix tmux access (below). Until then mv2 refuses to kill or relaunch it |
+| STATUS `unknown` on a live agent | Launch-only (`plain`), or the live connection hasn't reported yet | This is expected when launch-only. `mv2 inspect NAME` shows the mode |
+
+### "Outdated launch"
+
+`report`, `inbox` and `session-bind` print `mv2: Outdated launch` when they run with the `MV2_AGENT_ID` and `MV2_LAUNCH_ID` of an earlier launch of that agent. The command came from one of these:
+
+- A shell or background job left over from before the agent was resumed.
+- A terminal that copied an agent's environment.
+
+mv2 refuses so that an old process can't act as the current one.
+
+Run the command from the agent's current session instead. To run it yourself, clear those variables and name the agent:
+
+```sh
+env -u MV2_AGENT_ID -u MV2_LAUNCH_ID mv2 inbox --agent NAME --peek
+```
+
+`Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.
+
+### A name is taken or ambiguous
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `This universe already has an agent named NAME` | Names are unique in a universe, including stopped, dormant and failed agents | `mv2 resume NAME`, choose another name, or `mv2 remove NAME` first |
+| `Expected one agent matching 'REF'; found 2. Use a full UUID from these matches: ...` | A reference matches a name, a full ID or the start of an ID, so a short hex name can match another agent's ID | Use one of the full UUIDs listed |
+| `No agent named NAME here` | The agent is in another universe or subverse | Run `mv2 list --recursive`, then use `-u PATH` for that universe |
+
+## Messages
+
+### A message shows uncertain or failed
+
+Every message is saved before delivery, so nothing is lost. What to do depends on the result line, and [messaging](../cli/messaging.md#read-the-result) lists all of them:
+
+| Result | Fix |
+| --- | --- |
+| `NAME: cannot yet tell whether it received the message.` | `mv2 deliver NAME --check`. It asks the session and records what arrived, without sending anything. Don't resend by hand, because the agent may already have it. |
+| `NAME: message accepted; no confirmation yet. Do not resend.` | Nothing is needed. Check again later with `--check` if you need the confirmation. |
+| `Not delivered to NAME: REASON. Saved; resume it, then mv2 deliver NAME --retry.` | Fix the reason, then `mv2 deliver NAME --retry`. It resends only definite failures. If the agent is stopped, `--retry` resumes it with the message as its first prompt. |
+
+`deliver` exits non-zero while something is still failed or uncertain.
+
+### A launch-only agent can't receive messages
+
+`send` prints `Not delivered to NAME: ...` with a reason such as `messaging is not connected for this session`. Codex says `the session is still starting` instead. `mv2 inspect NAME` shows `plain`. A plain launch has no channel into the running program (see [harnesses](harnesses.md#live-connection-or-launch-only)). Choose one of these:
+
+- Send with `--delivery inbox-only`. The agent reads the message with `mv2 inbox` at its next check.
+- Attach with `mv2 attach NAME` and type to it.
+- Relaunch it with a live connection. Fix the cause in `mv2 inspect`'s `Note:` line, or set `inbox_bridge`. Then run `mv2 kill NAME` and `mv2 deliver NAME --retry`. The retry resumes the agent with the saved message.
+
+## Harnesses
+
+### Claude starts launch-only (`plain`)
+
+`spawn` prints `Started NAME (Claude, plain).` Find the reason on `mv2 inspect NAME`'s `Note:` line, or in `mv2 capabilities --agent NAME` as `Launched without the bridge: REASON`. It is recorded in the agent's `runtime.json` as `native_mode.fallback_reason`.
+
+| Reason | Fix |
+| --- | --- |
+| `Claude Code X is older than Y, which the multiverse mod needs` | Update Claude Code, then kill and resume the agent. With `"inbox_bridge": true` the launch fails instead. |
+| No reason, and the dashboard inspector shows `Mode: plain (plain)` | `harness.json` sets `"inbox_bridge": false`. Remove it, then kill and resume. |
+| `Launched without compaction: ...` | This is not launch-only. The connection works, but the compaction plugin's settings are unusable. `mv2 doctor` names the problem, so fix it and relaunch. |
+| `No saved Claude conversation for this session; started it fresh under the same session ID` | This is not launch-only. The agent was stopped before its first message, so there was nothing to resume. |
+
+Sometimes a connected launch never becomes ready: `--wait` times out, and sends report `messaging is not connected for this session`. The launch may be waiting at a Claude login or workspace trust prompt. Attach and answer it.
+
+### Codex shows `STATUS disconnected`
+
+The agent's Codex terminal lost its connection to the shared app-server while the process kept running. New messages are refused, but saved.
+
+If the session was idle, mv2 reconnects it in the same pane, at most twice in five minutes. Idle means it had no turn, prompt, queued message or background terminal. `mv2 list` then shows `Note: Reconnected automatically.`, and `doctor` prints `Note: NAME reconnected automatically.`
+
+Otherwise, it stays disconnected, and `mv2 inspect NAME` shows the reason. One example is `Native relay lost. Kill then resume the agent; native work may still be running.` To recover, run:
+
+```sh
+mv2 kill NAME
+mv2 resume NAME
+mv2 deliver NAME --retry
+```
+
+If the reason says `Kill this unbound launch and spawn again.`, the launch never recorded a session. Kill it, remove it and spawn again. mv2 never restarts the shared daemon. It also never replays a message that may have arrived.
+
+### Codex: "failed to resolve feature override precedence"
+
+A launch error or `Note:` reads `Cannot isolate shared native session environment: ... failed to resolve feature override precedence: No such file or directory`. The shared Codex daemon was started from a directory that has since been deleted, such as a removed worktree. With `inbox_bridge` unset, the agent runs plain. With `true`, the launch fails.
+
+The message ends with a restart command for your Codex home, like `cd /home/me && CODEX_HOME=/home/me/.codex codex app-server daemon restart`. Restarting interrupts every Codex session on that daemon. Run the command exactly as printed, and only when no other Codex work is running. Then resume the agent, killing it first if it is running plain. mv2 never restarts the daemon itself.
+
+## Environment
+
+### tmux socket or permission problems
+
+mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socket in `MV2_TMUX_SOCKET`. `spawn` and `resume` read the variable from your environment, so set it the same way each time. Each agent remembers its socket, and mv2 always observes the agent there. Agents get their own server's socket, so the agents they start land on the same server.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |
+| `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET` |
+| `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -L multiverse-v2 ls` |
+
+### The dashboard doesn't show your agents
+
+- **It opened another universe.** `mv2` uses `-u PATH`, then `MV2_UNIVERSE`, then the nearest `.multiverse` at or above the current directory. Inside an agent's terminal, `MV2_UNIVERSE` points at that agent's universe. Run `mv2 -u PATH`.
+- **It made a new, empty universe.** Running `mv2` with no command, in a directory with no universe above it, creates one there. Open the right one with `mv2 -u PATH`. Delete the stray `.multiverse` if you don't want it.
+- **It opened a subverse.** Opened at a subverse, the dashboard shows that subverse and the ones below it, but never its parent. Open the root universe instead.
+- **It shows an error row.** An agent whose record can't be read shows `unknown`, and `mv2 doctor` names the problem.
+
+The dashboard refreshes every 1.5 seconds, and F5 refreshes it at once. `mv2 list --recursive` shows the same agents.
+
+### `mv2 update` refuses
+
+`mv2 update` prints `mv2 was not fully updated: REASON`. `mv2 update --check` shows the same refusal without changing anything.
+
+| Reason | Fix |
+| --- | --- |
+| `The mv2 checkout has uncommitted changes to tracked files; commit them before updating.` | Commit or stash your changes in the mv2 checkout, then update. Untracked files don't count. |
+| `... has diverged from ...`, `... is ahead of ...` | Your branch has its own commits. Push or rebase them, then update. |
+| `... has no upstream` or `no current branch (detached HEAD)` | Check out a branch that tracks a remote. |
+
+After an update, running agents and the dashboard keep the old code until you relaunch them.
