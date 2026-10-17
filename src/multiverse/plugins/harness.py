@@ -136,6 +136,12 @@ def _unusable(root, family):
     one counts when it extends `launch` or ships something for that harness), None for the rest."""
     found = {}
     for entry in loader.entries(root):
+        if entry.on and entry.state == "on" and entry.manifest is not None and loader.loading(entry):
+            # Still loading after what this launch waits (a plugin that hung before is waited for briefly).
+            contributes = entry.manifest.harnesses.get(family) or "launch" in entry.manifest.extends
+            found[entry.name] = (entry.manifest.version, "it is still loading: its import or register() has not "
+                                 "finished") if contributes else None
+            continue
         if not entry.on or entry.state not in ("unusable", "failed") or entry.manifest is None:
             continue
         if entry.state == "unusable":

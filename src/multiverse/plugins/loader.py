@@ -537,6 +537,8 @@ def load(found, off=False, wait=None):
     files = _files(directory) if isinstance(known, Failed) else None
     if isinstance(known, Failed) and known.files == files:
         raise PluginError(known.problem)
+    if wait is None and _known_slow(found):
+        wait = KNOWN_SLOW_WAIT  # it hung before with these files: whoever needs it now is not held up again
     done, started = _start_loading(found, directory, files)
     if not done.wait(LOAD_SECONDS + 1 if wait is None else max(0.0, started + wait - time.monotonic())):
         raise StillLoading(f"{found.name} is still loading")
@@ -577,15 +579,35 @@ def _start_loading(found, directory, files):
 
 
 def _load(found, directory):
+    """Import and register a plugin in a thread of its own, waiting LOAD_SECONDS for it.
+
+    A load past the limit is failed for now, not for good: its thread goes on, and what it ends with lands when
+    it ends (a slow cold import on a slow disk is loaded then; an error replaces the timeout). A hang is also
+    remembered against the plugin's files (LOAD_TIMEOUTS), so the next process does not wait the limit again."""
     from . import api  # the API imports this module
     package = _package_name(found)
     registrations = Registrations()
     _keep_bytecode_out(directory)
-    result, done, gate, abandoned = {}, threading.Event(), threading.Lock(), []
+    outcome, done, gate, late = {}, threading.Event(), threading.Lock(), []
 
     def forget_modules():
         for name in [name for name in sys.modules if name == package or name.startswith(package + ".")]:
             del sys.modules[name]  # tried again from scratch once its files change
+
+    def land(loaded=None, error=None):
+        """Keep what a load ended with."""
+        if error is not None:
+            forget_modules()
+            problem = f"{found.name} failed to load: {_describe(error)}"
+            with _lock:
+                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                _changed()
+            return problem
+        with _lock:
+            _loaded[directory] = loaded
+            _changed()
+        _remember_slow(directory, None)
+        return None
 
     def run():
         try:
@@ -597,34 +619,74 @@ def _load(found, directory):
                 raise PluginError(f"{found.manifest.module} has no register(mv) function")
             if register is not None:
                 register(api.Plugin(loaded))
-            result["loaded"] = loaded
+            outcome["loaded"] = loaded
         except BaseException as error:  # SystemExit included: a plugin never ends the process by failing to load
-            result["error"] = error
+            outcome["error"] = error
         finally:
             with gate:
                 done.set()
-                if abandoned:  # too late: the caller went on without it
-                    forget_modules()
+                if late:  # the caller went on without it: what it ended with lands now
+                    land(outcome.get("loaded"), outcome.get("error"))
 
     threading.Thread(target=run, name=f"plugin {found.name}: load", daemon=True).start()
     finished = done.wait(LOAD_SECONDS)
     with gate:
         if not finished and not done.is_set():
-            abandoned.append(True)
-            result = {"error": TimeoutError(f"took longer than {LOAD_SECONDS:g} s to load")}
-    if "error" in result:
-        error = result["error"]
-        problem = f"{found.name} failed to load: {_describe(error)}"
-        if not abandoned:
-            forget_modules()
-        with _lock:
-            _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
-            _changed()
-        raise PluginError(problem) from error
-    with _lock:
-        _loaded[directory] = result["loaded"]
-        _changed()
-    return result["loaded"]
+            late.append(True)
+            error = TimeoutError(f"took longer than {LOAD_SECONDS:g} s to load")
+            problem = f"{found.name} failed to load: {_describe(error)}"
+            with _lock:
+                _loaded[directory] = Failed(found.manifest, found.source, problem, _files(directory))
+                _changed()
+            _remember_slow(directory, _files(directory))
+            raise PluginError(problem) from error
+    if "error" in outcome:
+        raise PluginError(land(error=outcome["error"])) from outcome["error"]
+    land(outcome["loaded"])
+    return outcome["loaded"]
+
+
+LOAD_TIMEOUTS = "plugin-load-timeouts.json"  # in ~/.multiverse: plugins whose load ran past LOAD_SECONDS
+KNOWN_SLOW_WAIT = 0.5  # seconds a caller that would wait in full waits for a plugin that hung before
+
+
+def _digest(files):
+    return hashlib.sha256(repr(files).encode()).hexdigest()
+
+
+def _remember_slow(directory, files):
+    """Record (files given) or forget (None) that this plugin's load ran past the limit. Never raises."""
+    from ..store import lock, read, write
+    path = trust.user_directory() / LOAD_TIMEOUTS
+    try:
+        if files is None and not path.is_file():
+            return
+        with lock(path.with_name(f".{LOAD_TIMEOUTS}.lock")):
+            try:
+                plugins = read(path).get("plugins") or {}
+            except (OSError, ValueError, AttributeError):
+                plugins = {}
+            if files is None:
+                if str(directory) not in plugins:
+                    return
+                plugins.pop(str(directory), None)
+            else:
+                plugins[str(directory)] = {"files": _digest(files), "at": now()}
+            write(path, {"schema": 1, "plugins": plugins})
+    except (OSError, ValueError):
+        pass
+
+
+def _known_slow(found):
+    """Whether this plugin's load ran past the limit before, with these same files."""
+    from ..store import read
+    try:
+        recorded = (read(trust.user_directory() / LOAD_TIMEOUTS).get("plugins") or {})
+    except (OSError, ValueError, AttributeError):
+        return False
+    directory = Path(found.manifest.directory).resolve()
+    item = recorded.get(str(directory))
+    return isinstance(item, dict) and item.get("files") == _digest(_files(directory))
 
 
 def _keep_bytecode_out(directory):

@@ -48,6 +48,9 @@ TIMEOUTS_PER_EVENT = 3  # a handler out of time on one event this many times is 
 READ_LIMIT = 500  # events one journal read returns
 PAGES_PER_POLL = 4  # reads one poll may make, so handlers ahead of a stuck one keep going
 ABANDONED_PER_WORKER = 2  # calls left running past their deadline before the worker restarts itself
+HUNG_EXIT = 75  # a worker's exit code when it restarts itself for calls that never returned
+HUNG_RESTARTS = 3  # such restarts, however far apart, before the plugin is left stopped
+HANDLERS = "handlers.json"  # state/plugins/NAME/, next to the cursor: what each handler finished, in that journal
 DELIVERY = "delivery.json"  # state/plugins/NAME/: recent give-ups, which mv2 plugins and doctor show
 GIVE_UPS_SHOWN = 24 * 3600  # seconds a give-up stays in mv2 plugins and doctor
 NEEDS = frozenset({"events", "service"})
@@ -120,7 +123,7 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
         stopping = threading.Event()
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(signum, lambda *_: stopping.set())
-    workers, restarts, stopped = {}, {}, {}
+    workers, restarts, stopped, hung = {}, {}, {}, {}
     started, pruned = now(), 0.0
     _log(root, f"host started (pid {os.getpid()})")
     beating = threading.Event()
@@ -139,23 +142,19 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
             for name in list(stopped):
                 if name not in wanted:
                     del stopped[name]  # turning it off and on again gives it a fresh start
+                    hung.pop(name, None)
             for name in wanted:
                 process = workers.get(name)
-                if process is not None and process.poll() is None:
+                if process is not None and not _exited(process):
                     continue
                 if process is not None:
-                    _log(root, f"{name}: worker exited with {process.returncode}")
-                    recent = [moment for moment in restarts.get(name, []) if time.monotonic() - moment < RESTART_WINDOW]
-                    if len(recent) >= RESTARTS:
-                        stopped[name] = f"its worker exited {len(recent) + 1} times in 5 minutes; left stopped"
+                    _reap(process)  # with whatever its stuck calls left running in its process group
+                    if not _may_restart(root, name, process.returncode, restarts, hung, stopped):
                         del workers[name]
-                        _log(root, f"{name}: {stopped[name]}")
                         continue
-                    restarts[name] = [*recent, time.monotonic()]
                 if name in stopped:
                     continue
-                workers[name] = subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker",
-                                                  str(root), name], stdin=subprocess.DEVNULL)
+                workers[name] = _start_worker(root, name)
             _write_status(root, started, workers, restarts, stopped)
             if time.monotonic() - pruned >= PRUNE_SECONDS:
                 pruned = time.monotonic()
@@ -176,14 +175,67 @@ def supervise(root, *, exit_when_idle=True, stopping=None):
     return 0
 
 
-def _stop_worker(process):
-    if process.poll() is None:
-        process.terminate()
+def _start_worker(root, name):
+    """A plugin's worker, in a process group of its own: what its calls start (a hung subprocess.run) goes with
+    it when it ends."""
+    return subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker", str(root), name],
+                            stdin=subprocess.DEVNULL, start_new_session=True)
+
+
+def _exited(process):
+    """Whether a worker has ended, without reaping it: until it is reaped its pid, and so its process group's id,
+    cannot be another process's, so _reap can kill what it left in that group."""
+    if process.returncode is not None:
+        return True
+    try:
+        return os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        return process.poll() is not None
+
+
+def _reap(process):
+    """Kill what is left in an ended (or ending) worker's process group, then reap the worker."""
+    if process.returncode is None:
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait()
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    process.wait()
+
+
+def _stop_worker(process):
+    """Ask a worker to stop (SIGTERM, then 10 s), then end its process group and reap it."""
+    if not _exited(process):
+        process.terminate()
+        deadline = time.monotonic() + 10
+        while not _exited(process) and time.monotonic() < deadline:
+            time.sleep(0.05)
+    _reap(process)
+
+
+def _may_restart(root, name, code, restarts, hung, stopped):
+    """Whether a worker that exited with `code` is started again; when not, `stopped[name]` says why.
+
+    An ordinary exit is restarted RESTARTS times in RESTART_WINDOW. A worker that restarted itself for handler
+    calls that never returned (HUNG_EXIT) is counted however far apart that happens: one such run can take
+    longer than the window, and a plugin that keeps hanging must still end up stopped, and shown so."""
+    _log(root, f"{name}: worker exited with {code}")
+    if code == HUNG_EXIT:
+        hung[name] = hung.get(name, 0) + 1
+        if hung[name] > HUNG_RESTARTS:
+            stopped[name] = (f"its handlers kept hanging: its worker restarted {HUNG_RESTARTS} times for handler "
+                             "calls that never returned; left stopped (fix the plugin, then turn it off and on, or "
+                             "restart the host)")
+            _log(root, f"{name}: {stopped[name]}")
+            return False
+        return True
+    recent = [moment for moment in restarts.get(name, []) if time.monotonic() - moment < RESTART_WINDOW]
+    if len(recent) >= RESTARTS:
+        stopped[name] = f"its worker exited {len(recent) + 1} times in 5 minutes; left stopped"
+        _log(root, f"{name}: {stopped[name]}")
+        return False
+    restarts[name] = [*recent, time.monotonic()]
+    return True
 
 
 def _status_lock(root):
@@ -199,7 +251,7 @@ def _write_status(root, started, workers, restarts, stopped, state="running"):
             write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
                          "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
                          "workers": {name: {"pid": process.pid,
-                                            "state": "running" if process.poll() is None else "exited",
+                                            "state": "exited" if _exited(process) else "running",
                                             "restarts": len(restarts.get(name, []))}
                                      for name, process in workers.items()},
                          "stopped": stopped})
@@ -349,7 +401,7 @@ def work(root, name):
     failed = threading.Event()
     services = _Services(loaded, mv, root, name, failed)
     services.start(scopes)
-    refreshed = 0.0
+    refreshed, hung_calls = 0.0, False
     try:
         while not stopping.is_set() and not failed.is_set():
             if os.getppid() != supervisor:
@@ -373,13 +425,14 @@ def work(root, name):
                     # Calls that never returned hold threads: a fresh worker has none (the supervisor starts it
                     # again, at most RESTARTS times in RESTART_WINDOW). Their events are given up on already.
                     _log(root, f"{name}: {len(_abandoned)} handler calls never returned; restarting its worker")
+                    hung_calls = True
                     failed.set()
                     break
             stopping.wait(WORKER_POLL_SECONDS)
     finally:
         stopping.set()
         services.stop()
-    return 1 if failed.is_set() else 0
+    return HUNG_EXIT if hung_calls else 1 if failed.is_set() else 0
 
 
 class _Services:
@@ -439,7 +492,9 @@ def _deliver(loaded, mv, scope, name):
     after = _read_cursor(scope, name)
     universe = mv.universe(scope)
     journal, place = events.journal_id(scope), (loaded.name, str(scope))
-    if _journals.get(place) not in (None, journal):
+    if place not in _journals:
+        _restore_progress(loaded, scope, name, journal)  # a fresh worker: what its handlers finished before
+    elif _journals[place] not in (None, journal):
         # The journal started again (its state was removed): nothing in it was seen. Told by its id, never by
         # what one read returns, which a sibling far ahead of a stuck handler is always past.
         for table in (_finished, _timeouts):
@@ -447,6 +502,7 @@ def _deliver(loaded, mv, scope, name):
                 del table[key]
     _journals[place] = journal
     held, complete, page_after = set(), True, after  # held: handlers that have not finished an earlier event
+    handlers = range(len(loaded.registrations.handlers))
     for page in range(PAGES_PER_POLL):
         found, gap = events.read(scope, page_after, limit=READ_LIMIT)
         if page == 0 and gap is not None:
@@ -458,15 +514,66 @@ def _deliver(loaded, mv, scope, name):
                 complete = False
             elif complete:
                 _write_cursor(scope, name, event["seq"])
-        page_after = found[-1]["seq"]
-        if len(found) < READ_LIMIT:
+        free = [index for index in handlers if index not in held]
+        if not free:
+            break  # every handler waits on an earlier event: nothing more to do this poll
+        # The next read starts where the least advanced handler that is not held is: a stuck handler holds the
+        # cursor on disk, never its siblings, however far ahead of it they are.
+        page_after = max(found[-1]["seq"],
+                         min(_finished.get((loaded.name, str(scope), index), -1) for index in free))
+        if len(found) < READ_LIMIT and page_after <= found[-1]["seq"]:
             break
+    _save_progress(loaded, scope, name, journal)
+
+
+def _handler_id(index, pattern, handler):
+    """How a handler is known in handlers.json, across worker restarts: its place, pattern and function."""
+    return f"{index} {pattern} {getattr(handler, '__qualname__', type(handler).__name__)}"
+
+
+def _restore_progress(loaded, scope, name, journal):
+    """What each handler finished in this journal, from handlers.json, into _finished. A different journal, a
+    handler no longer there, or an unreadable file restores nothing: those events come again (at least once)."""
+    if journal is None:
+        return
+    try:
+        recorded = json.loads((Path(scope) / "state" / "plugins" / name / HANDLERS).read_text())
+    except (OSError, ValueError):
+        return
+    if not isinstance(recorded, dict) or recorded.get("journal") != journal:
+        return
+    finished = recorded.get("finished") if isinstance(recorded.get("finished"), dict) else {}
+    for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
+        seq = finished.get(_handler_id(index, pattern, handler))
+        if isinstance(seq, int) and not isinstance(seq, bool):
+            key = (loaded.name, str(scope), index)
+            _finished[key] = max(_finished.get(key, -1), seq)
+    _saved[(loaded.name, str(scope))] = (journal, finished)
+
+
+def _save_progress(loaded, scope, name, journal):
+    """Keep what each handler finished next to the cursor, when it changed, so a fresh worker (after a restart)
+    never gives a handler an event it finished. Never recreates a removed universe; never raises."""
+    if journal is None or not (Path(scope) / "universe.json").is_file():
+        return
+    finished = {_handler_id(index, pattern, handler): _finished[(loaded.name, str(scope), index)]
+                for index, (pattern, handler) in enumerate(loaded.registrations.handlers)
+                if (loaded.name, str(scope), index) in _finished}
+    place = (loaded.name, str(scope))
+    if _saved.get(place) == (journal, finished):
+        return
+    try:
+        write(Path(scope) / "state" / "plugins" / name / HANDLERS, {"journal": journal, "finished": finished})
+        _saved[place] = (journal, finished)
+    except (OSError, ValueError):
+        pass
 
 
 # Per (plugin, universe, handler): the last seq it finished; (seq, tries, first try's start) for the event it is
 # on; and the generation of its guard key, raised when a call is left running so the next one can start.
 _finished, _timeouts, _generations = {}, {}, {}
 _journals = {}  # (plugin, universe) -> the id of the journal its handlers' progress above belongs to
+_saved = {}  # (plugin, universe) -> (journal, finished) last written to handlers.json
 _abandoned = []  # (Loaded, guard key) of calls given up on while still running, in this process
 
 
@@ -477,9 +584,13 @@ def _dispatch(loaded, universe, event, scope, held=None):
     held = set() if held is None else held
     kind, seq, finished = event.get("type", ""), event.get("seq", 0), True
     for index, (pattern, handler) in enumerate(loaded.registrations.handlers):
-        if kind != "events.gap" and not fnmatch.fnmatchcase(kind, pattern):
-            continue  # a gap goes to every handler: each may have missed events of its own types
         key = (loaded.name, str(scope), index)
+        if kind != "events.gap" and not fnmatch.fnmatchcase(kind, pattern):
+            # Not one of its types (a gap goes to every handler: each may have missed events of its own):
+            # passed, unless it is held on an earlier event, so the next read starts past it for it too.
+            if index not in held and _finished.get(key, -1) < seq:
+                _finished[key] = seq
+            continue
         if _finished.get(key, -1) >= seq:
             continue  # it finished this one while a sibling held the cursor
         if index in held:

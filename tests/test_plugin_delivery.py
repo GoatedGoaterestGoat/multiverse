@@ -177,7 +177,7 @@ class AbandonedCallsTest(Fixture):
         with mock.patch.object(host, "HANDLER_SECONDS", 0.1), \
                 mock.patch.object(host.signal, "signal"):  # the worker's own signal handlers: not in a test
             start = time.monotonic()
-            self.assertEqual(host.work(self.root, "pair"), 1)  # failed: the supervisor starts a fresh one
+            self.assertEqual(host.work(self.root, "pair"), host.HUNG_EXIT)  # the supervisor starts a fresh one, counting it
             self.assertLess(time.monotonic() - start, 10)
         log = (host.host_directory(self.root) / "host.log").read_text()
         self.assertIn("pair: 2 handler calls never returned; restarting its worker", log)

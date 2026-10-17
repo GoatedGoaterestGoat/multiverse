@@ -358,8 +358,16 @@ where they happen and delivered where plugins run**:
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
     ("gave up on event N (agent.status) in its handler H"). A worker left with
     two calls that never returned restarts itself (the supervisor starts a
-    fresh one, which has no stuck threads). A handler that raises is recorded
-    and passed. The cursor on disk moves past an event once every matching
+    fresh one, which has no stuck threads). Each worker runs in a process group
+    of its own, and the supervisor ends that group with it, so a stuck call's
+    child processes (a hung `subprocess.run`) go too. Such restarts are counted
+    however far apart they are: after 3, the plugin is left stopped, and
+    `mv2 plugins` says its handlers kept hanging. What each handler finished is
+    kept next to the cursor (`state/plugins/NAME/handlers.json`, for that
+    journal), so a fresh worker never gives a handler an event it finished.
+    Handlers that are not held read on from their own place, so siblings keep
+    going however far behind a stuck handler is. A handler that raises is
+    recorded and passed. The cursor on disk moves past an event once every matching
     handler is done with it, so after a restart an event may come again:
     handlers must be idempotent.
   - **Stale events:** each event says when it happened, so a handler can skip
@@ -659,8 +667,13 @@ plugin error can stop a launch, a send, `list` or the dashboard.
 
 Loading has a limit too: a plugin's import and `register(mv)` always run in a
 thread of their own and get 10 s. One that takes longer is left out as failed
-(tried again by the next process, or once its files change), and the Plugins
-screen, `mv2 plugins` and `doctor` say so; it never hangs `mv2`. A caller waits
+for now, and the Plugins screen, `mv2 plugins` and `doctor` say so; it never
+hangs `mv2`. Its load goes on: what it ends with lands when it ends, so a slow
+cold import is loaded then. The hang is also remembered against the plugin's
+files (`~/.multiverse/plugin-load-timeouts.json`): later processes wait for it
+at most 0.5 s, and a launch leaves it out while it still loads, saying so in
+the launch's `plugins` record and fallback reason, until it loads or its files
+change. A caller waits
 for a plugin still loading only up to a deadline counted from when its load
 started: a launch plan waits until it ends; the dashboard's refreshes (columns,
 panels, inspector lines) wait at most `loader.REFRESH_WAIT` (0.5 s) in all, so

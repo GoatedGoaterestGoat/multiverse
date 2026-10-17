@@ -110,7 +110,7 @@ def bootstrap_lines(root):
     return lines
 
 
-def problems(root, reserved=()):
+def problems(root, reserved=(), wait=None):
     """Why plugins here are not working, as sentences: for `mv2 doctor` and the dashboard."""
     found_problems = []
     usable = []
@@ -141,6 +141,8 @@ def problems(root, reserved=()):
                 and found.name not in _failed_conversions(root)):
             # Waiting for its first-use conversion: until then the plugin has neither its switch nor its settings.
             then = (f"nothing is converted while {loader.SAFE_MODE}=off" if loader.safe_mode()
+                    else f"review the plugin and run mv2 plugins trust {found.name} first; it is converted the next "
+                         f"time mv2 runs here after that" if found.state in ("untrusted", "changed")
                     else "it is converted the next time mv2 runs here, or now with mv2 plugins migrate --apply")
             found_problems.append(f"{found.name}: {legacy} is still here and not converted yet: {then}.")
             continue
@@ -168,9 +170,11 @@ def problems(root, reserved=()):
             found_problems.append(f"{', '.join(owners)} declares mv2 {name}, which mv2 itself uses; it is ignored")
         elif len(owners) > 1:
             found_problems.append(f"{' and '.join(owners)} both declare mv2 {name}; neither is used")
-    for found in usable:
+    for found in usable:  # `wait`: how long a plugin still loading is waited for (the dashboard: a short wait)
         try:
-            loader.load(found)
+            loader.load(found, wait=wait)
+        except loader.StillLoading:
+            found_problems.append(f"{found.name} is still loading")
         except PluginError as error:
             found_problems.append(str(error))
     # Loading runs each plugin's own settings check: settings it refuses make it unusable here, said once.
