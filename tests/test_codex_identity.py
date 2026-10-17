@@ -124,6 +124,55 @@ class PlainRefusalTest(unittest.TestCase):
                 self.assertIsNone(self.classify(value))
 
 
+class PlainStartupTest(unittest.TestCase):
+    """Actual empty composers from an isolated, model-free 0.163.0 TUI."""
+    def setUp(self):
+        self.adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        self.fixtures = Path(__file__).parent / 'fixtures/codex'
+
+    def capture(self, name):
+        return [{**frame, 'cli_version': '0.163.0'}
+                for frame in json.loads((self.fixtures / name).read_text())]
+
+    def test_real_ready_composers_end_startup_observation(self):
+        for frame in self.capture('started-0.163.0.json'):
+            with self.subTest(width=frame['width']):
+                self.assertTrue(self.adapter.launch_started(frame))
+                self.assertIsNone(self.adapter.launch_refusal(frame))
+
+    def test_loading_and_refused_native_composers_do_not_confirm_startup(self):
+        for name in ('loading-0.163.0.json', 'refusal-0.163.0.json'):
+            for frame in self.capture(name):
+                with self.subTest(fixture=name, width=frame['width']):
+                    self.assertFalse(self.adapter.launch_started(frame))
+        loading = self.capture('loading-0.163.0.json')[0]
+        self.assertFalse(self.adapter.launch_started({**loading,
+            'text': loading['text'] + '\n  fixture default · /fixture/workspace\n'}))
+
+    def test_cursor_history_and_malformed_evidence_do_not_confirm_startup(self):
+        frame = self.capture('started-0.163.0.json')[1]
+        variants = [None, {}, {**frame, 'cursor_visible': False}, {**frame, 'cursor_visible': 1},
+            {**frame, 'cursor_x': 1}, {**frame, 'cursor_x': True}, {**frame, 'cursor_y': True},
+            {**frame, 'cursor_y': -1}, {**frame, 'cursor_y': 1000}, {**frame, 'cursor_y': '9'},
+            {key: value for key, value in frame.items() if key != 'cursor_y'},
+            {**frame, 'text': None}, {**frame, 'text': '\x1b[0m' + frame['text']},
+            {**frame, 'text': 'x' * 32769}, {**frame, 'text': frame['text'] + '\0'},
+            {**frame, 'text': frame['text'].replace('› Ask', '> › Ask')},
+            {**frame, 'text': frame['text'] + '\n› A different composer below\n'},
+            {**frame, 'text': frame['text'].split('  fixture default')[0]},
+            {**frame, 'text': frame['text'].replace(' · ', ' unknown-footer ')},
+            {**frame, 'cursor_y': frame['cursor_y'] - 1}]
+        for index, value in enumerate(variants):
+            with self.subTest(case=index):
+                self.assertFalse(self.adapter.launch_started(value))
+
+    def test_untested_versions_never_confirm_startup(self):
+        frame = self.capture('started-0.163.0.json')[1]
+        for version in (None, '', '0.162.1', '0.164.0', [False, 163, False], {'version': '0.163.0'}):
+            with self.subTest(version=version):
+                self.assertFalse(self.adapter.launch_started({**frame, 'cli_version': version}))
+
+
 class SharedIdentityTest(unittest.TestCase):
     def test_old_bridge_environment_requests_restart_without_mutating_it(self):
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})

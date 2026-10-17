@@ -41,6 +41,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .refusal import plain_refusal
         return plain_refusal(evidence)
 
+    def launch_started(self, evidence):
+        from .refusal import plain_started
+        return plain_started(evidence)
+
     def _configure_launch(self):
         if self.settings.get('inbox_bridge') is True:
             for key in ('args', 'spawn_args', 'resume_args'):

@@ -112,6 +112,8 @@ The live connection runs through Codex's shared app-server daemon. There is one 
 
 **Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it ("This conversation is open in another app"), and mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
 
+On supported Codex layouts, startup refusal observation ends when the ordinary composer is ready. Later navigation does not turn that successful launch into a startup refusal. An incomplete or unrecognized screen stays under observation for a bounded startup period.
+
 **Update prompts.** mv2 starts Codex with `-c check_for_update_on_startup=false`, so unattended terminals don't stop at an update dialog. Add `["-c", "check_for_update_on_startup=true"]` to `args` to get the prompts back. A launch can then wait at the dialog until you answer it, so `--wait` can time out.
 
 **Daemon restarts.** If a launch reports `failed to resolve feature override precedence`, the daemon was started from a directory that has since been deleted. Run the restart command that the error prints, but only when no other Codex work is running. Then resume the agent. See [troubleshooting](troubleshooting.md#codex-failed-to-resolve-feature-override-precedence).
