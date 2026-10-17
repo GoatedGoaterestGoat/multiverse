@@ -1,12 +1,17 @@
+# Multiverse
+
 <p align="center">
-  <img src="docs/media/banner.png" width="100%" alt="Multiverse v2: an agent-agnostic manager for teams of coding agents, organized as nested universes. The dashboard shows a project's agents and its nested subverses.">
+  <img src="docs/media/banner.png" width="100%" alt="Multiverse v2: a harness-agnostic, extensible manager for agent teams. The dashboard shows a project's agents and its nested subverses.">
 </p>
 
 <p align="center">
-  <a href="docs/media/intro.mp4"><img src="docs/media/intro.webp" width="100%" alt="A one-minute tour: a lead agent in Claude Code and a Codex reviewer message each other, the team grows, and a QA subverse files bugs to its own dashboard."></a>
-  <br>
-  <sub><a href="docs/media/intro.mp4">Watch with sound</a> · 58 seconds</sub>
+  <a href="https://github.com/GoatedGoaterestGoat/multiverse/stargazers"><img src="https://img.shields.io/github/stars/GoatedGoaterestGoat/multiverse?logo=github&labelColor=1e1e2e&color=cba6f7" alt="GitHub stars"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-cba6f7?labelColor=1e1e2e" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-cba6f7?labelColor=1e1e2e" alt="Linux and macOS">
+  <img src="https://img.shields.io/badge/harnesses-Claude%20Code%20%7C%20Codex%20%7C%20Pi-cba6f7?labelColor=1e1e2e" alt="Claude Code, Codex and Pi">
 </p>
+
+**A harness-agnostic, extensible manager for agent teams.**
 
 Multiverse (`mv2`) runs Claude Code, Codex and Pi side by side in tmux and shows them in one terminal dashboard. Open any agent's terminal from the dashboard to work with it, and return when you're done.
 
@@ -15,6 +20,10 @@ Multiverse (`mv2`) runs Claude Code, Codex and Pi side by side in tmux and shows
 - **Messages that arrive.** Every message is saved before delivery, and mv2 delivers through each harness's own interface instead of typing into its terminal, so it knows whether a message was accepted.
 - **Files you can edit.** The prompts agents receive, the harness settings and each universe's dashboard view are Markdown and JSON files in `.multiverse/`.
 - **Plugins.** Plugins can add dashboard columns and panels, commands, and options for how agents launch. Tree compaction and the remote control are built as plugins.
+
+## Demo
+
+https://github.com/user-attachments/assets/24084193-fc3d-48a6-a9a6-c3e7415220a5
 
 ## Status
 
