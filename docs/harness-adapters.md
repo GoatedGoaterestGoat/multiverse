@@ -307,15 +307,15 @@ mismatch records an actionable runtime error, closes that client connection,
 and prevents new mv2 input for the unvalidated launch. No automatic downgrade,
 empty model turn, turn-time grant fallback, or shared-daemon restart is used.
 
-Codex 0.159.3 applies overrides when loading a thread but can retain the existing
-grant when rejoining an already-loaded thread. If validation fails, stop the
-mv2 agent, close any other clients subscribed to that exact thread, let it
-become inactive and wait for native unload before resuming. The default delay
-is 60 seconds, configurable by native `thread_unload_delay_secs`; both no
-subscribers and inactivity must hold, and a new subscription cancels the timer.
-The native daemon and other threads stay running. See the
-[app-server protocol](https://learn.chatgpt.com/docs/app-server) and the
-[0.159.3 unload implementation](https://github.com/openai/codex/blob/rust-v0.159.3/codex-rs/app-server/src/request_processors/thread_lifecycle.rs).
+A shared Codex conversation keeps its current native grants. Multiple clients
+of that conversation are normal: whichever client drives it, it is the same mv2
+agent doing the work. When explicit requested grants differ from the effective
+native reply, mv2 reports both values and refuses input for that attachment. Use
+the conversation's current grants or deliberately change them through supported
+Codex controls before a new mv2 resume. mv2 never forces an unload, detaches an
+outside client, or restarts the daemon to change permissions. Manual attachment
+does not require an idle conversation; automatic recovery retains its separate
+idle-only safety requirements.
 
 Verification uses an installed Codex 0.163.0 TUI, a disposable native home and
 a local scripted provider: a plain full-access launch and two successive
@@ -744,8 +744,10 @@ on argv. Plain Codex tools inherit them from the process under Codex's own
 exclusive idle resume applies the requested tool environment. Codex can retain
 old config when rejoining a thread that is still subscribed or active; mv2 never
 forces an unload or service restart to change it. Plugin MCP servers receive
-only their declared `env` and `env_vars`; agent identity requires explicit
-`env_vars` references (see [the Codex plugin contract](plugins.md#codex)).
+only their declared `env` and `env_vars`; bridge MCP entries cannot reference
+launch IDs or attachment/tmux sockets. Stable references do not implicitly
+authorize a helper as the conversation's shell: plugins keep their explicit API
+permissions (see [the Codex plugin contract](plugins.md#codex)).
 Claude's compaction builder runs with the same variables, except those it always
 scrubs. Values remain plain text in `harness.json` and each launch's
 `request.json`, including its RPC settings.
@@ -776,8 +778,10 @@ different environment. Agent workspace, model and initial permissions remain
 per-thread. The shared server must not inherit an agent identity: startup scrubs
 `MV2_*`, native parent IDs and configured exclusions. Before terminal launch the
 adapter reads native effective environment exclusions, preserves them, adds
-identity exclusions, and passes the current launch's `MV2_*` values through
-per-thread shell configuration. Native configuration files are never rewritten.
+identity exclusions, and supplies only agent-stable tool identity through the
+session RPC. The terminal/runner retains its strict launch identity and private
+relay; neither is copied into the conversation. Native configuration files are
+never rewritten.
 Other daemon process environment (provider credentials, proxies and environment
 used by integrations) remains shared; it does not change to match each monitor.
 Different process-level environments require separately configured native homes.
@@ -851,6 +855,61 @@ cancellation remain available independently of the relay. Kill the launch, then
 resume its saved conversation; if the launch never bound a thread, kill it and
 spawn again. Native work may survive a disconnected TUI. The relay never restarts
 the daemon or reconnects to conceal a broken terminal session.
+
+### One Codex conversation, one agent
+
+Codex bridge shell calls use the persisted `codex-agent-v1` identity policy,
+not the terminal launch ID. The native tool environment contains a stable mode,
+universe, full agent UUID, directory, CLI/Python paths and pinned native storage.
+`CODEX_THREAD_ID` must match the saved native binding. Missing or mismatched
+proof is an error, never an operator fallback. `MV2_LAUNCH_ID` and launch-private
+control/tmux addresses are absent. The attachment's `--remote` relay remains
+private to that launch; there is no stable raw-native relay.
+
+Before a manual resume or completed stop, mv2 waits for the previous launch's
+owned relay, status, recovery and startup roles to close. A bounded cleanup
+failure remains visible and blocks handover. Per-launch cleanup and connection
+records contain role, endpoint and timing metadata, never conversation content;
+outside clients and the native daemon are left running.
+
+`report` (including `status`) and every `inbox` form address that one agent;
+`send` records its stable sender identity, including cross-universe sends. These
+calls remain valid when an attachment stops, fails or is replaced. Reports use
+last-writer-wins semantics; the inbox has one cursor. `inbox --wait` follows
+ordinary attachment replacement but rejects a changed binding, native scope,
+identity policy or removed agent. Agent calls never clear a launch refusal or
+publish native status/usage. Management and delivery commands remain available,
+with their exact target launch, pane, native service, permissions and receipt
+checks unchanged.
+
+Runner binding/runtime updates and raw attachment control remain launch-strict.
+New bridge bootstrap does not ask the model to bind a session. In stable agent
+mode, `session-bind` can only verify the identical already-bound native UUID,
+without changing properties, timestamps, runtime or events. It cannot establish
+or replace a binding. Plain-mode registration retains its existing strict
+launch callback. Restart running Codex bridge agents once after updating:
+`mv2 kill NAME`, then `mv2 resume NAME`, with no other client attached so Codex
+releases and reloads the conversation with clean stable values. An old
+conversation environment is refused with this restart guidance; there is no
+automatic adoption, legacy authority bypass or redirect of old relay sockets.
+
+A native competing writer is different from same-server sharing. Codex 0.163.0
+can return `-32600` with `already has an active writer`; plain TUI shows
+`This conversation is open in another app`. The adapter preserves that native
+cause as the launch error in list, inspect, wait and send. Plain recognition is
+limited to the actual active native refusal widget in an owned visible pane,
+with its controls and hidden cursor, at the tested version; quoted history is
+not a refusal. Same-server successful rejoin is never labelled in use.
+
+The native refusal remains latched for that launch, even if pressing R later
+succeeds in Codex. Use `mv2 kill NAME --attachment-only` to end mv2's refused
+frontend and await its owned cleanup, then explicitly resume through mv2 to ask
+Codex again. This attachment-only exit must
+not cancel the conversation's running work; `kill`/`stop` retains its distinct
+explicit conversation-wide cancellation semantics. Definitely unsubmitted core startup
+messages can fail with the native cause, but a plain frontend's retained wake
+prompt may still submit on R: its acceptance stays uncertain until evidence or
+frontend exit resolves it. Accepted/uncertain prompts are never replayed.
 
 ### Automatic recovery of idle Codex terminals
 

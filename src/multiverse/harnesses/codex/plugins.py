@@ -372,7 +372,12 @@ def prepare(context, command, *, bridge=False, daemon=None, final=False, setting
                 if not isinstance(local, str) or not _name.fullmatch(local):
                     raise ValueError('MCP server names must contain lowercase letters, digits, hyphens or underscores')
                 native_name = 'mv2_' + name.replace('-', '_') + '_' + local.replace('-', '_')
-                checked.append((native_name, _server(definition, plugin_dir, permissions)))
+                server = _server(definition, plugin_dir, permissions)
+                if bridge:
+                    from .identity import VOLATILE
+                    if VOLATILE.intersection(server.get('env_vars', [])):
+                        raise ValueError('Shared Codex MCP servers cannot reference launch identity or attachment sockets')
+                checked.append((native_name, server))
             text = None
             if 'instructions' in fields:
                 path = _inside(plugin_dir, fields['instructions'], 'instructions')

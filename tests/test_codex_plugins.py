@@ -34,6 +34,8 @@ class CodexPluginsTest(PluginTestCase):
             'MV2_CLI': '/target/bin/mv2', 'MV2_PYTHON': '/target/python',
             'MV2_CONTROL_SOCKET': self.values['control_socket']},
             endpoint=NativeEndpoint('unix-websocket', str(self.work / 'native.sock')))
+        self.context = replace(self.context, agent_environment={key: value for key, value in self.context.environment.items()
+            if key in ('PATH', 'MV2_AGENT_ID', 'MV2_UNIVERSE', 'MV2_AGENT_DIR', 'MV2_CLI', 'MV2_PYTHON')})
         version = patch.object(codex, 'codex_version', return_value=(0, 162, 1))
         version.start()
         self.addCleanup(version.stop)
@@ -96,6 +98,15 @@ class CodexPluginsTest(PluginTestCase):
             'MV2_AGENT_DIR': '/sender', 'MV2_CLI': '/sender/mv2', 'MV2_TMUX_SOCKET': '/sender/tmux'})
         env = self.config(self.command())['mcp_servers']['mv2_demo_tools'].get('env', {})
         self.assertFalse(any(key.startswith('MV2_') for key in env))
+
+    def test_bridge_mcp_cannot_capture_attachment_identity(self):
+        for index, key in enumerate(('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET')):
+            with self.subTest(key=key):
+                self.add_plugin(name='volatile-' + str(index),
+                    fields={'mcp_servers': {'tools': {'command': 'python3', 'env_vars': [key]}}})
+                command = self.command({'inbox_bridge': True})
+                self.assertNotIn('mcp_servers', command.rpc_proxy.settings['plugin_config'])
+                self.assertIn('launch identity', json.dumps(command.plugins))
 
     def test_initial_core_context_reaches_plain_and_fallback_mcp(self):
         from multiverse import harnesses

@@ -172,7 +172,10 @@ class CodexDaemonTest(TerminalBase):
                 self.assertEqual(identity['cwd'], str(work))
                 self.assertEqual(identity['env']['MV2_AGENT_ID'], launched['id'])
                 self.assertEqual(identity['env']['MV2_UNIVERSE'], str(root))
-                self.assertEqual(identity['env']['MV2_LAUNCH_ID'], launched['runtime']['launch_id'])
+                self.assertEqual(identity['env']['MV2_IDENTITY_MODE'], 'codex-agent-v1')
+                self.assertEqual(identity['env']['MV2_AGENT_DIR'], str(directory))
+                for key in ('MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'):
+                    self.assertNotIn(key, identity['env'])
                 self.assertEqual(identity['env']['CODEX_THREAD_ID'], properties['native_session_id'])
                 self.assertNotIn('MV2_FOREIGN_AGENT', identity['env'])
                 self.assertNotIn('CLAUDECODE', identity['env'])

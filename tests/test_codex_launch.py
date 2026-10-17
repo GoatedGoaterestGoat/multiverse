@@ -1,5 +1,6 @@
 """Codex remote launch relay with a scripted offline app-server."""
 import asyncio
+from copy import deepcopy
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -99,10 +100,12 @@ class CodexLaunchTest(unittest.TestCase):
         executor = Mock()
         executor.rpc.return_value = NativeResult('ok', value={'exclude': ['NATIVE_SECRET'], 'writable_roots': ['/server-root']})
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
-        command = adapter.spawn(replace(self.context, executor=executor, environment={'MV2_AGENT_ID': 'agent'}))
+        command = adapter.spawn(replace(self.context, executor=executor, environment={'MV2_AGENT_ID': 'agent'},
+                                        agent_environment={'MV2_AGENT_ID': 'agent'}))
         self.assertIn('/server-root', command.rpc_proxy.settings['roots'])
         self.assertIn('NATIVE_SECRET', ' '.join(command.argv))
-        self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="agent"', command.argv)
+        self.assertEqual(command.rpc_proxy.settings['agent_environment']['MV2_AGENT_ID'], 'agent')
+        self.assertFalse(any('shell_environment_policy.set.MV2_' in arg for arg in command.argv))
         self.assertEqual(executor.rpc.call_count, 1)
 
     def test_deleted_daemon_cwd_diagnostic_keeps_strict_and_auto_contracts(self):
@@ -281,11 +284,11 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await self.server.wait_closed()
         self.temp.cleanup()
 
-    async def connect(self, expect_upstream=True):
+    async def connect(self, expect_upstream=True, **callbacks):
         self.protocol = LaunchProtocol(self.settings)
         self.proxy = rpc.LaunchProxy(self.spec, self.protocol,
             lambda native_id: agents.bind_session(self.root, 'agent', native_id, 'launch'), self.errors.append,
-            record_lost=self.losses.append)
+            record_lost=self.losses.append, **callbacks)
         await asyncio.to_thread(self.proxy.start)
         self.client = await unix_connect(self.spec['socket_path'], max_size=64 * 1024 * 1024)
         if expect_upstream:
@@ -469,6 +472,37 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
         await self.upstream.send(response)
         self.assertEqual(await self.client.recv(), response)
         self.assertEqual(self.naming, [])
+
+    async def test_native_refusal_is_published_before_forward_and_native_retry_cannot_bind(self):
+        self.settings['native_id'] = self.native_id
+        refusals = []
+        await self.connect(record_refusal=lambda evidence: refusals.append(deepcopy(evidence)))
+        request = {'id': 2, 'method': 'thread/resume', 'params': {'threadId': self.native_id}}
+        await self.client.send(json.dumps(request))
+        await self.receive()
+        message = f'thread {self.native_id} already has an active writer'
+        response = json.dumps({'id': 2, 'error': {'code': -32600, 'message': message}})
+        await self.upstream.send(response)
+        self.assertEqual(await self.client.recv(), response)
+        self.assertEqual(refusals[0]['message'], message)
+        self.assertEqual(refusals[0]['code'], -32600)
+        first = deepcopy(refusals[0])
+        # R is a native retry, not a new mv2 launch. Its response still reaches
+        # the terminal, but cannot bind or release input in this failed launch.
+        await self.client.send(json.dumps({**request, 'id': 3}))
+        await self.receive()
+        retry = json.dumps({'id': 3, 'result': {'thread': {'id': self.native_id, 'cwd': str(self.root)}}})
+        await self.upstream.send(retry)
+        self.assertEqual(await self.client.recv(), retry)
+        self.assertFalse(self.protocol.bound)
+        self.assertNotIn('native_session_id', read(self.directory / 'properties.json'))
+        self.assertTrue(all(evidence == first for evidence in refusals))
+        self.assertEqual(self.naming, [])
+        await self.client.send(json.dumps({'id': 4, 'method': 'turn/start',
+                                          'params': {'threadId': self.native_id, 'input': []}}))
+        rejected = json.loads(await self.client.recv())
+        self.assertIn(message, rejected['error']['message'])
+        self.assertTrue(self.received.empty())
 
     async def test_unknown_frames_binary_and_approvals_pass_through_unchanged(self):
         await self.connect()

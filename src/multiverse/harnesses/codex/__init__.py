@@ -21,6 +21,22 @@ class CodexAdapter(ConfiguredAdapter):
     resume_prompt_args = ('{task}',)
     storage_env = ('CODEX_HOME', 'CODEX_SQLITE_HOME')
 
+    def agent_identity_policy(self):
+        from .identity import POLICY
+        return POLICY
+
+    def agent_identity_problem(self, session, environment):
+        if (environment.get('MV2_IDENTITY_MODE') is None and environment.get('MV2_LAUNCH_ID')
+                and environment.get('CODEX_THREAD_ID') and environment.get('MV2_AGENT_ID') == session.agent_id
+                and (session.native_mode or {}).get('mode') == 'bridge'):
+            return ('This Codex conversation still has values from before the update: restart the agent '
+                    '(mv2 kill, then mv2 resume) with no other client attached.')
+        return None
+
+    def launch_refusal(self, evidence):
+        from .refusal import plain_refusal
+        return plain_refusal(evidence)
+
     def _configure_launch(self):
         if self.settings.get('inbox_bridge') is True:
             for key in ('args', 'spawn_args', 'resume_args'):
@@ -86,13 +102,23 @@ class CodexAdapter(ConfiguredAdapter):
                                'mv2 does not restart shared daemons.')
                 raise BridgeUnavailable(reason)
             native_settings = observed.value
-        from .plugins import prepare
-        additions = prepare(context, command, bridge=True, daemon=native_settings.get('daemon_version'),
+        from .identity import tool_environment, storage_environment
+        stable = tool_environment(context)
+        storage = storage_environment(context)
+        tool_context = replace(context, environment={
+            **{key: value for key, value in context.environment.items() if not key.startswith('MV2_')}, **stable})
+        from .plugins import prepare, overrides
+        additions = prepare(tool_context, command, bridge=True, daemon=native_settings.get('daemon_version'),
                             final=context.executor is not None, settings=getattr(self, 'settings', {}),
                             harness_name=self.name)
         command = additions.apply(command)
         argv = list(command.argv)
         argv, bootstrap, roots, permissions = remote_arguments(argv, context)
+        # Bridge registration is the generation-owned relay's job. Cached old
+        # bootstrap instructions are handled by core's already-bound verifier.
+        explicit_instructions = any(key == 'developer_instructions' for key, _ in overrides(args))
+        if self.bootstrap and not explicit_instructions:
+            bootstrap = bootstrap.replace(self.bootstrap, '').strip()
         position = argv.index('--') if '--' in argv else len(argv)
         workspace_policy = native_settings.get('workspace_policy', {})
         options = ['--remote', 'unix://' + context.values['control_socket'] if context.endpoint else 'unix://']
@@ -114,11 +140,6 @@ class CodexAdapter(ConfiguredAdapter):
                     raise ValueError('Shared daemon mode requires individual shell_environment_policy keys; configuration unchanged')
             excludes = list(dict.fromkeys([*excludes, 'MV2_*', *command.unset_env]))
             options += ['-c', 'shell_environment_policy.exclude=' + json.dumps(excludes)]
-        # Tools run in the daemon, not the terminal process. Forward only this
-        # launch's identity explicitly; never inherit another client's MV2_*.
-        for key, value in context.environment.items():
-            if key.startswith('MV2_') or key == 'PATH':
-                options += ['-c', f'shell_environment_policy.set.{key}={json.dumps(value, ensure_ascii=False)}']
         # Harness/plugin variables can contain credentials. Pass them to native
         # shell tools in the session RPC, never as process-list-visible flags.
         from .plugins import merge_config
@@ -126,11 +147,9 @@ class CodexAdapter(ConfiguredAdapter):
             {'shell_environment_policy': {'set': dict(command.environment)}} if command.environment else {},
             additions.session_config)
         argv[position:position] = options
-        storage = {'CODEX_HOME': str(Path(context.environment.get('CODEX_HOME', '~/.codex')).expanduser().resolve())}
-        if context.environment.get('CODEX_SQLITE_HOME'):
-            storage['CODEX_SQLITE_HOME'] = str(Path(context.environment['CODEX_SQLITE_HOME']).expanduser().resolve())
         return CommandSpec(tuple(argv), command.unset_env,
                            environment=command.environment, plugins=command.plugins,
+                           agent_identity=self.agent_identity_policy(),
                            attachment=AttachmentSpec('service', 'binding', 'idle-existing-service', True, True),
                            control_endpoint=NativeEndpoint('unix-websocket', context.values['control_socket']),
                            rpc_proxy=RpcProxySpec(context.values['control_socket'],
@@ -140,6 +159,7 @@ class CodexAdapter(ConfiguredAdapter):
                                 'name': context.values['name'],
                                 'resume_permissions': permissions,
                                 'plugin_config': session_config,
+                                'agent_environment': stable,
                                 'plugin_mcp_environment': additions.mcp_environment,
                                 'plugin_user_config': additions.user_config,
                                 'native_id': context.values.get('session_id') if context.mode == 'resume' else None},

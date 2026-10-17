@@ -165,7 +165,10 @@ class AdapterContractTest(BaseTest):
         from multiverse.harnesses.codex.launch import LaunchProtocol
         outgoing = LaunchProtocol(command.rpc_proxy.settings).outgoing(
             {'id': 1, 'method': 'thread/start', 'params': {}})
-        self.assertEqual(outgoing['params']['config']['shell_environment_policy']['set'], env)
+        forwarded = outgoing['params']['config']['shell_environment_policy']['set']
+        self.assertEqual({key: forwarded[key] for key in env}, env)
+        self.assertEqual(forwarded['MV2_IDENTITY_MODE'], 'codex-agent-v1')
+        self.assertEqual(forwarded['CODEX_HOME'], environment['CODEX_HOME'])
         self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.argv))
         self.assertNotIn('a "quoted" é', '\n'.join(command.argv))
         # Automatic selection keeps the variables when it falls back to a plain launch.
@@ -303,14 +306,16 @@ class AdapterContractTest(BaseTest):
         environment = {'CODEX_HOME': str(self.work / 'native home'), 'MV2_AGENT_ID': 'current',
                        'MV2_UNIVERSE': str(self.root), 'PATH': '/literal/tools'}
         command = adapter.spawn(LaunchContext('spawn', values, 'chosen', environment,
-                                             NativeEndpoint('unix-websocket', '/native/socket'), executor))
+                                             NativeEndpoint('unix-websocket', '/native/socket'), executor,
+                                             agent_environment={'MV2_AGENT_ID': 'current'}))
         argv = command.argv
         self.assertEqual(argv[argv.index('--remote') + 1], 'unix://' + values['control_socket'])
         self.assertEqual(command.rpc_proxy.upstream_path, '/native/socket')
         excludes = [v for v in argv if v.startswith('shell_environment_policy.exclude=')][-1]
         self.assertEqual(json.loads(excludes.partition('=')[2]),
                          ['USER_EXCLUDED', 'CUSTOM_EXCLUDED', 'MV2_*', 'CODEX_THREAD_ID', 'CLAUDECODE', 'PARENT_ONLY'])
-        self.assertIn('shell_environment_policy.set.MV2_AGENT_ID="current"', argv)
+        self.assertEqual(command.rpc_proxy.settings['agent_environment']['MV2_AGENT_ID'], 'current')
+        self.assertFalse(any('shell_environment_policy.set.MV2_' in arg for arg in argv))
         self.assertEqual(argv[-1], values['task'])
         self.assertEqual(command.shared_service.environment['CODEX_HOME'], environment['CODEX_HOME'])
         self.assertEqual(path.read_bytes(), before)
