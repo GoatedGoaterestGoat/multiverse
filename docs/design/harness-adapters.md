@@ -1042,8 +1042,14 @@ publishes the key for that path, while the mod and its status and usage reports
 keep working. mv2's own socket then has no key, so the adapter follows Claude to
 that socket: it reads `~/.claude/sessions/<pid>.json` for the agent's process and
 uses its `messagingSocketPath` and key only when the file belongs to that exact
-process (the pid, the start time the runner recorded when it started Claude and
-the file's `procStart` all agree, and its `sessionId` is the agent's session).
+process: the start the runner recorded when it started Claude is the pid's start
+now (so a reused pid fails), the file's `procStart` is that start in Claude's own
+format (field 22 of `/proc/<pid>/stat`, in clock ticks since boot, on Linux;
+`ps -o lstart=` in UTC on macOS), the process isn't a zombie, and the file's
+`sessionId` is the agent's session. Only a running launch with a sessions file is
+checked, so a listing runs no process query for stopped agents. For a running
+one, each check costs one `ps` on macOS, and on Linux a `/proc` read plus one
+`ps` once the file matches.
 When it cannot follow (the file is another process's, or the launch was recorded
 before mv2 kept the start time), `mv2 list`, `inspect` and `send` say "Claude
 relaunched itself (/restart) without mv2's inbox; restart the agent". Restarting

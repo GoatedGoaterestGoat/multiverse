@@ -8,17 +8,26 @@ listens on its own socket; /clear moves it to a new sessionId.
 import hashlib
 import json
 import os
+from pathlib import Path
 import socket
+import time
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from multiverse import harnesses
+from multiverse.runtime import lifecycle, process
+from multiverse.store import write
 from multiverse.harnesses.types import Message, NativeEndpoint, NativeResult, ObservedBinding, SessionHandle
 from multiverse.runtime.process import process_started
 
 from test_multiverse import BaseTest
 
 TOKEN = '0123456789abcdef0123456789abcdef'
+# Claude's own files: a sessions file from macOS (Claude Code 2.1.302, the user's paths replaced), the same shape
+# with the procStart a real Linux sessions file holds, and a /proc/<pid>/stat line in Linux's format (proc(5))
+# whose field 22, the start in clock ticks since boot, is that procStart.
+FIXTURES = Path(__file__).resolve().parent / 'fixtures' / 'claude'
+LINUX_START = '1334113325'
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
 
 
@@ -34,6 +43,7 @@ class ClaudeRelaunchTest(BaseTest):
         self.ours = str(self.work / 'mv2.sock')        # the launch's own socket, gone after /restart
         self.theirs = str(self.work / 'relaunch.sock')  # where Claude listens after /restart
         self.sockets = []
+        self.started = process_started(os.getpid())  # this process's start, as the runner records pid_started
 
     def tearDown(self):
         for sock in self.sockets:
@@ -57,7 +67,7 @@ class ClaudeRelaunchTest(BaseTest):
     def session(self, **changes):
         values = dict(native_id=self.native, state='running', endpoint=NativeEndpoint('unix-lines', self.ours),
                       bridge='claude-mod-v1', home=str(self.config), pid=os.getpid(),
-                      pid_started=process_started(os.getpid()), session_file=str(self.work / 'agent' / 'session.jsonl'))
+                      pid_started=self.started, session_file=str(self.work / 'agent' / 'session.jsonl'))
         values.update(changes)
         return SessionHandle('agent', 'claude', str(self.work), **values)
 
@@ -170,3 +180,131 @@ class ClaudeRelaunchTest(BaseTest):
         self.record()  # its file names mv2's own socket: nothing relaunched, only no key yet
         self.assertIsNone(self.adapter.connection_problem(session))
         self.assertNotEqual(self.adapter.send(session, self.message(), self.executor()).reason, RELAUNCHED)
+
+
+    def claude_file(self, fixture, **changes):
+        """Claude's sessions file for this process, from a real one: its pid, session and socket made this launch's."""
+        record = json.loads((FIXTURES / fixture).read_text())
+        record.update({'pid': os.getpid(), 'sessionId': self.native, 'messagingSocketPath': self.ours, **changes})
+        (self.config / 'sessions' / f'{os.getpid()}.json').write_text(json.dumps(record))
+
+    def on_linux(self, *, state='S', ticks=LINUX_START, name='claude', line=None):
+        """Run the adapter as on Linux, with this process's /proc/<pid>/stat from the Linux fixture."""
+        fields = (FIXTURES / 'proc-stat-linux.txt').read_text().split(' ')
+        fields[0], fields[1], fields[2], fields[21] = str(os.getpid()), f'({name})', state, ticks
+        proc = self.work / 'proc'
+        (proc / str(os.getpid())).mkdir(parents=True, exist_ok=True)
+        (proc / str(os.getpid()) / 'stat').write_text(' '.join(fields) if line is None else line)
+        self.enterContext(patch('multiverse.harnesses.claude.LINUX', True))
+        self.enterContext(patch('multiverse.harnesses.claude.PROC', proc))
+
+    def counted(self):
+        """Every ps the observer runs (multiverse.runtime.process), counted."""
+        return self.enterContext(patch.object(process, '_query', wraps=process._query))
+
+    def test_a_real_macos_process_file_identifies_its_process(self):
+        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
+        self.claude_file('sessions-darwin.json')  # the start the real file holds: another process
+        self.assertIsNone(self.adapter.observed_binding(self.session()))
+
+    def test_on_linux_the_start_is_compared_in_claudes_own_clock_ticks(self):
+        self.on_linux()
+        self.claude_file('sessions-linux.json')
+        self.assertEqual(self.adapter.observed_binding(self.session()),
+                         ObservedBinding(native_id=self.native, home=str(self.config), evidence='claude-process-file'))
+        # The /restart heal and the advice work there too.
+        self.listening(self.theirs)
+        self.key(self.theirs)
+        self.claude_file('sessions-linux.json', messagingSocketPath=self.theirs)
+        executor = self.executor()
+        self.assertEqual(self.adapter.send(self.session(), self.message(), executor).state, 'native_queued')
+        self.assertEqual(executor.write_lines.call_args.args[0].endpoint, NativeEndpoint('unix-lines', self.theirs))
+        self.assertEqual(self.adapter.connection_problem(self.session(pid_started=None)), RELAUNCHED)
+
+    def test_on_linux_another_process_a_reused_pid_a_zombie_or_a_damaged_stat_is_never_this_process(self):
+        self.claude_file('sessions-linux.json')
+        cases = {'another start in /proc': dict(ticks='1334113326'), 'a zombie': dict(state='Z'),
+                 'an empty stat': dict(line=''), 'a cut-short stat': dict(line=f'{os.getpid()} (claude) S 1 2 3'),
+                 'a start that is not a number': dict(ticks='12x4')}
+        for case, stat in cases.items():
+            with self.subTest(case):
+                self.on_linux(**stat)
+                self.assertIsNone(self.adapter.observed_binding(self.session()))
+        self.on_linux()
+        self.assertIsNone(self.adapter.observed_binding(self.session(pid_started='Thu Jan 1 00:00:00 1970')))  # reused
+        # A command name holding ") " and spaces: the fields are read after its last parenthesis, as Claude does.
+        self.on_linux(name='claude) S 1 2 (x')
+        self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
+
+    def test_a_damaged_process_file_or_a_zombie_on_macos_is_never_this_process(self):
+        path = self.config / 'sessions' / f'{os.getpid()}.json'
+        for damaged in ('{', '[]', json.dumps({'sessionId': self.native}), json.dumps({'procStart': 1234, 'sessionId': self.native})):
+            with self.subTest(damaged=damaged):
+                path.write_text(damaged)
+                self.assertIsNone(self.adapter.observed_binding(self.session()))
+                self.assertIsNone(self.adapter.connection_problem(self.session()))
+        self.claude_file('sessions-darwin.json', procStart=self.started)
+        with patch('multiverse.harnesses.claude.process_snapshot', return_value=(self.started, 'Z')):
+            self.assertIsNone(self.adapter.observed_binding(self.session()))
+
+    def test_a_stopped_launch_or_one_without_a_process_file_runs_no_process(self):
+        query = self.counted()
+        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        query.reset_mock()
+        for session in (self.session(state='stopped'), self.session(state='failed'), self.session(pid=None)):
+            self.assertIsNone(self.adapter.observed_binding(session))
+            self.assertIsNone(self.adapter.connection_problem(session))
+        (self.config / 'sessions' / f'{os.getpid()}.json').unlink()
+        self.assertIsNone(self.adapter.observed_binding(self.session()))
+        self.assertEqual(query.call_count, 0)
+        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        query.reset_mock()
+        self.assertIsNotNone(self.adapter.observed_binding(self.session()))
+        self.assertEqual(query.call_count, 1)  # one ps for a running launch on macOS
+
+    def test_a_listing_of_stopped_claude_agents_runs_no_process(self):
+        for number in range(10):
+            agent = self.root / 'state/agents' / str(uuid4())
+            write(agent / 'properties.json', {'id': agent.name, 'name': f'stopped-{number}', 'harness': 'claude',
+                                              'workspace': str(self.work), 'native_session_id': str(uuid4()),
+                                              'native_session_home': str(self.config)})
+            write(agent / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'stopped', 'pid': os.getpid(),
+                                           'pid_started': process_started(os.getpid())})
+        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))  # a live Claude on that pid
+        query = self.counted()
+        query.reset_mock()
+        started = time.monotonic()
+        rows = lifecycle.listing(self.root)
+        elapsed = time.monotonic() - started
+        self.assertEqual(len([row for row in rows if row['name'].startswith('stopped-')]), 10)
+        self.assertEqual(query.call_count, 0)
+        self.assertLess(elapsed, 1.0)
+
+    def test_each_check_of_a_live_healed_agent_queries_its_process_once(self):
+        # After /restart is healed the launch's own key is gone, so a listing asks the adapter for the binding
+        # and for a connection problem. Each check queries the process once; nothing is cached between checks,
+        # so a pid reused in between is still caught.
+        agent = self.root / 'state/agents' / str(uuid4())
+        write(agent / 'properties.json', {'id': agent.name, 'name': 'healed', 'harness': 'claude',
+                                          'workspace': str(self.work), 'native_session_id': self.native,
+                                          'native_session_home': os.path.realpath(self.config)})
+        write(agent / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running', 'pid': os.getpid(),
+                                       'pid_started': self.started, 'native_bridge': 'claude-mod-v1',
+                                       'control_endpoint': {'transport': 'unix-lines', 'address': self.ours}})
+        self.listening(self.theirs)
+        self.key(self.theirs)
+        self.claude_file('sessions-darwin.json', procStart=self.started, messagingSocketPath=self.theirs)
+        query = self.counted()
+        query.reset_mock()
+        self.assertIsNotNone(self.adapter.observed_binding(self.session()))
+        self.assertEqual(query.call_count, 1)
+        self.assertIsNone(self.adapter.connection_problem(self.session()))  # healed: nothing to report
+        self.assertEqual(query.call_count, 2)
+        query.reset_mock()
+        with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'alive'}):
+            [row] = lifecycle.listing(self.root)
+        self.assertIsNone(row['connection_error'])
+        # Today's listing asks for the binding twice (its own reconcile, then usage_snapshot's) and for the
+        # connection once: three checks, so three queries. Sharing the reconcile in core would make it two.
+        self.assertEqual(query.call_count, 3)

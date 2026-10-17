@@ -32,13 +32,14 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ...runtime.process import process_started
+from ...runtime.process import process_snapshot, process_started
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import Usage
 from ...store import read
@@ -95,34 +96,73 @@ def peer_token(socket_path, home=None):
     return token if isinstance(token, str) and TOKEN.match(token) else None
 
 
-def process_file(session):
-    """Claude's own file for this launch's pid (`<home>/sessions/<pid>.json`) and the pid's current start.
+# Claude writes procStart in its own format: field 22 of /proc/<pid>/stat (clock ticks since boot) on Linux,
+# `ps -o lstart=` in UTC elsewhere (macOS), the same form as the runner's pid_started there.
+LINUX = sys.platform.startswith('linux')
+PROC = Path('/proc')
 
-    (record, started), either None. Undocumented and Claude's own, like the peer key files beside it.
+
+def process_file(session):
+    """Claude's own file for this running launch's pid (`<home>/sessions/<pid>.json`), or None.
+
+    Reads only that file: a launch that is not running, or has no file, costs no process query.
+    Undocumented and Claude's own, like the peer key files beside it.
     """
-    if not isinstance(session.pid, int) or isinstance(session.pid, bool):
-        return None, None
+    pid = session.pid
+    if session.state != 'running' or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return None
     home = Path(session.home) if session.home else claude_home()
     try:
-        record = json.loads((home / 'sessions' / f'{session.pid}.json').read_text())
+        record = json.loads((home / 'sessions' / f'{pid}.json').read_text())
     except (OSError, ValueError):
-        record = None
-    if not isinstance(record, dict) or not isinstance(record.get('procStart'), str):
-        record = None
-    return record, process_started(session.pid)
+        return None
+    return record if isinstance(record, dict) and isinstance(record.get('procStart'), str) else None
+
+
+def _proc_start(pid):
+    """Linux: (state, start in clock ticks) from /proc/<pid>/stat, or None.
+
+    Fields are counted after the last ')', since the command name can hold spaces and parentheses.
+    """
+    try:
+        stat = (PROC / str(pid) / 'stat').read_text()
+    except (OSError, ValueError):
+        return None
+    fields = stat[stat.rfind(')') + 2:].split(' ') if ')' in stat else []
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return fields[0], fields[19]
+
+
+def same_process(record, pid):
+    """mv2's start of `pid` (as the runner records pid_started) when Claude's file `record` is this live,
+    non-zombie process, else None.
+
+    One ps on macOS. On Linux, /proc first and ps only when the file's ticks match it.
+    """
+    claimed = ' '.join(record['procStart'].split())
+    if LINUX:
+        proc = _proc_start(pid)
+        if proc is None or proc[0] == 'Z' or proc[1] != claimed:
+            return None
+        return process_started(pid)
+    snapshot = process_snapshot(pid)
+    if snapshot is None or snapshot[1].startswith('Z') or snapshot[0] != claimed:
+        return None
+    return snapshot[0]
 
 
 def process_record(session):
     """Claude's file for this exact launch's process, or None.
 
     Only when three starts are one: the one the runner recorded when it started this
-    launch's child, the pid's start now, and the file's procStart. A pid reused by a
-    later process fails the first; execve (/restart) keeps the pid and its start.
+    launch's child, the pid's start now, and the file's procStart (in Claude's format).
+    A pid reused by a later process fails the first; execve (/restart) keeps the pid and its start.
     """
-    record, started = process_file(session)
-    if record is None or not started or session.pid_started != started:
+    record = process_file(session)
+    if record is None or not session.pid_started:
         return None
-    return record if ' '.join(record['procStart'].split()) == started else None
+    return record if same_process(record, session.pid) == session.pid_started else None
 
 
 def unverified_relaunch(session):
@@ -130,8 +170,10 @@ def unverified_relaunch(session):
 
     Never trusted for delivery or a binding, only to tell the person to restart the agent.
     """
-    record, started = process_file(session)
-    if session.pid_started or record is None or not started or ' '.join(record['procStart'].split()) != started:
+    if session.pid_started:
+        return False
+    record = process_file(session)
+    if record is None or not same_process(record, session.pid):
         return False
     path = record.get('messagingSocketPath')
     return isinstance(path, str) and os.path.abspath(path) != os.path.abspath(session.endpoint.address)
