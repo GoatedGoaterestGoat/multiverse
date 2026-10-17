@@ -14,6 +14,7 @@ from multiverse.store import write
 FRAGILE = '''
 def register(mv):
     mv.dashboard.panel("ticker", "panel:Ticker")
+    mv.dashboard.screen("board", "panel:Board")
 '''
 FRAGILE_PANEL = '''
 from textual.widgets import Static
@@ -29,6 +30,32 @@ class Ticking(Static):
     def tick(self):
         if ARMED:
             raise RuntimeError("ticker exploded")
+
+from textual.screen import ModalScreen
+
+from textual.message import Message
+
+BOARD_ARMED, BOARD_TICKS, BOARD_IN_HANDLER = [], [], []
+
+class Blast(Message):
+    pass
+
+class Board(ModalScreen):
+    BINDINGS = [("escape", "app.pop_screen", "Close")]
+    def __init__(self, root, backend):
+        super().__init__()
+    def compose(self):
+        yield Static("board", id="board")
+    def on_mount(self):
+        self.set_interval(0.05, self.tick)
+    def tick(self):
+        BOARD_TICKS.append(1)
+        if BOARD_ARMED and BOARD_IN_HANDLER:
+            self.post_message(Blast())   # fails in the board's own handler: its message loop ends
+        elif BOARD_ARMED:
+            raise RuntimeError("board exploded")
+    def on_blast(self, message):
+        raise RuntimeError("board's handler exploded")
 
 class Ticker:
     def parse(self, widget, title):
@@ -57,7 +84,7 @@ class Notes(ModalScreen):
 class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
-        self.write_plugin("fragile", {"module": "plugin", "extends": ["dashboard.panel"]},
+        self.write_plugin("fragile", {"module": "plugin", "extends": ["dashboard.panel", "dashboard.screen"]},
                           {"plugin.py": FRAGILE, "panel.py": FRAGILE_PANEL})
         self.write_plugin("editor", {"module": "plugin", "extends": ["dashboard.screen"]},
                           {"plugin.py": EDITOR, "screens.py": EDITOR_SCREENS})
@@ -86,6 +113,45 @@ class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             await d.until(lambda: "still here" in " ".join(d.local_view()), "the main view")
             self.assertNotIn("tick", d.local_view(), "fragile's dead widget is still on the main screen")
             self.assertTrue(d.app.is_running)
+
+    async def test_a_plugins_failure_beneath_another_plugins_screen_leaves_that_screen_and_its_edit_alone(self):
+        await self.failure_beneath()
+
+    async def test_a_plugin_screen_whose_own_loop_ends_beneath_another_closes_cleanly_later(self):
+        self.panel_module().BOARD_IN_HANDLER.append(True)
+        await self.failure_beneath()
+
+    async def failure_beneath(self):
+        # The review's stack: the main screen, fragile's board, editor's notes above it with unsaved text.
+        async with self.dashboard() as d:
+            board = await d.run_action("fragile: board")
+            notes = await d.run_action("editor: notes")
+            self.assertEqual([type(s).__name__ for s in d.app.screen_stack[1:]], ["Board", "Notes"])
+            notes.query_one("#note", Input).value = "half-written"
+            module = self.panel_module()
+            module.BOARD_ARMED.append(True)  # fragile's board, underneath, now fails
+            await d.until(lambda: "fragile" in d.status and "failed" in d.status, "fragile's failure to be reported")
+            await d.settle()
+            self.assertIs(d.screen, notes, "the editor plugin's screen above fragile's was closed for fragile's failure")
+            self.assertEqual(notes.query_one("#note", Input).value, "half-written")
+            ticks = len(module.BOARD_TICKS)
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(module.BOARD_TICKS), ticks, "the failed board's timer still runs under the notes")
+            await d.close_screen()  # the person closes the notes: the failed board goes with them, not shown again
+            await d.until(lambda: len(d.app.screen_stack) == 1, "the failed board to close once it was on top")
+            self.assertNotIn(board, d.app.screen_stack)
+            self.assertTrue(d.app.is_running)
+
+    async def test_a_plugins_failure_on_top_closes_only_its_screen_and_keeps_the_one_beneath(self):
+        async with self.dashboard() as d:
+            notes = await d.run_action("editor: notes")
+            notes.query_one("#note", Input).value = "half-written"
+            await d.run_action("fragile: board")
+            self.panel_module().BOARD_ARMED.append(True)
+            await d.until(lambda: "fragile" in d.status and "failed" in d.status, "fragile's failure to be reported")
+            await d.until(lambda: d.screen is notes, "fragile's board to close")
+            self.assertEqual(notes.query_one("#note", Input).value, "half-written")
+            self.assertEqual(len(d.app.screen_stack), 2)
 
     async def test_a_core_error_raised_while_handling_a_plugins_error_still_ends_the_dashboard(self):
         explode = self.panel_module().explode

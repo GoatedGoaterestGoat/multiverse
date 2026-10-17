@@ -7,6 +7,7 @@ check_action see them; Textual @on handlers must stay on this class.
 import asyncio
 from pathlib import Path
 import sys
+import weakref
 
 from rich.text import Text
 from textual import on, work
@@ -103,6 +104,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.plugin_service = plugin_service or PluginService()
         self.plugin_actions, self.plugin_screens = {}, {}
         self.registry_generation = None  # loader.generation() when the palette was last read
+        self.doomed = weakref.WeakSet()  # failed plugins' screens still under another screen: closed once on top
         self.host = None  # the plugin host: {needed, running, stopped, ...}; None until read
         self.host_failed = False
         self.host_user_stopped = False  # stopped from the Plugins screen with h: do not start it again until h does
@@ -508,8 +510,10 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     pass
 
     async def close_plugin_screens(self, package, message=""):
-        """Close the failing plugin's screens, and only its: from the lowest one in the stack up (what it opened above
-        itself goes with it), leaving any other plugin's screen and its unsaved input alone. Then take the plugin's
+        """Close the failing plugin's screens, and only its, leaving every other screen and its unsaved input alone,
+        wherever it is in the stack. Textual closes only the top screen: the failing plugin's screens on top close now;
+        one under another screen (a plugin's opened from the palette over it, or one it opened itself) stops running
+        at once and closes as soon as it is on top again, so it is never shown in the meantime. Then take the plugin's
         widgets out of every screen that stays.
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
@@ -530,11 +534,15 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             return module == package or module.startswith(package + ".") \
                 or getattr(node, "mv_plugin_package", None) == package
 
-        stack = self.screen_stack
-        lowest = next((index for index, screen in enumerate(stack) if index and theirs(screen)), None)
-        if lowest is not None:
-            while len(self.screen_stack) > lowest:
-                await self.pop_screen()
+        while len(self.screen_stack) > 1 and theirs(self.screen):
+            await self.pop_screen()
+        for screen in self.screen_stack[1:]:
+            if theirs(screen):
+                self.doomed.add(screen)
+                for node in (screen, *screen.walk_children(with_self=False)):  # nothing of it runs while it waits
+                    for timer in list(getattr(node, "_timers", ())):
+                        timer.stop()
+                    self.workers.cancel_node(node)
         views = []
         for screen in self.screen_stack:
             for widget in list(screen.walk_children(with_self=False)):
@@ -555,6 +563,18 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     await widget.remove()
         for view in views:
             await view.mount(Static(message, markup=False, classes="view-error"))
+
+    def pop_screen(self):
+        """Close the top screen, and then any failed plugin's screen that this leaves on top (close_plugin_screens)."""
+        done = super().pop_screen()
+        if len(self.screen_stack) > 1 and self.screen in self.doomed:
+            self.call_later(self.close_doomed)
+        return done
+
+    async def close_doomed(self):
+        while len(self.screen_stack) > 1 and self.screen in self.doomed:
+            self.doomed.discard(self.screen)
+            await self.pop_screen()
 
     def get_system_commands(self, screen):
         yield from super().get_system_commands(screen)
