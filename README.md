@@ -6,9 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/GoatedGoaterestGoat/multiverse/stargazers"><img src="https://img.shields.io/github/stars/GoatedGoaterestGoat/multiverse?logo=github&labelColor=1e1e2e&color=cba6f7" alt="GitHub stars"></a>
-  <img src="https://img.shields.io/badge/python-3.11%2B-cba6f7?labelColor=1e1e2e" alt="Python 3.11 or newer">
-  <img src="https://img.shields.io/badge/platform-Linux%20%7C%20macOS-cba6f7?labelColor=1e1e2e" alt="Linux and macOS">
-  <img src="https://img.shields.io/badge/harnesses-Claude%20Code%20%7C%20Codex%20%7C%20Pi-cba6f7?labelColor=1e1e2e" alt="Claude Code, Codex and Pi">
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.299-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.299"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.159.3-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.159.3"></a>
 </p>
 
 **A harness-agnostic, extensible manager for agent teams.**
