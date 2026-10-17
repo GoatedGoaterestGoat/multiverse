@@ -1,4 +1,4 @@
-"""Independent LAB-SESSION-004 regression using real runner subprocesses."""
+"""Every shipped harness clears the parent agent's identity, checked through the real runner."""
 import json
 import os
 from pathlib import Path
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-SOURCE = Path(os.environ.get('MV2_SESSION_TEST_SOURCE', Path(__file__).resolve().parents[1] / 'src'))
+SOURCE = Path(__file__).resolve().parents[1] / 'src'
 sys.path.insert(0, str(SOURCE))
 from multiverse.store import read, write
 from multiverse.harnesses import load
@@ -43,7 +43,6 @@ class CrossHarnessParentIdentity(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     seen = read(output)
                     inherited = sorted(set(seen) & {'CODEX_THREAD_ID', 'CLAUDECODE'})
-                    print(str(manifest.relative_to(SOURCE)), 'inherited_native_markers=', inherited)
                     self.assertEqual(seen.get('MV2_AGENT_ID'), 'child-agent')
                     self.assertEqual(inherited, [])
 

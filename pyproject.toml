@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "multiverse-v2"
 version = "0.1.0"
-description = "Local, prompt-led agent universes"
+description = "A harness-agnostic, extensible manager for agent teams."
 requires-python = ">=3.11"
 dependencies = [
     "textual>=8.2.3,<9",

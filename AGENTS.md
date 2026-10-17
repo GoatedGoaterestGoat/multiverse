@@ -18,7 +18,7 @@ mv2 (multiverse-v2) is a Python CLI and Textual dashboard that runs coding agent
 | `src/multiverse/plugins/` | The plugin system and its API; bundled plugins in `builtin/` |
 | `src/multiverse/ui/`, `templates/` | The dashboard, bundled templates |
 | `plugins/` | Optional plugins in their own repositories, as git submodules (`compaction`, `remote`) |
-| `examples/` | The demo backend the UI tests use, sample plugins, example templates |
+| `examples/` | The demo backend the UI tests use, sample plugins |
 | `tests/` | unittest modules |
 | `docs/` | User docs; `docs/develop/` for contributors; `docs/design/` for rationale |
 
