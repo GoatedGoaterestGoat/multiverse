@@ -94,3 +94,20 @@ contains no conversation content.
 Usage remains scoped to the current native conversation. A rebind does not add
 earlier generations' tokens, cost or context to the new session's measurement.
 The journal preserves history for explicit transcript or accounting features.
+
+## Messages across a session change
+
+Messages address the agent. When a saved message has definitely not been
+accepted, delivery follows the agent's current conversation if its original
+target is in this same harness and storage home's verified lineage. This also
+applies to messages held during startup and to an explicit retry of a definite
+failure, including a wake prompt. Core preserves the original inbox record and
+adds `session_changes` to its delivery state: the old and new targets, when it
+was moved, and the journal transition IDs and reasons (such as `clear`). A
+conversation outside that lineage is never substituted.
+
+Accepted messages and submissions whose outcome is uncertain are never moved
+or resent. `deliver --check` can look up their receipts against the original
+owned conversation after a session change. A missing receipt stays uncertain;
+it does not prove non-delivery and does not authorize a resend. Each adapter
+still decides what historical receipt evidence it can provide.

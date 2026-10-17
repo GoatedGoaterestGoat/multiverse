@@ -366,11 +366,9 @@ def _check_recovery(previous, properties, recovery):
 def _wake_prompt(root, agent_dir, properties, message_id):
     """The waking message as the resumed session's starting prompt, and its delivery tracking."""
     message, tracking = message_record(agent_dir, message_id)
-    target = tracking.get('target_session') or message.get('target_session')
-    if target and target != properties.get('native_session_id'):
-        raise ValueError('Wake message targets a different native session')
     if message.get('delivery') not in ('steer', 'follow-up') or tracking.get('submission_state', 'pending') not in ('pending', 'failed'):
         raise ValueError('Wake message is ineligible or may already have been submitted; refusing replay')
+    tracking = native.retarget_message(agent_dir, properties, message, tracking)
     return native.framed_text(root, message), tracking
 
 

@@ -481,6 +481,41 @@ def flush_startup(root, directory, launch_id, error=None):
     note_ready(root, directory, launch_id)
 
 
+def _session_changes(directory, properties, target):
+    """The owned lineage from a message's target to the current conversation.
+
+    An arbitrary matching ID is insufficient: the journal must still agree with
+    this agent's current harness, canonical home and authoritative pointer.
+    """
+    effective, rows = agents.sessions.effective(directory, properties)
+    if (effective != properties or not properties.get('native_session_home')
+            or not rows or rows[-1]['to'] != properties.get('native_session_id')):
+        return None
+    # Returning to an earlier owned conversation can repeat an ID. Use its
+    # latest departure, not an earlier lap through the lineage.
+    starts = [index for index, row in enumerate(rows) if row['from'] == target]
+    return rows[starts[-1]:] if starts else None
+
+
+def retarget_message(directory, properties, message, tracking):
+    """Caller holds launch.lock. Move only definitely unaccepted agent input."""
+    target = tracking.get('target_session') or message.get('target_session')
+    current = properties.get('native_session_id')
+    if not target or target == current:
+        return tracking
+    changes = _session_changes(directory, properties, target)
+    if not changes:
+        raise ValueError('Message targets a different native session outside this agent\'s lineage; refusing delivery')
+    if tracking.get('submission_state', 'pending') not in ('pending', 'failed'):
+        raise ValueError('Message may already have been submitted; refusing to move it to another conversation')
+    change = {'from': target, 'to': current, 'at': now(),
+              'transitions': [{key: row[key] for key in ('id', 'reason')} for row in changes]}
+    tracking = {**tracking, 'target_session': current,
+                'session_changes': [*tracking.get('session_changes', []), change]}
+    update_message(directory, message['id'], target_session=current, session_changes=tracking['session_changes'])
+    return tracking
+
+
 def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
@@ -516,10 +551,13 @@ def deliver(root, reference, message_id, retry=False, check=False):
             if tracking.get('submission_state') == 'failed':
                 return {**tracking['attempts'][-1], 'ok': False}
             target = tracking.get('target_session') or message.get('target_session')
+            receipt_session = session
             if target and target != session.native_id:
-                raise ValueError('Message targets a different native session; refusing reconciliation')
+                if not _session_changes(directory, executor.properties, target):
+                    raise ValueError('Message targets a different native session; refusing reconciliation')
+                receipt_session = replace(session, native_id=target)
             try:
-                result = adapter.get_delivery(session, message_id, executor)
+                result = adapter.get_delivery(receipt_session, message_id, executor)
                 if result.state == 'native_queued':
                     changes = {'submission_state': 'accepted', 'native_receipt': result.value}
                     if (result.value or {}).get('transcript_confirmed'):
@@ -531,9 +569,6 @@ def deliver(root, reference, message_id, retry=False, check=False):
         selected_mode = message.get('delivery', 'inbox-only')
         if selected_mode not in ('steer', 'follow-up'):
             raise ValueError('Native delivery requires steer or follow-up')
-        target = tracking.get('target_session') or message.get('target_session')
-        if target and target != session.native_id:
-            raise ValueError('Message targets a different native session; refusing delivery')
         previous = tracking.get('attempts', [])
         state = tracking.get('submission_state', 'pending')
         if state in ('accepted', 'unknown', 'submitting') or (state == 'failed' and not retry):
@@ -546,6 +581,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
                 receipt = {**receipt, 'state': 'unknown', 'reason': 'Previous submission was interrupted; acceptance unknown'}
                 update_message(directory, message_id, submission_state='unknown')
             return {**receipt, 'reused': True, 'ok': receipt['state'] not in ('error', 'unavailable', 'unknown')}
+        tracking = retarget_message(directory, executor.properties, message, tracking)
+        target = tracking.get('target_session') or message.get('target_session')
         relay_lost = (session.native_relay or {}).get('state') == 'lost'
         if not relay_lost and executor.facts.get('startup_delivery') == 'waiting' and observe(executor.properties, executor.facts)['live'] == 'alive':
             update_message(directory, message_id, submission_state='pending', deferred_launch_id=session.launch_id,
