@@ -20,6 +20,7 @@ from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse.store import read, write
 from native_safety import isolated_home
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
@@ -154,8 +155,16 @@ class CodexWheelTest(TerminalBase):
             managed = home / 'packages/standalone/current/codex'
             managed.parent.mkdir(parents=True)
             managed.symlink_to(Path(shutil.which('codex')).resolve())
-            self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
-                                                  env=environment, capture_output=True, timeout=20))
+            daemon_groups = PrivateDaemonGroups()
+            self.enterContext(daemon_groups.observe_starts())
+            def stop_owned_daemon():
+                try:
+                    subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
+                                   env=environment, stdin=subprocess.DEVNULL,
+                                   capture_output=True, timeout=20, check=True)
+                finally:
+                    daemon_groups.close()
+            self.addCleanup(stop_owned_daemon)
         path = self.root / 'harnesses/codex/harness.json'
         spec = read(path)
         spec['settings'] = {'inbox_bridge': bridge,

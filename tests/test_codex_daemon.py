@@ -27,6 +27,7 @@ from multiverse.universe.mailbox import inbox
 from multiverse.store import read, write
 from multiverse.tools import send
 from native_safety import check_spawn, isolated_home
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
@@ -98,12 +99,21 @@ class CodexDaemonTest(TerminalBase):
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
                'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '', 'http_proxy': '', 'https_proxy': '', 'all_proxy': '',
                'NO_PROXY': '127.0.0.1,localhost', 'USER_EXCLUDED': 'must-remain-excluded', 'MV2_FOREIGN_AGENT': 'must-not-leak', 'CLAUDECODE': 'foreign'}
+        daemon_groups = PrivateDaemonGroups()
         def daemon(command):
             result = subprocess.run(['codex', 'app-server', 'daemon', command], env=env,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)
-            return json.loads(result.stdout)
-        self.addCleanup(lambda: daemon('stop'))
+            info = json.loads(result.stdout)
+            if command == 'start' and 'pid' in info:
+                daemon_groups.remember(info)
+            return info
+        def stop_owned_daemon():
+            try:
+                daemon('stop')
+            finally:
+                daemon_groups.close()
+        self.addCleanup(stop_owned_daemon)
         with ThreadPoolExecutor(max_workers=4) as pool:
             started = list(pool.map(lambda _: daemon('start'), range(4)))
         self.assertEqual(sum(x['status'] == 'started' for x in started), 1, started)

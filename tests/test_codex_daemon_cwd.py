@@ -12,6 +12,7 @@ from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import launch_settings
 from multiverse.harnesses.types import LaunchContext, RpcSpec
 from native_safety import isolated_home
+from native_processes import PrivateDaemonGroups
 from test_multiverse import BaseTest
 
 
@@ -26,11 +27,17 @@ class CodexDaemonCwdTest(BaseTest):
         workspace.mkdir()
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home)}
 
+        daemon_groups = PrivateDaemonGroups()
+        self.enterContext(daemon_groups.observe_starts())
         def stop_owned_daemon():
             # This test owns a separate native home; never touch the user's daemon.
-            result = subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
-                                    cwd=self.work, env=env, capture_output=True, text=True, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stderr)
+            try:
+                result = subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
+                                        cwd=self.work, env=env, stdin=subprocess.DEVNULL,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            finally:
+                daemon_groups.close()
         self.addCleanup(stop_owned_daemon)
         values = {'name': 'cwd-probe', 'workspace': str(workspace), 'agent_dir': str(self.root),
                   'bootstrap_json': json.dumps('probe'), 'task': '', 'session_id': '',

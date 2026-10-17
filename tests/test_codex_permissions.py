@@ -19,6 +19,7 @@ from multiverse.store import read, write
 from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
 from native_safety import isolated_home
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
@@ -91,8 +92,16 @@ class CodexPermissionTest(TerminalBase):
         env = {**os.environ, 'CODEX_HOME': str(home), 'CODEX_SQLITE_HOME': str(home),
                'NO_PROXY': '127.0.0.1,localhost', 'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '',
                'http_proxy': '', 'https_proxy': '', 'all_proxy': ''}
-        self.addCleanup(lambda: subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
-                                               env=env, capture_output=True, timeout=20))
+        daemon_groups = PrivateDaemonGroups()
+        self.enterContext(daemon_groups.observe_starts())
+        def stop_owned_daemon():
+            try:
+                subprocess.run(['codex', 'app-server', 'daemon', 'stop'],
+                               env=env, stdin=subprocess.DEVNULL,
+                               capture_output=True, timeout=20, check=True)
+            finally:
+                daemon_groups.close()
+        self.addCleanup(stop_owned_daemon)
         config = self.root / 'harnesses/codex/harness.json'
         spec = read(config)
         spec['settings'] = {'args': ['--dangerously-bypass-approvals-and-sandbox'], 'spawn_args': ['--no-daemon']}

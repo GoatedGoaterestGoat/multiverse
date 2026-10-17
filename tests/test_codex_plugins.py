@@ -13,6 +13,8 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
+from native_processes import PrivateProcessGroup
+
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex import plugins as codex
 from multiverse.harnesses.codex.launch import LaunchProtocol, launch_settings
@@ -439,7 +441,9 @@ for line in sys.stdin:
         async def probe():
             environment = {**os.environ, 'CODEX_HOME': str(home), 'APP_TOKEN': 'stale-daemon'}
             process = await asyncio.create_subprocess_exec(path, 'app-server', stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=environment)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=environment,
+                start_new_session=True)
+            group = PrivateProcessGroup(process.pid)
             async def rpc(frame):
                 process.stdin.write((json.dumps(frame) + '\n').encode())
                 await process.stdin.drain()
@@ -464,8 +468,8 @@ for line in sys.stdin:
                     'APP_TOKEN': 'mcp-secret', 'MV2_AGENT_ID': 'target', 'OTHER_API_KEY': None})
             finally:
                 process.stdin.close()
-                if process.returncode is None:
-                    process.terminate()
+                # Keep the event loop running so asyncio can reap the leader.
+                await asyncio.to_thread(group.close)
                 await asyncio.wait_for(process.wait(), 5)
         asyncio.run(probe())
 
@@ -497,7 +501,9 @@ for line in sys.stdin:
             if not bridge:
                 environment.update(command.environment)
             process = await asyncio.create_subprocess_exec(*argv, stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=environment)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, env=environment,
+                start_new_session=True)
+            group = PrivateProcessGroup(process.pid)
             connection = None
             async def rpc(frame):
                 if connection is not None:
@@ -585,8 +591,7 @@ for line in sys.stdin:
                 if connection is not None:
                     await connection.close()
                 process.stdin.close()
-                if process.returncode is None:
-                    process.terminate()
+                await asyncio.to_thread(group.close)
                 await asyncio.wait_for(process.wait(), 5)
         for bridge in (False, True):
             with self.subTest(bridge=bridge):
