@@ -112,6 +112,10 @@ class FirstScreenTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             took = time.monotonic() - started
             self.assertLess(took, 1.5, f"the Plugins screen showed 'Reading…' for {took:.1f} s")
             self.assertIn("quick", [item["name"] for item in d.screen.items])
+            details = lambda: str(d.screen.query_one("#plugin-details").render())
+            while "slow is still loading" not in details():  # the problems, read without waiting out the load
+                self.assertLess(time.monotonic() - started, 1.5, f"no 'still loading' line: {details()!r}")
+                await asyncio.sleep(0.05)
 
 
 if __name__ == "__main__":

@@ -91,7 +91,9 @@ class PluginService:
         return plugins.on_here(Path(root))
 
     def problems(self, root):
-        return plugins.problems(Path(root))
+        # A plugin still loading says so instead of holding up the Plugins screen; its real problem, if any,
+        # shows when the screen reads again after the load ends (loader.generation() rises).
+        return plugins.problems(Path(root), wait=loader.REFRESH_WAIT)
 
     def error_count(self):
         """Plugin failures recorded in this process (cheap: no plugin code runs)."""
