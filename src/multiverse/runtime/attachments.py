@@ -12,7 +12,7 @@ import time
 
 from ..store import existing_lock, lock, now, read, uid, write
 from ..universe import agents
-from .process import process_started
+from .process import process_started, process_snapshot
 
 
 def begin(launch, started):
@@ -134,8 +134,9 @@ def _gone(pid, started=None):
     except ProcessLookupError:
         return True
     except PermissionError:
-        return False
-    return bool(started and (current := process_started(pid)) and current != started)
+        pass  # Process identity can still prove exit or PID reuse without permission to signal it.
+    snapshot = process_snapshot(pid)
+    return bool(snapshot and (snapshot[1][0] in ('Z', 'X') or (started and snapshot[0] != started)))
 
 
 def problem(directory, facts):

@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from multiverse.runtime import lifecycle
 from multiverse.runtime import attachments, recovery
+from multiverse.runtime.process import process_snapshot
 from multiverse.harnesses.types import AttachmentSpec, NativeActivity, NativeEndpoint, NativeResult, NativeServiceHandle, ServiceIdentity, RpcSpec
 from multiverse.store import read, write
 from multiverse.terminal.tmux import Tmux, observe
@@ -88,6 +89,29 @@ class LegacyAttachmentTest(TerminalBase):
 
 
 class AttachmentTeardownTest(BaseTest):
+    def test_exited_unreaped_process_does_not_block_attachment_cleanup(self):
+        child = subprocess.Popen([sys.executable, '-c', 'pass'], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            until(lambda: (process_snapshot(child.pid) or ('', ''))[1].startswith('Z'), seconds=5)
+            os.kill(child.pid, 0)  # A zombie still has a PID, but has no connections to drain.
+            self.assertTrue(attachments._gone(child.pid))
+        finally:
+            child.wait(timeout=5)
+
+    def test_live_unknown_and_invalid_process_identities_still_block_without_signals(self):
+        snapshot = process_snapshot(os.getpid())
+        self.assertIsNotNone(snapshot)
+        self.assertFalse(attachments._gone(os.getpid(), snapshot[0]))
+        with patch.object(attachments, 'process_snapshot', return_value=None), \
+                patch.object(attachments.os, 'kill', side_effect=PermissionError) as signal:
+            self.assertFalse(attachments._gone(123, snapshot[0]))
+            signal.assert_called_once_with(123, 0)
+        with patch.object(attachments.os, 'kill') as signal:
+            for pid in (None, 0, -1, True, '123'):
+                self.assertFalse(attachments._gone(pid))
+            signal.assert_not_called()
+
     def test_missing_launch_directory_skips_metadata_and_logs_once_without_recreation(self):
         directory = self.root / 'state' / 'agents' / str(uuid4())
         launch = directory / 'launches' / str(uuid4())
