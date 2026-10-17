@@ -209,7 +209,8 @@ def schedule(directory, launch_id):
 
 
 def frontend_children(pid):
-    result = subprocess.run(['ps', '-axo', 'pid=,ppid='], capture_output=True, text=True, timeout=3, check=True)
+    result = subprocess.run(['ps', '-axo', 'pid=,ppid='], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=3, check=True)
     return any(len(fields := line.split()) == 2 and fields[1] == str(pid) for line in result.stdout.splitlines())
 
 

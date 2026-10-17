@@ -20,7 +20,7 @@ def process_started(pid):
         return None
     try:
         result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True,
-                                env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'}, timeout=2)
+                                stdin=subprocess.DEVNULL, env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'}, timeout=2)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return None
     if not isinstance(result.stdout, str):

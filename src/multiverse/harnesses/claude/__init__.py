@@ -254,7 +254,8 @@ def claude_version(executable):
     key = os.path.realpath(path)
     if key not in _versions:
         try:
-            output = subprocess.run([path, '--version'], capture_output=True, text=True, timeout=10).stdout
+            output = subprocess.run([path, '--version'], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10).stdout
         except (OSError, subprocess.SubprocessError):
             return None
         found = re.search(r'(\d+)\.(\d+)\.(\d+)', output)

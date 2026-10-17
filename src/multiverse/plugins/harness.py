@@ -301,7 +301,8 @@ def version_of(executable):
     key = (real, status.st_mtime_ns, status.st_size)
     if key not in _versions:
         try:
-            result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=10)
+            result = subprocess.run([path, "--version"], stdin=subprocess.DEVNULL,
+                                    capture_output=True, text=True, timeout=10)
         except (OSError, subprocess.SubprocessError):
             return None
         found = re.search(r"(\d+)\.(\d+)\.(\d+)", result.stdout) if result.returncode == 0 else None

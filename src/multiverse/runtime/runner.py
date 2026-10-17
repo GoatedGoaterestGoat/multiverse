@@ -476,7 +476,8 @@ def main():
                     shutil.rmtree(service_dir, ignore_errors=True)
                     service_dir = None
                 attachment = fallback.get('attachment') or {}
-        process = subprocess.Popen(request["argv"], env=env)
+        # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
+        process = subprocess.Popen(request["argv"], env=env, stdin=None)
         update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=process_started(process.pid))
         if request.get('observe_refusal'):
             from multiverse import harnesses

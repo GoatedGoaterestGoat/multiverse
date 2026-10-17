@@ -32,7 +32,8 @@ def environment(command):
 def execute(command: CommandSpec, workspace, timeout=10):
     env = environment(command)
     # Never use a shell: message text and native IDs remain literal argv values.
-    return subprocess.run(command.argv, cwd=workspace, env=env, text=True, capture_output=True, timeout=timeout)
+    return subprocess.run(command.argv, cwd=workspace, env=env, stdin=subprocess.DEVNULL,
+                          text=True, capture_output=True, timeout=timeout)
 
 
 def start_shared_service(specification, workspace, log_path, unset_env, observe_versions=None):
@@ -74,7 +75,7 @@ def _start_shared_service(specification, workspace, log_path, unset_env, observe
         # Read-only CLI help detects old/partial installations without starting
         # another daemon or constructing a speculative native conversation.
         help_result = subprocess.run([argv[0], '--help'], cwd=service_cwd, env=env,
-                                     capture_output=True, text=True, timeout=5)
+                                     stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5)
         help_text = help_result.stdout + help_result.stderr
         missing = [flag for flag in specification.required_cli_flags
                    if not re.search(r'(?<!\S)' + re.escape(flag) + r'(?=[\s=<]|$)', help_text)]

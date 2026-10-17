@@ -80,7 +80,7 @@ def codex_version(executable, workspace):
         key = (str(resolved), stat.st_mtime_ns, stat.st_size)
         if key not in _versions:
             output = subprocess.run([str(resolved), '--version'], capture_output=True, text=True,
-                                    cwd=workspace, timeout=5, check=False)
+                                    stdin=subprocess.DEVNULL, cwd=workspace, timeout=5, check=False)
             match = re.fullmatch(r'(?:codex-cli\s+)?(\d+)\.(\d+)\.(\d+)\s*', output.stdout)
             _versions[key] = tuple(map(int, match.groups())) if output.returncode == 0 and match else None
         return _versions[key]

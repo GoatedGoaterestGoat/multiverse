@@ -37,7 +37,8 @@ def run(root=None, *, agent):
     env = dict(os.environ)
     env.pop("TMUX", None)
     env.pop("TMUX_PANE", None)
-    subprocess.run(command, env=env, check=True)
+    # This is the interactive terminal client, not one of Tmux.run's inspection helpers.
+    subprocess.run(command, env=env, check=True, stdin=None)
 
 
 if __name__ == "__main__":

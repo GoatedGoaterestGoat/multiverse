@@ -15,7 +15,10 @@ class Tmux:
         self.prefix = ["tmux", "-S", socket_path] if socket_path else ["tmux", "-L", "multiverse-v2"]
 
     def run(self, *args):
-        result = subprocess.run([*self.prefix, *args], text=True, capture_output=True, timeout=10)
+        # A tmux client resets stdin's O_NONBLOCK flag, even for capture/list commands.
+        # Never share the native TUI's terminal file description with these helpers.
+        result = subprocess.run([*self.prefix, *args], stdin=subprocess.DEVNULL,
+                                text=True, capture_output=True, timeout=10)
         if result.returncode or result.stderr.startswith("error "):
             raise RuntimeError(result.stderr.strip() or "tmux command failed")
         return result.stdout.rstrip("\n")
@@ -100,7 +103,7 @@ class Tmux:
         if not isinstance(child_pid, int) or child_pid <= 0 or runner_pid <= 0:
             raise ValueError('Native process has not registered yet; retry after startup')
         parent = subprocess.run(['ps', '-p', str(child_pid), '-o', 'ppid='],
-                                capture_output=True, text=True, timeout=2)
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=2)
         if parent.returncode == 1 and not parent.stdout.strip():
             return  # The native child exited; its runner is finishing cleanup.
         if parent.returncode or parent.stdout.strip() != str(runner_pid):
