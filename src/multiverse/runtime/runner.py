@@ -315,6 +315,7 @@ class RefusalMonitor:
         self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
         self.describe, self.executable = adapter.launch_refusal, executable
         self.supports = getattr(adapter, 'supports_launch_refusal', None)
+        self.started = getattr(adapter, 'launch_started', None)
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='native-launch-refusal', daemon=True)
 
@@ -358,15 +359,24 @@ class RefusalMonitor:
                     properties = read(self.agent_dir / 'properties.json')
                     backend, pane = owned(properties, facts)
                     text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
-                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}')
+                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}').split('\t')
                     # Recheck tags after both observations as well as before.
                     owned(properties, facts)
-                evidence = self.describe({'cli_version': version, 'text': text,
-                                          'cursor_visible': {'0': False, '1': True}.get(cursor),
-                                          'native_id': properties.get('native_session_id')})
+                x = y = None
+                if len(cursor) == 3:
+                    try:
+                        x, y = int(cursor[1]), int(cursor[2])
+                    except ValueError:
+                        pass  # Unknown position cannot identify a successful composer.
+                snapshot = {'cli_version': version, 'text': text,
+                            'cursor_visible': {'0': False, '1': True}.get(cursor[0]) if len(cursor) == 3 else None,
+                            'cursor_x': x, 'cursor_y': y, 'native_id': properties.get('native_session_id')}
+                evidence = self.describe(snapshot)
                 if evidence is not None:
                     refusal.record(self.agent_dir, self.launch_id, evidence)
                     return
+                if callable(self.started) and self.started(snapshot) is True:
+                    return  # Ends observation only; not binding, readiness or permission authority.
             except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 pass  # Unavailable or unknown evidence cannot identify a refusal.
             self.stopped.wait(min(.25, max(0, deadline - time.monotonic())))

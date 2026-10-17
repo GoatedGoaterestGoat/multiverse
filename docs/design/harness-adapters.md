@@ -919,8 +919,20 @@ not a refusal. Same-server successful rejoin is never labelled in use.
 
 The plain startup observer runs only for a supported native layout and for at
 most the first 60 seconds after it starts. It stops sooner after validated
-bridge binding, native refusal, relay loss or launch exit. Unsupported versions
+bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
 perform no pane polling; later TUI navigation is outside this startup observer.
+
+### Successful plain startup observation
+
+An adapter may provide `launch_started(evidence) -> bool` beside its refusal
+classifier. Both receive the same current owned-pane snapshot: actual CLI
+version, visible text, cursor visibility and integer cursor coordinates. Core
+checks refusal first. Only an exact `True` from the startup hook ends observation;
+it never grants readiness, establishes a binding, changes permissions or clears
+a refusal. For tested Codex 0.163.0, the active empty ordinary composer with its
+configured footer is startup evidence. The real loading composer is not. Later
+navigation after that success is no longer classified as a launch failure.
+Unknown layouts retain the bounded startup window and existing relay-loss exit.
 
 The native refusal remains latched for that launch, even if pressing R later
 succeeds in Codex. Use `mv2 kill NAME --attachment-only` to end mv2's refused

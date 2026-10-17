@@ -1,5 +1,7 @@
 """A native refusal is primary and latched until a new mv2 launch."""
 from uuid import uuid4
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -40,6 +42,70 @@ class LaunchRefusalTest(BaseTest):
                     monitor._run()
                 self.assertEqual(describe.called, observe)
                 self.assertEqual(owned.called, observe)
+
+    def observe_native_frames(self, first_name, started=None):
+        fixtures = Path(__file__).parent / 'fixtures/codex'
+        first = json.loads((fixtures / first_name).read_text())[0]
+        refused = json.loads((fixtures / 'refusal-0.163.0.json').read_text())[0]
+        class Clock:
+            elapsed = 0.
+            def is_set(self):
+                return self.elapsed >= 75
+            def wait(self, seconds):
+                self.elapsed += seconds
+        clock = Clock()
+        write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
+              'startup_checked': True, 'attachment': {'readiness': 'process'},
+              'native_versions': {'cli': '0.163.0'}})
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+        monitor.stopped = clock
+        if started is not None:
+            monitor.started = started
+        backend = Mock()
+        def command(name, *args):
+            frame = first if clock.elapsed < 10 else refused
+            if name == 'capture-pane':
+                return frame['text']
+            if name == 'display-message':
+                flag = '1' if frame['cursor_visible'] else '0'
+                # Also reproduce against the old flag-only capture path.
+                return (flag + '\t' + str(frame.get('cursor_x', 0)) + '\t' + str(frame.get('cursor_y', 0))
+                        if 'cursor_x' in args[-1] else flag)
+            self.fail('Unexpected terminal operation: ' + name)
+        backend.run.side_effect = command
+        with patch.object(runner.time, 'monotonic', side_effect=lambda: clock.elapsed), \
+                patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')), \
+                patch.object(refusal, 'record', wraps=refusal.record) as recorded:
+            monitor._run()
+        return clock, backend, recorded
+
+    def test_successful_plain_composer_ends_observation_before_later_navigation_refusal(self):
+        clock, backend, recorded = self.observe_native_frames('started-0.163.0.json')
+        recorded.assert_not_called()
+        self.assertEqual(backend.run.call_count, 2, 'Successful composer should end all pane polling')
+        self.assertEqual(clock.elapsed, 0)
+        self.assertNotIn('native_refusal', agents.runtime(self.directory))
+
+    def test_native_loading_composer_does_not_hide_a_real_initial_refusal(self):
+        for first in ('loading-0.163.0.json', 'resuming-0.163.0.json'):
+            with self.subTest(first=first):
+                clock, backend, recorded = self.observe_native_frames(first)
+                recorded.assert_called_once()
+                self.assertEqual(clock.elapsed, 10)
+                self.assertIn('open in another app', agents.runtime(self.directory)['reason'])
+
+    def test_startup_hook_needs_boolean_true_and_never_overrides_a_native_refusal(self):
+        for answer in (1, 'ready', {'ready': True}):
+            with self.subTest(answer=answer):
+                clock, _, recorded = self.observe_native_frames('started-0.163.0.json', Mock(return_value=answer))
+                recorded.assert_called_once()
+                self.assertEqual(clock.elapsed, 10)
+        success = Mock(return_value=True)
+        clock, _, recorded = self.observe_native_frames('refusal-0.163.0.json', success)
+        recorded.assert_called_once()
+        self.assertEqual(clock.elapsed, 0)
+        success.assert_not_called()
 
     def test_first_native_refusal_wins_over_r_retry_exit_and_relay_diagnostics(self):
         refusal.record(self.directory, self.launch, self.evidence)
