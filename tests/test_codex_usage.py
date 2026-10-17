@@ -161,7 +161,10 @@ class CodexUsageRuntimeTest(unittest.TestCase):
 class CodexUsageLifecycleTest(TerminalBase):
     def test_dashboard_keeps_context_through_stop_repeated_resumes_and_refresh(self):
         worker = self.work / 'codex-stand-in'
-        worker.write_text(f'#!{sys.executable}\nimport time\nprint("READY", flush=True)\ntime.sleep(120)\n')
+        worker.write_text(f'#!{sys.executable}\nimport sys,time\n'
+                          'if sys.argv[1:] == ["--version"]:\n'
+                          '    print("codex-cli 0.163.0")\n    raise SystemExit(0)\n'
+                          'print("READY", flush=True)\ntime.sleep(120)\n')
         worker.chmod(0o700)
         write(self.root / 'harnesses/custom-codex/harness.json', {'schema': 2, 'adapter': 'codex',
               'settings': {'executable': str(worker), 'inbox_bridge': False}})
