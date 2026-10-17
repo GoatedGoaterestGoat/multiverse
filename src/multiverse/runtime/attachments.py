@@ -159,6 +159,8 @@ def _observation(pid, observations):
             os.kill(pid, 0)  # Observation only. Never signal a cleanup process.
         except ProcessLookupError:
             observations[pid] = (True, None)
+        except OverflowError:
+            observations[pid] = (False, None)  # Damaged saved PID, not proof of exit.
         except PermissionError:
             observations[pid] = (False, process_snapshot(pid))
         else:

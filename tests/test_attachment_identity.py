@@ -120,3 +120,11 @@ class AttachmentIdentityTest(BaseTest):
         value = read(worker.path)
         self.assertNotEqual(value['at'], self.old)
         self.assertIn('recovery worker', attachments.problem(self.directory, self.facts))
+
+    def test_out_of_range_saved_pid_is_unknown_not_a_process_control_error(self):
+        role = self.legacy_role()
+        write(role.path, {**read(role.path), 'pid': 2 ** 90})
+        reason = attachments.problem(self.directory, self.facts)
+        self.assertIn(str(2 ** 90), reason)
+        self.assertIn(str(role.path), reason)
+        self.assertIn('cannot prove', reason)
