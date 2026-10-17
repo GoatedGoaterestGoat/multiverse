@@ -38,7 +38,8 @@ from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
+from ...runtime.process import process_started
+from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import Usage
 from ...store import read
 
@@ -56,6 +57,8 @@ ASK_TIMEOUT = 120
 # What the mod reports through `runtime-update --bridge` once it runs in a launch.
 BRIDGE = 'claude-mod-v1'
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
+NO_KEY = 'Claude has not published the inbox key for this launch'
+RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
 
@@ -77,18 +80,61 @@ def has_saved_conversation(native_id, environment=None):
     return any((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
 
 
-def peer_token(socket_path):
+def peer_token(socket_path, home=None):
     """The inbox key Claude publishes for this socket, or None before it binds.
 
     Claude writes `<pid>.<sha256 of the socket path>.key` under its sessions
-    directory; the socket path is unique to one launch.
+    directory (in `home`, the launch's storage, else this process's); the socket
+    path is unique to one launch.
     """
     digest = hashlib.sha256(os.path.abspath(socket_path).encode()).hexdigest()
-    keys = list((claude_home() / 'sessions').glob(f'*.{digest}.key'))
+    keys = list(((Path(home) if home else claude_home()) / 'sessions').glob(f'*.{digest}.key'))
     if len(keys) != 1:
         return None
     token = json.loads(keys[0].read_text()).get('peerToken')
     return token if isinstance(token, str) and TOKEN.match(token) else None
+
+
+def process_file(session):
+    """Claude's own file for this launch's pid (`<home>/sessions/<pid>.json`) and the pid's current start.
+
+    (record, started), either None. Undocumented and Claude's own, like the peer key files beside it.
+    """
+    if not isinstance(session.pid, int) or isinstance(session.pid, bool):
+        return None, None
+    home = Path(session.home) if session.home else claude_home()
+    try:
+        record = json.loads((home / 'sessions' / f'{session.pid}.json').read_text())
+    except (OSError, ValueError):
+        record = None
+    if not isinstance(record, dict) or not isinstance(record.get('procStart'), str):
+        record = None
+    return record, process_started(session.pid)
+
+
+def process_record(session):
+    """Claude's file for this exact launch's process, or None.
+
+    Only when three starts are one: the one the runner recorded when it started this
+    launch's child, the pid's start now, and the file's procStart. A pid reused by a
+    later process fails the first; execve (/restart) keeps the pid and its start.
+    """
+    record, started = process_file(session)
+    if record is None or not started or session.pid_started != started:
+        return None
+    return record if ' '.join(record['procStart'].split()) == started else None
+
+
+def unverified_relaunch(session):
+    """For a launch recorded before its start was: whether Claude's file for its pid names another socket.
+
+    Never trusted for delivery or a binding, only to tell the person to restart the agent.
+    """
+    record, started = process_file(session)
+    if session.pid_started or record is None or not started or ' '.join(record['procStart'].split()) != started:
+        return False
+    path = record.get('messagingSocketPath')
+    return isinstance(path, str) and os.path.abspath(path) != os.path.abspath(session.endpoint.address)
 
 
 class Transcript:
@@ -396,6 +442,60 @@ class ClaudeAdapter(ConfiguredAdapter):
                                 base_environment=command.environment)
         return replace(command, environment=plan.environment, plugins=plan.record())
 
+    def session_home(self, environment):
+        """Claude's storage for a launch: CLAUDE_CONFIG_DIR, else HOME/.claude, of that launch's environment."""
+        return os.path.realpath(claude_home(environment))
+
+    def observed_binding(self, session):
+        """The session this launch's exact process is on now, from Claude's own process file, or None.
+
+        A /clear moves the same process to a new session; core compares it with the binding.
+        """
+        record = process_record(session)
+        if record is None:
+            return None
+        try:
+            native_id = normalize_session_id(record.get('sessionId'))
+        except (TypeError, ValueError):
+            return None
+        return ObservedBinding(native_id=native_id, home=session.home or os.path.realpath(claude_home()),
+                               evidence='claude-process-file')
+
+    def connection_problem(self, session):
+        """Why messages cannot reach this live launch when its process relaunched itself, else None."""
+        if session.state != 'running' or not session.endpoint or not self._bridge(session).launched:
+            return None
+        if peer_token(session.endpoint.address, session.home):
+            return None
+        target, reason = self._inbox(session)
+        return reason if target is None and reason == RELAUNCHED else None
+
+    def _inbox(self, session):
+        """(session to write to, its inbox key), or (None, why not).
+
+        The launch's own socket while Claude publishes its key. After /restart the same
+        process listens on its own socket instead (its process file names it, with the
+        same session and start): delivery follows it there. Nothing is written.
+        """
+        token = peer_token(session.endpoint.address, session.home)
+        if token is not None:
+            return session, token
+        if session.pid_started is None:
+            # Its start was not recorded: the file cannot be tied to this launch, so no heal.
+            return None, (RELAUNCHED if unverified_relaunch(session) else NO_KEY)
+        record = process_record(session)
+        path = record.get('messagingSocketPath') if record else None
+        try:
+            same = record is not None and normalize_session_id(record.get('sessionId')) == normalize_session_id(session.native_id)
+        except (TypeError, ValueError):
+            same = False
+        if not same or not isinstance(path, str) or os.path.abspath(path) == os.path.abspath(session.endpoint.address):
+            return None, NO_KEY
+        token = peer_token(path, session.home)
+        if token is None or not os.path.exists(path):
+            return None, RELAUNCHED
+        return replace(session, endpoint=NativeEndpoint('unix-lines', path)), token
+
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
 
@@ -463,9 +563,9 @@ class ClaudeAdapter(ConfiguredAdapter):
         bridge = self._bridge(session)
         if not bridge.ready:
             return NativeResult('unavailable', bridge.reason)
-        token = peer_token(session.endpoint.address)
-        if token is None:
-            return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
+        target, token = self._inbox(session)
+        if target is None:
+            return NativeResult('unavailable', token)
         # Always `next`: the mod decides from the tag when a follow-up runs.
         try:
             opening = f'<<MV2 {mode} id={normalize_session_id(message.id)}>>'
@@ -473,8 +573,8 @@ class ClaudeAdapter(ConfiguredAdapter):
             opening = f'<<MV2 {mode}>>'  # no receipt without a UUID
         frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': message.id,
                  'message': {'role': 'user', 'content': opening + (message.framed or message.text) + CLOSE}}
-        written = executor.write_lines(session, [json.dumps({'type': 'auth', 'token': token}),
-                                                 json.dumps(frame, ensure_ascii=False)])
+        written = executor.write_lines(target, [json.dumps({'type': 'auth', 'token': token}),
+                                                json.dumps(frame, ensure_ascii=False)])
         if written.state != 'ok':
             return written
         return NativeResult('native_queued', 'Written to the Claude session inbox; the mod reports delivery')
@@ -490,15 +590,15 @@ class ClaudeAdapter(ConfiguredAdapter):
             return NativeResult('unavailable', bridge.reason)
         if not session.session_file:
             return NativeResult('unavailable', 'No agent directory recorded')
-        token = peer_token(session.endpoint.address)
-        if token is None:
-            return NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
+        target, token = self._inbox(session)
+        if target is None:
+            return NativeResult('unavailable', token)
         question_id = str(uuid4())
         answer = Path(session.session_file).parent / 'claude-asks' / f'{question_id}.json'
         frame = {'type': 'user', 'priority': 'next', 'session_id': session.native_id, 'msg_id': question_id,
                  'message': {'role': 'user', 'content': f'<<MV2 ask id={question_id}>>{question}{CLOSE}'}}
-        written = executor.write_lines(session, [json.dumps({'type': 'auth', 'token': token}),
-                                                 json.dumps(frame, ensure_ascii=False)])
+        written = executor.write_lines(target, [json.dumps({'type': 'auth', 'token': token}),
+                                                json.dumps(frame, ensure_ascii=False)])
         if written.state != 'ok':
             return written
         deadline = time.monotonic() + ASK_TIMEOUT

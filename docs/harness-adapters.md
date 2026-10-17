@@ -974,9 +974,29 @@ environment, and turns `--dangerously-skip-permissions` into the session's
 permission mode and allowed tools; it drops `--messaging-socket-path`, `--name`
 and `--add-dir`. Claude then listens on its own default socket
 (`/tmp/cc-socks/<pid>.sock`, listed in `~/.claude/sessions/<pid>.json`) and
-publishes the key for that path, so messages to mv2's socket stop reaching it,
-while the mod and its status and usage reports keep working. Restarting the
-agent through mv2 (stop, then resume) brings mv2's flags back.
+publishes the key for that path, while the mod and its status and usage reports
+keep working. mv2's own socket then has no key, so the adapter follows Claude to
+that socket: it reads `~/.claude/sessions/<pid>.json` for the agent's process and
+uses its `messagingSocketPath` and key only when the file belongs to that exact
+process (the pid, the start time the runner recorded when it started Claude and
+the file's `procStart` all agree, and its `sessionId` is the agent's session).
+When it cannot follow (the file is another process's, or the launch was recorded
+before mv2 kept the start time), `mv2 list`, `inspect` and `send` say "Claude
+relaunched itself (/restart) without mv2's inbox; restart the agent". Restarting
+the agent through mv2 (stop, then resume) brings all of mv2's flags back,
+including `--name` and `--add-dir`.
+
+`/clear` keeps the process but moves it to a new session ID, and Claude's inbox
+drops a message addressed to another session. mv2 follows the move. With the
+bridge, the mod reports the new ID when the cleared session starts, but only
+once Claude's process file names it: Claude starts that write before the hook
+runs without waiting for it, so the mod waits up to 5 s and reports nothing if
+the file never changes. Core also reads that file for the exact process
+(`observed_binding`, evidence `claude-process-file`) before it lists, measures,
+sends to or resumes an agent, so a launch without the bridge follows a `/clear`
+too. Core then rebinds the agent and records the move in its session history
+(`docs/session-lineage.md`). Messages, usage and resume go to the new session;
+the old conversation stays on disk as an earlier generation.
 
 The pieces keep to their own side of the boundary:
 
