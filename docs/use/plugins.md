@@ -121,7 +121,7 @@ There is one host per top-level universe, in a tmux session on mv2's server. It 
 - If a plugin needs the host and it isn't running, the dashboard starts it. It does this when it opens, and again after you change plugins on `P`. The header shows `host off` while the host is needed but not running. On `P`, press `h` to start or stop it.
 - Quitting the dashboard doesn't stop the host. The host stops by itself once no plugin needs it.
 - A worker that exits is restarted at most 3 times in 5 minutes. After that it stays stopped, and `mv2 plugins host` and `P` show the reason. Turn the plugin off and on again to give it a fresh start.
-- A plugin whose event handlers keep hanging is also left stopped, after 3 restarts however far apart.
+- A plugin whose event handlers keep hanging is also left stopped, after 3 such restarts within a day, however long each run takes. `mv2 plugins` and `mv2 doctor` say so too.
 - The host's log is `state/plugins/host/host.log` in the top-level universe.
 
 ## Safe mode

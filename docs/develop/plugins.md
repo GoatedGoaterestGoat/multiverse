@@ -212,14 +212,14 @@ def waiting(event):
 
 A handler runs in the plugin host, in the plugin's own worker process, for every universe in the tree where the plugin is on. An `api.Event` has `type`, `seq`, `at`, `universe`, `agent` (`{"id", "name"}` or `None`), `launch`, `data` and `age`, the seconds since it happened.
 
-Core records `agent.created`, `agent.launched`, `agent.ready`, `agent.status` (`data`: `from`, `to`), `agent.exited` (`state`, `exit_code`, `reason`), `agent.killed`, `agent.reported` (`phase`, `summary`), `agent.moved`, `agent.removed`, `message.saved`, `message.delivered`, `message.failed`, `message.read`, `universe.created` and `refresh.applied`. The [design](../design/plugins.md#seeing-lifecycle-events-from-any-process) lists each one's `data`. Message text is never recorded.
+Core records `agent.created`, `agent.launched`, `agent.ready`, `agent.status` (`data`: `from`, `to`), `agent.exited` (`state`, `exit_code`, `reason`), `agent.killed`, `agent.reported` (`phase`, `summary`), `agent.session` (`from`, `to`, `reason`, after a native session change), `agent.moved`, `agent.removed`, `message.saved`, `message.delivered`, `message.failed`, `message.read`, `universe.created` and `refresh.applied`. The [design](../design/plugins.md#seeing-lifecycle-events-from-any-process) lists each one's `data`. Message text is never recorded.
 
 `mv.events.emit("KIND", data, universe=None, agent=None)` records `my-plugin.KIND` for any plugin that subscribes. A handler whose events were pruned before it read them gets one `events.gap` event, with `missed`, `from` and `to`.
 
 - **Recording.** A universe records a type only while a plugin that is on there subscribes to it. Recording never holds up what it reports. It waits at most 0.2 s for the journal, and an event it can't write is dropped and logged to `state/plugins/events.log`. Events are at most 16 KiB, and larger `data` becomes `{"truncated": true, "bytes": N}`.
 - **At least once, in order.** The plugin's cursor, `state/plugins/NAME/events.cursor`, moves past an event once every matching handler finished it, raised (recorded, not retried) or was given up on. After a host restart, an event can arrive again. Make handlers idempotent, and skip old events by `event.age`.
 - **Time.** A handler has 60 s per event. A handler that runs out of time holds up only itself, and its siblings go on, however far ahead they get. A call counts one try when it runs out of time, and one more for every further 60 s it keeps running. After 3 tries, the handler is given up on for that event, and its next events get calls of their own. `mv2 plugins`, `mv2 doctor` and `P` show each give-up for a day.
-- **Hangs.** A worker left with two calls that never returned restarts itself, and the stuck calls' child processes end with it. After 3 such restarts, however far apart, the plugin is left stopped. Each handler's progress is kept in `state/plugins/NAME/handlers.json`, so a restart never repeats an event to a handler that finished it.
+- **Hangs.** A worker left with two calls that never returned restarts itself, and the stuck calls' child processes end with it. After 3 such restarts within a day, however long each run takes, the plugin is left stopped, and `mv2 plugins` and `doctor` say so. Each handler's progress is kept in `state/plugins/NAME/handlers.json`, so a restart never repeats an event to a handler that finished it.
 - **Start and retention.** Turning a plugin on starts its cursor at the journal's end. A journal keeps 7 days and 32 MiB by default (`"events": {"retain_days": 7, "max_mb": 32}` in `plugins.json`). `mv2 plugins events` shows its size and cursors, and `--prune` prunes it now.
 
 ```python
@@ -261,7 +261,8 @@ Each test gets:
 
 - a temporary universe from the base template (`self.root`), with the plugin found and on;
 - a temporary home, `CLAUDE_CONFIG_DIR` and `bin/` first on `PATH`;
-- no inherited agent identity.
+- no inherited agent identity;
+- a guard on your real `~/.multiverse`: a write there, by the test or a thread it started, is refused with `PermissionError` and fails that test, and writes no test can be charged with fail the run. The plugin's own directory, and Python's bytecode in a personal plugin, are not guarded, so a plugin in `~/.multiverse/plugins/NAME` can run its tests from there.
 
 Nothing starts an agent, tmux, a harness or the plugin host. A test sees only its own plugins unless the class sets `bundled = True`.
 
@@ -289,7 +290,7 @@ Don't declare mv2 as a dependency, so installing the plugin never replaces the m
 
 | Plugin code | Time limit | When it raises or runs out of time |
 | --- | --- | --- |
-| Import and `register(mv)` | 10 s | Past 10 s, the plugin is `failed` for now, and its load goes on: the result is used when it ends. Later processes wait for it at most 0.5 s, and a launch leaves it out while it still loads. A load that raises, or a registration the API refuses, leaves it `failed` until its files change or another process tries it |
+| Import and `register(mv)` | 10 s | Past 10 s, the plugin is `failed` for now, and its load goes on: the result is used when it ends. For the next 10 minutes, later processes wait for it at most 0.5 s, and a launch leaves it out while it still loads. A load that raises, or a registration the API refuses, leaves it `failed` until its files change or another process tries it |
 | A column | 2 s per refresh, for all its rows | The cell shows `—`, or `…` while a slow pass still runs |
 | A panel; inspector lines | 2 s; 2 s each and 4 s together | One line saying why; `unavailable` |
 | A palette action | 30 s | A status line saying it failed |

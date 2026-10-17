@@ -54,6 +54,7 @@ def plugin_module(directory, name):
 # thread that outlived its test, the process exits 1 at its end.
 
 _protected = set()  # absolute directories no test may change
+_exempt = set()  # directories inside them that are not mv2's state: the plugin under test (PluginTestCase.plugin)
 _violations = []  # {"path", "event", "test", "thread", "unreported"}
 _current = None  # the test running now
 _installed = False
@@ -118,21 +119,40 @@ def _record(event, path):
                         "thread": thread.name, "unreported": True})
 
 
+# For each event the guard watches: (index of a path the call changes, index of the directory fd it is relative
+# to, or None), from the audit events table. A path read but not changed (a link's target) is not listed.
+_TARGETS = {"os.mkdir": [(0, 2)], "os.rmdir": [(0, 1)], "os.remove": [(0, 1)], "os.chmod": [(0, 2)],
+            "os.utime": [(0, 3)], "os.rename": [(0, 2), (1, 3)], "os.link": [(1, 3)], "os.symlink": [(1, 2)],
+            "os.truncate": [(0, None)], "shutil.rmtree": [(0, 1)], "shutil.copyfile": [(1, None)],
+            "shutil.move": [(0, None), (1, None)]}
+
+
 def _hook(event, args):
     if event == "open":
         if len(args) < 3 or not _writes(args[1], args[2]):
             return
-        paths = args[:1]
-    elif event in _WRITES:
-        paths = args[:2] if event in ("os.rename", "os.link", "os.symlink", "shutil.copyfile", "shutil.move") \
-            else args[:1]
+        targets = [(args[0], None)]
+    elif event in _TARGETS:
+        targets = [(args[at] if at < len(args) else None, args[fd] if fd is not None and fd < len(args) else None)
+                   for at, fd in _TARGETS[event]]
     else:
         return
-    for path in paths:
-        where = _absolute(path)
-        if where is not None and any(where == top or where.startswith(top + os.sep) for top in _protected):
+    for path, directory in targets:
+        where = _absolute(path, directory)
+        if where is not None and any(where == top or where.startswith(top + os.sep) for top in _protected) \
+                and not _allowed(where):
             _record(event, where)
             raise PermissionError(f"a test may not change the real ~/.multiverse: {where}")
+
+
+def _allowed(where):
+    """Not mv2's state although inside the home: the plugin under test's own directory, and Python's bytecode in
+    a personal plugin (~/.multiverse/plugins/NAME), which importing its test modules writes before any test runs."""
+    if any(where == top or where.startswith(top + os.sep) for top in _exempt):
+        return True
+    parts = where.split(os.sep)
+    return ("__pycache__" in parts or where.endswith((".pyc", ".pyo"))) and any(
+        where.startswith(os.path.join(top, "plugins") + os.sep) for top in _protected)
 
 
 def _writes(mode, flags):
@@ -141,14 +161,37 @@ def _writes(mode, flags):
     return isinstance(flags, int) and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
 
 
-def _absolute(path):
+def _absolute(path, directory=None):
+    """The absolute path a call changes: relative to `directory` (a dir_fd, as shutil.rmtree passes) when given,
+    else to the working directory; None when it cannot be told (a file descriptor, or a dir_fd whose path this
+    system cannot give), which is then not counted."""
     if isinstance(path, int) or path is None:
         return None
     try:
         path = os.fsdecode(os.fspath(path))
     except TypeError:
         return None
-    return os.path.normpath(os.path.join(os.getcwd(), path)) if not os.path.isabs(path) else os.path.normpath(path)
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    if isinstance(directory, int) and not isinstance(directory, bool) and directory >= 0:  # AT_FDCWD is negative
+        base = _fd_path(directory)
+        return os.path.normpath(os.path.join(base, path)) if base else None
+    return os.path.normpath(os.path.join(os.getcwd(), path))
+
+
+def _fd_path(fd):
+    """The path of an open directory: /proc/self/fd on Linux, F_GETPATH on macOS; None elsewhere or if closed."""
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        pass
+    try:
+        import fcntl
+        if hasattr(fcntl, "F_GETPATH"):
+            return os.fsdecode(fcntl.fcntl(fd, fcntl.F_GETPATH, bytes(1024)).split(b"\0", 1)[0]) or None
+    except (OSError, ValueError):
+        pass
+    return None
 
 
 def _exit_status(strict=None):
@@ -187,6 +230,10 @@ class PluginTestCase(unittest.TestCase):
         install()  # before anything here moves HOME; checked last, once everything else is cleaned up
         running(self.id())
         self.addCleanup(check, self.id())
+        if self.plugin is not None:  # its own directory is its developer's code, not mv2's state
+            own = {os.path.normpath(os.path.abspath(self.plugin)), os.path.realpath(self.plugin)}
+            _exempt.update(own)
+            self.addCleanup(_exempt.difference_update, own)
         self.addCleanup(running, None)
         temp = tempfile.TemporaryDirectory(prefix="mv2-plugin-test-", dir="/tmp")
         self.addCleanup(temp.cleanup)

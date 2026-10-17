@@ -1533,7 +1533,12 @@ multiverse-v2/
   moved `HOME`), by the test or by a thread it started, is refused with
   `PermissionError` and fails that test, never a later one. Writes no test can
   be charged with (a test class that never names itself, or a thread that
-  outlived its test) are printed at the end and fail the run. Its helpers:
+  outlived its test) are printed at the end and fail the run. A path given
+  relative to a directory file descriptor (as `shutil.rmtree` removes files)
+  is resolved through that descriptor, so the working directory never decides
+  it. The plugin under test's own directory, and Python's bytecode in a
+  personal plugin (`~/.multiverse/plugins/NAME`), are not guarded: a personal
+  plugin runs its tests from its own directory. Its helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it
     would load it. Its `registrations` hold what `register` added, such as
     columns, handlers, launch contributions and helpers, to call directly.

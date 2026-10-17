@@ -120,12 +120,13 @@ mv2 and the plugins write here, so leave it alone.
 | `NAME/errors.log` | The plugin's recorded errors with tracebacks, rotated to `errors.log.1` at 1 MiB. |
 | `NAME/plugin.log` | Lines the plugin logs. |
 | `NAME/events.cursor` | The last event the plugin's handlers finished in this universe. |
+| `NAME/events.cursor.journal` | The journal (`journal-id`) that cursor belongs to, so a journal that started again is delivered from its start. Older mv2 ignores it. |
 | `NAME/handlers.json` | The last event each of the plugin's handlers finished, so a restarted worker never gives a handler an event twice. |
 | `host/` | In a top-level universe: the plugin host's `host.lock`, `status.json` and `host.log`. |
 | `events.log` | Events that could not be recorded. |
 | `migrate-failed.json`, `not-installed-notified.json` | Settings conversions that failed, and notices already given about a plugin that isn't installed. |
 
-`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, and `journal-id`. A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
+`state/events/` holds the event journal. It contains `.jsonl` segments named by their first event's number, `seq`, which holds the next number, `journal-id`, and its second copy `journal-id.copy` (so a lost or unreadable `journal-id` is not taken for a new journal). A journal that was removed and started again gets a new `journal-id`, so the host knows its events are new. mv2 writes the journal only while a plugin that is on here subscribes to events. It prunes the journal to the `events` limits in `plugins.json`.
 
 ## statusline.json
 
@@ -282,7 +283,7 @@ To restore an agent or subverse, move its entry back to its `origin`. `mv2 trash
 | `~/.multiverse/trusted-plugins.json` | The universe plugins you trusted: each one's path, the SHA-256 of its files and when. Written by `mv2 plugins trust` and `untrust`. |
 | `~/.multiverse/plugin-cache/SHA256/` | The copy of a trusted universe plugin that actually runs. A copy nothing trusts and nothing used for 14 days is removed. |
 | `~/.multiverse/plugin-fingerprints.json`, `~/.multiverse/pycache/`, `~/.multiverse/installed-plugins.json` | Caches: universe plugins' hashes by file sizes and times, Python bytecode for plugins imported from a universe's own directory, and the pip-installed plugins of each Python environment. They are safe to delete. |
-| `~/.multiverse/plugin-load-timeouts.json` | Plugins whose load ran past 10 s, by their files. Later processes wait for such a plugin at most 0.5 s, and a launch leaves it out while it still loads. The entry goes when the plugin loads or its files change. It is safe to delete. |
+| `~/.multiverse/plugin-load-timeouts.json` | Plugins whose load ran past 10 s, by their files. Later processes wait for such a plugin at most 0.5 s, and a launch leaves it out while it still loads. The entry goes when the plugin loads, its files change, or 10 minutes pass. It is safe to delete. |
 | tmux server `multiverse-v2` | Agent terminals (`tmux -L multiverse-v2`), unless `MV2_TMUX_SOCKET` names another socket. See [Environment](environment.md). |
 | `/tmp/mv2-native-LAUNCH/` | Private socket directory for a bridge launch. |
 | Codex, Claude and Pi storage | Native conversations stay where each harness keeps them (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`); mv2 never moves or deletes them. |
