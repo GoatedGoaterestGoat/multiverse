@@ -647,7 +647,7 @@ never restarts the daemon on its own. A disposable native-daemon regression test
 removes the original workspace and verifies that configuration reads still work.
 
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-`unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
+`unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`, and Claude also supports `system_prompt_snapshot` (see the Claude section). Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
