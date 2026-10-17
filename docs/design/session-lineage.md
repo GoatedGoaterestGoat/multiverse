@@ -79,6 +79,13 @@ potentially matching claim is refused conservatively. Initial binding, assigned
 session publication, rebind, and moves use the same namespace lock. Moving an
 agent checks its earlier generations as well as its current ID.
 
+A damaged journal belonging to another agent blocks a claim only when its
+readable bytes mention the requested ID, including a torn row. Unrelated damage
+does not block new agents. A journal that cannot be read or safely inspected
+still refuses the claim, naming the agent and file to repair. Historical storage
+homes keep the absolute scope recorded at the transition; reading history never
+follows a parent directory that became a symlink later.
+
 Lock order is agent launch locks, then tree namespace locks in path order, then
 properties locks. A claim never acquires another agent's launch lock while it
 holds the namespace lock. Its scan reads journal tips without repairing other

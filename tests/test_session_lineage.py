@@ -186,3 +186,49 @@ class SessionLineageTest(BaseTest):
         self.assertTrue((self.agent / 'properties.json').exists())
         self.assertFalse((destination / 'state' / 'agents' / self.agent.name).exists())
 
+    def test_other_agents_torn_journal_only_blocks_ids_it_may_own(self):
+        peer, previous = self.make_agent('damaged-peer')
+        current, torn = str(uuid4()), str(uuid4())
+        agents.rebind_session(self.root, peer.name, previous, current, 'clear', 'launch', home=self.home)
+        journal = peer / 'sessions.jsonl'
+        with journal.open('ab') as stream:
+            stream.write(b'{"schema":1,"to":"' + torn.encode() + b'"')
+        before = journal.read_bytes()
+        healthy = str(uuid4())
+        self.assertEqual(self.change(healthy)['native_session_id'], healthy)
+        for requested in (previous, current, torn):
+            with self.subTest(requested=requested), self.assertRaisesRegex(ValueError, 'damaged-peer.*sessions.jsonl'):
+                agents.rebind_session(self.root, self.agent.name, healthy, requested, 'clear', 'launch', home=self.home)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(read(self.agent / 'properties.json')['native_session_id'], healthy)
+
+    def test_os_unreadable_peer_journal_is_a_named_actionable_refusal(self):
+        peer, previous = self.make_agent('permission-peer')
+        agents.rebind_session(self.root, peer.name, previous, str(uuid4()), 'clear', 'launch', home=self.home)
+        journal, original = peer / 'sessions.jsonl', Path.open
+        def opened(path, *args, **kwargs):
+            if path == journal:
+                raise PermissionError('permission denied')
+            return original(path, *args, **kwargs)
+        for requested in (str(uuid4()), read(peer / 'properties.json')['native_session_id']):
+            with self.subTest(requested=requested), patch.object(Path, 'open', opened), \
+                    self.assertRaisesRegex(ValueError, 'permission-peer.*sessions.jsonl.*read'):
+                self.change(requested)
+
+    def test_stored_home_remains_valid_when_its_parent_later_becomes_a_symlink(self):
+        parent = self.work / 'scope-parent'
+        home = parent / 'home'
+        home.mkdir(parents=True)
+        self.home = str(home.resolve())
+        write(self.agent / 'properties.json', {**read(self.agent / 'properties.json'), 'native_session_home': self.home})
+        target = str(uuid4())
+        self.change(target)
+        parent.rename(self.work / 'original-scope')
+        replacement = self.work / 'replacement-scope'
+        replacement.mkdir()
+        parent.symlink_to(replacement, target_is_directory=True)
+        self.assertNotEqual(sessions.canonical_home(self.home), self.home)
+        effective, rows = sessions.effective(self.agent, read(self.agent / 'properties.json'))
+        self.assertEqual(effective['native_session_id'], target)
+        self.assertEqual(rows[0]['home'], self.home, 'Historical storage is not reinterpreted through a new symlink')
+
