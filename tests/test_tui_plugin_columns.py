@@ -150,6 +150,24 @@ class ColumnTests(PluginTestCase):
             module.PERMITS.release()
         self.until(lambda: self.answered(LocalBackend().snapshot(self.root)) == set(names), "the new values")
 
+    def test_a_column_turned_back_on_while_its_old_pass_still_runs_shows_dots_not_dashes(self):
+        import threading
+        names = ["a1", "a2", "a3"]
+        for name in names:
+            self.agent(name)
+        module = self.mod()
+        module.PERMITS = threading.Semaphore(0)  # the pass parks on its first row and stays parked
+        with mock.patch.object(loader, "SYNCHRONOUS_BUDGET", 0.3):
+            self.assertEqual(self.cells(LocalBackend().snapshot(self.root)), {n: "…" for n in names})
+            self.enable("loud", on=False)
+            LocalBackend().snapshot(self.root)
+            self.enable("loud")
+            again = self.cells(LocalBackend().snapshot(self.root))  # the old pass still holds the plugin's call
+        self.assertEqual(again, {n: "…" for n in names}, "a column waiting on its old pass showed dashes")
+        for _ in range(2 * len(names)):
+            module.PERMITS.release()
+        self.until(lambda: self.answered(LocalBackend().snapshot(self.root)) == set(names), "the new values")
+
     def test_a_universe_with_the_plugin_off_everywhere_makes_no_call(self):
         self.agent("a")
         module = self.mod()

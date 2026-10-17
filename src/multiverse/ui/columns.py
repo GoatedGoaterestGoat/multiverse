@@ -182,7 +182,7 @@ def fill_cells(rows, group=False):
         what = f"column {column.spec.key}" + (" (subverses)" if group else "")
         where = wanted[0].get("path") if group else wanted[0].get("universe")
         entry = _runs.setdefault((id(column.loaded), key, group), {"run": None, "last": {}, "slow": False})
-        run = entry["run"]
+        run, waiting = entry["run"], False
         if run is not None and run.finished.is_set():  # a pass that ran long has landed: it is the latest full answer
             entry["last"], entry["run"], run = dict(run.partial), None, None
         if run is None:
@@ -204,8 +204,8 @@ def fill_cells(rows, group=False):
 
             budget = 0.2 if entry["slow"] else loader.SYNCHRONOUS_BUDGET
             outcome = loader.guarded(column.loaded, what, answer, root=where, timeout=budget)
-            if outcome.state == "busy":  # nothing started: an earlier pass still holds the plugin's call
-                pass
+            if outcome.state == "busy":  # nothing started: an earlier pass (one from before the plugin went off,
+                waiting = True             # say) still holds the plugin's call; its rows are on their way, not missing
             elif run.finished.is_set():
                 entry["slow"] = False
                 entry["last"], entry["run"] = dict(run.partial), None
@@ -214,7 +214,7 @@ def fill_cells(rows, group=False):
         current = entry["run"].partial if entry["run"] is not None else {}
         for row in wanted:
             rk = row_key(row, group)
-            value = current[rk] if rk in current else entry["last"].get(rk, "…" if entry["run"] is not None else None)
+            value = current[rk] if rk in current else entry["last"].get(rk, "…" if entry["run"] is not None or waiting else None)
             if value is not None:
                 row.setdefault("plugin_cells", {})[key] = value
     # A column this pass did not use (its plugin went off, or the view stopped naming it) forgets its answers,

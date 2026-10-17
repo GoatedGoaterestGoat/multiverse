@@ -101,6 +101,18 @@ class FirstScreenTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 await d.refresh()
                 await asyncio.sleep(0.2)
 
+    async def test_the_plugins_screen_lists_at_once_while_a_register_still_hangs(self):
+        self.enterContext(mock.patch.object(loader, "LOAD_SECONDS", 5.0))  # still hanging when the screen opens
+        async with self.dashboard() as d:
+            started = time.monotonic()
+            d.app.action_plugins()
+            while not getattr(d.screen, "items", None):  # not d.until: that waits for every worker, this one included
+                self.assertLess(time.monotonic() - started, 6, "the Plugins screen never listed anything")
+                await asyncio.sleep(0.05)
+            took = time.monotonic() - started
+            self.assertLess(took, 1.5, f"the Plugins screen showed 'Reading…' for {took:.1f} s")
+            self.assertIn("quick", [item["name"] for item in d.screen.items])
+
 
 if __name__ == "__main__":
     unittest.main()

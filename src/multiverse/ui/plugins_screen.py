@@ -127,16 +127,23 @@ class PluginsScreen(ModalScreen):
 
     @work(group="plugins-load", exit_on_error=False)
     async def load(self, keep=None):
+        """The list first, then the universe's plugin problems and the host: each shows as soon as it is read, so a
+        plugin still loading (whose problems are only known once it has) never keeps the list from showing."""
         try:
             items = await asyncio.to_thread(self.service.listing, self.root)
-            problems = await asyncio.to_thread(self.service.problems, self.root)
-            host = await asyncio.to_thread(self.service.host_state, self.root)
         except Exception as error:
             self.query_one("#plugin-details", Static).update("Plugins unavailable.")
             self.error(str(error))
             return
-        self.items, self.problems, self.host = items, problems, host
+        self.items = items
         self.fill(keep)
+        try:
+            self.problems = await asyncio.to_thread(self.service.problems, self.root)
+            self.describe_selected()
+            self.host = await asyncio.to_thread(self.service.host_state, self.root)
+            self.describe_selected()
+        except Exception as error:
+            self.error(str(error))
 
     def fill(self, keep=None):
         table = self.query_one("#plugins-table", DataTable)

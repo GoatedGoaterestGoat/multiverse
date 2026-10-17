@@ -440,40 +440,48 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         found = plugin_of(error)
         if found is None:
             return super()._handle_exception(error)
-        name, loaded = found
+        name, loaded, package = found
         error = getattr(error, "error", error) if isinstance(error, WorkerFailed) else error  # say what the worker raised
         if loaded is not None:
             self.plugin_service.record(loaded, "screen or widget", error, self.home)
         message = f"{name}: its screen or widget failed: {type(error).__name__}: {error}"
         self.set_status(message, error=True)
-        self.call_later(self.close_plugin_screens, loaded, message)  # off this call: the failing widget is still unwinding
+        self.call_later(self.close_plugin_screens, package, message)  # off this call: the failing widget is still unwinding
 
-    async def close_plugin_screens(self, loaded=None, message=""):
-        """Pop every screen on top that is a plugin's class and take out the plugin's widgets on the screen that stays.
+    async def close_plugin_screens(self, package, message=""):
+        """Close the failing plugin's screens, and only its: from the lowest one in the stack up (what it opened above
+        itself goes with it), leaving any other plugin's screen and its unsaved input alone. Then take the plugin's
+        widgets out of every screen that stays.
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
         messages, and one that cannot render fails every layout; either keeps the screen from ever settling. Where a
         plugin's widgets were part of the local view, one line says what happened in their place."""
-        from ..plugins import loader
-        while len(self.screen_stack) > 1 and type(self.screen).__module__.startswith(loader.PACKAGE + "."):
-            await self.pop_screen()
-        package = loaded.package + "." if loaded is not None else None
+        def theirs(node):
+            module = type(node).__module__
+            return module == package or module.startswith(package + ".") \
+                or getattr(node, "mv_plugin_package", None) == package
+
+        stack = self.screen_stack
+        lowest = next((index for index, screen in enumerate(stack) if index and theirs(screen)), None)
+        if lowest is not None:
+            while len(self.screen_stack) > lowest:
+                await self.pop_screen()
         views = []
-        for widget in list(self.screen.walk_children(with_self=False)):
-            task = getattr(widget, "_task", None)
-            ours = package is not None and (type(widget).__module__.startswith(package)
-                                            or str(getattr(widget, "mv_plugin_package", "")) + "." == package)
-            if not widget.is_attached:
-                continue
-            if ours and isinstance(widget.parent, LocalView) and widget.parent not in views:
-                views.append(widget.parent)
-            if task is not None and task.done() and not widget.is_running:
-                try:
-                    await widget._message_loop_exit()  # what a widget's loop does when it ends: unmount and detach
-                except Exception:
-                    pass
-            elif ours:
-                await widget.remove()
+        for screen in self.screen_stack:
+            for widget in list(screen.walk_children(with_self=False)):
+                if not widget.is_attached:
+                    continue
+                task = getattr(widget, "_task", None)
+                ours = theirs(widget)
+                if ours and isinstance(widget.parent, LocalView) and widget.parent not in views:
+                    views.append(widget.parent)
+                if task is not None and task.done() and not widget.is_running:
+                    try:
+                        await widget._message_loop_exit()  # what a widget's loop does when it ends: unmount and detach
+                    except Exception:
+                        pass
+                elif ours:
+                    await widget.remove()
         for view in views:
             await view.mount(Static(message, markup=False, classes="view-error"))
 

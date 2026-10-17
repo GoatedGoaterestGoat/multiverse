@@ -25,23 +25,24 @@ def universe_name(root):
 
 
 def plugin_of(error):
-    """(plugin name, its Loaded or None) when `error` was raised by code of a loaded plugin, else None.
+    """(plugin name, its Loaded or None, its package) when `error` was raised in code of a plugin, else None.
 
-    A plugin's modules live in a package of their own (mv2_plugins.NAME_digest), so a traceback frame in
-    one says whose code it was, whatever Textual code stands between it and the event loop."""
-    seen = set()
-    while error is not None and id(error) not in seen:  # a worker's failure wraps the plugin's error as its cause
-        seen.add(id(error))
-        traceback = error.__traceback__
-        while traceback is not None:
-            module = str(traceback.tb_frame.f_globals.get("__name__", ""))
-            if module.startswith(loader.PACKAGE + "."):
-                package = ".".join(module.split(".")[:2])
-                found = loader.loaded_by_package(package)
-                return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found
-            traceback = traceback.tb_next
-        wrapped = error.error if isinstance(error, WorkerFailed) else None  # Textual's worker error keeps the real one here
-        error = wrapped or error.__cause__ or error.__context__
+    A plugin's modules live in a package of their own (mv2_plugins.NAME_digest), so a frame of the error's own
+    traceback in one says whose code it was, whatever Textual code stands between it and the event loop. Only the
+    error's own frames count, never the error it was raised while handling (`__context__`, `__cause__`): a bug of
+    the dashboard's that happens while it deals with a plugin's error stays the dashboard's, and ends it. The one
+    wrapper looked through is Textual's WorkerFailed, which carries a worker's error without being raised in it."""
+    if isinstance(error, WorkerFailed):
+        error = error.error
+    traceback = getattr(error, "__traceback__", None)
+    while traceback is not None:
+        module = str(traceback.tb_frame.f_globals.get("__name__", ""))
+        if module.startswith(loader.PACKAGE + "."):
+            package = ".".join(module.split(".")[:2])
+            found = loader.loaded_by_package(package)
+            return (found.name if found else package.split(".")[1].rsplit("_", 1)[0]), found, \
+                (found.package if found else package)
+        traceback = traceback.tb_next
     return None
 
 
