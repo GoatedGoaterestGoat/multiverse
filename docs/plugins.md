@@ -1530,9 +1530,10 @@ multiverse-v2/
   `CLAUDE_CONFIG_DIR`, a `bin/` directory first on `PATH` and no inherited
   agent identity. Nothing in it starts an agent, tmux or a harness. It runs
   guarded: a write under your real `~/.multiverse` (the one before any test
-  moved `HOME`), by the test or by a thread it left running, is refused with
-  `PermissionError` and fails the test, or the test process at its end. Its
-  helpers:
+  moved `HOME`), by the test or by a thread it started, is refused with
+  `PermissionError` and fails that test, never a later one. Writes no test can
+  be charged with (a test class that never names itself, or a thread that
+  outlived its test) are printed at the end and fail the run. Its helpers:
   - `loaded()`: the plugin loaded and registered, as a process that needs it
     would load it. Its `registrations` hold what `register` added, such as
     columns, handlers, launch contributions and helpers, to call directly.

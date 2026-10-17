@@ -55,8 +55,8 @@ class GuardTest(StandInHome):
     def test_check_raises_once_for_what_is_not_reported(self):
         testing._record("open", str(self.protected / "late.json"))
         with self.assertRaisesRegex(AssertionError, "late.json"):
-            testing.check()
-        testing.check()  # reported now: nothing more to say
+            testing.check(self.id())
+        testing.check(self.id())  # reported now: nothing more to say
 
 
 class SlowLoadLeakTest(StandInHome):
@@ -80,6 +80,47 @@ class PluginTestCaseGuardsTest(PluginTestCase):
     def test_plugin_test_cases_run_guarded(self):
         self.assertTrue(testing._protected)
         self.assertEqual(testing._current, self.id())
+
+
+class AttributionTest(StandInHome):
+    """A refused write fails the test it came from, never a later one; one no test can be charged with fails the
+    run at its end (strict, the default)."""
+
+    def test_a_write_from_no_test_does_not_fail_the_next_plugin_test(self):
+        testing.running(None)  # a plain TestCase that does not name itself, writing the real home
+        with self.assertRaises(PermissionError):
+            (self.real / ".multiverse").mkdir()
+        testing.running(self.id())
+        testing.check(self.id())  # not this test's: nothing to fail here
+        [found] = self.new_violations()
+        self.assertIsNone(found["test"])
+
+    def test_a_thread_belongs_to_the_test_that_started_it(self):
+        import threading
+        go, done = threading.Event(), threading.Event()
+
+        def late():
+            go.wait(5)
+            try:
+                (self.real / ".multiverse").mkdir()
+            except PermissionError:
+                pass
+            done.set()
+        threading.Thread(target=late, daemon=True).start()
+        testing.running("an.earlier.test")  # its test ended; the next one runs now
+        go.set()
+        done.wait(5)
+        testing.running(self.id())
+        [found] = self.new_violations()
+        self.assertEqual(found["test"], self.id())  # the thread was started here, not in the test running then
+
+    def test_exit_fails_the_run_only_when_strict(self):
+        testing._record("open", str(self.protected / "late.json"))
+        try:
+            self.assertEqual(testing._exit_status(strict=False), 0)
+            self.assertEqual(testing._exit_status(strict=True), 1)
+        finally:
+            self.new_violations()
 
 
 class PluginModuleTest(StandInHome):

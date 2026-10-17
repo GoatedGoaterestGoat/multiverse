@@ -57,20 +57,34 @@ _protected = set()  # absolute directories no test may change
 _violations = []  # {"path", "event", "test", "thread", "unreported"}
 _current = None  # the test running now
 _installed = False
+_strict = False  # whether writes no check() reported make the process exit 1 (the default once installed)
+_TEST = "_mv2_test"  # on a Thread: the test it was started in (threads it starts carry it on)
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
 
 
-def install(home=None):
+def install(home=None, strict=True):
     """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
-    ~/.multiverse as it was when this module was imported. Returns the directory now protected."""
-    global _installed
+    ~/.multiverse as it was when this module was imported. Returns the directory now protected.
+
+    A refused write counts against the test it came from: the test running then, or for a thread the test that
+    started it. Strict (the default): writes that no check() reported (no test named itself, or a thread outlived
+    its test) make the process exit 1 at its end, after they are printed. strict=False only prints them; it never
+    makes a process that another caller installed strict lenient again."""
+    global _installed, _strict
+    _strict = _strict or strict
     given = os.path.normpath(os.path.abspath(home if home is not None else _REAL_HOME))
     directory = os.path.realpath(given)
     _protected.update({given, directory})  # as written and as resolved (/tmp, /var are links on macOS)
     if not _installed:
         _installed = True
+        start = threading.Thread.start
+
+        def tagged_start(thread, *args, **kwargs):
+            setattr(thread, _TEST, getattr(threading.current_thread(), _TEST, None) or _current)
+            return start(thread, *args, **kwargs)
+        threading.Thread.start = tagged_start
         sys.addaudithook(_hook)
         atexit.register(_at_exit)
     return Path(directory)
@@ -87,9 +101,10 @@ def violations():
     return [dict(item) for item in _violations]
 
 
-def check():
-    """Raise AssertionError for refused writes not reported yet, and mark them reported."""
-    found = [item for item in _violations if item["unreported"]]
+def check(test=None):
+    """Raise AssertionError for refused writes not reported yet, and mark them reported: those of `test` when given
+    (what a test's own cleanup asks: never another test's), else all."""
+    found = [item for item in _violations if item["unreported"] and (test is None or item["test"] == test)]
     for item in found:
         item["unreported"] = False
     if found:
@@ -98,8 +113,9 @@ def check():
 
 
 def _record(event, path):
-    _violations.append({"path": path, "event": event, "test": _current,
-                        "thread": threading.current_thread().name, "unreported": True})
+    thread = threading.current_thread()
+    _violations.append({"path": path, "event": event, "test": getattr(thread, _TEST, None) or _current,
+                        "thread": thread.name, "unreported": True})
 
 
 def _hook(event, args):
@@ -135,6 +151,12 @@ def _absolute(path):
     return os.path.normpath(os.path.join(os.getcwd(), path)) if not os.path.isabs(path) else os.path.normpath(path)
 
 
+def _exit_status(strict=None):
+    """1 when a strict process has refused writes no check() reported, else 0."""
+    strict = _strict if strict is None else strict
+    return 1 if strict and any(item["unreported"] for item in _violations) else 0
+
+
 def _at_exit():
     found = [item for item in _violations if item["unreported"]]
     if not found:
@@ -143,9 +165,10 @@ def _at_exit():
     for item in found:
         print(f"  {item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})",
               file=sys.stderr)
-    sys.stdout.flush()
-    sys.stderr.flush()
-    os._exit(1)
+    if _exit_status():
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(1)
 
 
 CLEARED = ("MV2_UNIVERSE", "MV2_AGENT_ID", "MV2_AGENT_DIR", "MV2_LAUNCH_ID", "MV2_CONTROL_SOCKET",
@@ -163,7 +186,7 @@ class PluginTestCase(unittest.TestCase):
         super().setUp()
         install()  # before anything here moves HOME; checked last, once everything else is cleaned up
         running(self.id())
-        self.addCleanup(check)
+        self.addCleanup(check, self.id())
         self.addCleanup(running, None)
         temp = tempfile.TemporaryDirectory(prefix="mv2-plugin-test-", dir="/tmp")
         self.addCleanup(temp.cleanup)

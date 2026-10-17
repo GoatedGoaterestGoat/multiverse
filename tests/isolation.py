@@ -40,6 +40,7 @@ def isolate(test):
     """Isolate `test` (a TestCase, from its setUp) until it ends; returns the HOME it now has."""
     home_safety.install()
     home_safety.running(test.id())
+    test.addCleanup(home_safety.check, test.id())  # registered first, so it runs last: this test's refused writes
     test.addCleanup(home_safety.running, None)
     temporary = tempfile.TemporaryDirectory(prefix="mv2-test-home-", dir="/tmp")
     test.addCleanup(temporary.cleanup)
