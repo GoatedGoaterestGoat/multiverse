@@ -209,3 +209,29 @@ def _kill(pid):
         os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+
+
+class OlderHostTest(Fixture):
+    """A plugin host started before an update keeps running the code it started with: what the new code writes
+    must read as before to it (9d599d3's readers, quoted here), so it keeps its place instead of jumping to the
+    journal's end and skipping what it has not delivered."""
+
+    @staticmethod
+    def old_cursor(path):
+        return int(path.read_text().strip())  # 9d599d3 host._read_cursor; ValueError meant "start at the end"
+
+    @staticmethod
+    def old_counter(base):
+        return int((base / "seq").read_text().strip() or "1")  # 9d599d3 events._append and _read
+
+    def test_an_older_host_reads_the_new_cursor_and_counter_and_keeps_its_place(self):
+        self.emit(self.root, 5)
+        self.assertTrue(self.deliver_until(lambda: host._read_cursor(self.root, "pair") == 5))
+        self.assertEqual(self.old_cursor(host._cursor_path(self.root, "pair")), 5)
+        self.assertEqual(self.old_counter(events.directory(self.root)), 6)
+        # And what an older host writes still reads right to the new code.
+        host._cursor_path(self.root, "pair").write_text("3\n")
+        self.assertEqual(host._read_cursor(self.root, "pair"), 3)
+        (events.directory(self.root) / "seq").write_text("6\n")
+        self.assertIsNotNone(events.journal_id(self.root))
+        self.assertEqual(events.emit(self.root, "agent.status", {"id": "a", "name": "w"})["seq"], 6)

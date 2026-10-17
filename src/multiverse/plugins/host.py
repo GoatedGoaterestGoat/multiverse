@@ -364,12 +364,18 @@ def _cursor_path(scope, name):
     return Path(scope) / "state" / "plugins" / name / "events.cursor"
 
 
+def _cursor_journal_path(scope, name):
+    """Which journal the cursor belongs to: a file of its own, so the cursor keeps the plain number every mv2 reads
+    (a plugin host started before an update runs the old code, which takes anything else for "no cursor")."""
+    return _cursor_path(scope, name).with_name("events.cursor.journal")
+
+
 def _read_cursor(scope, name, journal=None):
     """The last sequence handled here, or, the first time, the journal's end: a new worker does not replay history.
 
-    The cursor names the journal it belongs to: one that started again since (its state was removed) is
-    delivered from its start, whatever the old cursor said. An older cursor without a journal is taken for one
-    that started again when it is past the journal's newest event."""
+    A cursor belonging to another journal (this one started again since: its state was removed) means its start,
+    whatever the number says. One whose journal is not known (written by an older mv2) is taken for one that
+    started again when it is past the journal's newest event."""
     path = _cursor_path(scope, name)
     journal = events.journal_id(scope) if journal is None else journal
     try:
@@ -380,10 +386,13 @@ def _read_cursor(scope, name, journal=None):
         last = events._last_sequence(found[-1][1]) if found else 0
         _write_cursor(scope, name, last, journal)
         return last
-    stored = parts[1] if len(parts) > 1 else None
+    try:
+        stored = _cursor_journal_path(scope, name).read_text().strip() or None
+    except OSError:
+        stored = parts[1] if len(parts) > 1 else None  # the one release that kept it in the cursor itself
     if stored is not None and journal is not None and stored != journal:
         return 0
-    following = events._counter(events.directory(scope))[0]
+    following = events._counter(events.directory(scope))
     if stored is None and following is not None and sequence >= following:
         return 0
     return sequence
@@ -394,9 +403,18 @@ def _write_cursor(scope, name, sequence, journal=None):
         return  # removed or moved meanwhile: a cursor must never bring its directories back
     path = _cursor_path(scope, name)
     path.parent.mkdir(parents=True, exist_ok=True)
+    mark = _cursor_journal_path(scope, name)
+    if journal and (_cursor_journals.get(str(path)) != journal or not mark.is_file()):
+        temporary = mark.with_name(".events.cursor.journal.tmp")
+        temporary.write_text(f"{journal}\n")
+        temporary.replace(mark)
+        _cursor_journals[str(path)] = journal
     temporary = path.with_name(".events.cursor.tmp")
-    temporary.write_text(f"{sequence} {journal}\n" if journal else f"{sequence}\n")
+    temporary.write_text(f"{sequence}\n")
     temporary.replace(path)
+
+
+_cursor_journals = {}  # cursor path -> the journal last written beside it by this process
 
 
 def _age(text):

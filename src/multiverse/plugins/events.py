@@ -57,29 +57,34 @@ def directory(root):
 ID = "journal-id"  # made with a journal, gone when its state is removed: a reader tells a journal that started again
 
 
+ID_COPY = "journal-id.copy"  # a second copy, so a journal-id that was lost or cannot be read is not taken for a new
+# journal. Files of their own: the counter keeps the format every mv2 since the journal began reads (a plugin host
+# started before an update runs the old code until it stops).
+
+
 def journal_id(root):
     """The id of `root`'s journal, made when it is first written; None while there is none (or before mv2 made
-    them: such a journal gets one at its next event). The counter file keeps it too, so a journal-id that was
-    deleted or cannot be read is not taken for a journal that started again."""
-    try:
-        value = (directory(root) / ID).read_text().strip()
-    except OSError:
-        value = ""
-    return value if _ID_FORMAT.fullmatch(value) else _counter(directory(root))[1]
+    them: such a journal gets one at its next event)."""
+    for name in (ID, ID_COPY):
+        try:
+            value = (directory(root) / name).read_text().strip()
+        except OSError:
+            continue
+        if _ID_FORMAT.fullmatch(value):
+            return value
+    return None
 
 
 _ID_FORMAT = re.compile(r"[0-9a-f]{32}")
 
 
 def _counter(base):
-    """(the next sequence number, the journal's id) from the counter file `seq`: either None when not there."""
+    """The next sequence number, from the counter file `seq`; None when it is not there or cannot be read."""
     try:
         parts = (Path(base) / "seq").read_text().split()
     except OSError:
-        return None, None
-    number = int(parts[0]) if parts and parts[0].isdigit() else None
-    known = parts[1] if len(parts) > 1 and _ID_FORMAT.fullmatch(parts[1]) else None
-    return number, known
+        return None
+    return int(parts[0]) if parts and parts[0].isdigit() else None
 
 
 def segments(root):
@@ -162,17 +167,18 @@ def _bounded_lock(path, seconds=None):
 def _append(root, event):
     base = directory(root)
     known = journal_id(root) or uuid.uuid4().hex
-    try:
-        stored = (base / ID).read_text().strip()
-    except OSError:
-        stored = ""
-    if stored != known:  # a new journal, or its id file lost: written again from the counter's copy
-        temporary = base / f".{ID}.tmp"
-        temporary.write_text(known + "\n")
-        temporary.replace(base / ID)
+    for name in (ID, ID_COPY):  # a new journal, or one of its two id files lost: written again from the other
+        try:
+            stored = (base / name).read_text().strip()
+        except OSError:
+            stored = ""
+        if stored != known:
+            temporary = base / f".{name}.tmp"
+            temporary.write_text(known + "\n")
+            temporary.replace(base / name)
     counter = base / "seq"
     found = segments(root)
-    sequence = _counter(base)[0] or 1
+    sequence = _counter(base) or 1
     if found:
         # A crash after writing an event but before counting it: never reuse its number.
         sequence = max(sequence, _last_sequence(found[-1][1]) + 1, found[-1][0])
@@ -189,7 +195,7 @@ def _append(root, event):
                 handle.write(b"\n")  # seal a torn last line; readers skip it
         handle.write(line)
     temporary = base / ".seq.tmp"
-    temporary.write_text(f"{sequence + 1} {known}\n")
+    temporary.write_text(f"{sequence + 1}\n")
     temporary.replace(counter)
     if rolled and found:
         prune(root, locked=True)  # the segment just closed counts now
@@ -294,7 +300,7 @@ def _read(root, after, limit):
     oldest = found[0][0]
     if after + 1 < oldest:
         gap = {"missed": oldest - after - 1, "from": after + 1, "to": oldest - 1}
-    number = _counter(directory(root))[0]  # nothing written since `after` (a worker polls every half second):
+    number = _counter(directory(root))  # nothing written since `after` (a worker polls every half second):
     if number is not None and number <= after + 1:  # no segment is read at all
         return [], gap
     events = []

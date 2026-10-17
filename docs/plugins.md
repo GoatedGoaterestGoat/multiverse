@@ -351,11 +351,14 @@ where they happen and delivered where plugins run**:
     time, holds only itself: its siblings go on, past any number of events,
     and an event a handler finished is never given to it again while a sibling
     catches up, however many polls that takes. A journal whose state was
-    removed starts again with a new id (`state/events/journal-id`, kept in its
-    counter file too, so a lost or unreadable id file is not taken for a new
-    journal), and only then does the host forget what its handlers finished.
-    A plugin's cursor names its journal, so a journal that started again is
-    delivered from its start, whatever the old cursor said. A call counts one try when it runs out of time and one more for
+    removed starts again with a new id (`state/events/journal-id`, with a
+    second copy in `journal-id.copy`, so a lost or unreadable id file is not
+    taken for a new journal), and only then does the host forget what its
+    handlers finished. Beside each plugin's cursor, `events.cursor.journal`
+    names the journal it belongs to, so a journal that started again is
+    delivered from its start, whatever the old cursor said. The cursor and the
+    journal's counter keep their plain-number format, so a plugin host started
+    before an update, still running the old code, keeps its place. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
     on for that event, and its next events get calls of their own. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day
