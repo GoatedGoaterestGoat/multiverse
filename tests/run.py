@@ -11,8 +11,9 @@ there.
 
 Runs started at once share the machine: a unit starts only when it holds one of the CPU count's slots in
 /tmp/mv2-test-slots-<uid>, so two agents' full runs take turns instead of overloading it. A unit still running
-after --timeout seconds, or when the run is interrupted, is stopped: its test fails and still runs its cleanups
-(stopping the tmux servers and native daemons it started); one not done GRACE seconds later is killed.
+after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM), is stopped: its test fails and still
+runs its cleanups (stopping the tmux servers and native daemons it started); one not done GRACE seconds later is
+killed. A unit whose runner is killed outright stops the same way.
 """
 import argparse
 import concurrent.futures
@@ -82,7 +83,15 @@ def _stop(signum, frame):
         raise Stopped("stopped by tests/run.py")
 
 
-def worker(start, target, shard, shards, report, verbosity):
+def _watch(fd):
+    """Stop this unit once the runner that started it is gone, however it ended: nothing is ever written to the pipe,
+    so a read returns only when the runner's end of it closes."""
+    while os.read(fd, 1):
+        pass
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def worker(start, target, shard, shards, report, verbosity, watch):
     sys.path[:0] = [str(start)] + ([str(HERE)] if Path(start) != HERE else [])
     import home_safety
     home_safety.install()  # strict: before a test module or fixture moves HOME
@@ -98,6 +107,8 @@ def worker(start, target, shard, shards, report, verbosity):
             suite = loader.loadTestsFromModule(sys.modules[target], pattern="test*.py")
     tests = [test for index, test in enumerate(_tests(suite)) if index % shards == shard]
     signal.signal(signal.SIGTERM, _stop)
+    os.set_inheritable(watch, False)  # the processes its tests start do not keep the runner's pipe
+    threading.Thread(target=_watch, args=(watch,), daemon=True).start()
     result = unittest.TextTestRunner(resultclass=_Result, verbosity=verbosity, stream=sys.stderr).run(
         unittest.TestSuite(tests))
     errors = [[test.id(), text] for test, text in result.errors]
@@ -193,8 +204,16 @@ class Run:
                 with self.lock:
                     if self.stopping.is_set():
                         return code, 0.0, None, ""
-                    process = subprocess.Popen(command, cwd=self.start.parent, stdout=out, stderr=subprocess.STDOUT,
-                                               stdin=subprocess.DEVNULL, start_new_session=True)
+                    watch, alive = os.pipe()  # the worker reads EOF from `watch` once this process is gone (_watch)
+                    try:
+                        process = subprocess.Popen(command + [str(watch)], cwd=self.start.parent, stdout=out,
+                                                   stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                                   start_new_session=True, pass_fds=(watch,))
+                    except BaseException:
+                        os.close(alive)
+                        raise
+                    finally:
+                        os.close(watch)
                     self.processes.add(process)
                 try:
                     code = process.wait(timeout=self.timeout)
@@ -202,6 +221,7 @@ class Run:
                     code = (f"stopped after {self.timeout:g} s" if self.end(process)
                             else f"killed after {self.timeout:g} s, its cleanups not done in {self.grace:g} s")
                 finally:
+                    os.close(alive)
                     with self.lock:
                         self.processes.discard(process)
             data = json.loads(report.read_text()) if report.exists() else None
@@ -329,11 +349,17 @@ class Run:
         temporary.replace(self.durations)
 
 
+def _terminated(signum, frame):
+    raise KeyboardInterrupt  # a kill stops the run as Ctrl-C does: each unit with its cleanups
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--worker"]:
-        start, target, shard, shards, report, verbosity = argv[1:]
-        return worker(start, target, int(shard), int(shards), report, int(verbosity))
+        start, target, shard, shards, report, verbosity, watch = argv[1:]
+        return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch))
+    signal.signal(signal.SIGINT, signal.default_int_handler)  # even when started with it ignored, as `cmd &` is
+    signal.signal(signal.SIGTERM, _terminated)
     parser = argparse.ArgumentParser(prog="tests/run.py", description=__doc__.split("\n\n")[0])
     parser.add_argument("names", nargs="*", metavar="NAME",
                         help="test modules (test_tui, tests/test_tui.py) or dotted classes and tests; default: all")

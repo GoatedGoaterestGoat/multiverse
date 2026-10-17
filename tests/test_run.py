@@ -208,14 +208,16 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(str(guarded / "cache.json"), result.stdout)
         self.assertFalse((guarded / "cache.json").exists())
 
-    def test_an_interrupt_stops_the_units_still_running(self):
-        started = self.work / "started"
+    def interrupted(self, how):
+        """Start a run whose second unit waits, stop the runner with signal `how` once the first unit has failed and
+        the second is waiting, and return (the runner's exit status, its output, the waiting worker's pid, and
+        whether that test's cleanup ran)."""
+        started, cleaned = self.work / "started", self.work / "cleaned"
         self.module("test_fails_first", """
             import unittest
             class FailsFirst(unittest.TestCase):
                 def test_wrong(self): self.fail("the failure before the interrupt")
             """)
-        cleaned = self.work / "cleaned"
         self.module("test_waits", f"""
             import os, time, unittest
             from pathlib import Path
@@ -225,7 +227,11 @@ class RunnerTest(unittest.TestCase):
                     Path({str(started)!r}).write_text(str(os.getpid()))
                     time.sleep(600)
             """)
-        runner = subprocess.Popen(self.command(), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # Started with Ctrl-C ignored, as `tests/run.py &` in a script starts it: the runner must restore it.
+        ignoring = ("import runpy, signal, sys; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                    "sys.argv = sys.argv[1:]; runpy.run_path(sys.argv[0], run_name='__main__')")
+        runner = subprocess.Popen([sys.executable, "-c", ignoring, *self.command()[1:]], text=True,
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: runner.poll() is None and runner.kill())
         lines = []
         reader = threading.Thread(target=lambda: lines.extend(runner.stdout), daemon=True)
@@ -236,17 +242,42 @@ class RunnerTest(unittest.TestCase):
             time.sleep(0.05)
         worker = int(started.read_text())
         self.addCleanup(self.kill_if_running, worker)  # should the runner leave it behind
-        runner.send_signal(signal.SIGINT)
+        runner.send_signal(how)
         runner.wait(timeout=30)
+        deadline = time.monotonic() + 30  # once its runner is gone, a worker stops by itself
+        while self.running(worker) and time.monotonic() < deadline:
+            time.sleep(0.05)
         reader.join(timeout=30)
         runner.stdout.close()
-        output = "".join(lines)
-        self.assertEqual(runner.returncode, 130, output)
+        return runner.returncode, "".join(lines), worker, cleaned.exists()
+
+    def running(self, pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+    def test_ctrl_c_stops_the_units_still_running_after_their_cleanups(self):
+        code, output, worker, cleaned = self.interrupted(signal.SIGINT)
+        self.assertEqual(code, 130, output)
         self.assertIn("Interrupted", output)
         self.assertIn("the failure before the interrupt", output)  # what had failed is still shown
-        with self.assertRaises(ProcessLookupError):
-            os.kill(worker, 0)
-        self.assertTrue(cleaned.exists())  # the interrupted test still ran its cleanups
+        self.assertFalse(self.running(worker))
+        self.assertTrue(cleaned)  # the interrupted test still ran its cleanups
+
+    def test_a_terminated_run_stops_its_units_as_ctrl_c_does(self):
+        code, output, worker, cleaned = self.interrupted(signal.SIGTERM)
+        self.assertEqual(code, 130, output)
+        self.assertIn("the failure before the interrupt", output)
+        self.assertFalse(self.running(worker))
+        self.assertTrue(cleaned)
+
+    def test_a_unit_whose_runner_is_killed_stops_by_itself_after_its_cleanups(self):
+        code, output, worker, cleaned = self.interrupted(signal.SIGKILL)
+        self.assertEqual(code, -signal.SIGKILL)
+        self.assertFalse(self.running(worker))
+        self.assertTrue(cleaned)
 
     def timed_module(self, name, log):
         """A module of two tests that each log when they start and end, 0.3 s apart."""
