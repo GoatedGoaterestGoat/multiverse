@@ -46,7 +46,7 @@ def callback(root, agent, *, agent_scoped=False):
             adapter = harnesses.load(root, properties['harness'])
             describe = adapter_hook(adapter, 'agent_identity_problem')
             problem = describe(SessionHandle.from_records(properties, agents.runtime(directory), directory), os.environ) if describe else None
-        except (OSError, KeyError):
+        except (OSError, KeyError, ValueError, TypeError):
             problem = None
         if problem:
             raise ValueError(problem)
