@@ -128,7 +128,7 @@ tmux unreachable                                   -> unknown
 
 Window and session names are only labels, so renaming them changes nothing. Every command that signals or captures a pane checks the tags first (`tmux.owned`).
 
-The native process gets `MV2_UNIVERSE`, `MV2_AGENT_ID`, `MV2_AGENT_DIR`, `MV2_LAUNCH_ID`, `MV2_CLI`, `MV2_PYTHON`, `MV2_CONTROL_SOCKET` and `MV2_TMUX_SOCKET`. See [environment](../reference/environment.md) for each one. Callbacks from the agent (`report`, `inbox`, `session-bind`, `runtime_update`) compare `MV2_LAUNCH_ID` with `runtime.json` and refuse an outdated launch. [Session isolation](../design/session-isolation.md) explains the limits of these checks.
+The runner and native frontend receive the agent's IDs and this launch's `MV2_LAUNCH_ID`, `MV2_CONTROL_SOCKET` and `MV2_TMUX_SOCKET`. Connected Codex tools instead receive agent-stable identity, including `MV2_IDENTITY_MODE`, without those three launch-specific values. `report`, `inbox` and the sender of `send` validate that identity against the exact native thread and saved storage scope. `session-bind` can only confirm the existing binding in this mode. Runner updates and control calls retain their launch checks. Child launches find the calling agent's tmux socket in its verified runtime record. See [environment](../reference/environment.md) and [session isolation](../design/session-isolation.md).
 
 ## How the dashboard is built
 

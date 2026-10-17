@@ -131,7 +131,7 @@ class SharedIdentityTest(unittest.TestCase):
             'agent_dir': stable['MV2_AGENT_DIR'], 'agent_id': 'agent', 'bootstrap_json': json.dumps('core bootstrap'),
             'task': 'hello', 'session_id': str(uuid4()), 'control_socket': f'/tmp/{launch}/rpc.sock'},
             environment={**stable, 'MV2_LAUNCH_ID': launch, 'MV2_CONTROL_SOCKET': f'/tmp/{launch}/rpc.sock',
-                         'MV2_TMUX_SOCKET': '/tmux/owned', 'CODEX_HOME': '/native/home'},
+                         'MV2_TMUX_SOCKET': f'/tmux/{launch}', 'CODEX_HOME': '/native/home'},
             agent_environment=stable, endpoint=NativeEndpoint('unix-websocket', '/native.sock'))
 
     def native_frame(self, command, config=None):

@@ -80,7 +80,7 @@ mv2 resume NAME
 
 ### "Outdated launch"
 
-`report`, `inbox` and `session-bind` print `mv2: Outdated launch` when they run with the `MV2_AGENT_ID` and `MV2_LAUNCH_ID` of an earlier launch of that agent. The command came from one of these:
+For launch-scoped agents, `report`, `inbox` and `session-bind` print `mv2: Outdated launch` when their `MV2_LAUNCH_ID` names an earlier launch. The command came from one of these:
 
 - A shell or background job left over from before the agent was resumed.
 - A terminal that copied an agent's environment.
@@ -90,10 +90,14 @@ mv2 refuses so that an old process can't act as the current one.
 Run the command from the agent's current session instead. To run it yourself, clear those variables and name the agent:
 
 ```sh
-env -u MV2_AGENT_ID -u MV2_LAUNCH_ID mv2 inbox --agent NAME --peek
+env -u MV2_AGENT_ID -u MV2_AGENT_DIR -u MV2_LAUNCH_ID -u MV2_IDENTITY_MODE mv2 inbox --agent NAME --peek
 ```
 
 `Outdated launch; refusing to kill a replacement` means the agent was relaunched while `kill` ran. Check `mv2 list` and kill again if needed.
+
+Connected Codex tools do not carry a launch ID. Their `report`, `inbox` and message sender use the agent's identity, native thread and saved storage paths. An incomplete or mismatched identity is refused; it does not become an operator call. Runner updates and control calls still require the current launch. See [environment](../reference/environment.md).
+
+If a connected Codex conversation says it still has values from before the update, restart it as described in [updating](updating.md). No other client should be attached during that restart. Do not work around the error by copying identity values into the old conversation.
 
 ### A name is taken or ambiguous
 

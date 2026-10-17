@@ -7,6 +7,8 @@ from ..types import AgentIdentitySpec
 POLICY = AgentIdentitySpec('codex-agent-v1', 'CODEX_THREAD_ID', ('CODEX_HOME', 'CODEX_SQLITE_HOME'))
 # These are core's generation-specific keys. Do not treat every MV2_ name as
 # launch identity: validated plugins own settings under their MV2_<NAME> prefix.
+# Child launches find their tmux server in the verified agent runtime. Keeping
+# a socket here would freeze one launch's server choice in shared tools.
 VOLATILE = frozenset({'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'})
 STABLE = frozenset({'MV2_IDENTITY_MODE', 'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
                     'MV2_CLI', 'MV2_PYTHON', 'PATH'})
