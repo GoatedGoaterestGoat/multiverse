@@ -966,6 +966,18 @@ message to a stopped agent, is an ordinary resume. This differs from Codex, whos
 shared app-server outlives its terminal. Neither is a general model: a bridge says
 what an integration can do, a service says where work lives.
 
+Claude's own `/restart` (offered once a newer Claude Code is installed) runs the
+new version in the same process, with a command line Claude rebuilds from the
+session. Seen on 2.1.302, it keeps `--resume`, `--settings`, every
+`--plugin-dir`, the model, the effort, `--append-system-prompt` and the
+environment, and turns `--dangerously-skip-permissions` into the session's
+permission mode and allowed tools; it drops `--messaging-socket-path`, `--name`
+and `--add-dir`. Claude then listens on its own default socket
+(`/tmp/cc-socks/<pid>.sock`, listed in `~/.claude/sessions/<pid>.json`) and
+publishes the key for that path, so messages to mv2's socket stop reaching it,
+while the mod and its status and usage reports keep working. Restarting the
+agent through mv2 (stop, then resume) brings mv2's flags back.
+
 The pieces keep to their own side of the boundary:
 
 - **Adapter** (`harnesses/claude/__init__.py`): launch flags, the inbox socket,
@@ -1144,7 +1156,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.299; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.302; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude
