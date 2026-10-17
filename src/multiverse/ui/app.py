@@ -26,7 +26,7 @@ from .editing import TreeEditing
 from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
-from .plugin_service import PluginService, plugin_of, universe_name
+from .plugin_service import PluginService, error_text, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, rate_limits
@@ -444,7 +444,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         error = getattr(error, "error", error) if isinstance(error, WorkerFailed) else error  # say what the worker raised
         if loaded is not None:
             self.plugin_service.record(loaded, "screen or widget", error, self.home)
-        message = f"{name}: its screen or widget failed: {type(error).__name__}: {error}"
+        message = f"{name}: its screen or widget failed: {error_text(error)}"
         self.set_status(message, error=True)
         self.call_later(self.close_plugin_screens, package, message)  # off this call: the failing widget is still unwinding
 
@@ -500,7 +500,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
                             lambda key=key: self.run_plugin_action(key)))
         for (plugin, name), (loaded, reference) in sorted(self.plugin_screens.items()):
             entries.append((f"{plugin}: {name}", f"{plugin}: open its screen",
-                            lambda plugin=plugin, loaded=loaded, reference=reference: self.open_plugin_screen(plugin, loaded, reference)))
+                            lambda plugin=plugin, loaded=loaded, reference=reference, title=f"{plugin}: {name}":
+                            self.open_plugin_screen(plugin, loaded, reference, title)))
         return entries
 
     def action_plugins(self):
@@ -519,8 +520,12 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             self.load_plugin_registry()
 
     @work(group="plugin-screen", exit_on_error=False)
-    async def open_plugin_screen(self, plugin, loaded, reference):
-        if not self.ready():
+    async def open_plugin_screen(self, plugin, loaded, reference, title=None):
+        """Open a plugin's screen from the palette, over whatever screen is open (the Plugins screen, another plugin's).
+        Only an operation, a draft or a move under way keeps it from opening, and the status line says so."""
+        if self.operating or self.draft is not None or self.moving is not None:
+            what = "an operation" if self.operating else "a draft" if self.draft is not None else "a move"
+            self.set_status(f"{title or plugin}: not opened while {what} is under way; finish it first", error=True)
             return
         root = self.target_scope()
         try:
@@ -531,7 +536,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
             self.push_screen(screen(root=root, backend=self.backend), self.plugin_screen_closed)
         except Exception as error:
             await asyncio.to_thread(self.plugin_service.record, loaded, f"screen {reference}", error, root)
-            self.set_status(f"{plugin}: screen failed: {error}", error=True)
+            self.set_status(f"{plugin}: screen failed: {error_text(error, kind=False)}", error=True)
 
     def plugin_screen_closed(self, result):
         """A plugin screen may leave a status line by dismissing with text."""
