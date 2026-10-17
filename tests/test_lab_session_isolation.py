@@ -17,7 +17,7 @@ from multiverse.harnesses import load
 class CrossHarnessParentIdentity(unittest.TestCase):
     def test_every_shipped_manifest_clears_both_parent_markers(self):
         manifests = sorted((SOURCE / 'multiverse/templates').glob('*/harnesses/*/harness.json'))
-        self.assertGreaterEqual(len(manifests), 5, 'Include base and both reusable role templates')
+        self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi'})
         for manifest in manifests:
             with self.subTest(manifest=str(manifest.relative_to(SOURCE))):
                 spec = load(manifest.parents[2], manifest.parent.name).spec

@@ -1,6 +1,0 @@
-{
-  "schema": 2,
-  "adapter": "codex",
-  "description": "Codex CLI; prompt-led coordination and explicit native session resume.",
-  "settings": {}
-}

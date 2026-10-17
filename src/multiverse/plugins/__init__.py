@@ -192,8 +192,8 @@ def problems(root, reserved=(), wait=None):
 
 def notes(root):
     """What doctor says without counting it a problem: a KNOWN optional plugin that is on here but not installed,
-    with no old settings file waiting (then nothing is lost: it only does not run). The development template
-    turns compaction on, and a checkout without access to its repository cannot install it."""
+    with no old settings file waiting (then nothing is lost: it only does not run). A template's plugins.json
+    can turn compaction on, and a checkout without access to its repository cannot install it."""
     waiting = dict(not_installed(root))
     unknown = config.load(root).unknown
     newer = ([f"plugins.json has fields this mv2 does not know: {', '.join(unknown)}; update mv2 to use them"]
@@ -572,7 +572,7 @@ def migrate(root, item):
         settings_files._accept(found.manifest, data, loaded.registrations.settings_check, item["to"], root)
     switches = config.load(root)
     # A legacy file's own on or off always wins: a template's plugins.json may name the plugin before its old
-    # file is converted (the development template turns compaction on), and the old file is what the person chose.
+    # file is converted, and the old file is what the person chose.
     switch = legacy and on is not None and switches.enabled.get(found.name) != on
     if switch and switches.problem:
         raise MigrationError(f"{config.path(root).name} cannot be used, so the switch for {found.name} cannot be "

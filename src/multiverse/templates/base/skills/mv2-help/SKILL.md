@@ -21,18 +21,14 @@ Adapt these examples to the user's paths and names:
 
 ```sh
 mv2 init /path/to/project --name project --template base
-mv2 -u /path/to/project/.multiverse subverse tests --template testing
-mv2 -u /path/to/project/.multiverse subverse dev --template development --workspace /path/to/worktree
+mv2 -u /path/to/project/.multiverse subverse tests
+mv2 -u /path/to/project/.multiverse subverse dev --template qa --workspace /path/to/worktree
 mv2 -u /path/to/project/.multiverse/subverses/tests catalog
 ```
 
 `init` installs into `DIRECTORY/.multiverse` and refuses an existing destination. `subverse` installs into the selected universe's `subverses/NAME`; `--workspace` points at an existing project or worktree, it does not create a Git worktree. Names use 1–64 letters, numbers, underscores or hyphens and begin with a letter or number.
 
-Choose among bundled templates by purpose:
-
-- `base`: coordination skill, mv2-help skill, help command, review workflow and Codex/Claude/Pi harness definitions.
-- `development`: shared skills and help plus development-role, implement, handoff and review workflows.
-- `testing`: shared skills and help plus testing-role, reproduce, retest and review workflows.
+The one bundled template is `base`: coordination skill, mv2-help skill, help command, review workflow and Codex/Claude/Pi harness definitions. Other templates, such as `qa` above, are the user's own.
 
 Inspect the chosen template for actual harnesses and defaults. Templates launch no agents and clone no runtime conversations. No manager is mandatory or automatically created. A template name resolves to `~/.multiverse/templates/NAME` before the bundled template; an explicit directory also works. Custom templates require `universe.json` and ordinary files, not symlinks. Fresh installs get fresh IDs, empty state and definition fingerprints.
 

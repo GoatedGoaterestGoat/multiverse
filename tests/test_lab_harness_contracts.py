@@ -124,16 +124,15 @@ class LabHarnessContracts(unittest.TestCase):
         self.assertEqual(set((self.root / 'state/agents').iterdir()), before)
 
     def test_agent_facing_templates_describe_current_messaging(self):
-        for template in ('base', 'development', 'testing'):
-            root = templates.TEMPLATES / template
-            for path in root.rglob('*.md'):
-                with self.subTest(path=path):
-                    text = path.read_text()
-                    self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
-            self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
-            skill = (root / 'skills/coordination/SKILL.md').read_text()
-            self.assertIn('deliver AGENT --retry', skill)
-            self.assertIn('deliver AGENT --check', skill)
+        root = templates.TEMPLATES / 'base'
+        for path in root.rglob('*.md'):
+            with self.subTest(path=path):
+                text = path.read_text()
+                self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
+        self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
+        skill = (root / 'skills/coordination/SKILL.md').read_text()
+        self.assertIn('deliver AGENT --retry', skill)
+        self.assertIn('deliver AGENT --check', skill)
 
 
 if __name__ == '__main__':

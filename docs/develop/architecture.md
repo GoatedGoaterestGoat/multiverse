@@ -17,7 +17,7 @@ Everything lives in `src/multiverse/`.
 | `plugins/` | The plugin system: discovery, manifests, trust, `plugins.json` and per-plugin settings, the loader and its failure boundaries, the `mv` API, launch contributions (`harness.py`), the event journal (`events.py`) and the plugin host (`host.py`). Bundled plugins live in `plugins/builtin/`. See [plugins](plugins.md). |
 | `compaction/` | Only a stub for Claude agents launched before tree compaction became a plugin. Compaction itself is the `plugins/compaction` submodule. |
 | `ui/` | The dashboard. See [below](#how-the-dashboard-is-built). |
-| `templates/` | The bundled `base`, `development` and `testing` templates. See [templates](templates.md). |
+| `templates/` | The bundled `base` template. See [templates](templates.md). |
 | `store.py` | Atomic JSON writes, file locks, IDs and timestamps. |
 | `display.py` | Text for people that the CLI and dashboard share: states, labels, usage. |
 
