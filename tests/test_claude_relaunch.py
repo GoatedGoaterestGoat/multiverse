@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 import socket
+import sys
 import time
+import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -44,6 +46,7 @@ class ClaudeRelaunchTest(BaseTest):
         self.theirs = str(self.work / 'relaunch.sock')  # where Claude listens after /restart
         self.sockets = []
         self.started = process_started(os.getpid())  # this process's start, as the runner records pid_started
+        self.on_macos()  # each case runs with one reader; ClaudeRelaunchLinuxReaderTest runs them all with the other
 
     def tearDown(self):
         for sock in self.sockets:
@@ -62,7 +65,7 @@ class ClaudeRelaunchTest(BaseTest):
     def record(self, socket_path=None, session_id=None, proc_start=None, pid=None):
         (self.config / 'sessions' / f'{pid or os.getpid()}.json').write_text(json.dumps({
             'pid': pid or os.getpid(), 'sessionId': session_id or self.native, 'kind': 'interactive',
-            'procStart': proc_start or process_started(pid or os.getpid()), 'messagingSocketPath': socket_path or self.ours}))
+            'procStart': proc_start or self.claude_start, 'messagingSocketPath': socket_path or self.ours}))
 
     def session(self, **changes):
         values = dict(native_id=self.native, state='running', endpoint=NativeEndpoint('unix-lines', self.ours),
@@ -90,7 +93,7 @@ class ClaudeRelaunchTest(BaseTest):
         cleared = str(uuid4())
         self.record(session_id=cleared)  # /clear moved the same process to a new session
         self.assertEqual(self.adapter.observed_binding(self.session()).native_id, cleared)
-        self.record(proc_start='Thu Jan  1 00:00:00 1970')  # the file is for another process on this pid
+        self.record(proc_start=self.other_start)  # the file is for another process on this pid
         self.assertIsNone(self.adapter.observed_binding(self.session()))
         self.record()
         # The pid now belongs to a later process than the one this launch started: file and pid agree, but not with us.
@@ -137,7 +140,7 @@ class ClaudeRelaunchTest(BaseTest):
         self.assertIsNone(self.adapter.connection_problem(self.session()))
         (self.config / 'sessions' / f'{os.getpid()}.{hashlib.sha256(self.ours.encode()).hexdigest()}.key').unlink()
         # Another process's record (a reused pid), or another session's: never a relaunch of this launch.
-        for record in (dict(socket_path=self.theirs, proc_start='Thu Jan  1 00:00:00 1970'),
+        for record in (dict(socket_path=self.theirs, proc_start=self.other_start),
                        dict(socket_path=self.theirs, session_id=str(uuid4()))):
             with self.subTest(**record):
                 self.listening(self.theirs) if not os.path.exists(self.theirs) else None
@@ -188,8 +191,13 @@ class ClaudeRelaunchTest(BaseTest):
         record.update({'pid': os.getpid(), 'sessionId': self.native, 'messagingSocketPath': self.ours, **changes})
         (self.config / 'sessions' / f'{os.getpid()}.json').write_text(json.dumps(record))
 
+    def on_macos(self):
+        """Run the adapter's macOS reader: procStart is `ps -o lstart=` in UTC, mv2's own start form."""
+        self.enterContext(patch('multiverse.harnesses.claude.LINUX', False))
+        self.claude_start, self.other_start = self.started, 'Thu Jan  1 00:00:00 1970'
+
     def on_linux(self, *, state='S', ticks=LINUX_START, name='claude', line=None):
-        """Run the adapter as on Linux, with this process's /proc/<pid>/stat from the Linux fixture."""
+        """Run the adapter's Linux reader, with this process's /proc/<pid>/stat from the Linux fixture."""
         fields = (FIXTURES / 'proc-stat-linux.txt').read_text().split(' ')
         fields[0], fields[1], fields[2], fields[21] = str(os.getpid()), f'({name})', state, ticks
         proc = self.work / 'proc'
@@ -197,13 +205,15 @@ class ClaudeRelaunchTest(BaseTest):
         (proc / str(os.getpid()) / 'stat').write_text(' '.join(fields) if line is None else line)
         self.enterContext(patch('multiverse.harnesses.claude.LINUX', True))
         self.enterContext(patch('multiverse.harnesses.claude.PROC', proc))
+        self.claude_start, self.other_start = ticks, str(int(LINUX_START) + 1)
 
     def counted(self):
         """Every ps the observer runs (multiverse.runtime.process), counted."""
         return self.enterContext(patch.object(process, '_query', wraps=process._query))
 
     def test_a_real_macos_process_file_identifies_its_process(self):
-        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        self.on_macos()
+        self.claude_file('sessions-darwin.json', procStart=self.started)
         self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
         self.claude_file('sessions-darwin.json')  # the start the real file holds: another process
         self.assertIsNone(self.adapter.observed_binding(self.session()))
@@ -244,13 +254,14 @@ class ClaudeRelaunchTest(BaseTest):
                 path.write_text(damaged)
                 self.assertIsNone(self.adapter.observed_binding(self.session()))
                 self.assertIsNone(self.adapter.connection_problem(self.session()))
+        self.on_macos()
         self.claude_file('sessions-darwin.json', procStart=self.started)
         with patch('multiverse.harnesses.claude.process_snapshot', return_value=(self.started, 'Z')):
             self.assertIsNone(self.adapter.observed_binding(self.session()))
 
     def test_a_stopped_launch_or_one_without_a_process_file_runs_no_process(self):
         query = self.counted()
-        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        self.claude_file('sessions-darwin.json', procStart=self.claude_start)
         query.reset_mock()
         for session in (self.session(state='stopped'), self.session(state='failed'), self.session(pid=None)):
             self.assertIsNone(self.adapter.observed_binding(session))
@@ -258,7 +269,7 @@ class ClaudeRelaunchTest(BaseTest):
         (self.config / 'sessions' / f'{os.getpid()}.json').unlink()
         self.assertIsNone(self.adapter.observed_binding(self.session()))
         self.assertEqual(query.call_count, 0)
-        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))
+        self.claude_file('sessions-darwin.json', procStart=self.claude_start)
         query.reset_mock()
         self.assertIsNotNone(self.adapter.observed_binding(self.session()))
         self.assertEqual(query.call_count, 1)  # one ps for a running launch on macOS
@@ -270,8 +281,8 @@ class ClaudeRelaunchTest(BaseTest):
                                               'workspace': str(self.work), 'native_session_id': str(uuid4()),
                                               'native_session_home': str(self.config)})
             write(agent / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'stopped', 'pid': os.getpid(),
-                                           'pid_started': process_started(os.getpid())})
-        self.claude_file('sessions-darwin.json', procStart=process_started(os.getpid()))  # a live Claude on that pid
+                                           'pid_started': self.started})
+        self.claude_file('sessions-darwin.json', procStart=self.claude_start)  # a live Claude on that pid
         query = self.counted()
         query.reset_mock()
         started = time.monotonic()
@@ -294,7 +305,7 @@ class ClaudeRelaunchTest(BaseTest):
                                        'control_endpoint': {'transport': 'unix-lines', 'address': self.ours}})
         self.listening(self.theirs)
         self.key(self.theirs)
-        self.claude_file('sessions-darwin.json', procStart=self.started, messagingSocketPath=self.theirs)
+        self.claude_file('sessions-darwin.json', procStart=self.claude_start, messagingSocketPath=self.theirs)
         query = self.counted()
         query.reset_mock()
         self.assertIsNotNone(self.adapter.observed_binding(self.session()))
@@ -308,3 +319,21 @@ class ClaudeRelaunchTest(BaseTest):
         # Listing reconciles once, then checks the healed connection separately.
         # No process identity is cached across those checks.
         self.assertEqual(query.call_count, 2)
+
+
+    @unittest.skipUnless(sys.platform.startswith('linux'), "reads this host's own /proc")
+    def test_on_a_linux_host_the_real_proc_start_identifies_this_process(self):
+        self.enterContext(patch('multiverse.harnesses.claude.LINUX', True))
+        from multiverse.harnesses.claude import _proc_start
+        state, ticks = _proc_start(os.getpid())
+        self.assertTrue(ticks.isdigit() and state not in ('Z', 'X'))
+        self.record(proc_start=ticks)
+        self.assertEqual(self.adapter.observed_binding(self.session()).native_id, self.native)
+
+class ClaudeRelaunchLinuxReaderTest(ClaudeRelaunchTest):
+    """Every case above again, with the Linux reader: procStart is /proc/<pid>/stat field 22."""
+
+    def setUp(self):
+        super().setUp()
+        self.on_linux()
+
