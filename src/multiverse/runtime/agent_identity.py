@@ -27,11 +27,9 @@ def environment(target, spec, saved=None):
     specification(spec)
     values = {key: target[key] for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR',
                                           'MV2_CLI', 'MV2_PYTHON', 'PATH')}
-    # Installation paths are part of the agent's tool environment, not whichever
-    # Python process happened to resume its terminal. Never copy volatile keys.
-    for key in ('MV2_CLI', 'MV2_PYTHON', 'PATH'):
-        if isinstance(saved, dict) and isinstance(saved.get(key), str) and saved[key]:
-            values[key] = saved[key]
+    # Request the launching installation's tools each time. A shared native
+    # conversation may retain its previous environment until an exclusive reload;
+    # saved paths are diagnostics, not authority and never override this request.
     return {**values, 'MV2_IDENTITY_MODE': spec.mode}
 
 

@@ -339,6 +339,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             write(launch / "request.json", {**_request(argv, env, command, endpoint, resume_message_id),
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
+                                           'agent_environment': dict(agent_environment) if command.agent_identity else None,
                                            'observe_refusal': native.adapter_hook(adapter, 'launch_refusal') is not None})
             if resume_message_id is not None:
                 # The runner cannot start until ready exists. Persist uncertainty

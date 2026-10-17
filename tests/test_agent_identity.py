@@ -36,6 +36,24 @@ class AgentIdentityTest(BaseTest):
                     'MV2_AGENT_ID': self.identity, 'MV2_AGENT_DIR': str(self.directory),
                     'FIXTURE_THREAD': self.native, 'FIXTURE_HOME': str(self.work)}
 
+    def test_each_launch_refreshes_tool_paths_without_changing_agent_authority(self):
+        old = {'MV2_CLI': '/removed/checkout/bin/mv2', 'MV2_PYTHON': '/removed/venv/bin/python',
+               'PATH': '/removed/bin', 'MV2_LAUNCH_ID': 'must-not-escape'}
+        target = {**self.env, 'MV2_CLI': '/current/checkout/bin/mv2',
+                  'MV2_PYTHON': '/current/venv/bin/python', 'PATH': '/current/bin:/usr/bin'}
+        refreshed = agent_identity.environment(target, self.spec, old)
+        for key in ('MV2_CLI', 'MV2_PYTHON', 'PATH'):
+            self.assertEqual(refreshed[key], target[key])
+        self.assertNotIn('MV2_LAUNCH_ID', refreshed)
+        # Executable locations are requested tool configuration, never actor proof.
+        with_old_tools = {**self.env, **{key: old[key] for key in ('MV2_CLI', 'MV2_PYTHON', 'PATH')}}
+        with_new_tools = {**self.env, **refreshed}
+        self.assertEqual(agent_identity.actor(with_old_tools), agent_identity.actor(with_new_tools))
+        self.assertEqual(agent_identity.environment(target, None, old), {})
+        for damaged in (None, [], {'MV2_CLI': 7, 'MV2_PYTHON': None, 'PATH': []}):
+            with self.subTest(saved=damaged):
+                self.assertEqual(agent_identity.environment(target, self.spec, damaged), refreshed)
+
     def test_read_only_cli_does_not_resolve_the_callers_agent_identity(self):
         from multiverse.cli import parser, run
         for action in ('catalog', 'list'):

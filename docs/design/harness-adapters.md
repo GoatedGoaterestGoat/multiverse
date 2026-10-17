@@ -867,7 +867,14 @@ universe, full agent UUID, directory, CLI/Python paths and pinned native storage
 `CODEX_THREAD_ID` must match the saved native binding. Missing or mismatched
 proof is an error, never an operator fallback. `MV2_LAUNCH_ID` and launch-private
 control/tmux addresses are absent. The attachment's `--remote` relay remains
-private to that launch; there is no stable raw-native relay.
+private to that launch; there is no stable raw-native relay. Each new launch requests
+`MV2_CLI`, `MV2_PYTHON` and `PATH` from the launching mv2 installation. The
+requested map is kept in that launch's `request.json.agent_environment` and the
+agent's latest `properties.json.agent_environment`; it is not an attestation of
+the environment in an already-loaded shared conversation. Executable paths are
+not part of actor authority. A shared native conversation can retain its old
+tools while another client remains attached; close those clients, then use a
+normal mv2 kill/resume to reload it after moving an installation.
 
 Before a manual resume or completed stop, mv2 waits for the previous launch's
 owned relay, status, recovery and startup roles to close. A bounded cleanup

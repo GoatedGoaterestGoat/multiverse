@@ -1,6 +1,8 @@
 """An independent shared-service provider declares the same authority contract."""
 from dataclasses import asdict, replace
 from pathlib import Path
+import os
+import sys
 import shutil
 import unittest
 from unittest.mock import Mock, patch
@@ -35,13 +37,19 @@ class IdentityLifecycleTest(NativeBackendTest):
         self.assertEqual(initial.agent_environment, final.agent_environment)
         self.assertNotIn('MV2_TMUX_SOCKET', final.agent_environment)
         before = dict(first['agent_environment'])
+        # A removed checkout/interpreter must not be restored into the new request.
+        write(directory / 'properties.json', {**first, 'agent_environment': {**before,
+              'MV2_CLI': '/removed/checkout/bin/mv2', 'MV2_PYTHON': '/removed/venv/bin/python', 'PATH': '/removed/bin'}})
         with patch.object(lifecycle, '_cli_path', return_value='/another/installation/bin/mv2'):
             resumed = lifecycle.start(self.root, resume=result['id'])
         self.addCleanup(shutil.rmtree, Path('/tmp') / ('mv2-native-' + resumed['runtime']['launch_id']), True)
         after = read(directory / 'properties.json')
-        self.assertEqual(after['agent_environment'], before)
+        self.assertEqual(after['agent_environment'], {**before, 'MV2_CLI': '/another/installation/bin/mv2',
+            'MV2_PYTHON': sys.executable, 'PATH': '/another/installation/bin' + os.pathsep + os.environ.get('PATH', '')})
+        self.assertEqual(after['agent_identity'], first['agent_identity'])
         request = read(directory / 'launches' / resumed['runtime']['launch_id'] / 'request.json')
         self.assertEqual(request['env']['MV2_CLI'], '/another/installation/bin/mv2')
+        self.assertEqual(request['agent_environment'], after['agent_environment'])
         self.assertNotEqual(request['env']['MV2_LAUNCH_ID'], result['runtime']['launch_id'])
 
     def test_late_plain_fallback_removes_the_provisional_policy(self):
