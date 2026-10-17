@@ -488,6 +488,27 @@ class ClaudeBridgeTest(BaseTest):
                                                          'env': {**command.environment, 'MV2_CLI': '/mv2/bin/mv2'}})
                     self.assertNotIn('CLAUDE_CODE_CHILD_SESSION', env)
 
+    def test_the_child_session_marker_is_removed_even_when_a_harness_replaces_unset_env(self):
+        # environment.md suggests replacing unset_env (for NO_COLOR, say); the marker must stay removed then.
+        from multiverse.runtime import runner
+        path = self.root / 'harnesses/claude/harness.json'
+        for settings, expected in (({'unset_env': ['NO_COLOR']}, None),
+                                   ({'env': {'CLAUDE_CODE_CHILD_SESSION': '0'}}, '0')):  # one the harness sets wins
+            with self.subTest(settings=settings):
+                config = read(path)
+                config['settings'] = {**config['settings'], **settings}
+                write(path, config)
+                adapter = harnesses.load(self.root, 'claude')
+                with patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 302)):
+                    command = adapter.spawn(LaunchContext('spawn', self.values()))
+                self.assertIn('CLAUDE_CODE_CHILD_SESSION', command.unset_env)
+                with patch.dict(os.environ, {'CLAUDE_CODE_CHILD_SESSION': '1', 'PATH': '/usr/bin'}):
+                    env = runner.launch_environment({'unset_env': list(command.unset_env),
+                                                     'env': {**command.environment, 'MV2_CLI': '/mv2/bin/mv2'}})
+                self.assertEqual(env.get('CLAUDE_CODE_CHILD_SESSION'), expected)
+                config['settings'] = {key: value for key, value in config['settings'].items() if key not in settings}
+                write(path, config)
+
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):
             for mode in ('spawn', 'resume'):

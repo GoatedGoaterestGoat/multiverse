@@ -107,7 +107,7 @@ class AdapterContractTest(BaseTest):
         self.assertIn('read-only', result.argv)
         self.assertIn('local-model', result.argv)
         # Settings replace the default list, so a harness can opt back into NO_COLOR.
-        self.assertEqual(set(result.unset_env), {'CODEX_THREAD_ID', 'CLAUDECODE', 'CUSTOM_PARENT'})
+        self.assertEqual(set(result.unset_env), {'CODEX_THREAD_ID', 'CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CUSTOM_PARENT'})
         default = harnesses.load(self.root, 'claude').spawn(LaunchContext('spawn', values, None))
         self.assertIn('NO_COLOR', default.unset_env)
         self.assertEqual(config.read_bytes(), original)
@@ -313,7 +313,8 @@ class AdapterContractTest(BaseTest):
         self.assertEqual(command.rpc_proxy.upstream_path, '/native/socket')
         excludes = [v for v in argv if v.startswith('shell_environment_policy.exclude=')][-1]
         self.assertEqual(json.loads(excludes.partition('=')[2]),
-                         ['USER_EXCLUDED', 'CUSTOM_EXCLUDED', 'MV2_*', 'CODEX_THREAD_ID', 'CLAUDECODE', 'PARENT_ONLY'])
+                         ['USER_EXCLUDED', 'CUSTOM_EXCLUDED', 'MV2_*', 'CODEX_THREAD_ID', 'CLAUDECODE',
+                          'CLAUDE_CODE_CHILD_SESSION', 'PARENT_ONLY'])
         self.assertEqual(command.rpc_proxy.settings['agent_environment']['MV2_AGENT_ID'], 'current')
         self.assertFalse(any('shell_environment_policy.set.MV2_' in arg for arg in argv))
         self.assertEqual(argv[-1], values['task'])
