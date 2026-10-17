@@ -7,6 +7,10 @@ from pathlib import Path
 
 from ..types import NativeResult, RpcRequest, RpcNotification, NativeActivity
 
+RESTORATION_PAGES = 32
+# initialize, two initial reads, three inventories and the final read, plus pages.
+RECOVERY_MAX_REQUESTS = RESTORATION_PAGES + 7
+
 
 def object_field(value, name):
     field = value.get(name)
@@ -36,13 +40,17 @@ def result(response):
 
 
 def _thread(session, *, allow_unloaded=False):
-    native_id = session.native_id
     initialized = result((yield RpcRequest('initialize', {
         'clientInfo': {'name': 'multiverse', 'title': 'Multiverse native delivery', 'version': '1'},
         'capabilities': {'experimentalApi': True},
     }, on_success=(RpcNotification('initialized', {}),))))
     if isinstance(initialized, NativeResult):
         return initialized
+    return (yield from _read_thread(session, allow_unloaded=allow_unloaded))
+
+
+def _read_thread(session, *, allow_unloaded=False):
+    native_id = session.native_id
     observed = result((yield RpcRequest('thread/read', {'threadId': native_id, 'includeTurns': False})))
     if isinstance(observed, NativeResult):
         return observed
@@ -80,9 +88,37 @@ def check_connection(session):
 
 def recovery_check(session):
     """Read-only proof that restarting this exact thread's TUI is safe."""
-    thread = yield from _thread(session)
+    thread = yield from _thread(session, allow_unloaded=True)
     if isinstance(thread, NativeResult):
         return thread
+    if thread['status']['type'] == 'notLoaded':
+        # Codex serves requests while restoring its daemon snapshot. Inventory
+        # is read-only and never loads a thread. Its default is all loaded IDs,
+        # but honor pagination rather than assuming the first page is complete.
+        cursor, seen = None, set()
+        for _ in range(RESTORATION_PAGES):
+            observed = result((yield RpcRequest('thread/loaded/list',
+                                                {} if cursor is None else {'cursor': cursor})))
+            if isinstance(observed, NativeResult):
+                return observed
+            data, next_cursor = observed.get('data'), observed.get('nextCursor')
+            if not isinstance(data, list) or any(not isinstance(item, str) or not item for item in data):
+                raise ValueError('Native loaded thread data must be a list of nonempty IDs')
+            if next_cursor is not None and (not isinstance(next_cursor, str) or not next_cursor
+                                            or next_cursor in seen):
+                raise ValueError('Native loaded thread cursor is malformed or cyclic')
+            if session.native_id in data or next_cursor is None:
+                break
+            seen.add(next_cursor)
+            cursor = next_cursor
+        else:
+            raise ValueError('Native loaded thread inventory exceeds the page bound')
+        # A loaded ID alone proves neither identity/workspace nor inactivity.
+        thread = yield from _read_thread(session, allow_unloaded=True)
+        if isinstance(thread, NativeResult):
+            return thread
+        if thread['status']['type'] == 'notLoaded':
+            return NativeResult('pending', 'Codex did not restore this conversation after its restart')
     if thread['status']['type'] != 'idle':
         return NativeResult('unavailable', 'Native thread is active or waiting for approval/input')
     for method, params, reason in (

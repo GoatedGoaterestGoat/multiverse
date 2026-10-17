@@ -10,7 +10,7 @@ from dataclasses import replace
 from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
                      RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
 from .launch import launch_settings, tui_arguments
-from .protocol import check_connection, send_message, get_delivery, stop_session, recovery_check
+from .protocol import check_connection, send_message, get_delivery, stop_session, recovery_check, RECOVERY_MAX_REQUESTS
 from ..types import BridgeUnavailable
 
 
@@ -181,7 +181,7 @@ class CodexAdapter(ConfiguredAdapter):
                 or session.endpoint != session.service.endpoint
                 or session.endpoint.transport != 'unix-websocket' or not session.native_id):
             return None
-        return RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=6)
+        return RpcSpec(session.endpoint.address, partial(recovery_check, session), max_requests=RECOVERY_MAX_REQUESTS)
 
     def retained_usage(self, session, runtime):
         from .usage import last_measurement
