@@ -6,6 +6,7 @@ check_action see them; Textual @on handlers must stay on this class.
 """
 import asyncio
 from pathlib import Path
+import sys
 
 from rich.text import Text
 from textual import on, work
@@ -14,7 +15,9 @@ from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
 from textual.containers import Horizontal
 from textual.content import Content
+from textual.screen import Screen
 from textual.widgets import DataTable, Footer, Input, OptionList, Static, TextArea
+from textual.css.query import NoMatches
 from textual.worker import WorkerFailed
 
 from ..display import clean
@@ -55,6 +58,21 @@ class PluginCommands(Provider):
                     if not title[offset].isspace():
                         shown = shown.stylize(matcher.match_style, offset, offset + 1)
                 yield Hit(score, shown, callback, text=title, help=help_text)
+
+
+class MainScreen(Screen):
+    """The dashboard's own screen. A plugin's widget on it that fails while Textual updates or lays out the screen (its
+    render() raising, text that reads as broken markup) is that plugin's failure and is contained here: an error that
+    escapes one of a screen's message handlers ends that screen's message loop, and the main screen's is the dashboard.
+    Textual already guards a layout refresh this way, but not an update; anything not the plugins' still raises."""
+
+    async def _dispatch_message(self, message):
+        try:
+            return await super()._dispatch_message(message)
+        except Exception as error:
+            if plugin_of(error) is None:
+                raise
+            self.app._handle_exception(error)
 
 
 class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
@@ -122,6 +140,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         yield Static("", id="status", markup=False)
         yield Footer()
         yield HarnessMenu(id="harness-menu")
+
+    def get_default_screen(self):
+        return MainScreen(id="_default")
 
     def get_css_variables(self):
         # app.tcss names colors as $mv-NAME; theme.py holds their values.
@@ -441,12 +462,44 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
         if found is None:
             return super()._handle_exception(error)
         name, loaded, package = found
+        self._close_dead_pump(sys._getframe(1), package)
         error = getattr(error, "error", error) if isinstance(error, WorkerFailed) else error  # say what the worker raised
         if loaded is not None:
             self.plugin_service.record(loaded, "screen or widget", error, self.home)
         message = f"{name}: its screen or widget failed: {error_text(error)}"
-        self.set_status(message, error=True)
         self.call_later(self.close_plugin_screens, package, message)  # off this call: the failing widget is still unwinding
+
+    def _close_dead_pump(self, caller, package):
+        """Textual reports a widget's failure from inside its message loop and then ends that loop, but the widget still
+        takes messages that nobody will ever read; anything that waits for every widget to settle (Textual's test pilot,
+        this dashboard's own driver) would wait on it forever until it is taken out. Mark it closing at once, so
+        nothing is queued for it. Only when the report comes from where the loop really ends (its start-up, or a
+        message it could not handle), never from a timer or a worker, after which the widget lives on; and only for
+        the failing plugin's own widget or screen, never one of the dashboard's."""
+        if caller.f_code.co_name not in ("_pre_process", "_process_messages_loop"):
+            return
+        pump = caller.f_locals.get("self")
+        if pump is None or pump is self or not hasattr(pump, "_closing"):
+            return
+        owners = getattr(pump, "ancestors_with_self", [pump])
+        if any(type(node).__module__ == package or type(node).__module__.startswith(package + ".")
+               or getattr(node, "mv_plugin_package", None) == package for node in owners):
+            pump._closing = True
+
+    @staticmethod
+    async def _drain(pump):
+        """Run the callbacks still queued for a widget whose message loop has ended, as its loop would have: a wait
+        for every widget to settle (one began before it died) gets its answer. Other messages for it are dropped."""
+        from textual import events
+        from textual._callback import invoke
+        queue = pump._message_queue
+        while not queue.empty():
+            message = queue.get_nowait()
+            if isinstance(message, events.Callback):
+                try:
+                    await invoke(message.callback)
+                except Exception:
+                    pass
 
     async def close_plugin_screens(self, package, message=""):
         """Close the failing plugin's screens, and only its: from the lowest one in the stack up (what it opened above
@@ -455,7 +508,17 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
         messages, and one that cannot render fails every layout; either keeps the screen from ever settling. Where a
-        plugin's widgets were part of the local view, one line says what happened in their place."""
+        plugin's widgets were part of the local view, one line says what happened in their place. The status line says
+        so last, once all of that is done: a failure shown there is already contained."""
+        try:
+            await self._close_plugin_screens(package, message)
+        finally:
+            try:
+                self.set_status(message, error=True)
+            except NoMatches:  # the dashboard is closing: there is no status line left to say it on
+                pass
+
+    async def _close_plugin_screens(self, package, message):
         def theirs(node):
             module = type(node).__module__
             return module == package or module.startswith(package + ".") \
@@ -476,6 +539,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
                 if ours and isinstance(widget.parent, LocalView) and widget.parent not in views:
                     views.append(widget.parent)
                 if task is not None and task.done() and not widget.is_running:
+                    widget._closing = True
+                    await self._drain(widget)
                     try:
                         await widget._message_loop_exit()  # what a widget's loop does when it ends: unmount and detach
                     except Exception:

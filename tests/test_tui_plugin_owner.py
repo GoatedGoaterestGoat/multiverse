@@ -16,6 +16,7 @@ def register(mv):
     mv.dashboard.screen("bad css", "screens:BadCss")
     mv.dashboard.screen("fine", "screens:Fine")
     mv.dashboard.panel("markup panel", "screens:MarkupPanel")
+    mv.dashboard.panel("later panel", "screens:LaterPanel")
 '''
 SCREENS = '''
 import functools
@@ -53,6 +54,22 @@ class BadCss(Closable):
 class Fine(Closable):
     def compose(self):
         yield Static("fine", id="fine")
+
+ARMED = []
+
+class Later(Static):
+    def render(self):
+        return "fine for now"
+    def go_wrong(self):
+        raise RuntimeError("went wrong on the main screen")
+    def later(self):
+        self.screen.call_later(self.go_wrong)   # run by the main screen's own message loop
+
+class LaterPanel:
+    def parse(self, widget, title):
+        return {"type": widget["type"], "title": title}
+    def compose(self, view, root, widget, index):
+        return [Later("later")]
 
 class MarkupPanel:
     def parse(self, widget, title):
@@ -95,6 +112,24 @@ class OwnerTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             self.assertTrue(d.app.is_running)
             await d.press("j")
             self.assertTrue(d.app.is_running)
+
+    async def test_a_plugin_error_escaping_a_main_screen_handler_does_not_stop_the_main_screen(self):
+        import importlib
+        write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": ["name"], "plugin_panels": "none",
+                                                    "widgets": [{"type": "later panel", "title": "Later"},
+                                                                {"type": "markdown", "title": "Fine", "text": "still here"}]})
+        async with self.dashboard() as d:
+            await d.until(lambda: "fine for now" in " ".join(d.local_view()), "the plugin's panel")
+            screens = importlib.import_module(f"{self.loaded('owner').package}.screens")
+            later = d.app.screen.query_one(screens.Later)
+            later.later()  # its error escapes a handler of the main screen, as a render error during an update does
+            await d.until(lambda: "owner: its screen or widget failed" in d.status, "the failure to be the plugin's")
+            main = d.app.screen_stack[0]
+            self.assertTrue(main.is_running, "the main screen's message loop ended")
+            self.assertFalse(main._closing)
+            await d.press("j")
+            self.assertTrue(d.app.is_running)
+            self.assertNotIn("fine for now", " ".join(d.local_view()))
 
     async def test_a_plugin_screen_with_invalid_css_says_what_is_wrong(self):
         async with self.dashboard() as d:
