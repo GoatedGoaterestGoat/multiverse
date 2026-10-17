@@ -38,6 +38,7 @@ class RecoveryProtocolTest(unittest.TestCase):
                                      endpoint=NativeEndpoint('unix-websocket', '/tmp/native.sock'))
         self.thread = {'id': 'exact-thread', 'cwd': '/tmp/work', 'status': {'type': 'idle'}}
         self.replies = {'initialize': {}, 'thread/read': {'thread': self.thread},
+                        'thread/loaded/list': {'data': []},
                         'thread/turns/list': {'data': [{'status': 'completed'}]},
                         'thread/queue/list': {'data': []}, 'thread/backgroundTerminals/list': {'data': []}}
 
@@ -273,6 +274,101 @@ class RecoveryWorkerTest(unittest.TestCase):
         self.assertEqual(facts['auto_recovery']['attempts'], 3)
         self.assertIn('timed out', facts['native_relay']['reason'])
 
+    @contextmanager
+    def restoration_clock(self):
+        elapsed = [0.]
+        def sleep(seconds):
+            elapsed[0] += seconds
+        with patch.object(recovery.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(recovery.time, 'sleep', side_effect=sleep):
+            yield elapsed
+
+    def test_restoration_waits_past_transport_retries_until_full_qualification(self):
+        self.publish_loss()
+        pending = NativeResult('pending', 'Codex did not restore this conversation after its restart')
+        backend = Mock()
+        with self.restoration_clock(), patch.object(recovery, 'BACKOFF', (0, 1)), \
+                patch.object(recovery, 'check', side_effect=[pending, pending, pending, NativeResult('ok')]) as checked, \
+                patch.object(recovery, 'owned', return_value=(backend, '%1')) as owned, \
+                patch.object(recovery, 'frontend_children', return_value=True), patch.object(lifecycle, 'start') as start:
+            recovery.run(self.directory, self.launch)
+        self.assertEqual(checked.call_count, 4)
+        owned.assert_called_once()
+        backend.signal_child.assert_not_called()
+        start.assert_not_called()
+        self.assertIn('terminal child processes', agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_unrestored_conversation_stops_at_the_restoration_bound_without_resuming(self):
+        self.publish_loss()
+        reason = 'Codex did not restore this conversation after its restart'
+        with self.restoration_clock() as elapsed, patch.object(recovery, 'RESTORE_TIMEOUT', 5), \
+                patch.object(recovery, 'BACKOFF', (0, 1)), \
+                patch.object(recovery, 'check', return_value=NativeResult('pending', reason)) as checked, \
+                patch.object(recovery, 'owned') as owned, patch.object(lifecycle, 'start') as start:
+            recovery.run(self.directory, self.launch)
+        self.assertEqual(elapsed[0], 5)
+        self.assertGreater(checked.call_count, 1)
+        owned.assert_not_called()
+        start.assert_not_called()
+        facts = agents.runtime(self.directory)
+        self.assertEqual(facts['auto_recovery']['state'], 'skipped')
+        self.assertIn(reason, facts['auto_recovery']['reason'])
+        self.assertEqual(facts['launch_id'], self.launch)
+
+    def test_restoration_never_retries_a_busy_unknown_or_mismatched_native_result(self):
+        for reason in ('Native thread is active', 'Native status is unknown', 'Wrong native identity'):
+            with self.subTest(reason=reason):
+                write(self.directory / 'runtime.json', self.facts)
+                self.publish_loss()
+                with self.restoration_clock(), patch.object(recovery, 'BACKOFF', (0, 1)), \
+                        patch.object(recovery, 'check', side_effect=[NativeResult('pending', 'Restoring'),
+                            NativeResult('unavailable', reason)]) as checked, patch.object(recovery, 'owned') as owned:
+                    recovery.run(self.directory, self.launch)
+                self.assertEqual(checked.call_count, 2)
+                owned.assert_not_called()
+                self.assertIn(reason, agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_late_idle_qualification_cannot_restart_after_the_restoration_deadline(self):
+        self.publish_loss()
+        with self.restoration_clock() as elapsed:
+            def check(*args):
+                if elapsed[0] == 0:
+                    return NativeResult('pending', 'Conversation was not restored in time')
+                elapsed[0] = 6  # The bounded RPC finished after the restoration budget.
+                return NativeResult('ok')
+            with patch.object(recovery, 'RESTORE_TIMEOUT', 5), patch.object(recovery, 'BACKOFF', (0, 1)), \
+                    patch.object(recovery, 'check', side_effect=check), patch.object(recovery, 'owned') as owned:
+                recovery.run(self.directory, self.launch)
+        owned.assert_not_called()
+        self.assertIn('not restored in time', agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_native_activity_while_waiting_for_restoration_cancels_qualification(self):
+        self.publish_loss()
+        def activity(_delay):
+            StatusWatcher(self.directory, self.launch, self.root)._publish('working')
+        with patch.object(recovery.time, 'sleep', side_effect=activity), \
+                patch.object(recovery, 'check', return_value=NativeResult('pending', 'Restoring')) as checked, \
+                patch.object(recovery, 'owned') as owned:
+            recovery.run(self.directory, self.launch)
+        checked.assert_called_once()
+        owned.assert_not_called()
+        self.assertIn('invalidated', agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_restoration_pending_does_not_remove_the_transport_failure_budget(self):
+        self.publish_loss()
+        calls = []
+        def check(*args):
+            calls.append(None)
+            if len(calls) == 1:
+                return NativeResult('pending', 'Restoring')
+            raise ConnectionRefusedError('daemon unavailable')
+        with self.restoration_clock(), patch.object(recovery, 'BACKOFF', (0, 1, 2)), \
+                patch.object(recovery, 'check', side_effect=check), patch.object(recovery, 'owned') as owned:
+            recovery.run(self.directory, self.launch)
+        self.assertEqual(len(calls), 4, 'Three failed transports remain bounded after a pending read')
+        self.assertEqual(agents.runtime(self.directory)['auto_recovery']['state'], 'failed')
+        owned.assert_not_called()
+
     def test_acceptance_after_proof_blocks_even_with_a_transcript_receipt(self):
         message = append_message(self.directory, 'new input', {}, delivery='steer', target_session=self.native_id)
         update_message(self.directory, message['id'], submission_state='accepted', target_session=self.native_id,
@@ -315,6 +411,20 @@ class RecoveryWorkerTest(unittest.TestCase):
         proof = read(self.directory / 'runtime.json')['recovery_snapshot']
         self.assertFalse(proof['safe'])
         self.assertIn('accepted after', proof['reason'])
+
+    def test_restoration_pending_keeps_existing_proof_without_refreshing_it(self):
+        class Clock:
+            def __init__(self):
+                self.calls = 0
+            def wait(self, seconds):
+                self.calls += 1
+                return self.calls > 2
+        monitor = recovery.RecoveryMonitor(self.directory, self.launch, self.root)
+        monitor.stopped = Clock()
+        with patch.object(recovery, 'check', return_value=NativeResult('pending', 'Restoring')):
+            monitor._run()
+        self.assertEqual(agents.runtime(self.directory)['recovery_snapshot'], self.facts['recovery_snapshot'])
+        self.assertEqual(self.publish_loss()['auto_recovery']['state'], 'checking')
 
     def test_fresh_native_background_work_and_frontend_children_prevent_shutdown(self):
         self.publish_loss()

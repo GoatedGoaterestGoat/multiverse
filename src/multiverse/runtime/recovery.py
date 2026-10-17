@@ -25,6 +25,8 @@ from .process import process_started
 
 PROOF_AGE = 15
 BACKOFF = (0, 1, 2, 4, 8)
+RESTORE_TIMEOUT = 60
+RESTORE_POLL = 2
 RESTART_WINDOW = 300
 RESTART_LIMIT = 2
 
@@ -156,6 +158,11 @@ class RecoveryMonitor:
                     if in_flight(self.directory, facts, properties['native_session_id'], since=started_at):
                         continue
                 result = check(properties, facts, self.directory)
+                if result.state == 'pending':
+                    # Native restoration is not an activity observation. Keep
+                    # only the old proof, with its unchanged expiry and version.
+                    self.stopped.wait(3)
+                    continue
                 with existing_lock(self.directory / '.launch.lock'):
                     current = agents.runtime(self.directory)
                     if (current.get('launch_id') != self.launch_id or current.get('state') != 'running'
@@ -250,22 +257,45 @@ def _run(directory, launch_id, worker):
             raise ValueError('Native activity invalidated the idle proof')
         return facts
     try:
-        for attempt, delay in enumerate(BACKOFF, 1):
+        attempt, transport_failures, restore_deadline, restore_reason = 0, 0, None, None
+        while True:
+            # Transport outages keep their existing attempt bound. A provider's
+            # explicit pending result means its own restoration is in progress,
+            # not permission for core to load or resume the conversation.
+            delay = BACKOFF[attempt] if attempt < len(BACKOFF) else RESTORE_POLL
+            if restore_deadline is not None:
+                delay = min(delay, max(0, restore_deadline - time.monotonic()))
             if delay:
                 time.sleep(delay)
             with existing_lock(directory / '.launch.lock'):
                 facts = current()
                 properties = read(directory / 'properties.json')
+                if restore_deadline is not None and time.monotonic() >= restore_deadline:
+                    agents.record_recovery(directory, launch_id, 'skipped',
+                                           'Automatic reconnect skipped: ' + restore_reason, attempts=attempt)
+                    return
                 pending = in_flight(directory, facts, properties.get('native_session_id'))
                 if pending:
                     agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + pending)
                     return
+                attempt += 1
                 agents.record_recovery(directory, launch_id, 'checking', 'Waiting for the existing native endpoint', attempts=attempt)
             try:
                 observed = check(properties, facts, directory)
             except (OSError, RuntimeError, TimeoutError) as error:
-                if attempt == len(BACKOFF):
+                transport_failures += 1
+                if transport_failures >= len(BACKOFF):
                     agents.record_recovery(directory, launch_id, 'failed', f'Automatic reconnect timed out: {error}', attempts=attempt)
+                    return
+                continue
+            if observed.state == 'pending':
+                if restore_deadline is None:
+                    restore_deadline = time.monotonic() + RESTORE_TIMEOUT
+                restore_reason = observed.reason or 'Native service did not restore the saved conversation'
+                with existing_lock(directory / '.launch.lock'):
+                    current()
+                    agents.record_recovery(directory, launch_id, 'checking',
+                                           'Waiting for native restoration: ' + restore_reason, attempts=attempt)
                 continue
             if observed.state != 'ok':
                 agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + observed.reason)
@@ -273,6 +303,10 @@ def _run(directory, launch_id, worker):
             with existing_lock(directory / '.launch.lock'):
                 facts = current()
                 properties = read(directory / 'properties.json')
+                if restore_deadline is not None and time.monotonic() >= restore_deadline:
+                    agents.record_recovery(directory, launch_id, 'skipped',
+                                           'Automatic reconnect skipped: ' + restore_reason, attempts=attempt)
+                    return
                 pending = in_flight(directory, facts, properties.get('native_session_id'))
                 if pending:
                     agents.record_recovery(directory, launch_id, 'skipped', 'Automatic reconnect skipped: ' + pending)
