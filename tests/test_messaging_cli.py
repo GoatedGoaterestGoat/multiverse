@@ -1,5 +1,5 @@
 """Readable delivery evidence, batch isolation and unchanged machine results."""
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
@@ -46,13 +46,16 @@ class MessagingCliTest(BaseTest):
 
     def output(self, action, *arguments, code=0):
         output = io.StringIO()
-        with redirect_stdout(output), patch.object(sys, 'argv', ['mv2', '-u', str(self.root), action, *arguments]):
+        errors = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(errors), \
+                patch.object(sys, 'argv', ['mv2', '-u', str(self.root), action, *arguments]):
             try:
                 cli.main()
             except SystemExit as error:
                 self.assertEqual(error.code, code)
             else:
                 self.assertEqual(code, 0, output.getvalue())
+        self.stderr = errors.getvalue()
         return output.getvalue()
 
     def history(self, name):
@@ -88,9 +91,10 @@ class MessagingCliTest(BaseTest):
             return NativeResult('error', 'connection refused') if session.agent_id == self.directories['second'].name else self.accepted()
         self.behavior = behavior
         output = self.output('send', 'first,second,third', '--text', 'secret', code=1)
-        self.assertEqual(len(output.splitlines()), 3)
-        self.assertIn('Not delivered to second: connection refused. Saved;', output)
-        self.assertIn('mv2 deliver second --retry', output)
+        self.assertEqual(len(output.splitlines()), 2)
+        self.assertIn('Not delivered to second: connection refused. Saved;', self.stderr)
+        self.assertIn('mv2 deliver second --retry', self.stderr)
+        self.assertNotIn('Not delivered', output)
         self.assertTrue(output.endswith('Sent to third; it reads this at its next pause.\n'))
         self.assertEqual(len(self.calls), 3)
         for name in self.directories:
@@ -114,7 +118,8 @@ class MessagingCliTest(BaseTest):
 
     def test_uncertain_submission_explains_check_and_never_retries_it(self):
         self.behavior = TimeoutError('connection lost')
-        output = self.output('send', 'first', '--text', 'private', code=1)
+        self.assertEqual(self.output('send', 'first', '--text', 'private', code=1), '')
+        output = self.stderr
         self.assertIn('cannot yet tell whether it received', output)
         self.assertIn('mv2 deliver first --check before sending again', output)
         self.assertNotIn('acceptance unknown', output)
@@ -175,12 +180,72 @@ class MessagingCliTest(BaseTest):
     def test_failure_diagnostic_hides_ids_and_body_but_keeps_reason_and_action(self):
         session_id = str(uuid4())
         self.behavior = NativeResult('error', f'No conversation found with session ID {session_id}')
-        output = self.output('send', 'first', '--text', 'private', code=1)
+        self.assertEqual(self.output('send', 'first', '--text', 'private', code=1), '')
+        output = self.stderr
         self.assertIn('No conversation found', output)
         self.assertNotIn(session_id, output)
         self.assertIn('mv2 deliver first --retry', output)
         self.behavior = NativeResult('error', 'Rejected private')
-        self.assertNotIn('private', self.output('send', 'first', '--text', 'private', code=1))
+        self.output('send', 'first', '--text', 'private', code=1)
+        self.assertNotIn('private', self.stderr)
+
+    def test_live_broken_messaging_advises_kill_then_resume(self):
+        self.behavior = NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
+        self.assertEqual(self.output('send', 'first', '--text', 'private', code=1), '')
+        self.assertIn('messaging is not connected', self.stderr)
+        self.assertIn('restart it with mv2 kill first, then mv2 resume first', self.stderr)
+        self.assertIn('mv2 deliver first --retry', self.stderr)
+        self.assertEqual(len(self.history('first')), 1)
+        self.assertEqual(self.history('first')[0]['tracking']['submission_state'], 'failed')
+
+    def test_stopped_failed_wake_still_advises_resume_without_kill(self):
+        receipt = {'state': 'error', 'reason': 'Could not wake agent: executable unavailable'}
+        with patch.object(native, 'send_or_wake', return_value=receipt), \
+                patch.object(native, 'observe', return_value={'live': 'stopped'}):
+            self.assertEqual(self.output('send', 'first', '--text', 'private', code=1), '')
+        self.assertIn('resume it', self.stderr)
+        self.assertNotIn('mv2 kill', self.stderr)
+
+    def test_failed_json_stays_on_stdout_with_original_record(self):
+        self.behavior = NativeResult('unavailable', 'inbox key not published')
+        result = json.loads(self.output('send', 'first', '--text', 'private', '--json', code=1))
+        self.assertEqual(self.stderr, '')
+        self.assertEqual(result['state'], 'unavailable')
+        self.assertEqual(result['native_delivery']['reason'], self.behavior.reason)
+        self.assertEqual(result['text'], 'private')
+        self.assertFalse(result['ok'])
+
+    def test_unknown_recipient_in_batch_uses_stderr_only_for_that_line(self):
+        output = self.output('send', 'first,missing,third', '--text', 'private', code=1)
+        self.assertEqual(len(output.splitlines()), 2)
+        self.assertIn('Sent to first;', output)
+        self.assertIn('Sent to third;', output)
+        self.assertTrue(self.stderr.startswith('Not sent to missing:'))
+        self.assertEqual(len(self.stderr.splitlines()), 1)
+
+    def test_both_cli_entrypoints_keep_failure_streams_and_json_contract(self):
+        env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}
+        env['PYTHONPATH'] = str(ROOT / 'src')
+        for standalone in (False, True):
+            for state in ('error', 'unknown'):
+                for json_mode in (False, True):
+                    with self.subTest(standalone=standalone, state=state, json=json_mode):
+                        code = ('import runpy, sys\nfrom multiverse.runtime import native\n'
+                                f'native.send_or_wake = lambda *args, **kwargs: '
+                                f'{{"state": {state!r}, "reason": "fixture failure"}}\n')
+                        code += ("runpy.run_module('multiverse.tools.send', run_name='__main__', alter_sys=True)\n" if standalone
+                                 else 'from multiverse.cli import main\nmain()\n')
+                        args = ['-u', str(self.root), *([] if standalone else ['send']), 'first', '--text', 'private']
+                        result = subprocess.run([sys.executable, '-c', code, *args, *(['--json'] if json_mode else [])],
+                                                env=env, capture_output=True, text=True, timeout=15)
+                        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                        if json_mode:
+                            self.assertEqual(result.stderr, '')
+                            self.assertEqual(json.loads(result.stdout)['state'], state)
+                        else:
+                            self.assertEqual(result.stdout, '')
+                            self.assertIn('Not delivered' if state == 'error' else 'cannot yet tell', result.stderr)
+                            self.assertNotIn('private', result.stderr)
 
     def test_standalone_and_compatibility_cli_have_same_readable_and_json_output(self):
         env = {key: value for key, value in os.environ.items() if not key.startswith('MV2_')}

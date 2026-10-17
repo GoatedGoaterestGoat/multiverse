@@ -23,7 +23,7 @@ def configure(parser):
 
 
 def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, delivery="steer", queue_only=False,
-        json=False, _present=None):
+        json=False, _present=None, _present_error=None):
     if delivery not in ('steer', 'follow-up', 'inbox-only'):
         raise ValueError('Delivery must be steer, follow-up, or inbox-only')
     root = universe.resolve(root)
@@ -57,14 +57,24 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             seen.add(directory)
             name = read(directory / 'properties.json')['name']
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only)
+            running = bool(_present and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             line = (f"Saved to {name}'s inbox; it sees it at its next check." if result['delivery'] == 'inbox-only'
-                    else delivery_line(name, receipt, delivery=delivery, text=text))
+                    else delivery_line(name, receipt, delivery=delivery, text=text, running=running))
         results.append({'agent': name, **result})
-        if _present:
-            _present(line)
+        present = _present_error if result.get('ok') is False and _present_error else _present
+        if present:
+            present(line)
     if len(references) == 1:
         return {key: value for key, value in results[0].items() if key != 'agent'}
     return {'recipients': results, 'ok': all(result.get('ok', True) for result in results)}
+
+
+def _running(directory):
+    """Observe only for readable failure advice; uncertainty never changes delivery evidence."""
+    try:
+        return native.observe(read(directory / 'properties.json'), agents.runtime(directory))['live'] == 'alive'
+    except (OSError, ValueError, KeyError, RuntimeError):
+        return False
 
 
 def _send_one(root, directory, text, sender, delivery, queue_only):
@@ -91,7 +101,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
 
 
 def cli_run(root=None, *, json=False, **options):
-    result = run(root, **options, _present=None if json else lambda line: print(line, flush=True))
+    result = run(root, **options, _present=None if json else lambda line: print(line, flush=True),
+                 _present_error=None if json else lambda line: print(line, file=sys.stderr, flush=True))
     if json:
         return result
     if result.get('ok') is False:

@@ -36,7 +36,7 @@ def failure_reason(reason, text=''):
     return (reason[:220].rstrip() + '…' if len(reason) > 220 else reason) or 'the session could not accept the message'
 
 
-def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text=''):
+def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, accepted=False, text='', running=False):
     state = receipt.get('state')
     value = receipt.get('value') or {}
     reason = str(receipt.get('reason') or '')
@@ -44,6 +44,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
         why = failure_reason(reason, text)
         if check:
             return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."
+        if running:
+            return (f"Not delivered to {name}: {why}. Saved; restart it with mv2 kill {name}, "
+                    f"then mv2 resume {name}, then mv2 deliver {name} --retry.")
         return f"Not delivered to {name}: {why}. Saved; resume it, then mv2 deliver {name} --retry."
     if state == 'unknown':
         if accepted:
