@@ -408,6 +408,7 @@ caller can forget one:
 | `agent.exited` | the runner, once, where the process's end is known | state (`stopped`/`failed`), exit code, reason |
 | `agent.killed` | `lifecycle.kill` | native cancellation state |
 | `agent.reported` | `agents.report` | phase, summary |
+| `agent.session` | `agents._session_event`, after a native session change is durably recorded (`sessions.transition`) or a session pointer is recovered, for the exact launch ([session lineage](session-lineage.md)) | from, to, reason |
 | `agent.moved` | `relocate.move_agent`, in both the source and the destination journal | from, to |
 | `agent.removed` | `relocate.remove_agent`, in its universe's journal | trash entry |
 | `message.saved` | `mailbox.append_message` | message id, delivery, length, sender's name/agent/plugin (never the text) |
