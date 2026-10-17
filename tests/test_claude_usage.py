@@ -1,4 +1,5 @@
 """Context, cost and rate limits reported by the Claude mod reach runtime.json and get_usage."""
+import functools
 import json
 import os
 from unittest.mock import patch
@@ -28,7 +29,15 @@ def compaction_here():
     return True
 
 
-NEEDS_COMPACTION = unittest.skipUnless(compaction_here(), 'needs the compaction plugin: mv2 plugins install compaction')
+def needs_compaction(test):
+    """Skip `test` unless the compaction plugin is found: checked as it runs, under its own HOME (BaseTest isolates it),
+    never at import, where discovery would read and write the real one."""
+    @functools.wraps(test)
+    def run(self, *args, **kwargs):
+        if not compaction_here():
+            self.skipTest('needs the compaction plugin: mv2 plugins install compaction')
+        return test(self, *args, **kwargs)
+    return run
 
 
 class ClaudeUsageTest(BaseTest):
@@ -181,7 +190,7 @@ class ClaudeUsageTest(BaseTest):
     def context(self, adapter, session):
         return self.value(adapter, session)['context']
 
-    @NEEDS_COMPACTION
+    @needs_compaction
     def test_after_our_compaction_the_estimate_stands_in_until_a_real_response_arrives(self):
         adapter, session, project, native_id, install = self.compacted()
         context = self.context(adapter, session)
@@ -222,7 +231,7 @@ class ClaudeUsageTest(BaseTest):
         adapter, session, *_ = self.compacted(installed_at='not a time')
         self.assertNotIn('estimated', self.context(adapter, session))
 
-    @NEEDS_COMPACTION
+    @needs_compaction
     def test_the_rows_an_install_stores_do_not_end_the_estimate(self):
         adapter, session, project, native_id, install = self.compacted()
         # Claude stores the installed conversation as new rows half a second later, each with zero usage.
@@ -236,7 +245,7 @@ class ClaudeUsageTest(BaseTest):
         self.assertEqual(context['tokens'], 32005)
         self.assertNotIn('estimated', context)
 
-    @NEEDS_COMPACTION
+    @needs_compaction
     def test_without_the_mod_the_estimate_still_replaces_the_stale_transcript_reading(self):
         adapter, session, project, native_id, install = self.compacted()
         stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,
