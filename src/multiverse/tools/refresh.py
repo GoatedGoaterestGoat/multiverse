@@ -7,7 +7,7 @@ from ..universe import templates
 from ..store import lock
 
 LABELS = {"update": "update", "add": "add", "local": "keep", "conflict": "conflict", "unknown": "unknown",
-          "deleted": "keep", "removed": "removed"}
+          "deleted": "keep", "removed": "removed", "deferred": "deferred"}
 
 
 def configure(parser):

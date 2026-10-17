@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "name": "notifier",
+  "version": "0.1.0",
+  "description": "A desktop notification when an agent needs you, fails, or reports blocked or done",
+  "api": "1.2",
+  "module": "plugin",
+  "extends": ["events"],
+  "events": ["agent.status", "agent.exited", "agent.reported"],
+  "permissions": ["process.spawn"],
+  "settings": {"version": 1, "schema": "settings.schema.json", "defaults": "defaults/settings.json"}
+}

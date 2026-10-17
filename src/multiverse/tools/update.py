@@ -1,22 +1,40 @@
-"""Fast-forward the running mv2 checkout and sync its Python environment."""
+"""Fast-forward the running mv2 checkout and sync its Python environment.
+
+Plugins that are Git submodules at plugins/<name> move with the checkout when
+they are initialized, detached and clean, at or behind a previous pin. A clean
+checkout left behind by an unavailable remote is retried, including when mv2
+itself is already current. Checks run before fetching, merging and moving.
+One that is not initialized is never fetched or initialized; a new one
+is only reported (mv2 plugins install NAME). A plugin that cannot move leaves
+the rest of the update in place, and says how to repair it.
+"""
+import json
+import math
 import os
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
+import sys
+import time
 
 
 NOTES = [
     "Running agents and the dashboard keep their old code until relaunched.",
     "Run mv2 refresh --apply to bring a universe's templates up to date.",
 ]
+SETTINGS_NOTICES = ("converted", "partial", "failed", "not_installed")
 
 
 def configure(parser):
     parser.add_argument("--check", action="store_true", help="Fetch and report changes without updating code or environment")
     parser.add_argument("--json", action="store_true", help="Print the result as JSON")
+    parser.add_argument("--plugin-fetch-timeout", type=float, default=PLUGIN_FETCH_TIMEOUT, metavar="SECONDS",
+                        help="Total fetch budget per plugin (default: 120 seconds); increase for slow remotes")
 
 
-def _git(checkout, *args):
+def _git(checkout, *args, timeout=120):
     env = os.environ.copy()
     # An inherited Git environment must not redirect the operation to another repository.
     for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE",
@@ -25,7 +43,7 @@ def _git(checkout, *args):
     env["GIT_TERMINAL_PROMPT"] = "0"
     return subprocess.run(["git", "-c", "merge.autostash=false", "-c", "submodule.recurse=false",
                            "-C", str(checkout), *args], env=env,
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=timeout)
 
 
 def _detail(process):
@@ -51,21 +69,298 @@ def source_checkout():
     return checkout
 
 
-def _clean(checkout, *, allow_dirty=False):
-    if _read(checkout, "status", "--porcelain", "--untracked-files=no", "--ignore-submodules=untracked"):
+def _clean(checkout, *, allow_dirty=False, plugins=()):
+    status = _git(checkout, "status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=untracked")
+    if status.returncode:
+        raise ValueError(_detail(status))
+    changed = []
+    records = iter(status.stdout.split("\0"))
+    for record in records:
+        if not record:
+            continue
+        if record[0] in "RC":
+            next(records, None)  # a rename's or copy's source path follows
+        # A plugin's own worktree (its HEAD or its files) is checked by _plugin_state, by name; anything in
+        # the index (a staged pin, a conflict, a deletion, a type change) is the checkout's own change.
+        if record[3:] in plugins and record[0] == " " and record[1] == "M":
+            continue
+        changed.append(record)
+    if changed:
         reason = "The mv2 checkout has uncommitted changes to tracked files; commit them before updating."
         if allow_dirty:
             return reason
         raise ValueError(reason)
 
 
-def run(root=None, *, check=False, json=False):
+PLUGIN_NAME = re.compile(r"[a-z][a-z0-9]*(?:-[a-z0-9]+)*")
+PLUGIN_TIMEOUT = 600
+PLUGIN_FETCH_TIMEOUT = 120
+
+
+def _must(directory, *args):
+    """A Git read that must succeed: an error is never taken for a clean or empty answer."""
+    process = _git(directory, *args)
+    if process.returncode:
+        raise ValueError(f"could not read {' '.join(args[:2])} in {directory}: {_detail(process)}")
+    return process.stdout
+
+
+def _plugin_links(checkout, revision):
+    """{"plugins/NAME": pinned commit} of the direct plugin gitlinks in a revision's tree; never .gitmodules alone."""
+    found = {}
+    for record in _must(checkout, "ls-tree", "-z", revision, "--", "plugins/").split("\0"):
+        meta, tab, path = record.partition("\t")
+        fields = meta.split()
+        name = path[len("plugins/"):] if path.startswith("plugins/") else ""
+        if (tab and len(fields) == 3 and fields[0] == "160000" and fields[1] == "commit"
+                and len(name) <= 40 and PLUGIN_NAME.fullmatch(name)):
+            found[path] = fields[2]
+    return found
+
+
+def _plugin_urls(checkout, revision):
+    """{"plugins/NAME": url} from a revision's .gitmodules (NUL-separated, never the working copy)."""
+    if _git(checkout, "cat-file", "-e", f"{revision}:.gitmodules").returncode:
+        return {}
+    process = _git(checkout, "config", "--blob", f"{revision}:.gitmodules", "-z", "--get-regexp",
+                   r"^submodule\..*\.(path|url)$")
+    if process.returncode not in (0, 1):  # 1: no submodule entries at all
+        raise ValueError(f"could not read {revision}:.gitmodules: {_detail(process)}")
+    paths, urls = {}, {}
+    for record in process.stdout.split("\0"):
+        key, _, value = record.partition("\n")
+        name, _, field = key.rpartition(".")
+        (paths if field == "path" else urls)[name] = value
+    return {path: urls.get(name) for name, path in paths.items()}
+
+
+def _plugin_repository(checkout, path):
+    """(directory, its resolved git directory) of the initialized submodule at exactly checkout/path, or None
+    when it is not initialized. Raises ValueError when it cannot be trusted: a symbolic link anywhere on the
+    way, a directory outside the checkout, or a repository Git cannot read."""
+    directory = checkout
+    for part in Path(path).parts:
+        directory = directory / part
+        if directory.is_symlink():
+            raise ValueError(f"{path} is reached through a symbolic link; mv2 will not update it")
+    if not directory.is_dir() or not (directory / ".git").exists():
+        return None
+    if not directory.resolve().is_relative_to(checkout.resolve()):
+        raise ValueError(f"{path} is outside the mv2 checkout")
+    top = Path(_must(directory, "rev-parse", "--show-toplevel").strip()).resolve()
+    if top != directory.resolve():
+        raise ValueError(f"{path} is not a repository of its own")
+    return directory, str(Path(_must(directory, "rev-parse", "--absolute-git-dir").strip()).resolve())
+
+
+def _plugin_facts(checkout, path):
+    """(HEAD, tracked changes, conflict, git directory, branch) of an initialized plugin, or None."""
+    found = _plugin_repository(checkout, path)
+    if found is None:
+        return None
+    directory, identity = found
+    head = _must(directory, "rev-parse", "HEAD").strip()
+    changes = _must(directory, "status", "--porcelain", "-z", "--untracked-files=no", "--ignore-submodules=untracked")
+    conflict = _must(checkout, "ls-files", "-u", "-z", "--", path)
+    branch = _git(directory, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch.returncode not in (0, 1):
+        raise ValueError(_detail(branch))
+    return head, bool(changes), bool(conflict), identity, branch.stdout.strip() if not branch.returncode else None
+
+
+def _plugin_state(checkout, links):
+    """({path: facts} of initialized plugins, [refusals]). Anything unreadable is a refusal, never clean."""
+    state, refusals = {}, []
+    for path, pin in sorted(links.items()):
+        try:
+            facts = _plugin_facts(checkout, path)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            refusals.append(f"{path} could not be checked: {error}")
+            state[path] = ("unknown",)
+            continue
+        if facts is None:
+            continue
+        state[path] = facts
+        head, changes, conflict, _, branch = facts
+        if conflict:
+            refusals.append(f"{path} has a merge conflict in the mv2 checkout; resolve it before updating.")
+        elif changes:
+            refusals.append(f"{path} has local changes; commit or discard them before updating.")
+        elif head != pin and branch is None:
+            try:
+                # A failed fetch can leave the pin unknown locally. Do not mistake that for local work:
+                # _move_plugins must fetch and prove ancestry before it can change this checkout.
+                if _has_commit(checkout / path, pin) and not _ancestor(checkout / path, head, pin):
+                    refusals.append(_pin_refusal(checkout, path, head, pin))
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                refusals.append(f"{path} could not be checked: {error}")
+    return state, refusals
+
+
+def _has_commit(directory, revision):
+    process = _git(directory, "rev-parse", "--verify", "--quiet", revision + "^{commit}")
+    if process.returncode not in (0, 1):
+        raise ValueError(_detail(process))
+    return process.returncode == 0
+
+
+def _ancestor(directory, before, after):
+    process = _git(directory, "merge-base", "--is-ancestor", before, after)
+    if process.returncode not in (0, 1):
+        raise ValueError(_detail(process))
+    return process.returncode == 0
+
+
+def _pin_refusal(checkout, path, head, pin):
+    position = "is ahead of" if _ancestor(checkout / path, pin, head) else "has diverged from"
+    command = shlex.join(["git", "-C", str(checkout / path), "switch", "--detach", pin])
+    return (f"{path} is detached at {head[:7]} and {position} mv2's pin {pin[:7]}; "
+            f"pin its current revision in mv2, or run {command}, then run mv2 update again. "
+            "Its checkout was left unchanged.")
+
+
+def _plugin_plan(checkout, before, after, state, urls_before, urls_after):
+    plan = []
+    for path in sorted(set(before) | set(after)):
+        name = path.split("/", 1)[1]
+        entry = {"name": name, "path": path, "before": before.get(path), "after": after.get(path)}
+        if path not in before:
+            entry["state"] = "available"
+        elif path not in after:
+            entry["state"] = "removed"
+        elif path not in state:
+            entry["state"] = "not_installed"
+        elif len(state[path]) > 4 and state[path][4] is not None:
+            entry["branch"] = state[path][4]
+            entry["state"] = "unchanged" if state[path][0] == after[path] else "preserved"
+            if entry["state"] == "preserved":
+                entry["reason"] = (f"is on branch {entry['branch']} at {state[path][0][:7]}; "
+                                   f"mv2 pins {after[path][:7]}. Its checkout is left unchanged.")
+        elif before[path] == after[path]:
+            entry["state"] = "unchanged" if state[path][0] == after[path] else "would_update"
+        else:
+            entry["state"] = "would_update"
+        if path in state and state[path][0] != "unknown":
+            entry["before"] = state[path][0]
+        if path in urls_before and path in urls_after and urls_before[path] != urls_after[path]:
+            entry["url_changed"] = {"before": urls_before[path], "after": urls_after[path]}
+        plan.append(entry)
+    return plan
+
+
+def _index_pin(checkout, path):
+    """The commit the checkout's index pins for path (what git submodule update checks out), or None."""
+    for record in _must(checkout, "ls-files", "-s", "-z", "--", path).split("\0"):
+        meta, tab, found = record.partition("\t")
+        fields = meta.split()
+        if tab and found == path and len(fields) == 3 and fields[0] == "160000" and fields[2] == "0":
+            return fields[1]
+    return None
+
+
+class _PluginUnavailable(ValueError):
+    """A plugin pin cannot be fetched; optional code must not block mv2 updates."""
+
+
+def _fetch_plugin(directory, revision, *, timeout=PLUGIN_FETCH_TIMEOUT):
+    """Fetch the missing pin; a rejected SHA can fall back once within the same overall budget."""
+    if _has_commit(directory, revision):
+        return
+    try:
+        branch = _git(directory, "symbolic-ref", "--quiet", "--short", "HEAD")
+        remote = "origin"
+        if not branch.returncode:
+            configured = _git(directory, "config", "--get", f"branch.{branch.stdout.strip()}.remote")
+            if not configured.returncode:
+                remote = configured.stdout.strip()
+        url = "." if remote == "." else _must(directory, "remote", "get-url", remote).strip()
+        # Match local URL support in plugins.install, scoped to these fetches, never global config.
+        local = url.startswith(("/", "./", "../", "~", "file:")) or (":" not in url)
+        options = ("-c", "protocol.file.allow=always") if local else ()
+        deadline = time.monotonic() + timeout
+
+        def fetch(*revisions):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("git fetch", timeout)
+            return _git(directory, *options, "fetch", "--no-recurse-submodules", "--no-tags", "--", remote,
+                        *revisions, timeout=remaining)
+
+        fetched = fetch(revision)
+        if fetched.returncode:
+            # Some servers forbid requesting a reachable commit by SHA. Their ordinary refs can still
+            # supply it, but this gets only the budget left by the first attempt. A timeout never retries.
+            fetched = fetch()
+            if fetched.returncode:
+                raise ValueError(_detail(fetched))
+        if not _has_commit(directory, revision):
+            raise ValueError(f"the remote did not provide commit {revision[:7]}")
+    except subprocess.TimeoutExpired as error:
+        raise _PluginUnavailable(f"its fetch did not finish within {timeout:g} s; for a slow remote, retry with "
+                                 "mv2 update --plugin-fetch-timeout SECONDS using a larger budget") from error
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        raise _PluginUnavailable(f"its remote could not supply {revision[:7]}: {error}") from error
+
+
+def _move_plugins(checkout, plan, state, pins, *, fetch_timeout=PLUGIN_FETCH_TIMEOUT):
+    """Move each initialized plugin whose checkout differs from its pin; returns the failures.
+
+    Everything for one plugin, its checks included, is inside its own failure
+    boundary: one that cannot be read or moved is reported, and the others and
+    the environment sync go on."""
+    failures = []
+    for entry in plan:
+        if entry["state"] != "would_update":
+            continue
+        path, old, new = entry["path"], entry["before"], entry["after"]
+        repair = f" Repair it with: git -C {checkout} submodule update --checkout -- {path}"
+        try:
+            facts = _plugin_facts(checkout, path)
+            if facts is None or facts != state[path] or facts[1:3] != (False, False):
+                raise ValueError("it changed during the update and was left as it is")
+            if _index_pin(checkout, path) != new:
+                raise ValueError("the commit the mv2 checkout pins for it changed during the update; it was left as it is")
+            _fetch_plugin(checkout / path, new, timeout=fetch_timeout)
+            # Fetching objects never moves work. Recheck the repository and index before any checkout.
+            if _plugin_facts(checkout, path) != facts or _index_pin(checkout, path) != new:
+                raise ValueError("it changed during the update and was left as it is")
+            if old != pins[path]:
+                previously_pinned = (_has_commit(checkout / path, pins[path])
+                                     and _ancestor(checkout / path, old, pins[path]))
+                if not previously_pinned and not _ancestor(checkout / path, old, new):
+                    reason = _pin_refusal(checkout, path, old, new)
+                    repair = ""  # This refusal includes the choice of revision and its exact repair command.
+                    raise ValueError(reason)
+            # --checkout overrides any submodule.<name>.update (merge, rebase, a command);
+            # nested submodules are neither fetched nor updated.
+            moved = _git(checkout, "-c", "fetch.recurseSubmodules=false", "submodule", "update", "--checkout",
+                         "--no-fetch", "--no-recommend-shallow", "--", path, timeout=PLUGIN_TIMEOUT)
+            if moved.returncode:
+                raise ValueError(_detail(moved))
+            now = _plugin_facts(checkout, path)
+            if now is None or now[0] != new:
+                raise ValueError(f"it is not at {new[:7]} after the update")
+            entry["state"] = "updated"
+        except _PluginUnavailable as error:
+            entry["state"], entry["reason"] = "unavailable", str(error)
+        except subprocess.TimeoutExpired as error:
+            entry["state"], entry["reason"] = "failed", f"git did not finish within {error.timeout:g} s"
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            entry["state"], entry["reason"] = "failed", str(error)
+        if entry["state"] == "failed":
+            failures.append(f"mv2 updated, but {path} could not be updated: {entry['reason'].rstrip('.')}." + repair)
+    return failures
+
+
+def run(root=None, *, check=False, json=False, plugin_fetch_timeout=PLUGIN_FETCH_TIMEOUT):
     # root is deliberately unused: -u selects a universe, not mv2's source repository.
     result = {"ok": False, "check": check, "json": json, "checkout": None, "branch": None,
               "upstream": None, "before": None, "after": None, "commits": 0,
               "environment": {"state": "not_run"}, "notes": []}
     refusals = []
     try:
+        if not math.isfinite(plugin_fetch_timeout) or plugin_fetch_timeout <= 0:
+            raise ValueError("--plugin-fetch-timeout must be a positive finite number of seconds.")
         if not shutil.which("git"):
             raise ValueError("Git is not available; install it before updating mv2.")
         checkout = source_checkout()
@@ -75,7 +370,12 @@ def run(root=None, *, check=False, json=False):
             raise ValueError("The mv2 checkout has no current branch (detached HEAD); select a branch manually before updating.")
         branch = branch_result.stdout.strip()
         result["branch"] = branch
-        dirty = _clean(checkout, allow_dirty=check)
+        links = _plugin_links(checkout, "HEAD")
+        state, plugin_refusals = _plugin_state(checkout, links)
+        if plugin_refusals and not check:
+            raise ValueError(" ".join(plugin_refusals))
+        refusals.extend(plugin_refusals)
+        dirty = _clean(checkout, allow_dirty=check, plugins=links)
         if dirty:
             refusals.append(dirty)
         upstream = _git(checkout, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}")
@@ -88,9 +388,23 @@ def run(root=None, *, check=False, json=False):
         fetched = _git(checkout, "fetch", "--no-recurse-submodules", "--", remote)
         if fetched.returncode:
             raise ValueError(f"Could not fetch mv2's upstream: {_detail(fetched)}")
-        dirty = _clean(checkout, allow_dirty=check)
+        dirty = _clean(checkout, allow_dirty=check, plugins=links)
         if dirty and dirty not in refusals:
             refusals.append(dirty)
+        now_links, (now_state, _) = _plugin_links(checkout, "HEAD"), _plugin_state(checkout, links)
+        moved = sorted(path for path in set(links) | set(now_links) | set(state) | set(now_state)
+                       if links.get(path) != now_links.get(path) or state.get(path) != now_state.get(path))
+        if moved:
+            changed = (f"{', '.join(moved)} changed while mv2 fetched its upstream; try again after other "
+                       "Git operations finish.")
+            if not check:
+                raise ValueError(changed)
+            refusals.append(changed)
+        upstream_links = _plugin_links(checkout, "@{u}")
+        plan = _plugin_plan(checkout, links, upstream_links, state, _plugin_urls(checkout, "HEAD"),
+                            _plugin_urls(checkout, "@{u}"))
+        if plan:
+            result["plugins"] = plan
         if (_read(checkout, "symbolic-ref", "--quiet", "--short", "HEAD") != branch
                 or _read(checkout, "rev-parse", "HEAD") != before):
             raise ValueError("The mv2 branch changed during the check; try again after other Git operations finish.")
@@ -123,6 +437,11 @@ def run(root=None, *, check=False, json=False):
                 result["notes"] = list(NOTES)
             if merged.returncode:
                 raise ValueError(f"Could not fast-forward mv2: {_detail(merged)}")
+        plugin_failures = _move_plugins(checkout, plan, state, links, fetch_timeout=plugin_fetch_timeout)
+        moved = [entry["path"] for entry in plan if entry["state"] == "updated"]
+        if moved:
+            result["notes"] = [*result["notes"], f"Running agents reload the Claude code of {', '.join(moved)} at once; "
+                               "other plugin code is picked up when an agent or the dashboard is relaunched."]
         # Recheck after merging: the new revision may add or remove uv.lock.
         if not (checkout / "uv.lock").is_file():
             result["environment"] = {"state": "skipped", "reason": "uv.lock is missing"}
@@ -134,15 +453,112 @@ def run(root=None, *, check=False, json=False):
             for key in ("UV_PROJECT", "UV_WORKING_DIRECTORY", "UV_ACTIVE"):
                 env.pop(key, None)
             env["UV_PROJECT_ENVIRONMENT"] = str(checkout / ".venv")
-            synced = subprocess.run([uv, "sync", "--locked"], cwd=checkout,
-                                    env=env, capture_output=True, text=True, timeout=600)
-            if synced.returncode:
-                raise ValueError(f"The code is current, but the environment sync failed: {_detail(synced)}. Run uv sync --locked in the mv2 checkout to retry.")
-            result["environment"] = {"state": "synced"}
+            try:
+                synced = subprocess.run([uv, "sync", "--locked"], cwd=checkout,
+                                        env=env, capture_output=True, text=True, timeout=600)
+                problem = _detail(synced) if synced.returncode else None
+            except subprocess.TimeoutExpired as error:
+                problem = f"uv did not finish within {error.timeout:g} s"
+            except (OSError, subprocess.SubprocessError) as error:
+                problem = f"uv could not run: {error}"
+            if problem:
+                plugin_failures.append(f"The code is current, but the environment sync failed: {problem}. "
+                                       f"Run uv sync --locked in {checkout} to retry.")
+            else:
+                result["environment"] = {"state": "synced"}
+        if result["environment"]["state"] != "failed":
+            settings = _convert_settings(checkout, root)
+            if settings["state"] in SETTINGS_NOTICES:  # nothing to say keeps the output as it was
+                result["settings"] = settings
+        if plugin_failures:
+            raise ValueError(" ".join(plugin_failures))
         result["ok"] = True
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         result["reason"] = " ".join(dict.fromkeys([*refusals, str(error)]))
+        if not check and result["environment"]["state"] == "pending":
+            result["environment"] = {"state": "not_run", "reason": "the code update did not complete"}
     return result
+
+
+def _convert_settings(checkout, root):
+    """Convert the caller's universe's pre-plugin settings files with the code just updated to.
+
+    This process still has the old code loaded, so a fresh one runs `mv2 plugins
+    migrate --apply --recursive --json` from the checkout, with that universe as
+    its own. Its JSON says what was converted and what was not: none, converted,
+    partial, failed or not_installed. A universe that does not resolve is skipped;
+    nothing here ever fails the update."""
+    from .. import universe
+    try:
+        target = universe.resolve(root)
+    except (OSError, ValueError):
+        return {"state": "skipped", "reason": "no universe here"}
+    python = checkout / ".venv" / "bin" / "python"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(checkout / "src"), env.get("PYTHONPATH")]))
+    env["MV2_UNIVERSE"] = str(target)
+    try:
+        converted = subprocess.run([str(python) if python.is_file() else sys.executable, "-m", "multiverse.cli",
+                                    "-u", str(target), "plugins", "migrate", "--apply", "--recursive", "--json"],
+                                   cwd=checkout, env=env, capture_output=True, text=True, errors="replace",
+                                   timeout=300)
+    except subprocess.TimeoutExpired as error:
+        return {"state": "failed", "universe": str(target), "reason": f"it did not finish within {error.timeout:g} s"}
+    except (OSError, subprocess.SubprocessError) as error:
+        return {"state": "failed", "universe": str(target), "reason": f"it could not run: {error}"}
+    try:
+        return _conversion(target, converted)
+    except Exception as error:  # whatever it printed, the update stands: this is said, never raised
+        detail = " ".join(f"{converted.stdout} {converted.stderr}".split())[:300]
+        return {"state": "failed", "universe": str(target),
+                "reason": f"its result could not be read ({type(error).__name__}: {error}): {detail}"}
+
+
+def _conversion(target, converted):
+    """Classify conversions and missing-plugin notices from `plugins migrate --json`. Raises on a
+    record that is not what that command prints."""
+    record = json.loads(converted.stdout)
+    planned, applied = record["planned"], record["applied"]
+    missing = record.get("not_installed", [])
+    for name, items in (("planned", planned), ("applied", applied), ("not_installed", missing)):
+        if not isinstance(items, list) or not all(isinstance(item, dict) and isinstance(item.get("plugin"), str)
+                                                  for item in items):
+            raise ValueError(f"{name} must list objects naming their plugin")
+    lines = []
+    for item in applied:
+        where = _scope_label(target, item.get("universe"))
+        lines.append(f"{item['plugin']}{where}: converted {Path(str(item['from'])).name} to "
+                     f"{Path(str(item['to'])).name}" + (f"; but {item['warning']}" if item.get("warning") else ""))
+    failures = [item for item in planned if item.get("problem")]
+    for item in failures:
+        where = _scope_label(target, item.get("universe"))
+        lines.append(f"{item['plugin']}{where}: not converted: {item['problem']}")
+    for item in missing:
+        name, legacy = item["plugin"], item["file"]
+        if not isinstance(legacy, str) or not legacy:
+            raise ValueError("not_installed must name its legacy settings file")
+        where = _scope_label(target, item.get("universe"))
+        # This process can still hold the old plugins module after the code update. Do not call a helper
+        # added only in the new code; consume the subprocess's data without loading or probing plugins.
+        lines.append(f"{legacy} is here but the {name} plugin isn't installed{where}: "
+                     f"run mv2 plugins install {name}, or move {legacy} away to stop using its settings")
+    if (converted.returncode or record.get("ok") is False) and not failures:
+        # It says it failed without naming what: never "nothing to do".
+        detail = " ".join(converted.stderr.split())[:300] or f"exit code {converted.returncode}"
+        lines.append(f"the conversion did not finish: {detail}")
+        failures = [None]
+    state = ("partial" if applied and (failures or missing) else "converted" if applied
+             else "failed" if failures else "not_installed" if missing else "none")
+    return {"state": state, "universe": str(target), "lines": lines}
+
+
+def _scope_label(target, scope):
+    if not scope or Path(scope) == Path(target):
+        return ""
+    try:
+        return " in " + "/".join(part for part in Path(scope).relative_to(target).parts if part != "subverses")
+    except ValueError:
+        return f" in {scope}"
 
 
 def format_output(result):
@@ -175,10 +591,56 @@ def format_output(result):
             lines.append(f"Environment sync skipped: {environment['reason']}.")
         elif result["check"]:
             lines.append("The environment would be synced with uv sync --locked.")
+    if not result["ok"] and not result["check"] and (environment["state"] != "not_run" or environment.get("reason")):
+        environment = result["environment"]
+        lines.append({"synced": "Environment synced.", "failed": "Environment sync failed (see above).",
+                      "skipped": f"Environment sync skipped: {environment.get('reason')}.",
+                      "not_run": f"Environment not synced: {environment.get('reason')}."}.get(
+                          environment["state"], f"Environment: {environment['state']}."))
+    for entry in result.get("plugins", []):
+        lines.extend(_plugin_lines(result, entry))
+    settings = result.get("settings") or {}
+    if settings.get("state") in SETTINGS_NOTICES:
+        lines.append({"converted": f"Plugin settings converted in {settings['universe']}:",
+                      "partial": f"Plugin settings partly converted in {settings['universe']}:",
+                      "failed": f"Plugin settings in {settings['universe']} were not converted:",
+                      "not_installed": f"Plugin settings in {settings['universe']} await plugin installation:"}[settings["state"]])
+        lines.extend("  " + line for line in settings.get("lines") or [settings.get("reason", "")])
+        if settings["state"] in ("partial", "failed"):
+            lines.append("  Fix what it names, then run mv2 plugins migrate --apply --recursive there.")
     if result["check"]:
         lines.append("Check only: code and environment unchanged.")
     lines.extend(result["notes"])
     return "\n".join(lines)
+
+
+def _plugin_lines(result, entry):
+    path, before, after = entry["path"], (entry["before"] or "")[:7], (entry["after"] or "")[:7]
+    found = {"would_update": [f"{path} would move from {before} to {after}; running agents would reload its "
+                              "Claude code at once."],
+             "updated": [f"Updated {path} from {before} to {after}."],
+             "available": [f"New optional plugin {entry['name']}: install it with mv2 plugins install {entry['name']}."],
+             "removed": [f"{path} would no longer be part of mv2; it would be left on disk." if result["check"]
+                         else f"{path} is no longer part of mv2; it was left on disk."],
+             "failed": [f"! {path} was not updated: {entry.get('reason')}"]}.get(entry["state"], [])
+    if entry["state"] == "preserved":
+        found.append(f"Warning: {path} {entry['reason']}")
+    deinit = f"git -C {shlex.quote(result['checkout'])} submodule deinit -f -- {path}"
+    if entry["state"] == "would_update":
+        found.append(f"If its remote is unavailable, {path} would stay at {before} with a warning; "
+                     f"mv2 and its environment would still update. To uninstall it, save any local files first, "
+                     f"then remove its checkout: {deinit}")
+    elif entry["state"] == "unavailable":
+        environment = result["environment"]
+        status = {"synced": "environment synced", "failed": "environment sync failed",
+                  "skipped": "environment sync skipped"}.get(environment["state"], "environment not changed")
+        found.append(f"Warning: {path} was left at {before}: {entry['reason']}. mv2's code update continued; "
+                     f"{status}. Restore access and run mv2 update again, or uninstall this optional plugin: "
+                     f"save any local files first, then remove its checkout with {deinit}")
+    if entry.get("url_changed"):
+        found.append(f"{path} now comes from {entry['url_changed']['after']}; to fetch from there, run "
+                     f"git -C {result['checkout']} submodule sync -- {path}")
+    return found
 
 
 if __name__ == "__main__":

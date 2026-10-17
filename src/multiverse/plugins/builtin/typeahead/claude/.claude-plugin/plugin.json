@@ -1,0 +1,6 @@
+{
+  "name": "multiverse-typeahead",
+  "version": "0.1.0",
+  "description": "Suggests /multiverse subcommands, catalog entries and agent names while you type",
+  "author": {"name": "Multiverse"}
+}

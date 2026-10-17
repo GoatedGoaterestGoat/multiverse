@@ -19,10 +19,18 @@ from ..universe.agents import check_available_name, directory, runtime, update_r
 from ..universe.mailbox import message_record, update_message
 from . import native
 
-def listing(root, recursive=False):
+def listing(root, recursive=False, only=None):
+    """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none."""
+    if only is not None and (not isinstance(only, str) or only in ("", ".", "..") or "/" in only
+                             or "\\" in only or os.sep in only or (os.altsep and os.altsep in only)):
+        raise ValueError(f"Not an agent ID: {only!r}")
     rows, snapshots = [], {}
     for scope in universe.tree(root) if recursive else [root]:
-        for path in sorted((scope / "state" / "agents").glob("*/properties.json")):
+        agents_dir = scope / "state" / "agents"
+        paths = [agents_dir / only / "properties.json"] if only is not None else sorted(agents_dir.glob("*/properties.json"))
+        for path in paths:
+            if only is not None and not path.is_file():
+                continue
             try:
                 properties = read(path)
                 facts = runtime(path.parent)
@@ -43,6 +51,25 @@ def listing(root, recursive=False):
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
                              "live": "unknown", "status": "unknown", "phase": "unknown", "summary": str(error)})
     return rows
+
+
+def plugins_record(root, command):
+    """runtime.json `plugins` for a command: what the adapter's plugin plan recorded, or, for an adapter
+    that applies no plugins, the status-line items of the plugins on here. Always a JSON object of that
+    shape; anything else (or any failure) is the empty record. Never fails a launch."""
+    try:
+        if command.plugins is not None:
+            record = command.plugins
+        else:
+            from ..plugins import harness as plugin_harness
+            record = plugin_harness.status_items(root)
+        record = json.loads(json.dumps(record))
+        if (not isinstance(record, dict) or not isinstance(record.get("plugins"), dict)
+                or not isinstance(record.get("status_items"), list)):
+            raise ValueError("not a plugins record")
+        return record
+    except Exception:
+        return {"plugins": {}, "status_items": []}
 
 
 def plain_fallback(command, error):
@@ -100,8 +127,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
-        context = LaunchContext(mode, values, model, {**os.environ, **(properties.get("native_environment", {}) if resume else {})},
-                                resume_prompt=resume_prompt)
+        cli_path = _cli_path()
+        # This launch's own identity, known before the adapter is asked, so a command prepared only once (plain)
+        # can name it, e.g. in a plugin's MCP server. It always wins over ambient or saved values, and the
+        # parent's MV2 identity never reaches the child. The tmux socket is added once the pane is owned.
+        target = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
+                  "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path,
+                  "MV2_PYTHON": sys.executable, "PATH": str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')}
+        saved = properties.get("native_environment", {}) if resume else {}
+        ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
+        context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt)
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
@@ -122,11 +157,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
         (launch / "task.md").write_text(resume_prompt if resume_prompt is not None else properties["task"])
-        cli_path = _cli_path()
-        env = {"MV2_UNIVERSE": str(root), "MV2_AGENT_ID": properties["id"], "MV2_AGENT_DIR": str(agent_dir),
-               "MV2_LAUNCH_ID": launch_id, "MV2_CONTROL_SOCKET": values["control_socket"], "MV2_CLI": cli_path, "MV2_PYTHON": sys.executable}
+        env = {key: value for key, value in target.items() if key != "PATH"}
         if resume:
-            env.update(properties.get('native_environment', {}))
+            env.update(saved)
         # Persist adapter-selected storage so resume cannot accidentally switch
         # accounts/history when launched by a different monitor environment.
         if command.shared_service:
@@ -141,6 +174,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             with lock(root / "state" / ".agents.lock"):
                 check_available_name(root, name)
                 write(agent_dir / "properties.json", properties)
+            _event(agent_dir, "agent.created", None, {"harness": harness, "model": model}, properties)
         write(agent_dir / "runtime.json",
               _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
@@ -204,6 +238,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if command.rpc_proxy and shared_endpoint and command.rpc_proxy.upstream_path != shared_endpoint.address:
                 raise ValueError('Native relay targets a different service endpoint')
             command = replace(command, attachment=native.launch_attachment(command))
+            if command.fallback is not None:
+                # The runner may still switch to the fallback; it records this, never the discarded plan.
+                command = replace(command, fallback=replace(command.fallback, plugins=plugins_record(root, command.fallback)))
             if command.attachment and command.attachment.readiness == 'binding':
                 if not command.rpc_proxy or not command.rpc_proxy.binds_session:
                     raise ValueError('Attachment requires an adapter protocol that validates binding')
@@ -214,7 +251,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             argv = list(command.argv)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
-                           native_mode=command.native_mode,
+                           native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,
                            attachment=asdict(command.attachment) if command.attachment else None,
                            startup_delivery='waiting' if endpoint else None)
@@ -230,6 +267,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                attempts=[*tracking.get('attempts', []), {'state': 'unknown',
                                    'reason': 'Resume registered; awaiting native process startup',
                                    'launch_id': launch_id, 'at': now()}])
+            # Before the runner is released, so ready and exited never come before launched.
+            _launched(root, agent_dir, launch_id, command, "wake" if resume_message_id is not None else mode, properties)
             (launch / "ready").touch()
         except Exception as error:
             if resume_message_id is not None and not (launch / 'ready').exists():
@@ -353,6 +392,76 @@ def launch_result(root, agent_dir):
             'session': asdict(SessionHandle.from_records(properties, facts, agent_dir))}
 
 
+def _event(agent_dir, kind, launch=None, data=None, properties=None):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.for_agent(agent_dir, kind, launch, data, properties)
+    except Exception:
+        pass
+
+
+def _launched(root, agent_dir, launch_id, command, mode, properties):
+    """agent.launched: how it launched and which plugins it loaded. Never fails the launch."""
+    try:
+        loaded = plugins_record(root, command)["plugins"]
+        _event(agent_dir, "agent.launched", launch_id, {
+            "mode": mode, "native_mode": (command.native_mode or {}).get("mode"),
+            "plugins": sorted(name for name, entry in loaded.items()
+                              if isinstance(entry, dict) and entry.get("state") == "loaded")}, properties)
+    except Exception:
+        pass
+
+
+def launch_ready(adapter, properties, facts, agent_dir, request, live, *, include_delivery=True):
+    """Whether a launch is ready: no launch error and no lost relay, running with its process in a live pane,
+    past its startup check, attached as its adapter requires (the bridge registered, the binding validated)
+    and, with `include_delivery`, its startup messages delivered. wait_ready and the agent.ready event use
+    this one predicate; wait_ready checks the first two itself first, to say why."""
+    if facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost':
+        return False
+    running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
+               and facts.get('startup_checked', True))
+    if not running:
+        return False
+    session = SessionHandle.from_records(properties, facts, agent_dir)
+    if ('attachment' not in facts and 'attachment' not in request
+            and request.get('rpc_proxy') and session.endpoint):
+        session = replace(session, attachment=native.legacy_attachment(request.get('shared_service')))
+    ready = native.attachment_ready(adapter, session)
+    return ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
+
+
+def note_ready(root, agent_dir, launch_id):
+    """Record agent.ready once, the first time this launch passes launch_ready. Never raises.
+
+    Called by the processes that change readiness (the runner after its startup
+    check, startup delivery once done), outside their locks. The pane's liveness is
+    observed as wait_ready observes it. A marker in the launch's directory, created
+    exclusively, makes it once per launch.
+    """
+    try:
+        from ..plugins import events
+        launch = agent_dir / 'launches' / launch_id
+        marker = launch / 'ready-event'
+        if marker.exists() or not events.subscribers(root, 'agent.ready'):
+            return
+        properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+        if facts.get('launch_id') != launch_id:
+            return
+        adapter = harnesses.load(root, properties['harness'])
+        live = observe(properties, facts)['live']
+        if not launch_ready(adapter, properties, facts, agent_dir, read(launch / 'request.json'), live):
+            return
+        try:
+            os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            return
+        _event(agent_dir, 'agent.ready', launch_id, {}, properties)
+    except Exception:
+        pass
+
+
 def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
@@ -368,15 +477,7 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
         if (facts.get('native_relay') or {}).get('state') == 'lost':
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
-        running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
-                   and facts.get('startup_checked', True))
-        session = SessionHandle.from_records(result, facts, agent_dir)
-        if ('attachment' not in facts and 'attachment' not in request
-                and request.get('rpc_proxy') and session.endpoint):
-            session = replace(session, attachment=native.legacy_attachment(request.get('shared_service')))
-        ready = running and native.attachment_ready(adapter, session)
-        ready = ready and (not include_delivery or facts.get('startup_delivery') not in ('waiting', 'failed'))
-        if ready:
+        if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
             return {**result, 'ok': True, 'ready': True}
         error = None
         if facts.get('state') == 'failed' or live in ('ending', 'stopped', 'dormant'):
@@ -495,6 +596,8 @@ def kill(root, reference):
             update_runtime(agent_dir, launch_id, state='dormant', status='unknown', dormant_at=now(),
                            error=cancellation.reason if cancellation and cancellation.state != 'ok' else None,
                            native_cancellation=cancellation.to_dict() if cancellation else None)
+        _event(agent_dir, "agent.killed", launch_id,
+               {"native_cancellation": cancellation.state if cancellation else "ok"}, properties)
         # Receipt IDs remain internal; callers need counts and the native result.
         details = (cancellation.value or {}) if cancellation else {}
         return {'id': agent_dir.name, 'state': 'dormant', 'native_cancellation': {

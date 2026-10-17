@@ -2,6 +2,7 @@
 import json
 import os
 from unittest.mock import patch
+import unittest
 from uuid import uuid4
 
 from multiverse.harnesses.types import SessionHandle
@@ -16,11 +17,28 @@ REPORT = {'context': {'tokens': 82000, 'window': 200000, 'percent': 41}, 'cost_u
                           {'window': 'bad', 'percent_used': 'x'}]}
 
 
+def compaction_here():
+    """Whether this checkout has the compaction plugin (the plugins/compaction submodule), which makes the estimate."""
+    from multiverse.plugins import entry
+    from multiverse.plugins.loader import PluginError
+    try:
+        entry(None, 'compaction')  # raises only when no plugin by that name is found
+    except PluginError:
+        return False
+    return True
+
+
+NEEDS_COMPACTION = unittest.skipUnless(compaction_here(), 'needs the compaction plugin: mv2 plugins install compaction')
+
+
 class ClaudeUsageTest(BaseTest):
     def setUp(self):
         super().setUp()
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}))
+        # The compaction plugin makes the estimate after a compaction; the base template leaves it off.
+        from multiverse.plugins import config as plugins_config
+        plugins_config.set_enabled(self.root, 'compaction', True)
 
     def response(self, id, input_tokens, output_tokens):
         usage = {'input_tokens': input_tokens, 'output_tokens': output_tokens,
@@ -66,11 +84,12 @@ class ClaudeUsageTest(BaseTest):
                                 session_file=str(directory / 'session.jsonl'))
         value = adapter.get_usage(session).value
         self.assertEqual(value['total_tokens'], 15)
-        self.assertEqual(value['context'], REPORT['context'])
+        # The mod's report, plus when the transcript's latest response came (what compaction's estimate is checked against).
+        self.assertEqual(value['context'], {**REPORT['context'], 'responded_at': '2026-09-30T00:00:00Z'})
         self.assertEqual(value['cost_usd'], 1.25)
         stale = SessionHandle(agent, 'claude', str(self.work), launch_id='previous', native_id=native_id,
                               session_file=str(directory / 'session.jsonl'))
-        self.assertEqual(adapter.get_usage(stale).value['context'], {'tokens': 10})
+        self.assertEqual(adapter.get_usage(stale).value['context'], {'tokens': 10, 'responded_at': '2026-09-30T00:00:00Z'})
         self.assertNotIn('cost_usd', adapter.get_usage(stale).value)
         self.assertEqual(adapter.get_usage(stale).value['total_tokens'], 15)
 
@@ -118,6 +137,24 @@ class ClaudeUsageTest(BaseTest):
         return json.dumps({'type': 'assistant', 'timestamp': stamp,
                            'message': {'id': id, 'usage': usage, 'content': [{'type': 'text'}]}}) + '\n'
 
+    def built(self, stamp):
+        """A row a compaction's install stores: a new ID, Claude's synthetic model and zero usage."""
+        usage = {'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}
+        return json.dumps({'type': 'assistant', 'timestamp': stamp, 'message': {
+            'id': str(uuid4()), 'model': '<synthetic>', 'usage': usage, 'content': [{'type': 'text', 'text': 'kept'}]}}) + '\n'
+
+    def test_rows_with_zero_usage_are_never_the_latest_response(self):
+        from multiverse.harnesses.claude import context_reading
+        agent, directory = self.agent()
+        native_id = str(uuid4())
+        project = self.transcript(native_id, self.stamped('msg_1', '2026-10-04T00:00:00Z', 10, 150000, 0),
+                                  self.built('2026-10-04T00:10:00.500Z'), self.built('2026-10-04T00:10:00.501Z'))
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config)}):
+            self.assertEqual(context_reading(native_id), (150010, '2026-10-04T00:00:00Z'))
+            with (project / f'{native_id}.jsonl').open('a') as handle:
+                handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+            self.assertEqual(context_reading(native_id), (32005, '2026-10-04T00:11:00Z'))
+
     def compacted(self, installed_at='2026-10-04T00:10:00+00:00', recorded=True, estimate=22000, derived_at='2026-10-04T05:00:00+00:00'):
         agent, directory = self.agent()
         native_id = str(uuid4())
@@ -136,25 +173,37 @@ class ClaudeUsageTest(BaseTest):
         facts = read(directory / 'runtime.json')
         write(directory / 'runtime.json', {**facts, 'usage': {'context': context, 'rate_limits': [], 'reported_at': at}})
 
-    def context(self, adapter, session):
-        return adapter.get_usage(session).value['context']
+    def value(self, adapter, session):
+        """The usage record as mv2 reports it: the adapter's, after plugins' adjustments (compaction's estimate)."""
+        from multiverse.plugins import harness as plugin_harness
+        return plugin_harness.adjust_usage(plugin_harness.session_info(session, 'claude'), adapter.get_usage(session).value)
 
+    def context(self, adapter, session):
+        return self.value(adapter, session)['context']
+
+    @NEEDS_COMPACTION
     def test_after_our_compaction_the_estimate_stands_in_until_a_real_response_arrives(self):
         adapter, session, project, native_id, install = self.compacted()
         context = self.context(adapter, session)
         self.assertEqual((context['tokens'], context['window'], context['estimated'], context['estimated_from']),
                          (22000, 200000, True, install))
         self.assertNotIn('percent', context)
-        value = adapter.get_usage(session).value
+        value = self.value(adapter, session)
         self.assertEqual(display.context_display({'state': 'ok', 'value': value}), '~22k/200k')
         self.assertIn('11%, estimated after compaction: conversation only', display.context_line({'state': 'ok', 'value': value}))
+        # The display says whatever the estimate's maker set; records from before it set one read as compaction's.
+        other = {'state': 'ok', 'value': {'context': {'tokens': 5000, 'estimated': True, 'estimated_reason': 'by a plugin'}}}
+        self.assertEqual(display.context_line(other).split(' · ')[0], 'Context: ~5.0k (estimated by a plugin)')
+        other['value']['context']['estimated_reason'] = 'by\na plugin ' + 'x' * 200
+        self.assertEqual(len(display.usage_context(other)['estimated_reason']), 80)
+        self.assertNotIn('\n', display.context_line(other))
         with (project / f'{native_id}.jsonl').open('a') as handle:
             handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
         context = self.context(adapter, session)
         # The mod's report predates the new response, so the transcript has the real request size.
         self.assertEqual(context['tokens'], 32005)
         self.assertNotIn('estimated', context)
-        self.assertEqual(display.context_display({'state': 'ok', 'value': adapter.get_usage(session).value}), '32k/200k')
+        self.assertEqual(display.context_display({'state': 'ok', 'value': self.value(adapter, session)}), '32k/200k')
 
     def test_the_mods_newer_report_wins_once_it_follows_the_response(self):
         adapter, session, project, native_id, install = self.compacted()
@@ -173,6 +222,21 @@ class ClaudeUsageTest(BaseTest):
         adapter, session, *_ = self.compacted(installed_at='not a time')
         self.assertNotIn('estimated', self.context(adapter, session))
 
+    @NEEDS_COMPACTION
+    def test_the_rows_an_install_stores_do_not_end_the_estimate(self):
+        adapter, session, project, native_id, install = self.compacted()
+        # Claude stores the installed conversation as new rows half a second later, each with zero usage.
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.built('2026-10-04T00:10:00.500Z') + self.built('2026-10-04T00:10:00.502Z'))
+        context = self.context(adapter, session)
+        self.assertEqual((context['tokens'], context['estimated'], context['estimated_from']), (22000, True, install))
+        with (project / f'{native_id}.jsonl').open('a') as handle:
+            handle.write(self.stamped('msg_2', '2026-10-04T00:11:00Z', 5, 30000, 2000))
+        context = self.context(adapter, session)
+        self.assertEqual(context['tokens'], 32005)
+        self.assertNotIn('estimated', context)
+
+    @NEEDS_COMPACTION
     def test_without_the_mod_the_estimate_still_replaces_the_stale_transcript_reading(self):
         adapter, session, project, native_id, install = self.compacted()
         stale = SessionHandle(session.agent_id, 'claude', str(self.work), launch_id='other', native_id=native_id,

@@ -28,7 +28,9 @@ function session(on: On, env: Record<string, string> = { MV2_AGENT_DIR: AGENT, M
     if (!file) return { deny: 'ENOENT' }
     return { value: { kind: 'file', size: file.text.length, mtimeMs: file.mtimeMs, isLink: false } }
   })
+  const reads: string[] = []
   on('fs.read', async ($, e) => {
+    reads.push(e.path)
     const file = files.get(e.path)
     return file ? { value: file.text } : { deny: 'ENOENT' }
   })
@@ -46,7 +48,7 @@ function session(on: On, env: Record<string, string> = { MV2_AGENT_DIR: AGENT, M
   on('ui.status', async ($, e) => { lines.push(e.text); return { value: undefined } })
   on('ui.toast', async () => ({ value: undefined }))
   const logs: string[] = []
-  return { clock, disk, peeks, lines, logs, setUnread: (messages: unknown[]) => { unread = messages } }
+  return { clock, disk, peeks, lines, logs, reads, setUnread: (messages: unknown[]) => { unread = messages } }
 }
 
 const properties = (phase: string, summary = '') => JSON.stringify({ id: 'a1', name: 'reviewer', phase, summary })
@@ -132,43 +134,12 @@ describe('status line', () => {
     expect(w.lines.at(-1)).toBe('reviewer (PR review) · done')
   })
 
-  test('a running /compact’s progress keeps the slot while the timer ticks, and the normal line returns after', async ($, on) => {
-    const w = session(on, { MV2_AGENT_DIR: AGENT, MV2_UNIVERSE: UNIVERSE, MV2_CLI: '/mv2', MV2_PYTHON: '/python', MV2_COMPACTION: '1' })
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const event = (value: object) => ({ stream: 'stdout' as const, text: JSON.stringify(value) + '\n' })
-    on('process.spawn', async function* () {
-      yield event({ event: 'progress', phase: 'building', turn: 'turn-aaaaaaaa', turns: 2, turns_done: 0, merges: 1, merges_left: 3 })
-      await gate
-      yield event({ event: 'message', message: { keep: 'row-1' } })
-      yield event({ event: 'result', count: 1, install_id: 'install-1', path: '/agent/compaction/installs/install-1.json',
-                    stats: { turns: 1, summarized: 0, tokens_before: 10, tokens_after: 5 } })
-      return { value: { code: 0, signal: null } }
-    })
-    on('session.compact', async () => ({ messages: [] }))
-    w.disk(`${AGENT}/properties.json`, properties('working'))
-    await start($)
-    await w.clock.settle()
-    expect(w.lines.at(-1)).toBe('working')
-    const compacting = $.session.compact({ trigger: 'manual', messages: [{ role: 'user', text: 'Fix it', toolUses: [], handle: 'row-1' }] })
-    await w.clock.settle()
-    expect(w.lines.at(-1)).toContain('compacting')
-    // The phase changes and the timer ticks while it runs: the progress keeps the slot.
-    w.disk(`${AGENT}/properties.json`, properties('blocked'))
-    await w.clock.advance(2000)
-    expect(w.lines.at(-1)).toContain('compacting')
-    release()
-    await compacting
-    await w.clock.settle()
-    // The normal line is back, as of the tick during compaction, now with compaction's own item.
-    expect(w.lines.at(-1)).toBe('blocked · compaction on')
-  })
-
-  // compaction.ts takes "enabled" from the launch's MV2_COMPACTION, which cannot change in a running
-  // process, so an agent launched without it has no compaction state to show.
+  // An agent launched without compaction does not declare the item, so even a leftover file shows nothing.
   test('an agent launched without compaction shows no compaction item, even when the config asks for it', async ($, on) => {
-    const w = session(on)  // no MV2_COMPACTION in this launch
+    const w = session(on)
     w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running' }))
+    w.disk(`${AGENT}/status-items/compaction.txt`, 'trees 9/9\n')
     w.disk(`${UNIVERSE}/statusline.json`, '{"schema": 1, "items": {"compaction": true}}')
     await start($)
     await w.clock.settle()
@@ -195,3 +166,94 @@ describe('status line', () => {
     expect(w.lines).toEqual(['working', 'working'])
   })
 })
+
+describe('plugin items on the status line', () => {
+  const COST = { name: 'cost', plugin: 'cost-item', claude: true, tmux: true }
+  const TESTS = { name: 'test-runs', plugin: 'ci', claude: false, tmux: true }
+  const runtime = (items: unknown[], status = 'idle') => JSON.stringify({ state: 'running', status, plugins: { plugins: {}, status_items: items } })
+  const item = (name: string) => `${AGENT}/status-items/${name}.txt`
+
+  test('a declared item shows its file after the core items, and follows the file', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20 today')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual(['working · $1.20 today'])
+    w.disk(item('cost'), '$1.35 today')
+    await w.clock.advance(2000)
+    w.disk(item('cost'), undefined)  // a missing file shows nothing
+    await w.clock.advance(2000)
+    w.disk(item('cost'), '')         // nor does an empty one
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working · $1.20 today', 'working · $1.35 today', 'working'])
+  })
+
+  test('an item that is off is never read; statusline.json turns it on, and off again', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([TESTS]))
+    w.disk(item('test-runs'), '3 failing')
+    await start($)
+    await w.clock.settle()
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working'])
+    expect(w.reads).not.toContain(item('test-runs'))
+    w.disk(`${UNIVERSE}/statusline.json`, JSON.stringify({ schema: 1, items: { 'test-runs': true, phase: true } }))
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('3 failing · working')  // placed where the file names it
+    w.disk(`${UNIVERSE}/statusline.json`, JSON.stringify({ schema: 1, items: { 'test-runs': false } }))
+    await w.clock.advance(2000)
+    const read = w.reads.filter((path) => path === item('test-runs')).length
+    w.disk(item('test-runs'), '4 failing')
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('working')
+    expect(w.reads.filter((path) => path === item('test-runs')).length).toBe(read)
+  })
+
+  test('status reports rewrite runtime.json often; the item files are read only when they change', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    for (const status of ['working', 'idle', 'waiting', 'idle']) {
+      w.disk(`${AGENT}/runtime.json`, runtime([COST], status))
+      await w.clock.advance(2000)
+    }
+    expect(w.reads.filter((path) => path === item('cost')).length).toBe(1)
+    expect(w.lines).toEqual(['working · $1.20'])
+  })
+
+  test('an item declared later is picked up; a malformed record declares none', async ($, on) => {
+    const w = session(on)
+    w.disk(`${AGENT}/properties.json`, properties('working'))
+    w.disk(`${AGENT}/runtime.json`, '{not json')
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual(['working'])
+    w.disk(`${AGENT}/runtime.json`, JSON.stringify({ state: 'running', plugins: 'nonsense' }))
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working'])
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    await w.clock.advance(2000)
+    expect(w.lines).toEqual(['working', 'working · $1.20'])
+    w.disk(`${AGENT}/runtime.json`, runtime([]))  // and dropped when a launch no longer declares it
+    await w.clock.advance(2000)
+    expect(w.lines.at(-1)).toBe('working')
+  })
+
+  test('outside a Multiverse agent there are no items, as there is no line', async ($, on) => {
+    const w = session(on, {})
+    w.disk(`${AGENT}/runtime.json`, runtime([COST]))
+    w.disk(item('cost'), '$1.20')
+    await start($)
+    await w.clock.settle()
+    expect(w.lines).toEqual([])
+    expect(w.reads).toEqual([])
+  })
+})
+

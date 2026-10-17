@@ -18,6 +18,16 @@ from textual.widgets import Input, Label, Static
 from ..display import clean
 
 MISSING = object()
+
+
+class _Null:
+    """A choice that writes null, apart from None, which means "not set" in a choice."""
+
+    def __repr__(self):
+        return "NULL"
+
+
+NULL = _Null()
 BOOL_OPTIONS = ((True, 'true'), (False, 'false'))
 
 
@@ -38,6 +48,7 @@ class Field:
     initial: object = ''
     group: str | None = None
     role: str | None = None
+    help: str = ''
 
 
 def lookup(data, path):
@@ -59,6 +70,8 @@ def field(key, path, label, kind, data, placeholder='', options=(), **extra):
         if not any(item[0] is None for item in options):
             options = ((None, f'default: {shown(placeholder)}' if placeholder != '' else 'default'), *options)
         initial = None if value is MISSING else value
+        if value is None and any(item[0] is NULL for item in options):
+            initial = NULL  # an explicit null the schema allows, as opposed to "not set"
         if initial is not None and initial not in [item[0] for item in options]:
             options = (*options, (initial, shown(initial)))
     else:
@@ -69,7 +82,7 @@ def field(key, path, label, kind, data, placeholder='', options=(), **extra):
 def convert(item, value):
     """A widget value as it is written in the file; MISSING when it is blank."""
     if item.kind == 'choice':
-        return MISSING if value is None else value
+        return None if value is NULL else MISSING if value is None else value
     text = value.strip()
     if not text:
         return MISSING
@@ -147,6 +160,23 @@ class Choice(Static, can_focus=True):
 class FieldScreen(ModalScreen):
     """Shared behaviour of the screens that edit fields: widgets, visibility and the error line."""
     BINDINGS = [Binding("escape", "close", "Close"), Binding("ctrl+enter", "save", "Save")]
+    # The look of a field screen travels with the class, so a plugin's screen needs nothing from app.tcss for
+    # its fields: rows (.frow with .flabel and an Input or Choice), the error line (.cerror), section titles
+    # (.csection), notes (.cwarn) and a field's help (.fhelp).
+    DEFAULT_CSS = """
+    FieldScreen { align: center middle; background: $mv-crust 75%; }
+    FieldScreen .csection { height: 1; margin-top: 1; color: $mv-teal; text-style: bold; }
+    FieldScreen .cwarn { height: auto; color: $mv-yellow; }
+    FieldScreen .cerror { height: auto; color: $mv-red; }
+    FieldScreen .frow { height: 1; }
+    FieldScreen .flabel { width: 22; color: $mv-subtext0; }
+    FieldScreen .frow Input { width: 1fr; height: 1; border: none; padding: 0 1; background: $mv-surface0; }
+    FieldScreen .frow Input:focus { background: $mv-surface1; border: none; }
+    FieldScreen .frow Input > .input--placeholder { color: $mv-overlay1; }
+    FieldScreen .frow Choice { width: 1fr; height: 1; padding: 0 1; background: $mv-surface0; }
+    FieldScreen .frow Choice:focus { background: $mv-surface1; color: $mv-teal; }
+    FieldScreen .fhelp { height: auto; padding-left: 22; color: $mv-overlay1; }
+    """
 
     def __init__(self, root, backend):
         super().__init__()

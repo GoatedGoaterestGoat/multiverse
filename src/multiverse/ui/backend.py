@@ -4,9 +4,11 @@ from pathlib import Path
 from .. import universe
 from ..harnesses import load as load_harness
 from ..store import read
-from ..tools import (ask, get_usage, attach, capabilities, compaction, deliver, inspect, kill, list_agents, move,
+from ..tools import (ask, get_usage, attach, capabilities, deliver, inspect, kill, list_agents, move,
                      native_status, remove, resume, send, spawn, stop, subverse)
-from . import theme
+from .. import plugins
+from . import columns, plugin_panels, theme
+from .columns import COLUMNS
 from .tree import counts, within
 from .views import view
 
@@ -30,6 +32,21 @@ class LocalBackend:
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
         members = list_agents.run(root, recursive=True, json=True)
+        plugin_columns = any(key not in COLUMNS for key in config["columns"])
+        if plugin_columns:
+            # Plugin columns: resolved and computed here, off the event loop. Each agent row says which
+            # plugins its universe has on and carries its plugin cells; rendering only reads them.
+            scopes = list(universe.tree(root))
+            columns.PLUGIN_COLUMNS = columns.resolve_plugin_columns(scopes, config["columns"])
+            on = {str(scope): sorted(plugins.on_here(scope)) for scope in scopes}
+            for member in members:
+                member["plugins"] = on.get(str(member.get("universe")), [])
+            columns.fill_cells(members)
+        else:
+            columns.PLUGIN_COLUMNS = {}
+            columns.forget_cells()
+        # Plugin panels render here, off the event loop, from this scope's agents; the dashboard only draws the result.
+        widgets = plugin_panels.expand(root, config["widgets"], members, config.get("plugin_panels", "auto"))
         groups = []
         for scope in universe.tree(root):
             group = {"path": str(scope), "parent": str(scope.parent.parent) if scope != root else None,
@@ -39,13 +56,17 @@ class LocalBackend:
                 data, style = read(scope / "universe.json"), view(scope)
                 groups.append({**group, "name": style["title"] or data["name"],
                                "description": data.get("description", ""), "accent": style["accent"]})
+                if plugin_columns:
+                    groups[-1]["plugins"] = on[str(scope)]
             except (OSError, ValueError, KeyError) as error:
                 groups.append({**group, "name": scope.name, "description": str(error),
                                "accent": theme.RED, "error": True})
+        if plugin_columns:
+            columns.fill_cells([g for g in groups if "plugins" in g], group=True)
         return {"root": root, "name": config["title"] or meta["name"],
                 "description": meta.get("description", ""), "accent": config["accent"],
                 "groups": groups, "counts": counts(members),
-                "columns": config["columns"], "widgets": config["widgets"], "agents": members}
+                "columns": config["columns"], "widgets": widgets, "agents": members}
 
     def spawn(self, root, values):
         return spawn.run(root, name=values["name"], task=values.get("task", ""),
@@ -96,18 +117,6 @@ class LocalBackend:
 
     def remove_subverse(self, path):
         return remove.run(universe.parent(path), target=str(path), subverse=True)
-
-    def compaction_overview(self, root):
-        return compaction.overview(root)
-
-    def save_compaction(self, root, value):
-        return compaction.save_settings(root, value)
-
-    def compaction_agent(self, root, reference, **preview):
-        return compaction.agent_view(root, agent=reference, **preview)
-
-    def set_compaction_scheduler(self, root, reference, scheduler):
-        return compaction.set_scheduler(root, agent=reference, scheduler=scheduler)
 
     def subverse(self, root, values):
         result = subverse.run(root, name=values["name"], template=values.get("template") or "base",

@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "name": "hello-column",
+  "version": "0.1.0",
+  "description": "An Uptime column and an inspector line: the smallest dashboard plugin",
+  "api": "1.0",
+  "module": "plugin",
+  "extends": ["dashboard.column", "dashboard.inspector"]
+}

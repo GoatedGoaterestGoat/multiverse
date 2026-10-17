@@ -1,8 +1,10 @@
 """Refresh updates unedited definition files from the template and never overwrites local edits."""
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse import cli
@@ -96,6 +98,58 @@ class RefreshTest(unittest.TestCase):
         self.assertEqual(self.actions()["harnesses/codex/harness.json"], "conflict")
         self.assertEqual(self.actions(take=["bootstrap.md"], apply=True)["bootstrap.md"], "update")
         self.assertEqual((self.root / "bootstrap.md").read_text(), "Bootstrap v2\n")
+
+    def plugin(self, name, legacy=None):
+        """A plugin named NAME found first (MV2_PLUGIN_PATH), whose pre-plugin settings file is `legacy`."""
+        directory = self.work / "plugins" / name
+        manifest = {"schema": 1, "name": name, "version": "0.1.0", "api": "1.0", "module": "plugin"}
+        if legacy:
+            manifest["settings"] = {"version": 2, "legacy": legacy}
+        write(directory / "plugin.json", manifest)
+        (directory / "plugin.py").write_text("def register(mv):\n    pass\n")
+        self.enterContext(patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(directory.parent)}))
+
+    def reason(self, path, **options):
+        return {change["path"]: change["reason"] for change in self.plan(**options)["changes"]}[path]
+
+    def test_plugin_settings_wait_for_the_migration_of_a_legacy_file(self):
+        # A universe from before the plugin existed: its notes.json, and the template's new settings file.
+        self.plugin("notes", legacy="notes.json")
+        write(self.root / "notes.json", {"schema": 1, "enabled": True})
+        self.put("plugin-settings/notes.json", '{"schema": 2}\n')
+        self.assertEqual(self.actions()["plugin-settings/notes.json"], "deferred")
+        self.assertIn("run mv2 plugins migrate", self.reason("plugin-settings/notes.json"))
+        refresh.run(self.root, apply=True)
+        self.assertFalse((self.root / "plugin-settings/notes.json").exists())  # nothing in front of the real settings
+        # After mv2 plugins migrate wrote the universe's own settings, they are kept.
+        write(self.root / "plugin-settings/notes.json", {"schema": 2, "default": {"budget": 200000}})
+        (self.root / "notes.json").unlink()
+        self.assertEqual(self.actions()["plugin-settings/notes.json"], "local")
+        self.assertEqual(self.actions(take=["plugin-settings/notes.json"])["plugin-settings/notes.json"], "update")
+
+    def test_plugin_settings_wait_only_while_an_old_file_waits(self):
+        # Without an old file there is nothing to protect: a plugin that is not here is no reason to hold back
+        # (a universe without access to an optional plugin would list it deferred forever).
+        self.put("plugin-settings/absent.json", '{"schema": 2}\n')
+        self.assertEqual(self.actions()["plugin-settings/absent.json"], "add")
+        # A known plugin's old file waits (core knows compaction's, installed or not): its settings and the
+        # template's switches wait for it, whatever the plugin's state.
+        self.put("plugin-settings/compaction.json", '{"schema": 2}\n')
+        self.put("plugins.json", '{"schema": 1, "enabled": {"compaction": true}}\n')
+        (self.root / "compaction.json").write_text('{"enabled": false}\n')
+        for path in ("plugin-settings/compaction.json", "plugins.json"):
+            self.assertEqual(self.actions()[path], "deferred")
+            self.assertIn("compaction.json is still here and not converted", self.reason(path))
+        refresh.run(self.root, apply=True)
+        self.assertFalse((self.root / "plugin-settings/compaction.json").exists())
+        self.assertEqual(self.actions(take=["plugin-settings/compaction.json"])["plugin-settings/compaction.json"], "add")
+        # Converted: the universe wrote both itself, with no install record: kept as its own from then on.
+        (self.root / "compaction.json").unlink()
+        (self.root / "plugin-settings" / "compaction.json").write_text('{"schema": 2, "budget": 50000}\n')
+        (self.root / "plugins.json").write_text('{"schema": 1, "enabled": {"compaction": false}}\n')
+        self.assertEqual({path: self.actions()[path] for path in ("plugins.json", "plugin-settings/compaction.json")},
+                         {"plugins.json": "local", "plugin-settings/compaction.json": "local"})
+        self.assertEqual(self.actions(take=["plugins.json"])["plugins.json"], "update")  # take still overrides
 
     def test_take_rejects_paths_outside_the_template(self):
         with self.assertRaises(ValueError):

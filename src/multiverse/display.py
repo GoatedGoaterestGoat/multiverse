@@ -124,7 +124,12 @@ def usage_context(result):
     percent = _number(found.get('percent'))
     if percent is None and window:
         percent = used * 100 / window
+    reason = found.get('estimated_reason')
     return {'tokens': used, 'window': window, 'percent': percent, 'estimated': found.get('estimated') is True,
+            # What the estimate is (the words after "estimated"); records from before plugins set it are compaction's.
+            # Plugin code sets it: one short line, so it cannot stretch the inspector.
+            'estimated_reason': ' '.join(reason.split())[:80] if isinstance(reason, str) and reason.strip()
+            else 'after compaction: conversation only',
             'last_known': found.get('last_known') is True}
 
 
@@ -153,9 +158,9 @@ def context_line(result):
     found = usage_context(result)
     line = 'Context: ' + context_display(result)
     if found and found['percent'] is not None:
-        line += f" ({found['percent']:.0f}%" + (', estimated after compaction: conversation only)' if found['estimated'] else ')')
+        line += f" ({found['percent']:.0f}%" + (f", estimated {found['estimated_reason']})" if found['estimated'] else ')')
     elif found and found['estimated']:
-        line += ' (estimated after compaction: conversation only)'
+        line += f" (estimated {found['estimated_reason']})"
     if found and found['last_known']:
         line += ' (last known)'
     cost = cost_display(result)

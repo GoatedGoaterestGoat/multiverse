@@ -174,6 +174,7 @@ class OperationTest(BaseTest):
         self.assertEqual(read(self.directory / 'properties.json'), properties)
         self.assertEqual(inbox(self.directory)['messages'], [])
         self.assertFalse((self.directory / 'native-delivery.json').exists())
+        # The base template leaves the compaction plugin (which adds a capability) off.
         self.assertEqual(set(LocalBackend().capabilities(self.root, self.agent)), set(CAPABILITIES))
 
     def test_cli_optional_prompt_and_explicit_queue_controls(self):

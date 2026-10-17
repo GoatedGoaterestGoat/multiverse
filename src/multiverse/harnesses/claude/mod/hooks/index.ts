@@ -1,8 +1,7 @@
 import type { EngineInterface, Register } from 'claude-code'
-import { compactionLine, registerCompaction } from './compaction'
 import { DESCRIPTION, HINT, NAME, registerMultiverse } from './multiverse'
-import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, render, setBase } from './statusline'
-import type { Config, Facts } from './statusline'
+import { INBOX_LIMIT, currentLine, defaultConfig, isSubverse, parseConfig, parseItems, render, setBase } from './statusline'
+import type { Config, Facts, PluginItem } from './statusline'
 import { registerUsage } from './usage'
 
 // Multiverse sends each message over this session's peer inbox at `next`
@@ -40,8 +39,9 @@ function tagged(text: string): Message | undefined {
   return { text: match[3] ?? "", mode, id: match[2] }
 }
 
-// Main-loop turn state: turn.start fires for the main loop only, and a
-// subagent's turn.complete carries its agentId.
+// Main-loop turn state. A subagent's or teammate's turn.start and turn.complete
+// carry its agentId (turn.start since Claude Code 2.1.299's types say so); only
+// the main loop's turns count, or a background subagent would leave "working".
 let turnRunning = false
 
 // What waits on the person, by key (`question:<id>`, `permission:<id>`,
@@ -56,14 +56,18 @@ const asked = new Map<string, string>()
 // Tools whose call is itself a question to the person.
 const QUESTIONS = new Set(["AskUserQuestion", "ExitPlanMode"])
 
-// The status line under the prompt (statusline.ts holds the logic and the slot
-// it shares with /compact's progress). A timer looks at four files' size and
-// time, with no subprocess, and reads only what changed; `mv2 inbox --peek`
-// runs only when the inbox changed.
+// The status line under the prompt (statusline.ts holds the logic and the slot).
+// A timer looks at its files' size and time,
+// with no subprocess, and reads only what changed; `mv2 inbox --peek` runs only
+// when the inbox changed. Plugin items add runtime.json (which declares them) and
+// the file of each item that is on.
 const REFRESH_MS = 2000
 const watched = new Map<string, string>()
 let statusConfig: Config = defaultConfig()
 const statusFacts: Facts = { inbox: 0 }
+let configText: string | undefined
+let declared: PluginItem[] = []
+const itemTexts: Record<string, string> = {}
 let statusTimer: { cancel: () => void } | undefined
 let statusRunning = false
 let shown: string | undefined
@@ -102,13 +106,39 @@ async function refreshStatus($: EngineInterface) {
     if (!directory || !universe) return
     const configFile = `${universe}/statusline.json`
     const properties = `${directory}/properties.json`
-    const [configChanged, propertiesChanged, inboxChanged, cursorChanged] = await Promise.all([
-      changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`)])
-    if (configChanged) {
-      const { config, problem } = parseConfig(await readFile($, configFile))
-      statusConfig = config
-      if (problem) $.ui.log(`multiverse: ${problem}; using the defaults`)
+    const [configChanged, propertiesChanged, inboxChanged, cursorChanged, runtimeChanged] = await Promise.all([
+      changed($, configFile), changed($, properties), changed($, `${directory}/inbox.jsonl`), changed($, `${directory}/inbox.cursor`),
+      changed($, `${directory}/runtime.json`)])
+    let itemsChanged = false
+    if (runtimeChanged) {
+      // Status reports rewrite runtime.json often; the items it declares rarely change.
+      let items: PluginItem[] | undefined
+      try {
+        items = parseItems(JSON.parse((await readFile($, `${directory}/runtime.json`)) ?? ""))
+      } catch { /* mid-write: the next change reads it */ }
+      if (items !== undefined && JSON.stringify(items) !== JSON.stringify(declared)) {
+        declared = items
+        itemsChanged = true
+      }
     }
+    if (configChanged) configText = await readFile($, configFile)
+    if (configChanged || itemsChanged) {
+      const { config, problem } = parseConfig(configText, declared)
+      statusConfig = config
+      if (problem && configChanged) $.ui.log(`multiverse: ${problem}; using the defaults`)
+    }
+    // Each plugin item that is on: its file, read when it changed. One that is off is not looked at.
+    for (const item of declared) {
+      const path = `${directory}/status-items/${item.name}.txt`
+      if (!statusConfig.on[item.name]) {
+        delete itemTexts[item.name]
+        watched.delete(path)
+      } else if (await changed($, path)) {
+        itemTexts[item.name] = (await readFile($, path)) ?? ""
+      }
+    }
+    for (const name of Object.keys(itemTexts)) if (!declared.some((item) => item.name === name)) delete itemTexts[name]
+    statusFacts.plugins = itemTexts
     if (propertiesChanged) {
       try {
         const data: unknown = JSON.parse((await readFile($, properties)) ?? "")
@@ -134,8 +164,6 @@ async function refreshStatus($: EngineInterface) {
         if (Array.isArray(messages)) statusFacts.inbox = Math.min(messages.length, INBOX_LIMIT)
       } catch { /* keep the last count */ }
     }
-    // compactionLine() is undefined unless this launch enabled compaction (MV2_COMPACTION=1).
-    statusFacts.compaction = compactionLine()
     setBase(render(statusConfig, statusFacts))
     const line = currentLine()
     if (line !== shown) {
@@ -236,7 +264,6 @@ function text(content: readonly { type: string; text?: unknown }[]): string {
 
 export const register: Register = (on) => {
   registerUsage(on)
-  registerCompaction(on)
 
   registerMultiverse(on)
 
@@ -251,15 +278,20 @@ export const register: Register = (on) => {
     shown = undefined
     statusConfig = defaultConfig()
     Object.assign(statusFacts, { agent: undefined, universe: undefined, phase: undefined, summary: undefined, inbox: 0 })
+    configText = undefined
+    declared = []
+    for (const name of Object.keys(itemTexts)) delete itemTexts[name]
     statusTimer = $.clock.every(REFRESH_MS, () => { void refreshStatus($) })
     void refreshStatus($)
     return result
   })
 
   on("turn.start", async ($, e, next) => {
-    turnRunning = true
-    void report($)
-    void refreshStatus($)
+    if (e.agentId === undefined) {
+      turnRunning = true
+      void report($)
+      void refreshStatus($)
+    }
     return next(e)
   })
 

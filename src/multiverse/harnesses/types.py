@@ -119,6 +119,9 @@ class CommandSpec:
     native_mode: Mapping[str, Any] | None = None
     fallback: 'CommandSpec | None' = None
     attachment: AttachmentSpec | None = None
+    # What the plugins on in the agent's universe added to this launch, as the adapter applied them
+    # (multiverse.plugins.harness.LaunchPlan.record()); lifecycle stores it as runtime.json `plugins`.
+    plugins: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -166,8 +169,7 @@ class NativeResult:
 
 DeliveryMode = Literal['steer', 'follow-up']
 # session_name describes naming during spawn/resume, not a live rename operation.
-CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery',
-                'compaction')
+CAPABILITIES = ('spawn', 'resume', 'wake', 'session_name', 'stop', 'send_steer', 'send_follow_up', 'ask', 'get_usage', 'get_delivery')
 
 
 @dataclass(frozen=True)

@@ -17,12 +17,11 @@ status: working, waiting (a permission prompt or question) or idle.
 
 Usage is measured from the session's own transcript, with or without the bridge.
 
-With the bridge, a universe can opt this harness into tree compaction
-(`compaction.json`; see multiverse.compaction). The launch then tells the mod
-to answer the session's `/compact` with mv2's compacted conversation, and adds
-a PreCompact hook that refuses Claude's own compaction should the mod ever fail
-to answer. `compaction(session)` returns the protocol implementation in
-`compaction/`.
+Tree compaction is the `compaction` plugin (the plugins/compaction submodule):
+its launch contribution loads its own Claude plugin, which answers the
+session's `/compact` with mv2's compacted conversation, and adds a PreCompact
+hook that refuses Claude's own compaction should that ever fail to answer. Its
+Claude source (sources/claude) reads this harness's transcripts.
 """
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime
@@ -37,16 +36,17 @@ import threading
 import time
 from uuid import uuid4
 
+from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
 from ..types import Capability, NativeEndpoint, NativeResult, normalize_session_id
 from ..types import Usage
 from ...store import read
 
 MOD = Path(__file__).parent / 'mod'
-# Typeahead for /multiverse, a plugin of its own: it hooks `prompt.autocomplete`, which Claude Code
-# 2.1.292 added and an older Claude refuses, so it is loaded only from that version on.
-TYPEAHEAD = Path(__file__).parent / 'typeahead'
-TYPEAHEAD_VERSION = (2, 1, 292)
+# Typeahead for /multiverse is now the bundled `typeahead` mv2 plugin (multiverse/plugins/builtin/typeahead),
+# loaded like any plugin's Claude directory from Claude Code 2.1.292. This copy stays, unchanged, only for
+# agents launched before the move: Claude reloads a plugin from the path it was given. Remove it once no
+# live launch's request.json names it.
 # The mod acts only on text between these tags and removes them. The opening
 # tag names the delivery mode, which the mod honors, and the message ID for its
 # receipt: `<<MV2 steer id=UUID>>` ... `<</MV2>>`.
@@ -58,9 +58,6 @@ BRIDGE = 'claude-mod-v1'
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
-# Claude's own compaction is refused unless a subagent asked for it (exit 2 blocks
-# it). Runs with the agent's Python, like the mod's reports; a missing one blocks too.
-COMPACTION_GUARD = '"${MV2_PYTHON:-python3}" -m multiverse.compaction guard || exit 2'
 
 
 def claude_home(environment=None):
@@ -98,9 +95,11 @@ class Transcript:
     """Usage recorded in one transcript file, read once and then as it grows.
 
     Claude writes one record per content block of a response, each with the
-    response's usage, so usage is counted once per response ID. A compaction
-    that keeps a row stores it again with zero usage; that copy never replaces
-    the response's real usage.
+    response's usage, so usage is counted once per response ID. A row with zero
+    usage is never a response: a compaction that keeps a row stores it again with
+    zero usage, and an installed compaction's rows arrive as new IDs with zero
+    usage (Claude's `<synthetic>` model). Neither replaces a real response's usage
+    or becomes the latest request, so `last` stays the latest real response.
     """
 
     def __init__(self, path):
@@ -121,7 +120,7 @@ class Transcript:
                 continue
             message = record.get('message') if isinstance(record, dict) and record.get('type') == 'assistant' else None
             if isinstance(message, dict) and isinstance(message.get('usage'), dict) and message.get('id'):
-                if message['id'] in self.responses and not any(counted(message['usage'], key) for key in USAGE_KEYS):
+                if not any(counted(message['usage'], key) for key in USAGE_KEYS):
                     continue
                 self.responses[message['id']] = message['usage']
                 self.last = record.get('timestamp') or self.last
@@ -170,48 +169,6 @@ def moment(text):
         return None
 
 
-_compactions = {}
-
-
-def latest_compaction(agent_dir):
-    """The newest compaction the session has installed: {'install', 'at', 'tokens'} (tokens estimated), or None.
-
-    The estimate is the compaction's own count of the conversation it left
-    (`stats.tokens_after`: prompts, summaries and raw leaves at about four
-    characters a token, so no system prompt or tools, and well under the real
-    count); read again only when the install log changes.
-    """
-    directory = Path(agent_dir) / 'compaction'
-    try:
-        log = directory / 'installed.jsonl'
-        status = log.stat()
-        key = (status.st_mtime_ns, status.st_size)
-        cached = _compactions.get(log)
-        if cached and cached[0] == key:
-            return cached[1]
-        record = None
-        for line in log.read_text().splitlines():
-            try:
-                found = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(found, dict) and re.fullmatch(r'[0-9a-f-]{36}', str(found.get('install', ''))) and found.get('at'):
-                record = found
-        result = None
-        if record:
-            # installed.jsonl's `at` is when the record was derived from the transcript, possibly much later;
-            # the install file is written just before the rows are handed to Claude.
-            payload = json.loads((directory / 'installs' / f"{record['install']}.json").read_text())
-            tokens, created = payload.get('stats', {}).get('tokens_after'), payload.get('created_at')
-            if isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 0 and created:
-                result = {'install': record['install'], 'at': created, 'tokens': tokens}
-        _compactions[log] = (key, result)
-        return result
-    except (OSError, ValueError, AttributeError):
-        return None
-
-
-
 def measured_usage(native_id):
     """Cumulative usage of the session and its subagents, from their transcripts."""
     projects = claude_home() / 'projects'
@@ -232,6 +189,11 @@ def measured_usage(native_id):
 
 # The oldest Claude Code the mod and the peer inbox were built and tested on.
 MIN_BRIDGE_VERSION = (2, 1, 280)
+# Resume passes `--system-prompt-snapshot off`, which Claude Code has had since this version. With the
+# snapshot on (its default) a resumed conversation keeps the system prompt recorded at its first request,
+# so a bootstrap changed since then (a plugin's line added or removed, a template update) never applies.
+SNAPSHOT_FLAG = '--system-prompt-snapshot'
+SNAPSHOT_FLAG_VERSION = (2, 1, 267)
 _versions = {}
 
 
@@ -313,15 +275,22 @@ class ClaudeAdapter(ConfiguredAdapter):
         # Like Codex: unset is auto, true requires the bridge, false launches plain. `settings['inbox_bridge']`
         # holds the effective on/off (auto is on) for everything that reads it; the policy is kept apart.
         raw = settings.get('inbox_bridge')
+        # "off" (the default) resumes with --system-prompt-snapshot off, so the current bootstrap applies; "on"
+        # leaves Claude's own snapshot, so a resumed conversation keeps the prompt of its first request.
+        settings = dict(settings)
+        snapshot = settings.pop('system_prompt_snapshot', 'off')
+        if snapshot not in ('off', 'on'):
+            raise ValueError('system_prompt_snapshot must be "off" or "on"')
         adapter = super().configured(name, {**settings, 'inbox_bridge': True if raw is None else raw})
         adapter.bridge_policy = 'auto' if raw is None else 'required' if raw is True else 'plain'
+        adapter.system_prompt_snapshot = snapshot
         return adapter
 
     def spawn(self, context):
         return self._with_bridge(super().spawn(context), context)
 
     def resume(self, session, context):
-        command = super().resume(session, context)
+        command = self._snapshot_flag(super().resume(session, context))
         fresh = None
         if session.native_id and not has_saved_conversation(session.native_id, context.environment):
             fresh = self._reserve_session(command, session.native_id)
@@ -332,6 +301,44 @@ class ClaudeAdapter(ConfiguredAdapter):
         mode = dict(command.native_mode)
         mode['fallback_reason'] = '; '.join(filter(None, [mode.get('fallback_reason'), FRESH_SESSION]))
         return replace(command, native_mode=mode)
+
+    def _snapshot_flag(self, command):
+        """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.
+
+        mv2's flag is removed, never a user's, when the harness keeps Claude's snapshot
+        (`system_prompt_snapshot: "on"`), when the user passes the flag themselves in `args` or
+        `resume_args` (theirs wins), and for a Claude known to be too old for it: only where the
+        bridge decision reads the version anyway, since a plain launch never asks which version is
+        installed and a version that cannot be read keeps the flag.
+        """
+        argv = list(command.argv)
+        own = self._own_snapshot_flag(argv)
+        if own is None:
+            return command
+        end = argv.index('--') if '--' in argv else len(argv)
+        theirs = any(index not in (own, own + 1) and (arg == SNAPSHOT_FLAG or arg.startswith(SNAPSHOT_FLAG + '='))
+                     for index, arg in enumerate(argv[:end]))
+        keep = not theirs and self.system_prompt_snapshot != 'on'
+        if keep and self.bridge_policy != 'plain':
+            version = claude_version(argv[0])
+            keep = version is None or version >= SNAPSHOT_FLAG_VERSION
+        if keep:
+            return command
+        del argv[own:own + 2]
+        return replace(command, argv=tuple(argv))
+
+    @staticmethod
+    def _own_snapshot_flag(argv):
+        """Where mv2's own `--system-prompt-snapshot off` is, or None: right after the recipe's bootstrap.
+
+        A user's `args` and `resume_args` go in right after the executable, so the recipe's
+        `--append-system-prompt` is the last one before any `--`.
+        """
+        end = argv.index('--') if '--' in argv else len(argv)
+        bootstrap = max((index for index in range(end) if argv[index] == '--append-system-prompt'), default=None)
+        if bootstrap is not None and argv[bootstrap + 2:bootstrap + 4] == [SNAPSHOT_FLAG, 'off']:
+            return bootstrap + 2
+        return None
 
     @staticmethod
     def _reserve_session(command, native_id):
@@ -355,75 +362,39 @@ class ClaudeAdapter(ConfiguredAdapter):
         policy = self.bridge_policy
         plain = replace(command, native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if policy == 'plain':
-            return plain
+            return self._with_plugins(plain, context)
         problem = bridge_problem(command.argv[0])
         if problem:
             if policy == 'required':
                 raise ValueError(problem)
-            return replace(plain, native_mode={**plain.native_mode, 'fallback_reason': problem})
+            return self._with_plugins(replace(plain, native_mode={**plain.native_mode, 'fallback_reason': problem}), context)
         socket = context.values['control_socket']
         # mv2 sends from outside the session, which Claude otherwise holds for
         # approval when the session skips permission prompts.
         settings = {'crossSessionInbound': 'accept'}
         environment = {**command.environment, 'CLAUDE_CODE_ENABLE_FUNCTION_HOOKS': '1'}
         native_mode = {'policy': policy, 'mode': 'bridge', 'fallback_reason': None}
-        root = self._universe(context.values.get('agent_dir'))
-        compaction, problem = self.compaction_state(root) if root else (None, None)
-        if compaction is not None and compaction.enabled:
-            settings['hooks'] = {'PreCompact': [{'hooks': [{'type': 'command', 'command': COMPACTION_GUARD}]}]}
-            environment['MV2_COMPACTION'] = '1'
-        elif problem:
-            # An unusable compaction.json never stops a launch: this one runs without compaction.
-            native_mode = {'policy': policy, 'mode': 'bridge without compaction',
-                           'fallback_reason': f'Launched without compaction: {problem}'}
-        version = claude_version(command.argv[0])
-        typeahead = ('--plugin-dir', str(TYPEAHEAD)) if version is not None and version >= TYPEAHEAD_VERSION else ()
+        # Plugins on in the agent's universe: their Claude directories (by Claude version), settings and environment.
+        # The adapter's own settings and environment never change; problems and modes join the launch's own.
+        plan = plugins.plan_for(context, 'claude', self.name, version=claude_version(command.argv[0]), bridge=True,
+                                base_settings=settings, base_environment=environment)
+        if plan.problems:
+            native_mode['fallback_reason'] = '; '.join(filter(None, [native_mode['fallback_reason'], *plan.problems]))
+        if plan.modes:
+            native_mode['mode'] = ' '.join([native_mode['mode'], *plan.modes])
+        directories = tuple(argument for directory in plan.claude_plugin_dirs for argument in ('--plugin-dir', directory))
         return replace(command,
             argv=(command.argv[0], '--plugin-dir', str(MOD), '--messaging-socket-path', socket,
-                  '--settings', json.dumps(settings), *typeahead, *command.argv[1:]),
+                  '--settings', json.dumps(plan.claude_settings), *directories, *command.argv[1:]),
             control_endpoint=NativeEndpoint('unix-lines', socket),
-            environment=environment, native_mode=native_mode)
+            environment=plan.environment, native_mode=native_mode, plugins=plan.record())
 
-    @staticmethod
-    def _universe(agent_dir):
-        """The universe an agent directory belongs to, or None outside one."""
-        if not agent_dir:
-            return None
-        directory = Path(agent_dir)
-        root = directory.parent.parent.parent
-        if directory.parent.name != 'agents' or not (root / 'universe.json').is_file():
-            return None
-        return root
-
-    @staticmethod
-    def compaction_defaults():
-        """Claude's builder settings where compaction.json gives none."""
-        from .compaction import BUILDER_DEFAULTS
-        return dict(BUILDER_DEFAULTS)
-
-    def compaction_state(self, root, loaded=None):
-        """(settings, None) for this harness in the universe at `root`, or (None, why its compaction.json cannot be used).
-
-        `loaded` checks a parsed file (config.Config) before it is written
-        instead of the one on disk. Launches, capabilities and `mv2 doctor` use
-        it; `mv2 compaction` refuses loudly instead.
-        """
-        from ...compaction import config
-        from .compaction import BUILDER_DEFAULTS, check_builder
-        try:
-            settings = (loaded or config.load(root)).for_harness(self.name, BUILDER_DEFAULTS)
-        except ValueError as error:
-            return None, str(error)
-        try:
-            check_builder(settings.builder)
-        except ValueError as error:
-            return None, f'{Path(root) / config.FILE}: harnesses.{self.name}.builder: {error}'
-        return settings, None
-
-    def compaction(self, session):
-        """The compaction protocol for this exact session (multiverse.compaction.protocol)."""
-        from .compaction import ClaudeCompaction
-        return ClaudeCompaction(self, session)
+    def _with_plugins(self, command, context):
+        """A plain launch: plugins' environment only. It loads no Claude plugin directory (no mod, no function
+        hooks) and asks Claude for no version, so each directory is recorded as not fitting."""
+        plan = plugins.plan_for(context, 'claude', self.name, version=None, bridge=False,
+                                base_environment=command.environment)
+        return replace(command, environment=plan.environment, plugins=plan.record())
 
     def _bridge(self, session):
         return bridge_of(getattr(self, 'settings', {}).get('inbox_bridge'), session)
@@ -449,24 +420,7 @@ class ClaudeAdapter(ConfiguredAdapter):
             result['ask'] = Capability('supported', mechanism='claude-model-fork')
         if session.native_id:
             result['get_usage'] = Capability('supported', mechanism='claude-transcript')
-        result['compaction'] = self._compaction_capability(session)
         return result
-
-    def _compaction_capability(self, session):
-        if not getattr(self, 'settings', {}).get('inbox_bridge'):
-            return Capability('unavailable', 'Needs the multiverse mod: remove "inbox_bridge": false from harness.json')
-        root = self._universe(Path(session.session_file).parent if session.session_file else None)
-        if root is None:
-            return Capability('unavailable', 'Not an agent of a universe')
-        settings, problem = self.compaction_state(root)
-        if problem:
-            return Capability('error', f'{problem}; launches run without compaction')
-        if not settings.enabled:
-            return Capability('unavailable', f'Off for {self.name} in compaction.json')
-        fallback = (session.native_mode or {}).get('fallback_reason')
-        if session.state == 'running' and fallback:
-            return Capability('error', f'{fallback}; restart the agent to use compaction')
-        return Capability('supported', mechanism='claude-mod-session-compact')
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
@@ -487,20 +441,13 @@ class ClaudeAdapter(ConfiguredAdapter):
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
         responded = moment(reading[1]) if reading else None
         reported_at = moment(reported.get('context_reported_at'))
-        try:
-            compaction = latest_compaction(Path(session.session_file).parent)
-        except TypeError:
-            compaction = None
-        installed_at = moment(compaction['at']) if compaction else None
-        if installed_at and not (responded and responded > installed_at):
-            # No response has come since our compaction: its count of the conversation stands in until one does.
-            context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
-            context.update(tokens=compaction['tokens'], estimated=True, estimated_at=compaction['at'],
-                           estimated_from=compaction['install'])
-        elif reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
+        if reading and (context.get('tokens') is None or (responded and (reported_at is None or reported_at < responded))):
             # No report from the mod yet, or a response newer than it: the transcript has the real request size.
             context = {key: value for key, value in context.items() if key not in ('tokens', 'percent')}
             context['tokens'] = reading[0]
+        if reading and reading[1]:
+            # When the latest main-thread response came: a plugin's estimate (compaction's) stands only until one does.
+            context['responded_at'] = reading[1]
         if context:
             reported['context'] = context
         if usage is None:

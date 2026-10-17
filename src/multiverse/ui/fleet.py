@@ -2,11 +2,12 @@
 from pathlib import Path
 
 from rich.text import Text
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Input, Static
 
 from ..display import clean
 from . import theme
-from .columns import COLUMNS, COMPACT_WIDTH
+from .columns import COLUMNS, COMPACT_WIDTH, lookup
 from .tree import group_key, hierarchy
 from .widgets import HarnessMenu
 
@@ -28,15 +29,16 @@ class FleetView:
         available = self.query_one("#fleet").content_size.width - 1
         fields = ["name", *(key for key in self.snapshot["columns"] if key not in ("name", "universe"))]
         if available < COMPACT_WIDTH:
-            fields = [key for key in fields if COLUMNS[key].compact]
+            fields = [key for key in fields if lookup(key).compact]
         if self.draft:
             fields = list(self.draft.columns)
-        widths = {key: COLUMNS[key].width for key in fields}
+        widths = {key: lookup(key).width for key in fields}
         if available < 68:
             widths["name"] = 23
         if self.draft and "harness" in widths:
             widths["harness"] = min(16, max(9, max((len(name) + 2 for name in self.draft.harnesses), default=9)))
-        flexible = next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
+        flexible = (next((key for key, column in COLUMNS.items() if column.flexible and key in fields), None)
+                    or next((key for key in fields if key not in COLUMNS and lookup(key).flexible), None))
         if flexible:
             widths[flexible] = max(6, available - 2 * len(fields) - sum(w for k, w in widths.items() if k != flexible))
         self.visible_rows = {row["key"]: row for row in projected}
@@ -60,7 +62,7 @@ class FleetView:
             self.selected_key = next((key for key in candidates if key in keys),
                                      next(iter(self.visible_agents), keys[0] if keys else None))
         table = self.query_one("#agents", DataTable)
-        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else COLUMNS[field].render(row)
+        rendered = [(row["key"], [self.draft_cell(row, field) if row["kind"] == "draft" else lookup(field).render(row)
                                   for field in fields]) for row in projected]
         if self.moving:
             for key, cells in rendered:
@@ -71,7 +73,7 @@ class FleetView:
             with self.batch_update(), table.prevent(DataTable.RowHighlighted, DataTable.RowSelected):
                 table.clear(columns=True)
                 for field in fields:
-                    table.add_column(COLUMNS[field].title, key=field, width=widths[field])
+                    table.add_column(Text(lookup(field).title), key=field, width=widths[field])
                 for key, cells in rendered:
                     table.add_row(*cells, key=key)
                 if keys:
@@ -125,6 +127,13 @@ class FleetView:
         menu.styles.offset = (x, y)
         menu.scroll_to_highlight()
 
+    def update_selection(self, content):
+        """Show the selected row's line; a row highlighted while the dashboard is shutting down has nowhere to show it."""
+        try:
+            self.query_one("#selection", Static).update(content)
+        except NoMatches:
+            pass
+
     def show_selection(self, key):
         row = self.visible_rows.get(key)
         self.selected_key = key
@@ -133,7 +142,7 @@ class FleetView:
             if self.draft.active == "harness":
                 value = clean(self.draft.values["harness"])
                 hint = "↑↓ choose · Enter confirm · Tab next" if self.draft.harnesses else "No harnesses configured in this group"
-                self.query_one("#selection", Static).update(f"Harness: {value} ▾ · {hint}")
+                self.update_selection(f"Harness: {value} ▾ · {hint}")
                 return
             label = Text(f"{self.draft.label()}: ", style=theme.TEAL)
             value = self.draft.cell(self.draft.active)
@@ -141,14 +150,14 @@ class FleetView:
             budget = max(8, self.size.width - len(label.plain) - 4)
             start = max(0, self.draft.cursor - budget + 1)
             label.append_text(value[start:start + budget])
-            self.query_one("#selection", Static).update(label)
+            self.update_selection(label)
             return
         if row:
             content = self.scope_trail(row)
             content += " · " + clean(row.get("summary") or row.get("description") or "n new agent · g new subverse")
-            self.query_one("#selection", Static).update(content)
+            self.update_selection(content)
         else:
-            self.query_one("#selection", Static).update("/ search · n new agent · g new subverse · ? keys")
+            self.update_selection("/ search · n new agent · g new subverse · ? keys")
 
     def scope_trail(self, row):
         path = Path(row["path"] if row["kind"] == "group" else row["universe"])

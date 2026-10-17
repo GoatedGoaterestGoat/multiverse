@@ -80,7 +80,33 @@ def create(destination, name, template="base", workdir=None):
     finally:
         if staging.exists():
             shutil.rmtree(staging)
+    # Its own journal, and its parent's for a subverse.
+    for scope in filter(None, (destination, _parent(destination))):
+        _event(scope, "universe.created", {"name": name, "path": str(destination), "template": str(template)})
     return destination
+
+
+def _parent(root):
+    candidate = root.parent.parent
+    return candidate if root.parent.name == "subverses" and (candidate / "universe.json").is_file() else None
+
+
+def _event(root, kind, data):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.emit(root, kind, None, None, data)
+    except Exception:
+        pass
+
+
+def _awaiting_migration(root):
+    """{"plugin-settings/NAME.json": legacy file} for plugins whose pre-plugin settings file is still here."""
+    try:
+        from ..plugins import awaiting_migration
+        return awaiting_migration(root)
+    except Exception:  # refresh never fails over plugins
+        return {}
 
 
 def refresh_plan(root, template=None, take=()):
@@ -90,7 +116,12 @@ def refresh_plan(root, template=None, take=()):
     refreshed. A file that still matches it takes template updates; a locally
     edited file is kept, and a conflict when both changed. Without a manifest
     (universes installed before refresh existed), a file that differs from the
-    template is `unknown` and changes only when named in `take`.
+    template is `unknown` and changes only when named in `take`. While a
+    plugin's pre-plugin settings file waits here to be converted, whatever the
+    plugin's state (installed or not: core knows compaction's), the template's
+    `plugin-settings/NAME.json` and `plugins.json` are `deferred`: the old file
+    decides both when it is converted. A plugin settings file the universe
+    wrote itself is `local`.
     """
     root = Path(root)
     meta = read(root / "universe.json")
@@ -104,6 +135,8 @@ def refresh_plan(root, template=None, take=()):
         raise ValueError(f"Template {name} has no universe at {source}")
     upstream, local = definition_files(source), definition_files(root)
     recorded = (manifest or {}).get("files", {})
+    awaiting = _awaiting_migration(root)
+    waiting = ", ".join(sorted(set(awaiting.values())))
     take = set(take)
     unknown_take = take - set(upstream)
     if unknown_take:
@@ -120,6 +153,13 @@ def refresh_plan(root, template=None, take=()):
         if mine == theirs:
             current += 1
             continue
+        if path not in take and ((path in awaiting and mine is None) or (path == "plugins.json" and awaiting)):
+            # A template's plugin settings and switch must not go in front of this universe's real, unconverted
+            # ones: converting the old file sets both.
+            changes.append({"path": path, "action": "deferred",
+                            "reason": f"{waiting} is still here and not converted: run mv2 plugins migrate --apply "
+                                      f"first (installing its plugin if it is not installed)"})
+            continue
         if path in take:
             action, reason = ("add", "taken from the template") if mine is None else ("update", "taken from the template")
         elif manifest is None:
@@ -130,6 +170,12 @@ def refresh_plan(root, template=None, take=()):
             action, reason = "update", "template changed; no local edits"
         elif theirs == before:
             action, reason = "local", "edited locally; template unchanged"
+        elif before is None and path.startswith("plugin-settings/"):
+            # Written here, by mv2 plugins migrate from the universe's own settings: they stay.
+            action, reason = "local", "the universe's own plugin settings; kept"
+        elif before is None and path == "plugins.json":
+            # Written here too (a conversion sets the switch from the old file): the universe's own choice.
+            action, reason = "local", "the universe's own plugin switches; kept"
         else:
             action, reason = "conflict", "edited locally and changed in the template"
         changes.append({"path": path, "action": action, "reason": reason})
@@ -181,4 +227,5 @@ def refresh_apply(root, plan):
     relative = os.path.relpath(source, template_source(plan["template"]))
     write(root / MANIFEST, {"schema": 1, "template": plan["template"],
                             "source": "" if relative == "." else Path(relative).as_posix(), "files": files})
+    _event(root, "refresh.applied", {"written": [c["path"] for c in writes]})
     return {"written": [c["path"] for c in writes], "trash": str(backup) if backup else None}

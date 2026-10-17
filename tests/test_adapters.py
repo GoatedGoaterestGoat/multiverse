@@ -162,8 +162,12 @@ class AdapterContractTest(BaseTest):
                                              NativeEndpoint('unix-websocket', '/native/socket'), executor))
         self.assertIn('--remote', command.argv)
         self.assertEqual(command.environment, env)
-        self.assertIn('shell_environment_policy.set.IS_SANDBOX="1"', command.argv)
-        self.assertIn('shell_environment_policy.set.LITERAL="a \\"quoted\\" é"', command.argv)
+        from multiverse.harnesses.codex.launch import LaunchProtocol
+        outgoing = LaunchProtocol(command.rpc_proxy.settings).outgoing(
+            {'id': 1, 'method': 'thread/start', 'params': {}})
+        self.assertEqual(outgoing['params']['config']['shell_environment_policy']['set'], env)
+        self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.argv))
+        self.assertNotIn('a "quoted" é', '\n'.join(command.argv))
         # Automatic selection keeps the variables when it falls back to a plain launch.
         self.assertEqual(command.fallback.environment, env)
         self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.fallback.argv))

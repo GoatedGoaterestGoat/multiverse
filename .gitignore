@@ -13,3 +13,6 @@ dist/
 /src/multiverse/harnesses/claude/mod/tsconfig.json
 /src/multiverse/harnesses/claude/typeahead/tsconfig.json
 /src/multiverse/harnesses/claude/typeahead/.claude-plugin/types/
+# What Claude Code writes into a plugin directory it loads, for bundled mv2 plugins' Claude parts.
+/src/multiverse/plugins/builtin/*/claude/tsconfig.json
+/src/multiverse/plugins/builtin/*/claude/.claude-plugin/types/

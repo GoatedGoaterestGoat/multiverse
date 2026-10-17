@@ -34,9 +34,22 @@ def update_runtime(agent_dir, launch_id, **changes):
         data = runtime(agent_dir)
         if data.get("launch_id") != launch_id:
             raise ValueError("Outdated launch; refusing to update current runtime")
+        before = data.get("status")
         data.update(changes, observed_at=now())
         write(agent_dir / "runtime.json", data)
-        return data
+    if "status" in changes and changes["status"] != before:
+        # After the lock: recording an event never holds up the runtime record.
+        _event(agent_dir, "agent.status", launch_id, {"from": before, "to": changes["status"]})
+    return data
+
+
+def _event(agent_dir, kind, launch=None, data=None, properties=None):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.for_agent(agent_dir, kind, launch, data, properties)
+    except Exception:
+        pass
 
 
 def bind_session(root, reference, session_id, launch_id=None):
@@ -64,7 +77,17 @@ def report(root, reference, phase=None, summary=None):
             data["summary"] = summary
         data["updated_at"] = now()
         write(agent_dir / "properties.json", data)
+    _reported(agent_dir, data)
     return data
+
+
+def _reported(agent_dir, data):
+    """agent.reported, with the current launch when the runtime record can be read; never fails a report."""
+    try:
+        launch = runtime(agent_dir).get("launch_id")
+    except Exception:
+        launch = None
+    _event(agent_dir, "agent.reported", launch, {"phase": data.get("phase"), "summary": data.get("summary")}, data)
 
 
 def record_recovery(directory, launch_id, state, reason, **extra):

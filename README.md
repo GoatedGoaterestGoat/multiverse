@@ -6,7 +6,7 @@ The base bootstrap is under 200 words, plus agent identity and paths. It supplem
 
 ## Try it
 
-Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.296; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
+Requires Python 3.11+, tmux, and an installed/configured Codex, Claude Code or Pi CLI. Codex is the default. CLI flags were checked against Codex 0.159.3 and Claude Code 2.1.299; the optional Pi integration is tested against 0.84.3. macOS and Linux are the intended platforms; this version was exercised on macOS with tmux 3.6a.
 
 From the repository root:
 
@@ -53,6 +53,8 @@ EOF
 
 The command refuses tracked, uncommitted changes, a branch without an upstream, or a branch ahead of or diverged from it. `--check` still fetches and counts pending commits when an upstream exists, even when tracked changes prevent updating. Refusals exit 1; successful checks and updates exit 0. Untracked files are left alone; Git refuses an update that would overwrite them. It never switches branches, rebases, resets or stashes. A package installation without a source checkout cannot use this command. Missing `uv` or `uv.lock` is reported as a skipped environment sync; a failed sync reports the error and can be retried with `uv sync --locked` in the mv2 checkout.
 
+Optional plugin fetches share a 120-second budget per plugin. For a slow remote, increase it with `mv2 update --plugin-fetch-timeout SECONDS`. A timeout leaves that plugin at its old revision with a warning and uninstall instructions; mv2 and its environment still update.
+
 Running agents and the dashboard keep their old code until relaunched. After updating mv2, use `mv2 refresh --apply` to bring a universe's installed template files up to date. The command prints these reminders only after pulling new commits.
 
 ## Individual tools
@@ -93,7 +95,8 @@ plugin API (see [harness adapters](docs/harness-adapters.md)).
 project/.multiverse/
   universe.json                 # ID, name, workspace and template provenance
   template-files.json           # fingerprints of installed definitions, for refresh
-  compaction.json               # tree compaction per harness (off in the base template)
+  plugins.json                  # which plugins are on here (compaction is off in the base template)
+  plugin-settings/compaction.json  # tree compaction's settings (until migrated, compaction.json)
   statusline.json               # Claude status-line items and the tmux status bar
   bootstrap.md                  # short automatic instructions
   harnesses/codex/              # declarative source adapter reference and preferences
@@ -181,7 +184,7 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | K or s | Kill after confirmation (`s` is an alias) |
 | r | Resume a stopped or dormant agent |
 | v / p | Full details / show or hide inspector |
-| c | Compaction settings of the selected group's or agent's universe (Enter on an agent opens its scheduler and plan preview) |
+| P | Plugins of the selected group: on or off here, what each adds, and Enter to configure one |
 | ? / q | Keyboard help / quit dashboard |
 | F5 / Ctrl-p | Refresh / command palette |
 | Tab / Shift-Tab | Move between inline draft fields or form fields |
@@ -190,6 +193,16 @@ The dashboard is a reader and command client. Quit it and agents continue. The d
 | Escape / Ctrl-Enter | Cancel / submit a form |
 
 Mouse: click a group to fold it, click an agent to select it, or double-click to attach. The footer key hints are clickable, including form submission and cancellation.
+
+### Plugins in the dashboard
+
+Plugins (see [plugins](docs/plugins.md)) can add table columns, widget types and automatic panels for a subverse's local view, inspector lines, a theme, command palette entries and settings. A plugin that is off in a scope adds nothing there: its column shows `—` and its widget says which plugin it needs. With no plugin on, the dashboard looks and behaves as before. Plugins never take a key.
+
+- **Plugins screen (`P`).** Opens for the selected group. It lists the plugins that scope sees with their state, errors and what each adds there. Space turns the selected plugin on or off in that scope, Enter configures it (the plugin's own screen, or fields it declared or its settings schema generates; a blank field means the plugin's default), and `h` starts or stops the plugin host.
+- **Command palette (Ctrl-p).** Plugin actions that are not settings appear as `plugin: name` and run for the selected row or group, saying so when the plugin is off there. Plugin screens appear the same way.
+- **Panels.** Entering a subverse opens its portal with its own `views/default.json` (see [views](docs/views.md)). A plugin on in that subverse can supply widget types for it, and panels it marks automatic appear after the view's own widgets unless the view sets `"plugin_panels"` to `"none"` or a list of the types it wants. A panel is labelled with its plugin and refreshes with the agent list.
+- **Inspector lines** from plugins follow the agent's own facts. A plugin that fails or takes more than a few seconds shows `plugin: unavailable` instead of holding up the dashboard.
+- **Header.** `N plugin errors` counts recent plugin failures and plugin workers the host left stopped. `host off` means a plugin needs the plugin host and it is not running. The dashboard starts the host when it opens if plugins need it; the host keeps running after the dashboard quits (`mv2 plugins host stop` stops it).
 
 Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to return to the dashboard that opened it. This also works when the dashboard runs inside tmux: the host terminal opens the agent client and reattaches to the exact dashboard pane when that client exits. The dashboard's selection/state and agent process remain alive. On the dashboard itself, detach works normally. Custom prefixes and bindings are preserved; uppercase L remains tmux's stock last-session action. Each universe can customize `views/default.json`:
 
@@ -201,7 +214,7 @@ Detach from an attached agent with tmux's usual binding (normally Ctrl-b d) to r
 }
 ```
 
-The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Arbitrary view plugins and dashboard links remain follow-up work.
+The title and accent style its group row and agents in the parent hierarchy. The base template uses `"accent": "auto"` to assign subverse colors consistently from their IDs; an explicit hex color overrides it. The root view chooses the shared table columns; opening the TUI directly at a subverse uses that subverse's column configuration. Plugins can add table columns and widget types (see [plugins](docs/plugins.md)); dashboard links remain follow-up work.
 
 ## Messages, commands and prompts
 
@@ -228,7 +241,7 @@ Sending steer/follow-up to a stopped or dormant Claude, Codex or Pi agent resume
 
 `catalog` reads only capability metadata. `command review` prints the matching prompt without executing it. In Claude bridge sessions `/multiverse` is a native command registered by the mod: `/multiverse` or `/multiverse list` prints the catalog without a model turn, `/multiverse <name> [args]` submits that command, workflow or skill as your prompt, `/multiverse send <agent> <text>` messages another agent as this agent, and `/multiverse inbox` shows this agent's unread inbox-only messages and marks them read; the output is recorded as command output, so the agent knows it but acts on it only if asked. Only what the person types can run `send`, `inbox` or `<name>`. Pi's bridge extension also registers `/multiverse`. Elsewhere (Codex and plain launches) `/multiverse list` and `/multiverse review ...` are prompt conventions: native CLIs may intercept unknown slash commands, so send ordinary text such as `Please run /multiverse list`, or run `mv2 catalog` (in Codex, `! "$MV2_CLI" catalog` runs it directly). Names must match exactly; qualify an ambiguous name as `workflows/review`. Workflow control flow remains prose interpreted by the model.
 
-There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Pi preserves receipt metadata in its transcript separately from model-visible text. Codex tries its bridge by default: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. Claude also tries its bridge by default (unset means auto: the bridge unless the installed Claude Code is too old, then a plain launch with the reason shown; `true` requires it, `false` turns it off): `mv2 send` writes to the session's peer inbox, and the source-owned `multiverse` mod steers mid-turn at the next tool result or submits follow-ups and idle-session messages as ordinary prompts; the mod also reports status, delivery receipts and context usage. See the adapter guide for native resume permission constraints. Pi's bridge remains opt-in; plain launches report the missing required delivery capabilities explicitly.
+There are no added model tools. Agents use `$MV2_CLI` through their ordinary shell tool. Pi's bundled `extension.ts` is **optional and disabled by default**. Setting `"inbox_bridge": true` in its schema-2 `settings` enables native steering or follow-up delivery, lifecycle observations and a native `/multiverse` command. Pi preserves receipt metadata in its transcript separately from model-visible text. Codex tries its bridge by default: core starts or reuses the shared native daemon for its Codex home and attaches the native TUI to the exact session on it. `mv2 send` then sends normal after-turn messages or urgent safe-boundary steering to the exact bound thread. Claude also tries its bridge by default (unset means auto: the bridge unless the installed Claude Code is too old, then a plain launch with the reason shown; `true` requires it, `false` turns it off): `mv2 send` writes to the session's peer inbox, and the source-owned `multiverse` mod steers mid-turn at the next tool result or submits follow-ups and idle-session messages as ordinary prompts; the mod also reports status, delivery receipts and context usage. A resume passes `--system-prompt-snapshot off`, so a resumed Claude agent takes the current bootstrap; `"system_prompt_snapshot": "on"` in the Claude harness settings keeps the prompt Claude recorded instead, and the bootstrap then applies only to new conversations. See the adapter guide for native resume permission constraints. Pi's bridge remains opt-in; plain launches report the missing required delivery capabilities explicitly.
 
 ## Harness definitions
 
@@ -238,7 +251,7 @@ Shared Codex daemon startup runs from the user's home directory so removing an a
 
 Managed Codex launches suppress startup update prompts with `-c check_for_update_on_startup=false`, including plain/bridge spawn, resume and wake. An explicit value in the applicable harness `args`, `spawn_args` or `resume_args` wins. This changes neither native configuration files nor the daemon updater policy.
 
-Tree compaction replaces a harness's own conversation summary with Multiverse's: each turn gets a summary tree, built in the background as it ends, and when the session compacts every old turn is expanded to its scheduler's share of a budget. Claude Code is the first harness that supports it, through the mod's `session.compact` hook. A universe enables it per harness in `compaction.json` (off in the base template); `mv2 compaction AGENT` sets an agent's scheduler (`--scheduler`, `--budget`, `--k`), previews the plan (`--plan`) or builds trees now (`--build`), and the dashboard's `c` key edits the same settings. An unusable `compaction.json` never stops a launch: the agent runs without compaction and the reason shows in the inspector. See [tree compaction](docs/compaction.md).
+Tree compaction replaces a harness's own conversation summary with Multiverse's: each turn gets a summary tree, built in the background as it ends, and when the session compacts every old turn is expanded to its scheduler's share of a budget. Claude Code is the first harness that supports it, through a `session.compact` hook in the compaction plugin's Claude directory. The plugin is the `plugins/compaction` Git submodule ([GOAT](https://github.com/GoatedGoaterestGoat/GOAT), private): `mv2 plugins install compaction` sets it up in a checkout without it. It is switched on in a universe's `plugins.json` and configured per harness in `plugin-settings/compaction.json`; an older `compaction.json` is converted to it automatically the first time mv2 runs in that universe with the plugin installed (`mv2 plugins install compaction` in a checkout without the submodule), and until then compaction stays off. `mv2 compaction AGENT` sets an agent's scheduler (`--scheduler`, `--budget`, `--k`), previews the plan (`--plan`) or builds trees now (`--build`), and in the dashboard `P` → compaction → Configure edits the same settings. Unusable compaction settings never stop a launch: the agent runs without compaction and the reason shows in the inspector. See [tree compaction](docs/compaction.md).
 
 Claude bridge agents also show a status line under the prompt, beside the person's own Claude status line. By default it shows the reported phase, the unread inbox-only count when it is above zero, and, for an agent launched with compaction on, its trees built out of all turns (e.g. `trees 116/118 · building`); the agent's name (with its universe only inside a subverse) and its summary are off. `statusline.json` at the universe root chooses the items and their order (`agent`, `phase`, `summary`, `inbox`, `compaction`); an unusable file falls back to the defaults. It refreshes within a few seconds of a phase or inbox change, and `/compact` progress takes the line while it runs. Existing universes get `statusline.json` with `mv2 refresh --apply`.
 

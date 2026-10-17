@@ -17,11 +17,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import harnesses
 from multiverse.runtime import native
 from multiverse.universe import templates
-from multiverse.harnesses.claude import MOD, measured_usage, TYPEAHEAD, TYPEAHEAD_VERSION
+from multiverse.harnesses.claude import MOD, measured_usage
+from multiverse.plugins import loader as plugin_loader, manifest as plugin_manifest
 from multiverse.harnesses.types import LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
 from multiverse.tools import runtime_update, send
 from test_multiverse import BaseTest
+
+# The typeahead is the bundled `typeahead` plugin; its manifest gates it on the Claude version.
+TYPEAHEAD = plugin_loader.BUNDLED / 'typeahead' / 'claude'
+TYPEAHEAD_VERSION = plugin_manifest.load(TYPEAHEAD.parent).harnesses['claude'][0].min_version
 
 TOKEN = '0123456789abcdef0123456789abcdef'
 
@@ -390,6 +395,83 @@ class ClaudeBridgeTest(BaseTest):
         for sender, expected in cases:
             with self.subTest(sender=sender):
                 self.assertEqual(native.framed_text(self.root, {'from': sender, 'text': 'hi'}), expected)
+
+    def test_resume_renders_the_system_prompt_fresh_so_a_changed_bootstrap_applies(self):
+        # With Claude's snapshot on, a resumed conversation keeps the system prompt of its first request.
+        for setting in (None, True, False):
+            for version in ((2, 1, 300), (2, 1, 280), None):
+                with self.subTest(setting=setting, version=version):
+                    if setting is True and version is not None and version < (2, 1, 280):
+                        continue
+                    resumed, probe = self.launch(setting, version, 'resume')
+                    argv = list(resumed.argv)
+                    flag = argv.index('--system-prompt-snapshot')
+                    self.assertEqual(argv[flag + 1], 'off')
+                    self.assertEqual(argv[flag - 2], '--append-system-prompt')  # right after the bootstrap
+                    spawned, _ = self.launch(setting, version)
+                    self.assertNotIn('--system-prompt-snapshot', spawned.argv)  # a new conversation records it fresh
+                    if setting is False:
+                        probe.assert_not_called()  # plain still never asks which version is installed
+        # A Claude known to predate the flag (an auto launch that fell back to plain) does not get it.
+        old, _ = self.launch(None, (2, 1, 266), 'resume')
+        self.assertNotIn('--system-prompt-snapshot', old.argv)
+        self.assertIn('--append-system-prompt', old.argv)  # the rest of the command is unchanged
+        older, _ = self.launch(None, (2, 1, 267), 'resume')
+        self.assertIn('--system-prompt-snapshot', older.argv)
+
+    def test_the_snapshot_can_be_kept_with_a_harness_setting(self):
+        path = self.root / 'harnesses/claude/harness.json'
+        config = read(path)
+        config['settings']['system_prompt_snapshot'] = 'on'
+        write(path, config)
+        for setting in (None, True, False):
+            with self.subTest(setting=setting):
+                resumed, _ = self.launch(setting, (2, 1, 300), 'resume')
+                self.assertNotIn('--system-prompt-snapshot', resumed.argv)  # Claude keeps its recorded prompt
+                self.assertIn('--append-system-prompt', resumed.argv)
+        config['settings']['system_prompt_snapshot'] = 'off'
+        write(path, config)
+        self.assertIn('--system-prompt-snapshot', self.launch(None, (2, 1, 300), 'resume')[0].argv)
+        for bad in ('yes', True, None, ''):
+            with self.subTest(value=bad):
+                config['settings']['system_prompt_snapshot'] = bad
+                write(path, config)
+                with self.assertRaisesRegex(ValueError, 'system_prompt_snapshot must be "off" or "on"'):
+                    harnesses.load(self.root, 'claude')
+
+    def test_a_snapshot_flag_the_user_passes_wins_and_is_never_removed(self):
+        path = self.root / 'harnesses/claude/harness.json'
+        def flags(argv):
+            argv = list(argv)
+            end = argv.index('--') if '--' in argv else len(argv)
+            return [(argv[i], argv[i + 1]) if argv[i] == '--system-prompt-snapshot' else (argv[i], None)
+                    for i in range(end) if argv[i].startswith('--system-prompt-snapshot')]
+        for snapshot in ('off', 'on'):
+            for version in ((2, 1, 300), (2, 1, 266), None):
+                for key, user in (('resume_args', ['--system-prompt-snapshot', 'on']), ('args', ['--system-prompt-snapshot=on']),
+                                  ('resume_args', ['--system-prompt-snapshot', 'off'])):
+                    with self.subTest(snapshot=snapshot, version=version, key=key, user=user):
+                        config = read(path)
+                        config['settings'].update({'system_prompt_snapshot': snapshot, key: user})
+                        config['settings'].pop('resume_args' if key == 'args' else 'args', None)
+                        write(path, config)
+                        resumed, _ = self.launch(None, version, 'resume')
+                        # Exactly the user's own flag, as they wrote it; mv2 adds none beside it.
+                        expected = [tuple(user)] if len(user) == 2 else [(user[0], None)]
+                        self.assertEqual(flags(resumed.argv), expected)
+        # Without a flag of the user's, mv2's own follows its settings as before.
+        config = read(path)
+        config['settings'].pop('resume_args', None); config['settings'].pop('args', None)
+        config['settings']['system_prompt_snapshot'] = 'off'
+        write(path, config)
+        self.assertEqual(flags(self.launch(None, (2, 1, 300), 'resume')[0].argv), [('--system-prompt-snapshot', 'off')])
+        self.assertEqual(flags(self.launch(None, (2, 1, 266), 'resume')[0].argv), [])
+        # A user's own bootstrap text and flag before mv2's: still only mv2's own flag is the one dropped.
+        config['settings']['args'] = ['--append-system-prompt', 'mine', '--system-prompt-snapshot', 'off']
+        write(path, config)
+        resumed = self.launch(None, (2, 1, 300), 'resume')[0]
+        self.assertEqual(flags(resumed.argv), [('--system-prompt-snapshot', 'off')])
+        self.assertEqual(list(resumed.argv).count('--append-system-prompt'), 2)
 
     def test_the_typeahead_plugin_loads_only_on_a_claude_that_knows_its_event(self):
         for setting in (None, True):

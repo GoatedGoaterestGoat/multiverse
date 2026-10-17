@@ -1,0 +1,6 @@
+{
+  "schema": 1,
+  "notify": {"waiting": true, "failed": true, "blocked": true, "done": true},
+  "max_age_seconds": 300,
+  "quiet_seconds": 30
+}

@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "waiting": {"type": "boolean", "description": "An agent waits on you: a permission prompt, a question, a plan"},
+        "failed": {"type": "boolean", "description": "An agent's process exited with an error"},
+        "blocked": {"type": "boolean", "description": "An agent reported blocked"},
+        "done": {"type": "boolean", "description": "An agent reported done"}
+      }
+    },
+    "max_age_seconds": {"type": "integer", "minimum": 0, "description": "Older events are skipped (after the host was down)"},
+    "quiet_seconds": {"type": "integer", "minimum": 0, "description": "At most one notification per agent and kind in this time"}
+  }
+}

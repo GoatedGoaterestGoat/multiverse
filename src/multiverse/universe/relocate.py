@@ -86,7 +86,19 @@ def move_agent(root, reference, destination):
             data = read(target / "properties.json")
             data.update(universe_id=read(destination / "universe.json")["id"], updated_at=now())
             write(target / "properties.json", data)
+    # Both journals: subscribers where it left and where it arrived.
+    for scope in (root, destination):
+        _event(scope, "agent.moved", data, {"from": str(root), "to": str(destination)})
     return {**data, "universe": str(destination)}
+
+
+def _event(root, kind, agent, data):
+    """Record an event for plugins that subscribe to it; best effort, never raises."""
+    try:
+        from ..plugins import events
+        events.emit(root, kind, agent, None, data)
+    except Exception:
+        pass
 
 
 def move_subverse(path, destination):
@@ -119,6 +131,7 @@ def remove_agent(root, reference):
     record = {"kind": "agent", "name": properties["name"], "id": agent_dir.name,
               "origin": str(agent_dir), "removed_at": now()}
     write(entry / trash.RECORD, record)
+    _event(root, "agent.removed", properties, {"trash": str(entry)})
     return {**record, "trash": str(entry)}
 
 

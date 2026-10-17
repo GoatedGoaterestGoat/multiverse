@@ -25,7 +25,29 @@ must not guess a recent session. Claude receives an assigned UUID, and resumes i
 with `--resume` only once Claude has saved a transcript for it (it writes none before
 the first message); a session stopped before then restarts fresh under the same
 UUID with `--session-id`, without replaying its task, and says so in the agent's
-details. Pi owns an
+details. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+every resume. Claude Code keeps a conversation's system prompt as recorded at its
+first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
+would leave a resumed agent with the bootstrap it started with: a plugin's
+bootstrap line added or removed since, or a template change, would never reach
+it. Resume therefore passes `--system-prompt-snapshot off`, so the current
+bootstrap applies; an unchanged one keeps the prompt cache, and a changed one is
+cached afresh once. Resuming a Claude agent therefore needs Claude Code 2.1.267
+or newer, the first with that flag: the flag is left out where the version is
+read and known to be older (an auto launch falling back to plain), but a plain
+launch never asks the version, so on an older Claude its resume fails on the
+unknown option, which the failed-launch diagnostics show. A Claude harness can
+keep Claude's snapshot instead with `"system_prompt_snapshot": "on"` in its
+`harness.json` settings (default `"off"`): resume then passes no flag, the
+bootstrap applies only to new conversations, and a resumed agent keeps the one it
+started with, including bootstrap lines of plugins disabled or removed since.
+A `--system-prompt-snapshot` the harness passes itself in `args` or
+`resume_args` wins: mv2 then adds none, and never removes it.
+Measured on 2.1.301, the flag costs nothing while the bootstrap is unchanged: git
+changes, within a session or between stop and resume, do not change the rendered
+system prompt. A changed bootstrap re-caches the prompt and the conversation once.
+Passing the flag only when the bootstrap changed is not enough, because a later
+resume without it returns to the prompt recorded at the first request. Pi owns an
 exact session file and its bridge reports its UUID. Codex bridge binds the exact
 thread ID and workspace from the native launch reply. Plain Codex uses
 prompt-driven `session-bind` with the native `CODEX_THREAD_ID`.
@@ -627,7 +649,7 @@ never restarts the daemon on its own. A disposable native-daemon regression test
 removes the original workspace and verifies that configuration reads still work.
 
 Shared preferences are `executable`, `model`, `args`, `spawn_args`, `resume_args`,
-`unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`. Native flags,
+`unset_env` and `env`. Codex, Pi and Claude additionally support `inbox_bridge`, and Claude also supports `system_prompt_snapshot` (see the Claude section). Native flags,
 models, permissions and workspaces are preserved. Inherited `MV2_*`,
 `CODEX_THREAD_ID` and `CLAUDECODE` identities are scrubbed before child execution.
 Bundled defaults also unset `NO_COLOR`: the tmux server keeps the environment of
@@ -654,12 +676,18 @@ itself to find a harness's sessions (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Co
 `CLAUDE_CONFIG_DIR` for Claude); set those in the environment mv2 runs in. Variables
 an adapter sets for its bridge, such as Claude's `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS`,
 take precedence. Codex bridge tools run in the shared daemon rather than the
-terminal process, so the relay also forwards each variable to them as
-`shell_environment_policy.set`, as it does for `MV2_*`; plain Codex tools inherit them
-from the process under Codex's own `shell_environment_policy`. Claude's compaction
-builder runs with the same variables, except those it always scrubs. Values are
-stored as plain text in `harness.json` and each launch's `request.json`, and a
-forwarded Codex value appears on the command line: keep secrets out of `env`.
+terminal process, so the relay forwards harness and plugin variables in the
+session RPC config's `shell_environment_policy.set`. These values do not appear
+on argv. Plain Codex tools inherit them from the process under Codex's own
+`shell_environment_policy`; explicit native filtering still applies. Normal
+exclusive idle resume applies the requested tool environment. Codex can retain
+old config when rejoining a thread that is still subscribed or active; mv2 never
+forces an unload or service restart to change it. Plugin MCP servers receive
+only their declared `env` and `env_vars`; agent identity requires explicit
+`env_vars` references (see [the Codex plugin contract](plugins.md#codex)).
+Claude's compaction builder runs with the same variables, except those it always
+scrubs. Values remain plain text in `harness.json` and each launch's
+`request.json`, including its RPC settings.
 Schema-1 manifests accept the same `env` object.
 No adapter changes installed native configuration. The Claude bridge reads only the
 inbox key Claude publishes for its own launch's socket; no other credentials are read.
@@ -1003,6 +1031,18 @@ progress takes the slot while it lasts and the normal line returns after. Text
 reported by other agents is shown with control characters removed and a summary is
 shortened.
 
+Plugins add items of their own ([plugins](plugins.md#status-lines)). A launch
+declares them in `runtime.json` (`plugins.status_items`: each item's name, plugin
+and whether the Claude line shows it by default), and the plugin writes the text to
+`state/agents/<id>/status-items/<name>.txt`. A declared item is a key like the core
+ones: `statusline.json` places it or turns it on or off, and one the file does not
+name shows by its default, after everything else. The timer then also watches
+`runtime.json` (status reports rewrite it often; the items are read again only when
+they change) and the file of each item that is on; an item that is off is never
+read. The text is its first line, cleaned and shortened like a summary, and an
+empty or missing file shows nothing. A malformed record, a name that breaks the
+manifest rule or is a core name, and a repeated name declare nothing.
+
 The mod also registers the bridge (`BRIDGE`, `claude-mod-v1`) for its launch
 (steering, `ask` and receipts are reported unavailable, and `--wait` does not
 return, until it has) and reports status through `python -m
@@ -1014,20 +1054,26 @@ to its call through the engine's `ask` verdict and ends when the call finishes, 
 denied, or (Bash) draws its progress row; an approved call that runs briefly
 without a progress row can read `waiting` until it finishes.
 
-With the bridge, a universe's `compaction.json` can enable tree compaction for
-the Claude harness ([compaction](compaction.md)). The launch then sets
-`MV2_COMPACTION=1` and adds a `PreCompact` command hook. The mod answers the
-session's `/compact` with mv2's compacted turns from `python -m
-multiverse.compaction install`, showing progress and every error in the status
-line, as notices and as toasts, and skips with the reason when it cannot. The
-`PreCompact` hook refuses Claude's own compaction should the mod not answer, so a
-session never falls back to it. The mod's `Stop` hook starts the background tree
-builder with the time the turn ended. The adapter's `compaction(session)` returns
-the Claude implementation of the compaction protocol (`claude/compaction/`).
-A `compaction.json` that cannot be used (invalid, or builder settings Claude
-rejects) never stops a launch: that launch runs without compaction, without the
-`PreCompact` guard, and records why as its `native_mode` fallback, which the
-inspector shows. The `compaction` capability then reports the error, and
+With the bridge, the `compaction` plugin ([compaction](compaction.md); the
+`plugins/compaction` submodule), where it is installed and on, adds tree
+compaction to Claude launches through its launch contribution:
+`MV2_COMPACTION=1`, a `PreCompact` command hook, and its own Claude plugin
+directory. That plugin answers the session's `/compact` with mv2's compacted
+turns from the compaction plugin's
+`install` helper action (`python -m multiverse.plugins run compaction
+install`), showing progress and every error in the status line, as notices and
+as toasts, and skips with the reason when it cannot. The `PreCompact` hook
+refuses Claude's own compaction should it not answer, so a session never falls
+back to it. Its `Stop` hook starts the background tree builder with the time the
+turn ended. The plugin's Claude source (`sources/claude/`) reads this harness's
+transcripts; the adapter itself has no compaction code. A Claude agent launched
+before compaction became a plugin still calls `python -m multiverse.compaction
+guard` from its settings: that module stays for a release and lets Claude
+compact (restart the agent for tree compaction), and `mv2 doctor` names the
+running agents that still use it. Compaction settings that cannot be used (invalid, or
+builder settings Claude rejects) never stop a launch: that launch runs without
+compaction, without the `PreCompact` guard, and records why as its
+`native_mode` fallback, which the inspector shows. The `compaction` capability then reports the error, and
 `mv2 doctor` names the file; `mv2 compaction` refuses until it is fixed.
 
 Claude usage is measured from the session's own transcript under Claude's
@@ -1037,7 +1083,7 @@ adapter reads each transcript once, then only what was appended. A row that a
 compaction stored again (with zero usage) never replaces its response's usage.
 
 An accepted `send` means written to the Claude session inbox; the receipt
-confirms delivery. The mod was tested against Claude Code 2.1.296; the mod API
+confirms delivery. The mod was tested against Claude Code 2.1.299; the mod API
 may change between releases. Its offline tests (`mod/tests/*.test.ts`, run with
 `claude plugin test src/multiverse/harnesses/claude/mod`) cover status, every
 delivery path, `ask` and older tags; the Python suite runs them and `claude

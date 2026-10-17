@@ -1,6 +1,8 @@
 """Local view panels: one Panel per widget type a view's `widgets` list can name.
 
-Panels are declarative: a view file cannot import code, run commands or load plugins.
+A view file is declarative: it cannot import code or run commands. It can name
+a widget type that a plugin on in its universe provides (`mv.dashboard.panel`),
+as `type` or `plugin:type`; elsewhere that widget shows what it needs.
 """
 from pathlib import Path
 
@@ -46,7 +48,7 @@ class TablePanel(Panel):
 
     def compose(self, view, root, widget, index):
         table = DataTable(id=f"view-table-{index}", classes="view-table", cursor_type="row")
-        table.add_columns(*widget["columns"])
+        table.add_columns(*(Text(column) for column in widget["columns"]))
         for row in widget["rows"]:
             # Literal cells: fixture data must not become Rich markup.
             table.add_row(*(Text(cell) for cell in row))
@@ -76,9 +78,54 @@ class ArtifactsPanel(Panel):
 
 # A view's `widgets` entries name one of these by "type".
 PANELS = {"markdown": MarkdownPanel(), "table": TablePanel(), "artifacts": ArtifactsPanel()}
+# Plugin panels by widget type and universe, instantiated once: {(type, universe): Panel}.
+_plugin_panels = {}
 
 
-def normalize_widgets(value):
+def panel(kind, root=None):
+    """The Panel for a widget type: core, else the plugin one on in `root`; ValueError says what it needs."""
+    if kind in PANELS:
+        return PANELS[kind]
+    if root is None:
+        raise ValueError(f"unknown widget type: {kind}")
+    try:
+        changed = (Path(root) / "plugins.json").stat().st_mtime_ns
+    except OSError:
+        changed = None
+    key = (kind, str(root), changed)
+    if key not in _plugin_panels:
+        # Kept until plugins.json changes or columns.reset_plugin_caches(), a failure too:
+        # a refresh never imports again.
+        from .. import plugins
+        try:
+            loaded, reference = plugins.dashboard_panel(root, kind, wait=plugins.loader.REFRESH_WAIT)
+            _plugin_panels[key] = made = loaded.resolve(reference)()
+            try:
+                made.mv_plugin_package = loaded.package  # LocalView tags what it composes, so a failure can take it out
+            except AttributeError:
+                pass
+        except plugins.loader.StillLoading as error:
+            raise ValueError(str(error)) from None  # not kept: the widget appears on a refresh once its plugin has loaded
+        except plugins.PluginError as error:
+            _plugin_panels[key] = ValueError(str(error))
+        except Exception as error:
+            _plugin_panels[key] = ValueError(f"widget type {kind} could not be loaded: {type(error).__name__}: {error}")
+    found = _plugin_panels[key]
+    if isinstance(found, ValueError):
+        raise ValueError(str(found))
+    return found
+
+
+def _data_panel(kind, root):
+    """A function making the placeholder for a widget that a plugin renders from data, or None."""
+    from . import plugin_panels
+    found = plugin_panels.find(root, kind)
+    if found is None:
+        return None
+    return lambda widget, title: plugin_panels.placeholder(found[0], found[1], widget, title)
+
+
+def normalize_widgets(value, root=None):
     """Validate each widget independently so a bad widget cannot hide the fleet."""
     if not isinstance(value, list):
         value = [None]
@@ -89,9 +136,12 @@ def normalize_widgets(value):
                 raise ValueError("expected an object")
             kind = widget.get("type")
             title = str(widget.get("title", kind or "Widget"))[:200]
-            if not isinstance(kind, str) or kind not in PANELS:
+            if not isinstance(kind, str):
                 raise ValueError(f"unknown widget type: {kind}")
-            result.append(PANELS[kind].parse(widget, title))
+            if kind not in PANELS and root is not None and (data := _data_panel(kind, root)) is not None:
+                result.append(data(widget, title))  # rendered later, off the event loop (ui/plugin_panels.py)
+                continue
+            result.append(panel(kind, root).parse(widget, title))
         except Exception as error:  # any failure stays inside its widget
             result.append(error_widget(f"Widget {index + 1} error", error))
     return result
@@ -168,11 +218,20 @@ class LocalView(VerticalScroll):
         children = []
         for index, widget in enumerate(widgets):
             try:
-                shown = PANELS[widget["type"]].compose(self, root, widget, index)
+                made = panel(widget["type"], root)
+                shown = made.compose(self, root, widget, index)
+                package = getattr(made, "mv_plugin_package", None)
+                for item in shown if package else ():
+                    item.mv_plugin_package = package
             except Exception as error:
                 widget = error_widget(f"Widget {index + 1} error", error)
                 shown = PANELS["markdown"].compose(self, root, widget, index)
-            children.append(Label(widget["title"], classes="view-title", markup=False))
+            title = widget["title"]
+            plugin = widget.get("plugin")
+            if plugin and title and title != plugin:
+                title = f"{title} · {plugin}"  # where a plugin's panel comes from
+            if title:
+                children.append(Label(title, classes="view-title", markup=False))
             children.extend(shown)
         if children:
             await self.mount(*children)
