@@ -104,3 +104,24 @@ class TrustFirstTest(PluginTestCase):
         loader.reset()
         found = [problem for problem in plugins.problems(self.root) if "forked.json" in problem]
         self.assertIn("converted the next time mv2 runs here", found[0])
+
+
+class LateAttemptAfterResetTest(PluginTestCase):
+    """An attempt still running late never touches a later attempt's modules, even after loader.reset() (which
+    PluginTestCase calls between tests while such threads may still run)."""
+
+    def test_a_late_attempt_leaves_a_later_attempts_modules_alone(self):
+        release = self.work / "release"
+        os.environ["SLOW_RELEASE"] = str(release)
+        self.addCleanup(release.touch)
+        directory = self.write_plugin("slow", {"module": "plugin", "extends": ["launch"]}, {"plugin.py": SLOW})
+        self.enable("slow")
+        with mock.patch.object(loader, "LOAD_SECONDS", 0.3), self.assertRaises(loader.PluginError):
+            loader.load(self.entry("slow"))  # still in its register(), waiting for `release`
+        loader.reset()
+        (Path(directory) / "plugin.py").write_text("def register(mv):\n    pass\n")
+        loaded = loader.load(self.entry("slow"))
+        name = loaded.module.__name__
+        release.touch()  # the first attempt ends now, late, and is dropped
+        time.sleep(0.3)
+        self.assertIs(sys.modules.get(name), loaded.module, "a late attempt removed a later one's modules")

@@ -923,6 +923,7 @@ def reset():
         _entries.clear()
         _declared.clear()
         _loading.clear()
-        _attempts.clear()
+        # _attempts stays: an attempt still running late (a test's hung register()) must never share a package
+        # name with a later one, whose modules it would remove when it is dropped.
         for name in [name for name in sys.modules if name == PACKAGE or name.startswith(PACKAGE + ".")]:
             del sys.modules[name]

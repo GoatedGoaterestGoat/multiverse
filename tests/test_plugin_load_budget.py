@@ -71,7 +71,9 @@ class BackgroundLoadTest(PluginTestCase):
 
     def test_waiting_zero_never_loads_in_the_callers_thread(self):
         start = time.monotonic()
-        self.assertEqual(loader.active(self.root, wait=0), [])  # nobody was loading them: both start now
+        # Nobody was loading them: both start now, in the background. swift may already be done by the time the
+        # answer is made (then it is in it); slow, still in its register(), never is, and nothing waited for it.
+        self.assertNotIn("slow", [loaded.name for loaded in loader.active(self.root, wait=0)])
         self.assertLess(time.monotonic() - start, 0.3)
         for _ in range(100):  # swift finishes on its own, in the background
             if loader.entry(self.root, "swift").state == "loaded":
