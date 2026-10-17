@@ -19,6 +19,26 @@ from test_multiverse import TerminalBase, until
 
 
 class KillTest(TerminalBase):
+    def test_attachment_only_describes_service_and_terminal_work_ownership(self):
+        for owner in ('service', 'terminal', None, 'damaged'):
+            with self.subTest(owner=owner):
+                launched = lifecycle.start(self.root, 'attachment-' + str(owner), 'a task', 'fake', socket_path=self.socket)
+                directory = agents.directory(self.root, launched['id'])
+                until(lambda: (directory / 'seen.json').exists())
+                facts = agents.runtime(directory)
+                agents.update_runtime(directory, facts['launch_id'],
+                                      attachment=[] if owner == 'damaged' else {'work_owner': owner} if owner else None)
+                with patch.object(native, 'stop', side_effect=AssertionError('must not request cancellation')):
+                    result = lifecycle.kill(self.root, launched['id'], attachment_only=True)
+                reason = result['native_cancellation']['reason']
+                self.assertEqual(result['state'], 'dormant')
+                self.assertNotIn(launched['runtime']['tmux']['pane'], self.backend.snapshot()[0])
+                if owner == 'service':
+                    self.assertIn('conversation work was not cancelled', reason)
+                else:
+                    self.assertNotIn('work was not cancelled', reason)
+                    self.assertIn('ends work owned by that process', reason)
+
     def retain_wrapper(self, launched, directory):
         # Simulate an older/interrupted runner: compatibility paths must still
         # handle dead panes even though normal native exits now remove them.

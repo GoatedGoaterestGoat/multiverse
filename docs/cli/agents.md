@@ -57,7 +57,7 @@ mv2 resume worker --model opus --wait
 
 `kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`.
 
-`kill --attachment-only` closes only mv2's terminal and connection. The conversation's work keeps running, which matters when another client is working in a shared Codex conversation.
+`kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, start time and record path. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 

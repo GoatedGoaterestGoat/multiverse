@@ -167,7 +167,7 @@ mv2 stop [--attachment-only] agent
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
-| `--attachment-only` |  | Close only mv2's terminal; leave conversation work running |  |
+| `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
 
 ## kill
 
@@ -180,7 +180,7 @@ mv2 kill [--attachment-only] agent
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
-| `--attachment-only` |  | Close only mv2's terminal; leave conversation work running |  |
+| `--attachment-only` |  | Close mv2's terminal without requesting native cancellation; work owned by that process ends |  |
 
 ## move
 

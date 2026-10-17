@@ -623,8 +623,16 @@ def kill(root, reference, *, attachment_only=False):
             backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'on')
         update_runtime(agent_dir, launch_id, state='ending', status='unknown', ending_at=now())
         try:
-            cancellation = (NativeResult('ok', 'Only this terminal attachment was closed; conversation work was not cancelled')
-                            if attachment_only else native.stop(root, reference))
+            if attachment_only:
+                attachment = facts.get('attachment')
+                service_owned = isinstance(attachment, dict) and attachment.get('work_owner') == 'service'
+                reason = ('Only this terminal attachment was closed; conversation work was not cancelled'
+                          if service_owned else
+                          'Terminal process closed; this also ends work owned by that process. '
+                          'No separate native cancellation was requested')
+                cancellation = NativeResult('ok', reason)
+            else:
+                cancellation = native.stop(root, reference)
             if attachment_only:
                 mailbox.end_startup_messages(agent_dir, launch_id,
                     'Terminal attachment closed before delivery; saved for explicit retry')
