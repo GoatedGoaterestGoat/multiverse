@@ -10,7 +10,7 @@ from uuid import uuid4
 from multiverse.runtime import runner, registration, lifecycle
 from multiverse.runtime.process import process_started, process_snapshot
 from multiverse.store import now, read, write
-from test_multiverse import BaseTest, TerminalBase
+from test_multiverse import BaseTest, TerminalBase, until
 
 
 class RegistrationTest(BaseTest):
@@ -33,6 +33,46 @@ class RegistrationTest(BaseTest):
                       'parent_started': process_started(os.getpid()), 'sequence': 0,
                       'stage': 'creating terminal', 'state': 'preparing', 'at': now()}
         write(self.launch / 'registration.json', self.owner)
+
+    def test_parent_can_release_and_exit_after_the_runner_reads_an_earlier_stage(self):
+        script = self.work / 'release-parent.py'
+        script.write_text("""import sys, time
+from pathlib import Path
+from multiverse.runtime.registration import Progress
+launch = Path(sys.argv[1])
+progress = Progress(launch)
+progress.mark('configuring terminal status')
+(launch / 'parent-prepared').touch()
+while not (launch / 'release-parent').exists(): time.sleep(.01)
+progress.release()
+""")
+        child = subprocess.Popen([sys.executable, str(script), str(self.launch)], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        original = registration._parent_gone
+        def after_reading_old_stage(owner):
+            self.assertEqual(read(self.launch / 'registration.json')['stage'], 'configuring terminal status')
+            (self.launch / 'release-parent').touch()
+            self.assertEqual(child.wait(timeout=5), 0)
+            self.assertTrue((self.launch / 'ready').exists())
+            return original(owner)
+        try:
+            until(lambda: (self.launch / 'parent-prepared').exists())
+            with patch.object(registration, '_parent_gone', side_effect=after_reading_old_stage):
+                registration.wait_for_release(self.launch)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
+            child.stderr.close()
+
+    def test_completed_stage_without_ready_does_not_release_a_dead_parent(self):
+        code = ("from pathlib import Path; from multiverse.runtime.registration import Progress; "
+                "Progress(Path(__import__('sys').argv[1])).mark('releasing runner', state='complete')")
+        subprocess.run([sys.executable, '-c', code, str(self.launch)], stdin=subprocess.DEVNULL,
+                       capture_output=True, text=True, timeout=5, check=True)
+        self.assertFalse((self.launch / 'ready').exists())
+        with self.assertRaisesRegex(RuntimeError, 'parent exited'):
+            registration.wait_for_release(self.launch)
 
     def test_runner_waits_for_a_parent_making_progress_beyond_fifteen_seconds(self):
         def advance(_seconds):

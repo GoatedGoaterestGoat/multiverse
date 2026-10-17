@@ -91,7 +91,7 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 
 ## When a launch fails
 
-A launch that is still preparing isn't failed for being slow. mv2 waits while preparation makes progress, up to 60 seconds without progress and 180 seconds in total.
+Starting without `--wait` returns after setup; that command's normal exit does not fail the agent. A launch that is still preparing isn't failed for being slow. mv2 waits while preparation makes progress, up to 60 seconds without progress and 180 seconds in total.
 
 The agent's record stays, marked `failed`, with the error. The error includes the last lines of the agent's terminal. `mv2 list`, `mv2 inspect` and `mv2 doctor` all show it. Fix the cause, then run `mv2 resume NAME`.
 

@@ -97,6 +97,10 @@ def wait_for_release(launch, *, total_timeout=TOTAL_TIMEOUT, stall_timeout=STALL
                 raise RuntimeError(f'Launch preparation failed while {stage}')
             if observed >= next_check:
                 if _parent_gone(owner):
+                    # The parent can publish ready and exit after our stage
+                    # snapshot. Its normal exit is not failed registration.
+                    if (launch / 'ready').exists():
+                        return
                     raise RuntimeError(f'Launch registration parent exited while {stage}')
                 next_check = observed + 1
             if observed - started >= total_timeout:
