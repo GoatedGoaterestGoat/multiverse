@@ -7,7 +7,12 @@
 
 The processes a test starts inherit its HOME, so neither the test nor the runners, relays and CLI calls it
 starts can write the real ~/.multiverse. BaseTest calls it; a TestCase that is not a BaseTest can too.
+
+    track(tmux_socket=socket)   # a tmux server, or track(pid=pid) a daemon, started outside the test's process group
+
+so that tests/run.py ends it even if the test is stopped before its cleanups run.
 """
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -21,6 +26,7 @@ KEPT = ("MV2_CLI", "MV2_PYTHON")
 INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
 INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CONFIG_DIR", "TMUX", "TMUX_PANE")
 STARTED_WITH = dict(os.environ)  # before any test changed it: a value a test set itself is the test's to keep
+TRACKED = os.environ.get("MV2_TEST_TRACKED")  # where tests/run.py reads what to end after this unit
 
 
 def _inherited(key, value):
@@ -47,3 +53,20 @@ def isolate(test):
     test.enterContext(mock.patch.dict(os.environ, isolated_environment(Path(temporary.name).resolve()),
                                       clear=True))
     return Path(os.environ["HOME"])
+
+
+def track(*, tmux_socket=None, pid=None):
+    """Tell tests/run.py about a tmux server (by its socket) or a process (by PID) this test started outside its own
+    process group, where the runner's kill cannot reach. The runner ends it after the unit, even if the test was
+    stopped or killed before its cleanups ran. Does nothing when the tests run some other way."""
+    if not TRACKED:
+        return
+    from multiverse.runtime.process import process_started  # home_safety put this checkout's src on the path
+    record = {}
+    if tmux_socket is not None:
+        record["tmux_socket"] = str(tmux_socket)
+    if pid is not None and (started := process_started(pid)):
+        record.update(pid=pid, started=started)  # its start time, so that a later process with its PID is spared
+    if record:
+        with open(TRACKED, "a") as out:
+            out.write(json.dumps(record) + "\n")

@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 from native_safety import install as install_native_safety
 install_native_safety()
-from isolation import isolate
+from isolation import isolate, track
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -151,6 +151,7 @@ class TerminalBase(BaseTest):
         super().setUp()
         self.socket = str(self.work / "tmux.sock")
         self.backend = Tmux(self.socket)
+        track(tmux_socket=self.socket)  # its server runs in its own session: tests/run.py ends it if this test can't
         self.addCleanup(self.kill_server)
         harness = self.root / "harnesses" / "fake"
         harness.mkdir()

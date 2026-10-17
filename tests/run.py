@@ -10,10 +10,12 @@ not know counts as long. Every process guards the real ~/.multiverse (home_safet
 there.
 
 Runs started at once share the machine: a unit starts only when it holds one of the CPU count's slots in
-/tmp/mv2-test-slots-<uid>, so two agents' full runs take turns instead of overloading it. A unit still running
-after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM), is stopped: its test fails and still
-runs its cleanups (stopping the tmux servers and native daemons it started); one not done GRACE seconds later is
-killed. A unit whose runner is killed outright stops the same way.
+/tmp/mv2-test-slots-<uid> (a directory only this user may change), so two agents' full runs take turns instead of
+overloading it. A unit still running after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM),
+is stopped: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running, so the test
+fails and its cleanups still stop the tmux servers and native daemons it started. A unit not done GRACE seconds
+later is killed, and a unit whose runner is killed outright stops the same way; after any unit, the runner ends
+what its tests named with isolation.track and left running.
 """
 import argparse
 import concurrent.futures
@@ -23,6 +25,7 @@ import os
 from pathlib import Path
 import random
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -49,9 +52,30 @@ def _tests(suite):
             yield test
 
 
-class Stopped(Exception):
+class Stopped(BaseException):
     """The runner stopped this unit (interrupted, or past its time). The test running ends with this error, so its
-    tearDown and cleanups still stop the tmux servers and native daemons it started."""
+    tearDown and cleanups still stop the tmux servers and native daemons it started. A BaseException, so that a
+    test's or mv2's `except Exception` cannot swallow it."""
+
+
+_interruptible = False  # while a test's setUp or body runs: the only time a stop may raise (never in its cleanups)
+
+
+def _mark_interruptible(test):
+    """Let a stop raise in `test`'s setUp and body, and nowhere else."""
+    for name in ("_callSetUp", "_callTestMethod"):
+        method = getattr(test, name, None)
+        if method is None:
+            continue
+
+        def marked(*args, method=method):
+            global _interruptible
+            _interruptible = True
+            try:
+                return method(*args)
+            finally:
+                _interruptible = False
+        setattr(test, name, marked)
 
 
 class _Result(unittest.TextTestResult):
@@ -64,9 +88,17 @@ class _Result(unittest.TextTestResult):
 
     def startTest(self, test):
         self._started, self.test = time.monotonic(), test
+        import home_safety
+        home_safety.running(test.id())  # a refused write is charged to this test, even in a plain TestCase
         super().startTest(test)
 
     def stopTest(self, test):
+        import home_safety
+        try:
+            home_safety.check(test.id())  # what this test wrote under the real home, if its fixtures did not say
+        except AssertionError:
+            self.addError(test, sys.exc_info())
+        home_safety.running(None)
         super().stopTest(test)
         self.times[test.id()], self.test = round(time.monotonic() - self._started, 3), None
 
@@ -79,7 +111,7 @@ def _stop(signum, frame):
     if result is None:
         raise SystemExit(128 + signum)  # no test has started: nothing to clean up
     result.stop()
-    if result.test is not None:
+    if _interruptible:
         raise Stopped("stopped by tests/run.py")
 
 
@@ -99,13 +131,17 @@ def worker(start, target, shard, shards, report, verbosity, watch):
     if "." in target:  # one class or test, by name
         suite = loader.loadTestsFromName(target)
     else:
-        try:
+        try:  # as discovery imports a module: a SkipTest skips it, anything else is a failing test
             __import__(target)
-        except Exception:
-            suite = loader.loadTestsFromName(target)  # a test that fails with the import error
+        except unittest.SkipTest as skip:
+            suite = unittest.loader._make_skipped_test(target, skip, unittest.TestSuite)
+        except BaseException:
+            suite, _ = unittest.loader._make_failed_import_test(target, unittest.TestSuite)
         else:
             suite = loader.loadTestsFromModule(sys.modules[target], pattern="test*.py")
     tests = [test for index, test in enumerate(_tests(suite)) if index % shards == shard]
+    for test in tests:
+        _mark_interruptible(test)
     signal.signal(signal.SIGTERM, _stop)
     os.set_inheritable(watch, False)  # the processes its tests start do not keep the runner's pipe
     threading.Thread(target=_watch, args=(watch,), daemon=True).start()
@@ -161,7 +197,7 @@ class Run:
 
         Every run of the suite on this machine shares `budget` slots, so runs started at once take turns instead
         of overloading it. Closing the file frees its slot, as does the end of this process however it ends."""
-        self.slots.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.slots.mkdir(mode=0o700, parents=True, exist_ok=True)  # again, should it have gone since the check
         while not self.stopping.is_set():
             for index in random.sample(range(self.budget), self.budget):
                 handle = (self.slots / f"slot-{index}").open("a")
@@ -196,6 +232,7 @@ class Run:
 
     def _unit(self, target, shard, shards, scratch):
         report, output = Path(scratch) / f"{target}.{shard}.json", Path(scratch) / f"{target}.{shard}.log"
+        tracked = Path(scratch) / f"{target}.{shard}.tracked"  # what its tests started outside it (isolation.track)
         command = [sys.executable, str(Path(__file__).resolve()), "--worker", str(self.start), target, str(shard),
                    str(shards), str(report), "2" if self.verbose else "1"]
         began, code = time.monotonic(), "not started"
@@ -208,7 +245,8 @@ class Run:
                     try:
                         process = subprocess.Popen(command + [str(watch)], cwd=self.start.parent, stdout=out,
                                                    stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                                   start_new_session=True, pass_fds=(watch,))
+                                                   start_new_session=True, pass_fds=(watch,),
+                                                   env={**os.environ, "MV2_TEST_TRACKED": str(tracked)})
                     except BaseException:
                         os.close(alive)
                         raise
@@ -224,12 +262,60 @@ class Run:
                     os.close(alive)
                     with self.lock:
                         self.processes.discard(process)
+            ended = self.end_tracked(tracked)
             data = json.loads(report.read_text()) if report.exists() else None
+            if ended:
+                with output.open("a") as out:
+                    out.write(f"\nThe runner ended what this unit left running: {', '.join(ended)}.\n")
+                if data is not None:
+                    data["ended"] = ended
         except Exception:
             data = None
             with output.open("a") as out:
                 out.write("\n" + traceback.format_exc())
         return code, time.monotonic() - began, data, output.read_text(errors="replace")
+
+    @staticmethod
+    def end_tracked(path):
+        """End what a unit's tests started outside its process group and named with isolation.track (a tmux server,
+        a daemon) that is still running, however the unit ended; return what had to be ended. A process is ended
+        only while its start time is the one recorded, never a later process that took its number."""
+        records = []
+        try:
+            lines = Path(path).read_text().splitlines()
+        except OSError:
+            return []
+        for line in lines:
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                pass  # a line the unit was killed while writing
+        if str(HERE.parent / "src") not in sys.path:
+            sys.path.insert(0, str(HERE.parent / "src"))
+        from multiverse.runtime.process import process_snapshot
+        ended = []
+        for record in records:
+            socket = record.get("tmux_socket")
+            if socket and os.path.exists(socket):
+                try:
+                    stopped = subprocess.run(["tmux", "-S", socket, "kill-server"], capture_output=True,
+                                             stdin=subprocess.DEVNULL, timeout=10)
+                except (OSError, subprocess.SubprocessError):
+                    stopped = None
+                if stopped is not None and stopped.returncode == 0:
+                    ended.append(f"the tmux server on {socket}")
+            pid, started = record.get("pid"), record.get("started")
+            snapshot = process_snapshot(pid) if isinstance(pid, int) and started else None
+            if snapshot is not None and snapshot[0] == started and not snapshot[1].startswith("Z"):
+                try:
+                    if os.getpgid(pid) == pid:
+                        os.killpg(pid, signal.SIGKILL)  # a daemon leading its own session: its children too
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                    ended.append(f"process {pid}")
+                except ProcessLookupError:
+                    pass
+        return ended
 
     def end(self, process):
         """Stop a unit: SIGTERM lets the test running fail and clean up (_stop). Then, or once it has had `grace`
@@ -267,7 +353,26 @@ class Run:
             for process in list(self.processes):
                 self.kill(process)
 
+    def slots_problem(self):
+        """Why the slots directory cannot be trusted, or None. It must be a real directory, not a link, that only this
+        user can change: otherwise another user could hold the slots or swap them."""
+        try:
+            self.slots.mkdir(mode=0o700, parents=True, exist_ok=True)
+            status = os.lstat(self.slots)
+        except OSError as error:
+            return f"Cannot use {self.slots} for the machine's slots: {error}"
+        if not stat.S_ISDIR(status.st_mode):
+            return f"{self.slots} must be a directory, not a link or a file. Remove it and run again."
+        if status.st_uid != os.getuid() or status.st_mode & 0o077:
+            return (f"{self.slots} must be yours alone (owner {os.getuid()}, mode 700), but has owner {status.st_uid} "
+                    f"and mode {stat.S_IMODE(status.st_mode):o}. Remove it and run again.")
+        return None
+
     def __call__(self, names):
+        problem = self.slots_problem()
+        if problem:
+            print(problem, file=sys.stderr)
+            return 2
         units = self.plan(self.targets(names))
         print(f"{len(units)} units on {self.jobs} processes", flush=True)
         began, totals, problems, measured, done = time.monotonic(), {"run": 0, "skipped": 0}, [], {}, 0
@@ -293,7 +398,9 @@ class Run:
                             measured[target] = measured.get(target, 0) + sum(data["times"].values())
                     failed = code != 0 or not data or bool(data["failures"] or data["errors"])
                     print(f"[{done}/{len(units)}] {label}: {data['run'] if data else '?'} tests in {seconds:.1f} s"
-                          + (f", FAILED (exit {code})" if failed else ""), flush=True)
+                          + (f", FAILED (exit {code})" if failed else "")
+                          + (f"; ended what it left running: {', '.join(data['ended'])}" if data and data.get("ended")
+                             else ""), flush=True)
                     if self.verbose:
                         print(output, flush=True)
                     if failed:

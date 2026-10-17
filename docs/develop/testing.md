@@ -12,7 +12,7 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 `tests/run.py` runs the same tests as `unittest discover -s tests`. It runs each module, or a shard of a slow one, in its own process, as many at once as the machine has CPUs. The whole suite takes about two and a half minutes on 8 cores. Name modules, classes or tests for a focused run, and add `-v` to see each test.
 
 - **Concurrent runs share the machine.** Runs started at the same time take turns for its CPU slots instead of overloading it, and a waiting run prints `Waiting for a slot`.
-- **Stopping is clean.** A unit past `--timeout` (20 minutes), or a run stopped with Ctrl-C or SIGTERM, fails the running test and still runs its cleanups. Never stop a run by pattern-killing processes.
+- **Stopping is clean.** A unit past `--timeout` (20 minutes), or a run stopped with Ctrl-C or SIGTERM, fails the running test and still runs its cleanups: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running. A unit that doesn't finish within 30 seconds is killed, and so is a unit whose runner dies. Then the runner ends what the unit's tests named with `track` (below). Never stop a run by pattern-killing processes.
 - **The real home is guarded.** A test that writes the real `~/.multiverse` fails the run.
 - **Use `$MV2_PYTHON`**, the checkout's `.venv/bin/python` (`scripts/dev-env.sh` sets it). System Python lacks Textual, and the environment has no pytest.
 - **Pin `PYTHONPATH` in a worktree.** `uv sync` installs mv2 into `.venv` in editable mode, pointing at the checkout that created it. Run `PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" tests/run.py` so the tests, and the runners and helpers they start, import your worktree's code.
@@ -29,7 +29,10 @@ The live Codex and Pi modules depend on the installed versions and on timing. Th
 | `test_tui*.py`, `test_portal.py`, `test_ui_independent.py` | The dashboard |
 | `test_compaction.py` | Tree compaction, independent of any harness |
 | `test_docs.py` | Relative links in the docs, and the generated CLI reference |
+| `run.py`, `test_run.py` | The parallel runner (not a test module), and its tests |
+| `isolation.py`, `home_safety.py` | Each test's own HOME and environment, and the guard on the real `~/.multiverse` (not test modules) |
 | `native_safety.py` | The Codex daemon guard (not a test module) |
+| `native_processes.py` | Ends the processes of a private Codex server before its test removes the home (not a test module) |
 | `mock-provider.ts`, `steering-provider.ts`, `pi_bridge_test.mjs` | Offline Pi providers and the Pi extension's tests |
 
 The Claude mod and typeahead keep their TypeScript tests next to them, in `src/multiverse/harnesses/claude/mod/tests/` and `src/multiverse/plugins/builtin/typeahead/claude/tests/`.
@@ -40,8 +43,8 @@ Most modules need only Python, with no tmux, sockets or model. The rest skip whe
 
 | Needs | Modules | Without it |
 | --- | --- | --- |
-| tmux | Tests on `TerminalBase`: terminal tests in `test_multiverse`, `test_harnesses`, `test_kill`, `test_auto_exit`, `test_attach_return`, `test_launch_diagnostics`, `test_tmux_statusline` | Skipped |
-| `codex`, and tmux for most | `test_codex_daemon`, `test_codex_daemon_cwd`, `test_codex_mouse`, `test_codex_permissions`, `test_codex_timing`, and the live part of `test_codex_recovery` | Skipped |
+| tmux | Tests on `TerminalBase`: terminal tests in `test_multiverse`, `test_harnesses`, `test_kill`, `test_auto_exit`, `test_attach_return`, `test_attachment_teardown`, `test_launch_diagnostics`, `test_launch_registration`, `test_native_service`, `test_process_identity`, `test_tmux_statusline`, `test_wait`, `test_wake`, `test_claude_boundary`, `test_claude_resume`; also `test_helper_stdin` and one test in `test_run` | Skipped |
+| `codex`, and tmux for most | `test_codex_daemon`, `test_codex_daemon_cwd`, `test_codex_mouse`, `test_codex_permissions`, `test_codex_timing`, `test_codex_refusal_native`, `test_codex_shared_identity`, the native tests in `test_codex_plugins`, and the live part of `test_codex_recovery` | Skipped |
 | `pi` and tmux | `test_pi_timing`, Pi tests in `test_multiverse` and `test_wake_prompt` | Skipped |
 | `claude` | The mod and typeahead plugin tests in `test_claude_bridge`; with tmux, the Claude test in `test_wake_prompt` | Skipped |
 | Node 22+ | `test_pi_bridge` | Skipped |
@@ -61,8 +64,11 @@ node --experimental-strip-types tests/pi_bridge_test.mjs
 
 | Fixture | Where | Gives you |
 | --- | --- | --- |
-| `BaseTest` | `test_multiverse.py` | A temporary directory with a fresh `base` universe in `self.root` |
-| `TerminalBase` | `test_multiverse.py` | `BaseTest` plus a private tmux server at `self.socket` and a `fake` harness that records its argv in `seen.json`; cleanup kills the server and waits for its runners to exit |
+| `isolate(self)` | `isolation.py` | Call it first in `setUp`: the test gets its own HOME, which the processes it starts inherit, and loses the agent's environment (`MV2_*` but `MV2_CLI` and `MV2_PYTHON`, `CODEX_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX`). A value the test set itself before calling it stays |
+| `track(tmux_socket=…, pid=…)` | `isolation.py` | Names a tmux server or process the test started outside its own process group, so `tests/run.py` ends it even if the test is stopped before its cleanups run. A PID is ended only while its start time matches |
+| `home_safety` | `home_safety.py` | The real-home guard: a refused write under `~/.multiverse` fails the test that made it. `isolate` and `PluginTestCase` turn it on, as does every `tests/run.py` worker |
+| `BaseTest` | `test_multiverse.py` | `isolate(self)`, then a temporary directory with a fresh `base` universe in `self.root` |
+| `TerminalBase` | `test_multiverse.py` | `BaseTest` plus a private tmux server at `self.socket`, tracked, and a `fake` harness that records its argv in `seen.json`; cleanup kills the server and waits for its runners to exit |
 | `until(predicate)` | `test_multiverse.py` | Polls for up to 15 seconds |
 | Fake CLIs | `fake_cli` in `test_harnesses.py` | A script set as `settings.executable`, with the bridge off |
 | `FourthAdapter` | `test_operations.py` | An adapter that implements only the contract |
@@ -70,7 +76,7 @@ node --experimental-strip-types tests/pi_bridge_test.mjs
 | Local providers | `test_codex_timing.py`, `test_wake_prompt.py`, the Pi `.ts` files | Native CLIs answering from a local script |
 | Local remotes | `test_update.py` | `mv2 update` against a bare repository, never the running checkout |
 
-Pass `socket_path=self.socket` to `lifecycle.start` so launches stay on the test's tmux server. Wait with `until`, and never with a fixed sleep.
+Pass `socket_path=self.socket` to `lifecycle.start` so launches stay on the test's tmux server. Wait with `until`, and never with a fixed sleep. A test class that isn't a `BaseTest` calls `isolate(self)` first in its own `setUp`, and a test that starts a tmux server or daemon of its own names it with `track`.
 
 ## Dashboard tests
 
