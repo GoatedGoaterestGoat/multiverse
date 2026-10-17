@@ -9,6 +9,8 @@ import threading
 import time
 from unittest.mock import patch
 
+from isolation import track
+
 
 class PrivateProcessGroup:
     def __init__(self, pid):
@@ -20,6 +22,7 @@ class PrivateProcessGroup:
             raise AssertionError('Native fixture must own a separate process group')
         self.pgid = pid
         self.closed = False
+        track(pid=pid)  # tests/run.py ends the group if this test is stopped before close() runs
 
     def _members(self):
         output = subprocess.check_output(['ps', '-axo', 'pid=,pgid=,stat='], text=True, timeout=5)
