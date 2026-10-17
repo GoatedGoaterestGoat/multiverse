@@ -1,7 +1,10 @@
 """Exact-thread recovery safety, bounded outages and real idle TUI recovery."""
 from copy import deepcopy
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
 import json
 import os
 from pathlib import Path
@@ -25,6 +28,7 @@ from multiverse.universe.mailbox import append_message, update_message
 from multiverse.store import now, read, write
 from multiverse.terminal.tmux import Tmux
 from native_safety import isolated_home
+from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
 
@@ -165,6 +169,83 @@ class RecoveryWorkerTest(unittest.TestCase):
     def test_optional_status_loss_keeps_recent_idle_proof_for_primary_loss(self):
         StatusWatcher(self.directory, self.launch, self.root)._publish('unknown')
         self.assertEqual(self.publish_loss()['auto_recovery']['state'], 'checking')
+
+    def test_duplicate_idle_after_primary_loss_keeps_proof_but_requires_fresh_check(self):
+        watcher = StatusWatcher(self.directory, self.launch, self.root)
+        watcher._publish('unknown')  # The observer's transport can close first.
+        self.publish_loss()
+        watcher._publish('idle')  # Already queued before the primary connection closed.
+        facts = agents.runtime(self.directory)
+        self.assertEqual(facts['status'], 'unknown', 'A lost relay must not appear connected')
+        self.assertEqual(facts.get('native_status_version', 0), 0)
+        self.assertEqual(facts['recovery_snapshot'], self.facts['recovery_snapshot'])
+        with patch.object(recovery, 'BACKOFF', (0,)), patch.object(recovery, 'check',
+                return_value=NativeResult('unavailable', 'Fresh native check refused')) as checked, \
+                patch.object(lifecycle, 'start') as start:
+            recovery.run(self.directory, self.launch)
+        checked.assert_called_once()
+        start.assert_not_called()
+        self.assertIn('Fresh native check refused', agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_real_activity_after_primary_loss_invalidates_proof_without_restoring_display(self):
+        for status in ('working', 'waiting'):
+            with self.subTest(status=status):
+                write(self.directory / 'runtime.json', self.facts)
+                self.publish_loss()
+                StatusWatcher(self.directory, self.launch, self.root)._publish(status)
+                facts = agents.runtime(self.directory)
+                self.assertEqual(facts['status'], 'unknown')
+                self.assertEqual(facts['native_status_version'], 1)
+                self.assertIsNone(facts['recovery_snapshot'])
+                with patch.object(recovery, 'check') as checked, patch.object(lifecycle, 'start') as start:
+                    recovery.run(self.directory, self.launch)
+                checked.assert_not_called()
+                start.assert_not_called()
+                self.assertIn('invalidated', agents.runtime(self.directory)['auto_recovery']['reason'])
+
+    def test_observer_transport_unknown_does_not_hide_a_real_native_transition(self):
+        watcher = StatusWatcher(self.directory, self.launch, self.root)
+        watcher._publish('working')
+        watcher._publish('unknown')
+        watcher._publish('idle')
+        facts = agents.runtime(self.directory)
+        self.assertEqual(facts['status'], 'idle')
+        self.assertEqual(facts['native_status_version'], 2)
+        self.assertIsNone(facts['recovery_snapshot'])
+
+    def test_stale_status_and_relay_callbacks_cannot_change_replacement(self):
+        replacement = {**self.facts, 'launch_id': 'replacement', 'status': 'working'}
+        write(self.directory / 'runtime.json', replacement)
+        StatusWatcher(self.directory, self.launch, self.root)._publish('idle')
+        RelayPublisher(self.directory, self.launch)('old connection closed')
+        self.assertEqual(agents.runtime(self.directory), replacement)
+        self.popen.assert_not_called()
+
+    def test_removed_agent_is_not_recreated_by_status_or_relay_callbacks(self):
+        watcher, relay = StatusWatcher(self.directory, self.launch, self.root), RelayPublisher(self.directory, self.launch)
+        shutil.rmtree(self.directory)
+        watcher._publish('idle')
+        self.assertFalse(self.directory.exists())
+        relay('late transport loss')
+        self.assertFalse(self.directory.exists())
+        self.popen.assert_not_called()
+
+    def test_failure_diagnostics_keep_metadata_without_hiding_the_assertion(self):
+        launch = self.directory / 'launches' / self.launch
+        write(launch / 'cleanup.json', {'state': 'active', 'launch_id': self.launch})
+        write(launch / 'request.json', {'env': {'TOKEN': 'must-not-be-in-diagnostics'}})
+        self.work, self.backend = self.root, Mock()
+        self.backend.run.return_value = 'Owned recovery fixture pane'
+        output = io.StringIO()
+        with patch('sys.stderr', output), self.assertRaisesRegex(AssertionError, 'original assertion'):
+            with RecoveryLiveTest.recovery_trace(self, self.directory):
+                raise AssertionError('original assertion')
+        evidence = json.loads(output.getvalue().split('RECOVERY FAILURE EVIDENCE\n', 1)[1])
+        self.assertEqual(evidence['runtime']['launch_id'], self.launch)
+        self.assertTrue(evidence['trace'])
+        self.assertEqual(evidence['launches'][self.launch]['cleanup.json']['state'], 'active')
+        self.assertEqual(evidence['pane'], 'Owned recovery fixture pane')
+        self.assertNotIn('must-not-be-in-diagnostics', output.getvalue())
 
     def test_startup_and_uncertain_messages_block_without_receipt_mutation(self):
         message = append_message(self.directory, 'uncertain', {}, delivery='steer', target_session=self.native_id)
@@ -341,7 +422,14 @@ class RecoveryLiveTest(TerminalBase):
         self.env = {**os.environ, 'CODEX_HOME': str(self.home), 'CODEX_SQLITE_HOME': str(self.home),
                     'NO_PROXY': '127.0.0.1,localhost', 'HTTP_PROXY': '', 'HTTPS_PROXY': '', 'ALL_PROXY': '',
                     'http_proxy': '', 'https_proxy': '', 'all_proxy': ''}
-        self.addCleanup(lambda: self.daemon('stop'))
+        self.daemon_groups = PrivateDaemonGroups()
+        self.enterContext(self.daemon_groups.observe_starts())
+        def stop_owned_daemon():
+            try:
+                self.daemon('stop')
+            finally:
+                self.daemon_groups.close()
+        self.addCleanup(stop_owned_daemon)
         spec = read(self.root / 'harnesses/codex/harness.json')
         spec['settings'] = {'executable': str(shim), 'inbox_bridge': True,
                             'args': ['--dangerously-bypass-approvals-and-sandbox']}
@@ -351,7 +439,10 @@ class RecoveryLiveTest(TerminalBase):
         process = subprocess.run(['codex', 'app-server', 'daemon', command], env=self.env,
                                  cwd=self.work, capture_output=True, text=True, timeout=30)
         self.assertEqual(process.returncode, 0, process.stderr)
-        return json.loads(process.stdout)
+        result = json.loads(process.stdout)
+        if command in ('start', 'restart') and 'pid' in result:
+            self.daemon_groups.remember(result)
+        return result
 
     def launch(self, task='idle-recovery-probe'):
         with patch.dict(os.environ, self.env):
@@ -366,53 +457,111 @@ class RecoveryLiveTest(TerminalBase):
         self.addCleanup(cleanup)
         return result, directory
 
+    @contextmanager
+    def recovery_trace(self, directory):
+        """Keep bounded metadata and print it before fixture cleanup on failure."""
+        trace, stopped = deque(maxlen=256), threading.Event()
+        keys = ('launch_id', 'state', 'status', 'native_status_value', 'native_status_version',
+                'pid', 'pid_started', 'runner_pid', 'runner_started', 'startup_checked',
+                'startup_delivery', 'native_relay', 'recovery_snapshot', 'auto_recovery',
+                'ending_at', 'reason', 'error', 'tmux')
+        def snapshot():
+            try:
+                return {key: value for key, value in agents.runtime(directory).items() if key in keys}
+            except (OSError, ValueError) as error:
+                return {'read_error': str(error)}
+        initial = snapshot()
+        trace.append({'at': now(), 'runtime': initial})
+        def observe():
+            previous = initial
+            while not stopped.is_set():
+                facts = snapshot()
+                if facts != previous:
+                    trace.append({'at': now(), 'runtime': facts})
+                    previous = facts
+                stopped.wait(.05)
+        observer = threading.Thread(target=observe, name='test-recovery-trace', daemon=True)
+        observer.start()
+        try:
+            yield
+        except BaseException:
+            stopped.set()
+            observer.join(2)
+            try:
+                facts, records = snapshot(), {}
+                for launch in sorted((directory / 'launches').glob('*')):
+                    records[launch.name] = {'ready': (launch / 'ready').exists(),
+                                            'request_saved': (launch / 'request.json').exists()}
+                    for path in [launch / 'registration.json', launch / 'cleanup.json',
+                                 *sorted((launch / 'roles').glob('*.json'))]:
+                        if path.exists():
+                            try:
+                                value = read(path)
+                            except (OSError, ValueError) as error:
+                                value = {'read_error': str(error)}
+                            records[launch.name][str(path.relative_to(launch))] = value
+                try:
+                    pane = self.backend.run('capture-pane', '-p', '-t', facts['tmux']['pane'])
+                except (KeyError, OSError, RuntimeError) as error:
+                    pane = 'Pane unavailable: ' + str(error)
+                print('\nRECOVERY FAILURE EVIDENCE\n' + json.dumps({
+                    'fixture': str(self.work), 'runtime': facts, 'trace': list(trace),
+                    'launches': records, 'pane': pane}, indent=2), file=sys.stderr, flush=True)
+            except Exception as error:
+                print('Could not collect recovery failure evidence: ' + str(error), file=sys.stderr, flush=True)
+            raise
+        finally:
+            stopped.set()
+            observer.join(2)
+
     def test_idle_restarts_in_same_attached_pane_without_replaying_or_starting_daemon(self):
         result, directory = self.launch()
-        until(lambda: (agents.runtime(directory).get('recovery_snapshot') or {}).get('safe'), seconds=30)
-        native_id = read(directory / 'properties.json')['native_session_id']
-        old = agents.runtime(directory)
-        from multiverse.runtime.runner import UsagePublisher
-        UsagePublisher(directory, old['launch_id'])({'native_session_id': native_id,
-                                                   'context': {'tokens': 17457}, 'source': 'codex-app-server'})
-        measurement = agents.runtime(directory)['usage']
-        count = len(self.requests)
-        fd, slave = pty.openpty()
-        client = subprocess.Popen([*self.backend.prefix, 'attach-session', '-t', old['tmux']['session']],
-            stdin=slave, stdout=slave, stderr=slave,
-            env={**{key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')},
-                 'TERM': 'xterm-256color'})
-        os.close(slave)
-        def close_client():
-            if client.poll() is None:
-                client.terminate()
-                client.wait(timeout=5)
-            os.close(fd)
-        self.addCleanup(close_client)
-        until(lambda: self.backend.run('list-clients', '-t', old['tmux']['pane']), seconds=5)
-        clients = self.backend.run('list-clients', '-t', old['tmux']['pane'], '-F', '#{client_name}')
-        self.daemon('restart')  # Only this fixture's isolated daemon.
-        def ready():
-            facts = agents.runtime(directory)
-            return (facts.get('launch_id') != old['launch_id'] and facts.get('startup_checked')
-                    and (facts.get('auto_recovery') or {}).get('state') == 'reconnected')
-        until(ready, seconds=60)
-        current = agents.runtime(directory)
-        self.assertEqual(read(directory / 'properties.json')['native_session_id'], native_id)
-        self.assertEqual(current['tmux'], old['tmux'])
-        self.assertEqual(self.backend.run('list-clients', '-t', current['tmux']['pane'], '-F', '#{client_name}'), clients)
-        self.assertIsNone(client.poll())
-        self.assertEqual(current['last_usage'], measurement)
-        self.assertEqual(current['automatic_restarts'][-1]['from_launch_id'], old['launch_id'])
-        request = read(directory / 'launches' / current['launch_id'] / 'request.json')
-        self.assertEqual(request['rpc_proxy']['settings']['resume_permissions'],
-                         {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'})
-        self.assertIsNone(request['fallback'])
-        self.assertEqual(len(self.requests), count, 'Recovery must never start a model turn or replay the task')
-        commands = [json.loads(line) for line in self.commands.read_text().splitlines()]
-        self.assertEqual(commands.count(['app-server', 'daemon', 'start']), 1)
-        self.assertFalse(any(command[:2] == ['app-server', 'daemon'] and command[2] != 'start' for command in commands))
-        self.assertIn(current['launch_id'], self.backend.run('show-option', '-v', '-t', current['tmux']['session'],
-                                                            '@mv2_status_command'))
+        with self.recovery_trace(directory):
+            until(lambda: (agents.runtime(directory).get('recovery_snapshot') or {}).get('safe'), seconds=30)
+            native_id = read(directory / 'properties.json')['native_session_id']
+            old = agents.runtime(directory)
+            from multiverse.runtime.runner import UsagePublisher
+            UsagePublisher(directory, old['launch_id'])({'native_session_id': native_id,
+                                                       'context': {'tokens': 17457}, 'source': 'codex-app-server'})
+            measurement = agents.runtime(directory)['usage']
+            count = len(self.requests)
+            fd, slave = pty.openpty()
+            client = subprocess.Popen([*self.backend.prefix, 'attach-session', '-t', old['tmux']['session']],
+                stdin=slave, stdout=slave, stderr=slave,
+                env={**{key: value for key, value in os.environ.items() if key not in ('TMUX', 'TMUX_PANE')},
+                     'TERM': 'xterm-256color'})
+            os.close(slave)
+            def close_client():
+                if client.poll() is None:
+                    client.terminate()
+                    client.wait(timeout=5)
+                os.close(fd)
+            self.addCleanup(close_client)
+            until(lambda: self.backend.run('list-clients', '-t', old['tmux']['pane']), seconds=5)
+            clients = self.backend.run('list-clients', '-t', old['tmux']['pane'], '-F', '#{client_name}')
+            self.daemon('restart')  # Only this fixture's isolated daemon.
+            def ready():
+                facts = agents.runtime(directory)
+                return (facts.get('launch_id') != old['launch_id'] and facts.get('startup_checked')
+                        and (facts.get('auto_recovery') or {}).get('state') == 'reconnected')
+            until(ready, seconds=60)
+            current = agents.runtime(directory)
+            self.assertEqual(read(directory / 'properties.json')['native_session_id'], native_id)
+            self.assertEqual(current['tmux'], old['tmux'])
+            self.assertEqual(self.backend.run('list-clients', '-t', current['tmux']['pane'], '-F', '#{client_name}'), clients)
+            self.assertIsNone(client.poll())
+            self.assertEqual(current['last_usage'], measurement)
+            self.assertEqual(current['automatic_restarts'][-1]['from_launch_id'], old['launch_id'])
+            request = read(directory / 'launches' / current['launch_id'] / 'request.json')
+            self.assertEqual(request['rpc_proxy']['settings']['resume_permissions'],
+                             {'sandbox': 'danger-full-access', 'approvalPolicy': 'never'})
+            self.assertIsNone(request['fallback'])
+            self.assertEqual(len(self.requests), count, 'Recovery must never start a model turn or replay the task')
+            commands = [json.loads(line) for line in self.commands.read_text().splitlines()]
+            self.assertEqual(commands.count(['app-server', 'daemon', 'start']), 1)
+            self.assertFalse(any(command[:2] == ['app-server', 'daemon'] and command[2] != 'start' for command in commands))
+            self.assertIn(current['launch_id'], self.backend.run('show-option', '-v', '-t', current['tmux']['session'],
+                                                                '@mv2_status_command'))
 
     def test_native_background_work_stays_disconnected_without_restart(self):
         _, directory = self.launch('make-background')

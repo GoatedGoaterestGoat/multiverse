@@ -12,7 +12,7 @@ import threading
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from multiverse.universe.agents import update_runtime, bind_session, runtime
+from multiverse.universe.agents import update_runtime, mutate_runtime, bind_session, runtime
 from multiverse.store import lock, now, read, write
 from multiverse.runtime.process import process_started
 
@@ -141,15 +141,29 @@ class RelayPublisher:
         self.agent_dir, self.launch_id = agent_dir, launch_id
 
     def __call__(self, detail):
-        facts = runtime(self.agent_dir)
-        if facts.get('launch_id') != self.launch_id or facts.get('state') not in ('starting', 'running'):
-            return
-        bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+        try:
+            bound = read(self.agent_dir / 'properties.json').get('native_session_id')
+        except FileNotFoundError:
+            return  # Removed agents have no transport state to publish.
         recovery = ('Kill then resume the agent; native work may still be running.' if bound else
                     'Kill this unbound launch and spawn again.')
         reason = 'Native relay lost. ' + recovery
-        update_runtime(self.agent_dir, self.launch_id, status='unknown', native_relay={
-            'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()})
+        def changes(facts):
+            if facts.get('state') not in ('starting', 'running'):
+                return None
+            # Legacy records may not yet have an independent native status.
+            # Save it before transport loss makes the display unknown.
+            result = {'status': 'unknown', 'native_relay': {
+                'state': 'lost', 'reason': reason, 'detail': detail, 'at': now()}}
+            known = facts.get('native_status_value', facts.get('status'))
+            if known in ('working', 'waiting', 'idle'):
+                result['native_status_value'] = known
+            return result
+        try:
+            if mutate_runtime(self.agent_dir, self.launch_id, changes) is None:
+                return
+        except (FileNotFoundError, ValueError):
+            return  # A replaced launch cannot publish transport loss.
         from multiverse.runtime.recovery import schedule
         schedule(self.agent_dir, self.launch_id)
 
@@ -181,14 +195,23 @@ class StatusWatcher:
         if status not in ('working', 'waiting', 'idle', 'unknown'):
             status = 'unknown'
         try:
-            facts = read(self.agent_dir / 'runtime.json')
-            if (facts.get('launch_id') == self.launch_id and facts.get('state') == 'running'
-                    and facts.get('status') != status):
+            def changes_for(facts):
+                if facts.get('state') != 'running':
+                    return None
+                known = facts.get('native_status_value', facts.get('status'))
                 changes = {}
+                if known in ('working', 'waiting', 'idle'):
+                    changes['native_status_value'] = known
                 if status != 'unknown':
-                    changes = {'recovery_snapshot': None,
-                               'native_status_version': facts.get('native_status_version', 0) + 1}
-                update_runtime(self.agent_dir, self.launch_id, status=status, **changes)
+                    changes['native_status_value'] = status
+                    if known != status:
+                        changes.update(recovery_snapshot=None,
+                                       native_status_version=facts.get('native_status_version', 0) + 1)
+                # An optional observer never restores the primary connection.
+                lost = (facts.get('native_relay') or {}).get('state') == 'lost'
+                changes['status'] = 'unknown' if lost else status
+                return changes if any(facts.get(key) != value for key, value in changes.items()) else None
+            mutate_runtime(self.agent_dir, self.launch_id, changes_for)
         except (OSError, ValueError):
             pass  # A new launch or a removed agent can never inherit this stream.
 
@@ -365,7 +388,7 @@ def main():
     request = {}
     diagnostic = {}
     roles = {}
-    from multiverse.runtime import attachments, refusal
+    from multiverse.runtime import attachments, refusal, registration
     attachments.begin(launch, process_started(os.getpid()))
 
     def stop(_signum, _frame):
@@ -376,11 +399,7 @@ def main():
     # handler resets to the default on exec, unlike inheriting SIG_IGN.
     previous_handlers[signal.SIGINT] = signal.signal(signal.SIGINT, lambda *_: None)
     try:
-        deadline = time.monotonic() + 15
-        while not (launch / "ready").exists():
-            if time.monotonic() > deadline:
-                raise RuntimeError("Spawn did not finish registering this pane")
-            time.sleep(0.05)
+        registration.wait_for_release(launch)
         request = read(launch / "request.json")
         env = launch_environment(request)
         if request.get('rpc_proxy') or (request.get('control_endpoint') and not request.get('shared_service')):

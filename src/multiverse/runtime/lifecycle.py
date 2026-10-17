@@ -13,11 +13,11 @@ import time
 from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
-from ..terminal.tmux import Tmux, observe, owned
+from ..terminal.tmux import Tmux, observe, owned, status_setup
 from ..universe import agents, catalog, mailbox
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native, attachments, agent_identity
+from . import native, attachments, agent_identity, registration
 
 TEARDOWN_TIMEOUT = 10
 
@@ -234,10 +234,16 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
               _initial_runtime(launch_id, command, adapter, session, previous, resume, _recovery))
         backend = Tmux(socket_path or os.environ.get("MV2_TMUX_SOCKET"))
         terminal = None
+        progress = None
         service_directory_created = False
         try:
+            progress = registration.Progress(launch)
+            progress.mark('preparing terminal status')
+            prepared_status = status_setup(root, properties, launch_id, family)
+            env['PATH'] = target['PATH']
             shared_endpoint = None
             if command.shared_service:
+                progress.mark('preparing native service')
                 if _recovery:
                     shared_endpoint = session.service.endpoint
                 else:
@@ -255,6 +261,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                     command = plain_fallback(command, BridgeUnavailable(f'Native relay directory unavailable: {error}'))
                     shared_endpoint = None
             runner = Path(__file__).with_name("runner.py")
+            progress.mark('creating terminal')
             if _recovery:
                 backend = Tmux(_recovery['terminal']['socket'])
                 terminal = backend.respawn(properties, previous, workdir, [sys.executable, str(runner), str(launch)])
@@ -262,16 +269,17 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 terminal = backend.create(f'mv2-{properties["id"][:8]}-{launch_id[:8]}', workdir,
                                           [sys.executable, str(runner), str(launch)])
             backend = Tmux(terminal["socket"])
+            progress.mark('tagging terminal')
             backend.tag(terminal["pane"], properties, launch_id)
-            family = getattr(adapter, 'family', '')  # independent adapters may not declare one
-            backend.configure_status(terminal, root, properties, launch_id, family)
+            progress.mark('configuring terminal status')
+            backend.configure_status(terminal, root, properties, launch_id, family, prepared=prepared_status)
             update_runtime(agent_dir, launch_id, tmux=terminal)
             # Use the server that actually owns this pane, including when tmux
             # resolved a default socket. The runner scrubs inherited MV2 identity.
             env["MV2_TMUX_SOCKET"] = terminal["socket"]
-            env['PATH'] = str(Path(cli_path).parent) + os.pathsep + os.environ.get('PATH', '')
             executor = None
             if command.shared_service:
+                progress.mark('preparing native attachment')
                 executor = native.NativeExecutor(workdir, properties, runtime(agent_dir))
             context = LaunchContext(mode, values, model, env, shared_endpoint, executor, resume_prompt=resume_prompt,
                                     agent_environment=agent_environment)
@@ -312,6 +320,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 if not command.rpc_proxy or not command.rpc_proxy.binds_session:
                     raise ValueError('Attachment requires an adapter protocol that validates binding')
             mouse = bool(command.attachment and command.attachment.mouse)
+            progress.mark('recording final launch')
             if mouse:
                 # Apply the final resolved policy before releasing the runner.
                 backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
@@ -339,8 +348,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                    'launch_id': launch_id, 'at': now()}])
             # Before the runner is released, so ready and exited never come before launched.
             _launched(root, agent_dir, launch_id, command, "wake" if resume_message_id is not None else mode, properties)
-            (launch / "ready").touch()
+            progress.release()
         except Exception as error:
+            if progress is not None:
+                progress.fail()
             if resume_message_id is not None and not (launch / 'ready').exists():
                 mailbox.finish_wake(agent_dir, launch_id, resume_message_id, False,
                             f'Resume failed before native process startup: {error}')

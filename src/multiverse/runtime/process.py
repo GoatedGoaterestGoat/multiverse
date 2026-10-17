@@ -16,14 +16,28 @@ def process_started(pid):
     compare that saved identity with both the current process and native files.
     execve preserves it; a later process reusing the PID does not.
     """
+    value = _query(pid, 'lstart=')
+    return value if value is not None and START.fullmatch(value) else None
+
+
+def process_snapshot(pid):
+    """UTC start and process state from one observation; zombies have exited even before reaping."""
+    value = _query(pid, 'lstart=,stat=')
+    if value is None or ' ' not in value:
+        return None
+    started, state = value.rsplit(' ', 1)
+    return (started, state) if START.fullmatch(started) and state and state[0].isalpha() else None
+
+
+def _query(pid, fields):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return None
     try:
-        result = subprocess.run(['ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True,
+        result = subprocess.run(['ps', '-p', str(pid), '-o', fields], capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL, env={**os.environ, 'TZ': 'UTC', 'LC_ALL': 'C'}, timeout=2)
     except (OSError, subprocess.SubprocessError, ValueError, TypeError):
         return None
     if not isinstance(result.stdout, str):
         return None
     value = ' '.join(result.stdout.split())
-    return value if result.returncode == 0 and START.fullmatch(value) else None
+    return value if result.returncode == 0 else None
