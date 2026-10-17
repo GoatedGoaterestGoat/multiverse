@@ -149,3 +149,38 @@ class SessionObservationTest(BaseTest):
         self.assertIn('updating; retry', result['reason'])
         measured.assert_not_called()
         self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)
+
+    def test_listing_uses_one_reconciled_snapshot_but_direct_usage_still_checks(self):
+        calls = []
+        def observe(session):
+            calls.append(session.native_id)
+            return None
+        adapter = SimpleNamespace(observed_binding=observe,
+                                  get_usage=lambda session: NativeResult('ok', value={'native_id': session.native_id}))
+        with patch.object(harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            [row] = lifecycle.listing(self.root)
+            self.assertEqual(row['usage']['value']['native_id'], self.old)
+            self.assertEqual(calls, [self.old])
+            native.usage_snapshot(self.root, self.properties, self.facts)
+            self.assertEqual(calls, [self.old, self.old])
+
+    def test_listing_does_not_repeat_a_failed_identity_observation_for_usage(self):
+        observed = Mock(side_effect=ValueError('damaged native evidence'))
+        measured = Mock()
+        adapter = SimpleNamespace(observed_binding=observed, get_usage=measured)
+        with patch.object(harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            [row] = lifecycle.listing(self.root)
+        self.assertEqual(row['usage']['state'], 'error')
+        self.assertEqual(row['usage']['reason'], 'damaged native evidence')
+        observed.assert_called_once()
+        measured.assert_not_called()
+
+    def test_an_empty_observation_error_still_prevents_unreconciled_usage(self):
+        adapter = SimpleNamespace(observed_binding=Mock(side_effect=ValueError()), get_usage=Mock())
+        with patch.object(harnesses, 'load', return_value=adapter), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            [row] = lifecycle.listing(self.root)
+        self.assertEqual(row['usage']['state'], 'error')
+        adapter.get_usage.assert_not_called()

@@ -305,6 +305,6 @@ class ClaudeRelaunchTest(BaseTest):
         with patch('multiverse.runtime.lifecycle.observe', return_value={'live': 'alive'}):
             [row] = lifecycle.listing(self.root)
         self.assertIsNone(row['connection_error'])
-        # Today's listing asks for the binding twice (its own reconcile, then usage_snapshot's) and for the
-        # connection once: three checks, so three queries. Sharing the reconcile in core would make it two.
-        self.assertEqual(query.call_count, 3)
+        # Listing reconciles once, then checks the healed connection separately.
+        # No process identity is cached across those checks.
+        self.assertEqual(query.call_count, 2)

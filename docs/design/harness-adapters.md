@@ -1039,6 +1039,11 @@ message to a stopped agent, is an ordinary resume. This differs from Codex, whos
 shared app-server outlives its terminal. Neither is a general model: a bridge says
 what an integration can do, a service says where work lives.
 
+A listing reconciles each row once and passes those same properties and runtime
+records to usage measurement. Direct usage calls still reconcile independently.
+Connection diagnostics retain their own process identity check; there is no
+process-wide identity cache between reads.
+
 Claude's own `/restart` (offered once a newer Claude Code is installed) runs the
 new version in the same process, with a command line Claude rebuilds from the
 session. Seen on 2.1.302, it keeps `--resume`, `--settings`, every

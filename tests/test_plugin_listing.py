@@ -25,9 +25,9 @@ class OneAgentListingTest(PluginTestCase):
             seen.append(("observe", properties["id"]))
             return observe(properties, facts, snapshots)
 
-        def measuring(scope, properties, facts):
+        def measuring(scope, properties, facts, **options):
             seen.append(("usage", properties["id"]))
-            return usage(scope, properties, facts)
+            return usage(scope, properties, facts, **options)
         for patcher in (mock.patch.object(lifecycle, "observe", observing),
                         mock.patch.object(lifecycle.native, "usage_snapshot", measuring)):
             patcher.start()

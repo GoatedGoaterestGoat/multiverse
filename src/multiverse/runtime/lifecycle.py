@@ -43,7 +43,8 @@ def listing(root, recursive=False, only=None):
                     identity_problem = str(error)
                     facts = runtime(path.parent)
                 observation = observe(properties, facts, snapshots)
-                measured = native.usage_snapshot(scope, properties, facts)
+                measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
+                            native.usage_snapshot(scope, properties, facts, reconciled=True))
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)

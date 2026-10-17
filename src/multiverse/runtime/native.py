@@ -410,12 +410,13 @@ def _adjusted_usage(adapter, session, facts, result):
         return result
 
 
-def usage_snapshot(root, properties, facts):
-    """Nonblocking snapshot: optional failures are data, never UI exceptions."""
+def usage_snapshot(root, properties, facts, *, reconciled=False):
+    """Nonblocking snapshot; listing can reuse its own already reconciled records."""
     try:
         adapter = harnesses.load(root, properties['harness'])
         directory = root / 'state' / 'agents' / properties['id']
-        properties, facts = session_snapshot(root, directory, properties, facts, adapter=adapter)
+        if not reconciled:
+            properties, facts = session_snapshot(root, directory, properties, facts, adapter=adapter)
         if facts.get('binding_conflict'):
             return NativeResult('unavailable', facts['binding_conflict']).to_dict()
         session = SessionHandle.from_records(properties, facts, directory)
