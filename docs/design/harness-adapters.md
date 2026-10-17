@@ -1067,7 +1067,8 @@ runs without waiting for it, so the mod waits up to 5 s and reports nothing if
 the file never changes. Core also reads that file for the exact process
 (`observed_binding`, evidence `claude-process-file`) before it lists, measures,
 sends to or resumes an agent, so a launch without the bridge follows a `/clear`
-too. Core then rebinds the agent and records the move in its session history
+too. A report that names another session than the process file shows is
+refused. Core then rebinds the agent and records the move in its session history
 ([session lineage](session-lineage.md)). Messages, usage and resume go to the new session;
 the old conversation stays on disk as an earlier generation.
 

@@ -4,6 +4,7 @@ import os
 from unittest.mock import patch
 from uuid import uuid4
 
+from multiverse.harnesses.types import ObservedBinding
 from multiverse.store import write
 from multiverse.tools import runtime_update
 
@@ -16,7 +17,7 @@ class SessionRebindReportTest(BaseTest):
         self.previous, self.session = str(uuid4()), str(uuid4())
         self.agent = self.root / 'state/agents' / str(uuid4())
         write(self.agent / 'properties.json', {'id': self.agent.name, 'name': 'worker', 'harness': 'claude',
-                                               'native_session_id': self.previous})
+                                               'workspace': str(self.work), 'native_session_id': self.previous})
         write(self.agent / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
         self.config = self.work / 'claude-config'
         self.enterContext(patch.dict(os.environ, {'MV2_LAUNCH_ID': 'current', 'CLAUDE_CONFIG_DIR': str(self.config)}))
@@ -56,3 +57,19 @@ class SessionRebindReportTest(BaseTest):
         with patch('multiverse.universe.agents.rebind_session', return_value={}) as rebind:
             self.report(session_reason='new')
         self.assertIsNone(rebind.call_args.kwargs['home'])
+
+    def test_a_move_the_launchs_process_does_not_show_is_refused(self):
+        observed = lambda native_id: ObservedBinding(native_id=native_id, home=os.path.realpath(self.config),
+                                                     evidence='claude-process-file')
+        observer = 'multiverse.harnesses.claude.ClaudeAdapter.observed_binding'
+        with patch(observer, return_value=observed(str(uuid4()))), \
+                patch('multiverse.universe.agents.rebind_session') as rebind:
+            with self.assertRaisesRegex(ValueError, 'process is on another session'):
+                self.report()
+            rebind.assert_not_called()
+        for seen in (observed(self.session), None):  # the process shows it, or no evidence either way
+            with self.subTest(seen=seen), patch(observer, return_value=seen), \
+                    patch('multiverse.universe.agents.rebind_session', return_value={}) as rebind:
+                self.report()
+                rebind.assert_called_once()
+
