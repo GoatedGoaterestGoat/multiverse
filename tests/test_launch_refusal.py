@@ -8,6 +8,7 @@ from multiverse.store import read, write
 from multiverse.universe import agents
 from multiverse.universe.mailbox import append_message, message_record, update_message
 from multiverse.tools import inspect, list_agents, doctor
+from multiverse.harnesses.codex import CodexAdapter
 from test_multiverse import BaseTest
 
 
@@ -49,6 +50,47 @@ class LaunchRefusalTest(BaseTest):
         self.assertEqual(facts['reason'], self.evidence['message'])
         self.assertEqual(facts['native_refusal']['code'], -32600)
         self.assertFalse(lifecycle.launch_ready(object(), {}, facts, self.directory, {}, 'alive'))
+
+    def test_observer_skips_unsupported_versions_and_lost_relays_before_tmux(self):
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        for version, relay in (('0.162.1', 'ready'), ('0.164.0', 'ready'), (None, 'ready'),
+                               ([], 'ready'), ('0.163.0', 'lost')):
+            with self.subTest(version=version, relay=relay):
+                write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
+                      'attachment': {'readiness': 'process'}, 'native_relay': {'state': relay},
+                      'native_versions': {'cli': version}})
+                monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+                monitor.describe = Mock(return_value=self.evidence)
+                backend = Mock()
+                backend.run.side_effect = ['native widget', '0']
+                with patch('multiverse.plugins.harness.version_of', return_value=None) as probe, \
+                        patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')) as owned:
+                    monitor._run()
+                if relay == 'lost':
+                    probe.assert_not_called()
+                owned.assert_not_called()
+                monitor.describe.assert_not_called()
+
+    def test_plain_observer_stops_after_the_startup_window(self):
+        class Clock:
+            elapsed = 0.
+            def is_set(self):
+                return self.elapsed >= 75  # Bound the failing old implementation too.
+            def wait(self, seconds):
+                self.elapsed += seconds
+        write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
+              'attachment': {'readiness': 'process'}, 'native_versions': {'cli': '0.163.0'}})
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+        monitor.stopped = Clock()
+        monitor.describe = Mock(return_value=None)
+        backend = Mock()
+        backend.run.side_effect = lambda command, *args: 'normal native pane' if command == 'capture-pane' else '0'
+        with patch.object(runner.time, 'monotonic', side_effect=lambda: monitor.stopped.elapsed), \
+                patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
+            monitor._run()
+        self.assertLessEqual(monitor.stopped.elapsed, 60)
+        self.assertLessEqual(monitor.describe.call_count, 240)
 
     def test_definite_startup_queue_fails_but_a_registered_wake_prompt_stays_uncertain(self):
         queued = append_message(self.directory, 'not submitted', {}, delivery='steer', target_session=self.thread)

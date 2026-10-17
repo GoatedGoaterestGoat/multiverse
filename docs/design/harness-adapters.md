@@ -901,6 +901,11 @@ limited to the actual active native refusal widget in an owned visible pane,
 with its controls and hidden cursor, at the tested version; quoted history is
 not a refusal. Same-server successful rejoin is never labelled in use.
 
+The plain startup observer runs only for a supported native layout and for at
+most the first 60 seconds after it starts. It stops sooner after validated
+bridge binding, native refusal, relay loss or launch exit. Unsupported versions
+perform no pane polling; later TUI navigation is outside this startup observer.
+
 The native refusal remains latched for that launch, even if pressing R later
 succeeds in Codex. Use `mv2 kill NAME --attachment-only` to end mv2's refused
 frontend and await its owned cleanup, then explicitly resume through mv2 to ask

@@ -20,6 +20,7 @@ from multiverse.runtime.process import process_started
 STARTUP_SECONDS = 2
 OUTPUT_LINES = 40
 OUTPUT_BYTES = 8192
+REFUSAL_STARTUP_SECONDS = 60
 
 
 def bounded_output(text):
@@ -313,6 +314,7 @@ class RefusalMonitor:
     def __init__(self, agent_dir, launch_id, root, adapter, executable):
         self.agent_dir, self.launch_id, self.root = agent_dir, launch_id, root
         self.describe, self.executable = adapter.launch_refusal, executable
+        self.supports = getattr(adapter, 'supports_launch_refusal', None)
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, name='native-launch-refusal', daemon=True)
 
@@ -329,16 +331,25 @@ class RefusalMonitor:
         from multiverse.plugins.harness import version_of
         from multiverse.runtime import native, refusal
         from multiverse.terminal.tmux import owned
+        deadline = time.monotonic() + REFUSAL_STARTUP_SECONDS
         facts = runtime(self.agent_dir)
-        version = (facts.get('native_versions') or {}).get('cli') or version_of(self.executable)
-        while not self.stopped.is_set():
+        if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
+                or facts.get('state') not in ('starting', 'running')
+                or (facts.get('native_relay') or {}).get('state') == 'lost'):
+            return
+        versions = facts.get('native_versions')
+        version = (versions.get('cli') if isinstance(versions, dict) else None) or version_of(self.executable)
+        if self.supports is not None and not self.supports(version):
+            return  # No known native layout: do no pane observation or launch locking.
+        while not self.stopped.is_set() and time.monotonic() < deadline:
             try:
                 # Never wait behind a long send/stop. The snapshot is exact and
                 # contains no scrollback, command transcript or inferred status.
                 with native._snapshot_lock(self.agent_dir):
                     facts = runtime(self.agent_dir)
                     if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
-                            or facts.get('state') not in ('starting', 'running') or facts.get('native_refusal')):
+                            or facts.get('state') not in ('starting', 'running') or facts.get('native_refusal')
+                            or (facts.get('native_relay') or {}).get('state') == 'lost'):
                         return
                     if ((facts.get('attachment') or {}).get('readiness') in ('binding', 'legacy-binding')
                             and facts.get('state') == 'running'
@@ -358,7 +369,7 @@ class RefusalMonitor:
                     return
             except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 pass  # Unavailable or unknown evidence cannot identify a refusal.
-            self.stopped.wait(.25)
+            self.stopped.wait(min(.25, max(0, deadline - time.monotonic())))
 
 
 def launch_environment(request):
