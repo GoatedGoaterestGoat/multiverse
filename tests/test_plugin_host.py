@@ -69,6 +69,77 @@ def register(mv):
 """
 
 
+SLOW_LOADER = """
+import os
+import time
+
+def register(mv):
+    time.sleep(1.5)  # loading takes a while
+    mv.service(lambda context: context.stopping.wait())
+"""
+
+
+class SupervisorGoneEarlyTest(PluginTestCase):
+    """A supervisor that dies while its worker is still starting (a crash, kill -9): the worker stops all the same,
+    instead of taking its new parent for its supervisor."""
+
+    def test_a_worker_stops_when_its_supervisor_died_before_it_loaded_the_plugin(self):
+        import signal
+        import subprocess
+        import time
+        self.write_plugin("late", {"module": "plugin", "extends": ["service"]}, {"plugin.py": SLOW_LOADER})
+        self.enable("late")
+        started = self.work / "worker.pid"
+        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        # A supervisor that starts the worker and is gone at once.
+        subprocess.run([sys.executable, "-c", "import sys; from multiverse.plugins import host; "
+                        "open(sys.argv[2], 'w').write(str(host._start_worker(sys.argv[1], 'late').pid))",
+                        str(self.root), str(started)], env=environment, stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=60)
+        pid = int(started.read_text())
+
+        def alive():
+            try:
+                os.kill(pid, 0)
+                return True
+            except ProcessLookupError:
+                return False
+
+        def cleanup():
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        self.addCleanup(cleanup)
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and alive():
+            time.sleep(0.1)
+        self.assertFalse(alive(), "the worker outlived the supervisor that started it")
+        self.assertIn("late: supervisor gone; stopping", (host.host_directory(self.root) / "host.log").read_text())
+
+    def test_a_worker_started_without_its_supervisors_pid_takes_its_parent(self):
+        """As an older supervisor, still running after an update, starts one."""
+        import subprocess
+        import time
+        self.write_plugin("holder", {"module": "plugin", "extends": ["service"]}, {"plugin.py": HOLDER})
+        self.enable("holder")
+        address, recorded = self.work / "h.sock", self.work / "holder.pid"
+        environment = {**os.environ, "HOLDER_SOCKET": str(address), "HOLDER_PID": str(recorded),
+                       "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        worker = subprocess.Popen([sys.executable, "-m", "multiverse.plugins.host", "--worker", str(self.root),
+                                   "holder"], env=environment, stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: worker.poll() is None and worker.kill() or worker.wait(10))
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (recorded.exists() and recorded.read_text()):
+            time.sleep(0.1)
+        self.assertTrue(recorded.read_text(), "the service never came up")
+        self.assertIsNone(worker.poll(), "it took its live parent for a dead supervisor")
+        worker.terminate()
+        self.assertEqual(worker.wait(20), 0)
+        self.assertNotIn("supervisor gone", (host.host_directory(self.root) / "host.log").read_text())
+
+
 class SupervisorGoneTest(PluginTestCase):
     """A worker whose supervisor died abruptly (kill -9, OOM) stops, instead of holding its service's socket."""
 

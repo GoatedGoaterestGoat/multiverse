@@ -115,3 +115,56 @@ def _kill_group(pgid):
     except (ProcessLookupError, PermissionError):
         pass
 
+
+
+def _without_waitid(test):
+    """Run `test` as on macOS before Python 3.13, which has no os.waitid."""
+    if hasattr(os, "waitid"):
+        saved = os.waitid
+        del os.waitid
+        test.addCleanup(setattr, os, "waitid", saved)
+
+
+def _process_state(pid):
+    """ps's state letter for `pid` (Z for an unreaped zombie), or '' once it is gone."""
+    return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1]
+
+
+class WithoutWaitidTest(Fixture):
+    """The supervisor sees a worker end without reaping it, so it can still end what the worker left in its process
+    group, where os.waitid is missing too (macOS before Python 3.13)."""
+
+    def setUp(self):
+        super().setUp()
+        _without_waitid(self)
+
+    def test_an_exit_is_seen_and_the_worker_is_not_reaped(self):
+        worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.5)"])
+        self.addCleanup(host._reap, worker)
+        self.assertFalse(host._exited(worker))
+        deadline = time.monotonic() + 10
+        while not host._exited(worker) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(host._exited(worker))
+        self.assertTrue(host._exited(worker))  # and it stays seen
+        self.assertIsNone(worker.returncode)
+        self.assertEqual(_process_state(worker.pid), "Z", "the check reaped the worker")
+        host._reap(worker)
+        self.assertEqual(worker.returncode, 0)
+
+    def test_a_worker_that_ended_before_its_first_check(self):
+        worker = subprocess.Popen([sys.executable, "-c", "pass"])
+        self.addCleanup(host._reap, worker)
+        deadline = time.monotonic() + 10
+        while _process_state(worker.pid) != "Z" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(host._exited(worker))
+        self.assertEqual(_process_state(worker.pid), "Z", "the check reaped the worker")
+
+
+class ProcessGroupWithoutWaitidTest(ProcessGroupTest):
+    """A stuck call's child goes with its worker where os.waitid is missing too."""
+
+    def setUp(self):
+        super().setUp()
+        _without_waitid(self)

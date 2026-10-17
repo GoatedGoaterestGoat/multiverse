@@ -527,7 +527,11 @@ So the host is a general **supervisor** for plugins' long-running work:
   stop`, and stops its workers first. If the supervisor dies without doing so
   (`kill -9`, the out-of-memory killer, a crash), each worker notices within a
   second that its parent process changed, stops its services and exits, so
-  nothing keeps holding a socket or running a handler.
+  nothing keeps holding a socket or running a handler. The supervisor gives each
+  worker its own pid, so this holds even when it died while the worker was
+  still starting. It tells a worker has exited without reaping it (`waitid`,
+  or a kqueue on macOS before Python 3.13), so it can still end what the worker
+  left in its process group.
 - **Isolation.** The supervisor itself loads no plugin code. Each plugin with
   long-running work gets its own worker process, which loads that plugin
   alone. A plugin that blocks, leaks memory or crashes affects only its own
