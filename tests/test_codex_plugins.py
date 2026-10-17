@@ -113,6 +113,21 @@ class CodexPluginsTest(PluginTestCase):
     def test_initial_core_context_reaches_plain_and_fallback_mcp(self):
         from multiverse import harnesses
         from multiverse.runtime import lifecycle
+        from multiverse.store import write
+        # A pre-update agent has launch proof and a saved terminal, but no
+        # agent-stable policy. Its child must still reach target preparation.
+        parent, properties, _, _ = lifecycle._record(self.root, 'sender', '', 'codex', None, None)
+        self.assertNotIn('agent_identity', properties)
+        write(parent / 'properties.json', properties)
+        parent_launch = str(uuid4())
+        write(parent / 'runtime.json', {'launch_id': parent_launch, 'tmux': {'socket': '/sender/tmux'}})
+        identity_keys = {'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID',
+                         'MV2_IDENTITY_MODE', 'MV2_CONTROL_SOCKET', 'MV2_TMUX_SOCKET'}
+        environment = {key: value for key, value in os.environ.items()
+                       if key not in identity_keys and not key.startswith('CODEX_')}
+        environment.update(MV2_UNIVERSE=str(self.root), MV2_AGENT_ID=properties['id'],
+            MV2_AGENT_DIR=str(parent), MV2_LAUNCH_ID=parent_launch,
+            MV2_CLI='/sender/mv2', MV2_TMUX_SOCKET='/stale-sender/tmux')
         self.add_plugin(fields={'mcp_servers': {'tools': {'command': 'python3', 'env_vars': [
             'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET',
             'MV2_CLI', 'MV2_PYTHON', 'PATH']}}})
@@ -124,8 +139,7 @@ class CodexPluginsTest(PluginTestCase):
             def prepare_and_stop(context):
                 captured.append((context, spawn(context)))
                 raise ValueError('fixture stops before native preparation')
-            with self.subTest(setting=setting), patch.dict(os.environ, {'MV2_AGENT_ID': 'sender',
-                    'MV2_CLI': '/sender/mv2', 'MV2_TMUX_SOCKET': '/sender/tmux'}), \
+            with self.subTest(setting=setting), patch.dict(os.environ, environment, clear=True), \
                  patch.object(harnesses, 'load', return_value=adapter), \
                  patch.object(lifecycle, '_cli_path', return_value='/target/bin/mv2'), \
                  patch.object(lifecycle.shutil, 'which', return_value='/fixture/tmux'), \
@@ -140,7 +154,7 @@ class CodexPluginsTest(PluginTestCase):
                 'MV2_LAUNCH_ID', 'MV2_CONTROL_SOCKET', 'MV2_CLI', 'MV2_PYTHON', 'PATH'})
             self.assertEqual(context.environment['MV2_CLI'], '/target/bin/mv2')
             self.assertEqual(context.environment['MV2_PYTHON'], sys.executable)
-            self.assertNotEqual(context.environment['MV2_AGENT_ID'], 'sender')
+            self.assertNotEqual(context.environment['MV2_AGENT_ID'], properties['id'])
             self.assertNotIn('MV2_TMUX_SOCKET', context.environment)
 
     def test_launch_environment_is_not_copied_to_mcp_or_argv(self):
