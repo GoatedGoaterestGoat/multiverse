@@ -11,8 +11,8 @@ from multiverse import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "docs" / "cli" / "reference.md"
-# Rationale and lab records may cite files that have since moved; they are not checked.
-SKIPPED = (ROOT / "docs" / "design", ROOT / "docs" / "lab-notes", ROOT / "lab-notes")
+# Design records may cite files that have since moved; they are not checked.
+SKIPPED = (ROOT / "docs" / "design",)
 
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?^ {0,3}\1[`~]*[ \t]*$", re.MULTILINE | re.DOTALL)
 CODE_SPAN = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
