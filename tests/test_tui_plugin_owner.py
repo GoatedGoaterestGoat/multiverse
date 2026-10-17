@@ -64,6 +64,8 @@ class Later(Static):
         raise RuntimeError("went wrong on the main screen")
     def later(self):
         self.screen.call_later(self.go_wrong)   # run by the main screen's own message loop
+    def on_the_app(self):
+        self.app.call_later(self.go_wrong)      # run by the app's own message loop
 
 class LaterPanel:
     def parse(self, widget, title):
@@ -130,6 +132,21 @@ class OwnerTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             await d.press("j")
             self.assertTrue(d.app.is_running)
             self.assertNotIn("fine for now", " ".join(d.local_view()))
+
+    async def test_a_plugin_error_escaping_an_app_handler_does_not_end_the_dashboard(self):
+        import importlib
+        write(self.root / "views" / "default.json", {"title": "T", "accent": "#89b4fa", "columns": ["name"], "plugin_panels": "none",
+                                                    "widgets": [{"type": "later panel", "title": "Later"},
+                                                                {"type": "markdown", "title": "Fine", "text": "still here"}]})
+        async with self.dashboard() as d:
+            await d.until(lambda: "fine for now" in " ".join(d.local_view()), "the plugin's panel")
+            screens = importlib.import_module(f"{self.loaded('owner').package}.screens")
+            d.app.screen.query_one(screens.Later).on_the_app()  # as a render error raised while the app handles a message
+            await d.until(lambda: "owner: its screen or widget failed" in d.status, "the failure to be the plugin's")
+            await d.settle()
+            self.assertTrue(d.app.is_running, "the app's message loop ended: the dashboard quit")
+            await d.press("j")
+            self.assertTrue(d.app.is_running)
 
     async def test_a_plugin_screen_with_invalid_css_says_what_is_wrong(self):
         async with self.dashboard() as d:

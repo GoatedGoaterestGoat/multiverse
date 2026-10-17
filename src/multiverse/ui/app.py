@@ -60,11 +60,13 @@ class PluginCommands(Provider):
                 yield Hit(score, shown, callback, text=title, help=help_text)
 
 
-class MainScreen(Screen):
-    """The dashboard's own screen. A plugin's widget on it that fails while Textual updates or lays out the screen (its
-    render() raising, text that reads as broken markup) is that plugin's failure and is contained here: an error that
-    escapes one of a screen's message handlers ends that screen's message loop, and the main screen's is the dashboard.
-    Textual already guards a layout refresh this way, but not an update; anything not the plugins' still raises."""
+class ContainsPluginErrors:
+    """For the app and its main screen, whose message loops are the dashboard. A plugin's failure that escapes one of
+    their message handlers (a plugin widget's render() raising, or its text reading as broken markup, while Textual
+    updates or lays out the screen; a callback a plugin's widget asked them to run) is that plugin's and is contained
+    here. Otherwise Textual ends that message loop after reporting the error, and with it the dashboard: the main
+    screen's widgets are torn down, or the app quits. Textual guards a layout refresh this way, but not an update or a
+    callback. Anything not a plugin's still raises."""
 
     async def _dispatch_message(self, message):
         try:
@@ -75,7 +77,11 @@ class MainScreen(Screen):
             self.app._handle_exception(error)
 
 
-class MultiverseApp(FleetView, TreeEditing, AgentCommands, App):
+class MainScreen(ContainsPluginErrors, Screen):
+    """The dashboard's own screen."""
+
+
+class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors, App):
     CSS_PATH = "app.tcss"
     COMMANDS = App.COMMANDS | {PluginCommands}
     TITLE = "Multiverse"
