@@ -32,6 +32,7 @@ import fnmatch
 import json
 from pathlib import Path
 import time
+import uuid
 
 from ..store import lock, now
 from . import config, loader
@@ -50,6 +51,18 @@ NAME_WIDTH = 12
 
 def directory(root):
     return Path(root) / "state" / DIRECTORY
+
+
+ID = "journal-id"  # made with a journal, gone when its state is removed: a reader tells a journal that started again
+
+
+def journal_id(root):
+    """The id of `root`'s journal, made when it is first written; None while there is none (or before mv2 made
+    them: such a journal gets one at its next event)."""
+    try:
+        return (directory(root) / ID).read_text().strip() or None
+    except OSError:
+        return None
 
 
 def segments(root):
@@ -131,6 +144,10 @@ def _bounded_lock(path, seconds=None):
 
 def _append(root, event):
     base = directory(root)
+    if not (base / ID).is_file():
+        temporary = base / f".{ID}.tmp"
+        temporary.write_text(uuid.uuid4().hex + "\n")
+        temporary.replace(base / ID)
     counter = base / "seq"
     found = segments(root)
     try:

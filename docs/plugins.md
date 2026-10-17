@@ -350,7 +350,9 @@ where they happen and delivered where plugins run**:
     own, guarded on its own in each universe. One still running, or out of
     time, holds only itself: its siblings go on, past any number of events,
     and an event a handler finished is never given to it again while a sibling
-    catches up. A call counts one try when it runs out of time and one more for
+    catches up, however many polls that takes. A journal whose state was
+    removed starts again with a new id (`state/events/journal-id`), and only
+    then does the host forget what its handlers finished. A call counts one try when it runs out of time and one more for
     every further 60 s it keeps running; after 3 tries the handler is given up
     on for that event, and its next events get calls of their own. A give-up
     is shown by `mv2 plugins`, `doctor` and the Plugins screen for a day

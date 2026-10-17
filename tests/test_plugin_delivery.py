@@ -123,6 +123,22 @@ class NeverReturnsTest(Fixture):
                             for item in plugins.listing(self.root) if item["name"] == "pair"
                             for error in item["errors"]))
 
+    def test_no_handler_gets_an_event_twice_however_many_polls_while_a_sibling_is_stuck(self):
+        # PR #20 review 4: once the sibling was more than one read ahead, every poll took that as a journal that
+        # started again, wiped its progress and gave it everything from the stuck event on once more.
+        import threading
+        self.module.HOLD["test"] = threading.Event()
+        self.emit(self.root, 1200)
+        with mock.patch.object(host, "HANDLER_SECONDS", 0.1), mock.patch.object(host, "TIMEOUTS_PER_EVENT", 1000):
+            self.assertTrue(self.deliver_until(lambda: len(self.seen("fast")) >= 1200, seconds=20),
+                            len(self.seen("fast")))
+            for _ in range(4):  # more polls while slow is still on event 1
+                host._deliver(self.loaded, self.mv, self.root, "pair")
+        fast = self.seen("fast")
+        self.assertEqual(len(fast), len(set(fast)), f"{len(fast) - len(set(fast))} events delivered again")
+        self.assertEqual(fast, list(range(1, 1201)))
+        self.assertEqual(host._read_cursor(self.root, "pair"), 0)
+
     def test_siblings_keep_going_past_one_read_while_a_handler_is_stuck(self):
         import threading
         self.module.HOLD["test"] = threading.Event()

@@ -438,17 +438,19 @@ def _deliver(loaded, mv, scope, name):
         return
     after = _read_cursor(scope, name)
     universe = mv.universe(scope)
+    journal, place = events.journal_id(scope), (loaded.name, str(scope))
+    if _journals.get(place) not in (None, journal):
+        # The journal started again (its state was removed): nothing in it was seen. Told by its id, never by
+        # what one read returns, which a sibling far ahead of a stuck handler is always past.
+        for table in (_finished, _timeouts):
+            for key in [key for key in table if key[:2] == place]:
+                del table[key]
+    _journals[place] = journal
     held, complete, page_after = set(), True, after  # held: handlers that have not finished an earlier event
     for page in range(PAGES_PER_POLL):
         found, gap = events.read(scope, page_after, limit=READ_LIMIT)
-        if page == 0:
-            if gap is not None:
-                found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
-            if found:
-                newest = found[-1]["seq"]
-                for key in [key for key, seq in _finished.items()
-                            if key[:2] == (loaded.name, str(scope)) and seq > newest]:
-                    del _finished[key]  # the journal started again (its state was removed): nothing here was seen
+        if page == 0 and gap is not None:
+            found = [{"type": "events.gap", "seq": gap["to"], "at": now(), "data": gap}, *found]
         if not found:
             break
         for event in found:
@@ -464,6 +466,7 @@ def _deliver(loaded, mv, scope, name):
 # Per (plugin, universe, handler): the last seq it finished; (seq, tries, first try's start) for the event it is
 # on; and the generation of its guard key, raised when a call is left running so the next one can start.
 _finished, _timeouts, _generations = {}, {}, {}
+_journals = {}  # (plugin, universe) -> the id of the journal its handlers' progress above belongs to
 _abandoned = []  # (Loaded, guard key) of calls given up on while still running, in this process
 
 
