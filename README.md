@@ -294,9 +294,11 @@ Existing schema-1 definitions and assets remain authoritative and are never rewr
 ## Verification and next slices
 
 ```sh
-.venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python tests/run.py
 ./bin/mv2 -u /path/to/project doctor
 ```
+
+`tests/run.py` runs the same tests as `unittest discover -s tests`, each test module (or a shard of a slow one) in its own process, as many at once as the machine has CPUs: about two and a half minutes on 8 cores, where `unittest discover -s tests -v` takes about thirteen. Name modules for a focused run (`tests/run.py test_tui test_kill`), or a class or test by its dotted name; `-v` shows each test. Runs started at the same time, such as several agents' runs before their commits, share the machine's slots and take turns instead of overloading it. A unit that hangs past `--timeout` (20 minutes) or is interrupted fails, and still runs its cleanups. Any test that writes the real `~/.multiverse` fails.
 
 The Textual tests use `App.run_test()` and Pilot to exercise real widgets, mouse clicks, keystrokes, forms, cancellation, recursive folding, search through folded groups, correctly scoped creation, stable selection, failure reporting, stale captures, inline draft preservation, slow refreshes, and resizing down to 60×20. They need no terminal, sockets or model:
 
