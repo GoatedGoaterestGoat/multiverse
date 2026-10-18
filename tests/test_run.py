@@ -289,25 +289,30 @@ class RunnerTest(unittest.TestCase):
         self.assertFalse((guarded / "cache.json").exists())
 
     def test_a_credential_in_the_environment_reaches_no_module_test_or_child_process(self):
-        """The runner drops every variable that may hold a credential (tokens, secrets, API keys, GitHub ones) before
-        it imports or starts anything, so no module import, test or process a test starts sees one; otherwise a
-        failing assertion that prints an environment puts the user's token in logs and transcripts, as one once did,
-        and nothing shows it."""
-        planted = {"FAKE_SERVICE_TOKEN": "planted-token-value", "GITHUB_PERSONAL_ACCESS_TOKEN": "planted-gh-value"}
+        """The runner drops every variable that may hold a credential (tokens, secrets, keys, passwords, auth sockets
+        and askpass helpers, GitHub ones) before it imports or starts anything, so no module import, test or process a
+        test starts sees one; otherwise a failing assertion that prints an environment puts the user's token in logs
+        and transcripts, as one once did, and nothing shows it."""
+        planted = {"FAKE_SERVICE_TOKEN": "planted-token-value", "GITHUB_PERSONAL_ACCESS_TOKEN": "planted-gh-value",
+                   "DEPLOY_KEY": "planted-key", "NPM_AUTH": "planted-auth", "MYSQL_PWD": "planted-pwd",
+                   "GIT_ASKPASS": "/planted/askpass", "VSCODE_GIT_ASKPASS_MAIN": "/planted/vscode-askpass",
+                   "SSH_AUTH_SOCK": "/planted/agent.sock"}
+        kept = {"GIT_AUTHOR_NAME": "not a credential"}  # git's identity, which tests need
         self.module("test_secrets", f"""
             import json, os, subprocess, sys, unittest
-            PLANTED = {sorted(planted)!r}
-            SEEN_AT_IMPORT = [name for name in PLANTED if name in os.environ]
+            NAMES = {sorted(planted) + sorted(kept)!r}
+            SEEN_AT_IMPORT = [name for name in NAMES if name in os.environ]
             class Plain(unittest.TestCase):
                 def test_nothing_sees_a_planted_credential(self):
                     child = subprocess.run([sys.executable, "-c", "import json, os, sys; "
                                             "print(json.dumps([name for name in sys.argv[1:] if name in os.environ]))",
-                                            *PLANTED], capture_output=True, text=True, check=True)
-                    seen = {{"import": SEEN_AT_IMPORT, "test": [name for name in PLANTED if name in os.environ],
+                                            *NAMES], capture_output=True, text=True, check=True)
+                    seen = {{"import": SEEN_AT_IMPORT, "test": [name for name in NAMES if name in os.environ],
                              "child": json.loads(child.stdout)}}
-                    self.assertEqual(seen, {{"import": [], "test": [], "child": []}})
+                    self.assertEqual(seen, {{"import": {sorted(kept)!r}, "test": {sorted(kept)!r},
+                                            "child": {sorted(kept)!r}}})
             """)
-        result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted}, text=True,
+        result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted, **kept}, text=True,
                                 capture_output=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Ran 1 tests", result.stdout)
