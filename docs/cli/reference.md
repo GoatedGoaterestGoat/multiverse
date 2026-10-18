@@ -357,7 +357,7 @@ mv2 deliver [--json] (--check | --retry) agent
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
 | `--json` |  | Return the original delivery evidence as JSON |  |
-| `--check` |  | Reconcile pending or uncertain deliveries and record receipts for accepted ones, without submitting |  |
+| `--check` |  | Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting |  |
 | `--retry` |  | Retry definite failures; accepted or uncertain submissions are never resent |  |
 
 Use exactly one of `--check`, `--retry`.

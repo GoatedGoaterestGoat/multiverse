@@ -12,7 +12,7 @@ def configure(parser):
     parser.add_argument('--json', action='store_true', help='Return the original delivery evidence as JSON')
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument('--check', action='store_true',
-                      help='Reconcile pending or uncertain deliveries and record receipts for accepted ones, without submitting')
+                      help='Report definite failures and reconcile pending, uncertain or accepted deliveries, without submitting')
     mode.add_argument('--retry', action='store_true', help='Retry definite failures; accepted or uncertain submissions are never resent')
 
 
@@ -39,12 +39,18 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         accepted = (not retry and state == 'accepted' and not confirmed
                     and tracking.get('delivery_method') != 'resume_prompt'
                     and attempts[-1].get('launch_id') == launch_id)
-        if not accepted and state not in (('failed',) if retry else ('pending', 'submitting', 'unknown')):
+        if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown')):
             continue
         try:
             if retry:
                 with store.lock(directory / '.send.lock'):
                     receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
+            elif state == 'failed':
+                previous = attempts[-1]
+                receipt = {**previous, 'state': 'error', 'ok': False,
+                           'reason': previous.get('reason') or 'Message was not delivered',
+                           'value': {**(previous.get('value') if isinstance(previous.get('value'), dict) else {}),
+                                     'definite_failure': True}}
             else:
                 receipt = native.deliver(root, directory.name, message['id'], check=True)
         except (OSError, ValueError, RuntimeError) as error:

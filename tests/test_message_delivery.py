@@ -203,8 +203,10 @@ class InboxDeliveryTest(BaseTest):
         with patch.object(adapter, 'get_delivery', side_effect=check):
             result = deliver.run(self.root, agent=self.agent, check=True)
         self.assertEqual(checked, [accepted['id'], unknown['id'], pending['id']])
-        self.assertTrue(result['ok'])
-        self.assertTrue(all(m['transcript_confirmed'] for m in result['messages']))
+        self.assertFalse(result['ok'])  # The definite failure remains visible, without a native check.
+        self.assertEqual(len(result['messages']), 4)
+        self.assertEqual(sum(m.get('transcript_confirmed') is True for m in result['messages']), 3)
+        self.assertEqual([m['reason'] for m in result['messages'] if m.get('ok') is False], ['definite failure'])
         for message in (accepted, failed, unknown, pending):
             self.assertNotIn(message['id'], json.dumps(result))
         before = len(self.calls)

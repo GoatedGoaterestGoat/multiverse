@@ -177,6 +177,8 @@ class ConfiguredAdapter:
         result = {name: Capability('unavailable', 'No native implementation',
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
         result['session_name'] = Capability('unavailable', 'Native session naming is not verified for this manifest')
+        for operation in ('send_steer', 'send_follow_up'):
+            result[operation] = replace(result[operation], mechanism='launch-only')
         result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:
@@ -187,7 +189,7 @@ class ConfiguredAdapter:
         return result
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
-        return NativeResult('unavailable', 'No verified native message delivery for this session')
+        return NativeResult('unavailable', 'No verified native message delivery for this session', {'launch_only': True})
 
     def get_delivery(self, session, message_id, executor):
         return NativeResult('unavailable', 'Native receipt reconciliation is not implemented')

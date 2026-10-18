@@ -60,6 +60,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
             result['damaged'] = damage
         if notices:
             result['notices'] = notices
+        if row.get('delivery_problem'):
+            result['delivery_problem'] = row['delivery_problem']
         if row.get('runtime', {}).get('auto_recovery'):
             result['recovery'] = row['runtime']['auto_recovery']
         return result
@@ -68,6 +70,8 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     out = [head] + ([f"Reported: {reported}"] if reported else []) + ([f"Last error: {error_text(error, tail=5)}"] if error else []) \
         + ([f"Note: {fallback}"] if fallback else [])
     out.extend('Note: ' + notice for notice in notices)
+    if row.get('delivery_problem'):
+        out.append(row['delivery_problem'])
     if row.get('recovery_note'):
         out.append('Note: Reconnected automatically.')
     shown = tail(capture, lines)

@@ -1,6 +1,7 @@
 """Human summaries of delivery evidence; internal receipts stay unchanged."""
 import re
 import json
+from ..display import clean
 
 
 def failure_reason(reason, text=''):
@@ -44,12 +45,16 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     value = value if isinstance(value, dict) else {}
     reason = str(receipt.get('reason') or '')
     if state in ('error', 'unavailable'):
-        why = failure_reason(reason, text)
+        # A file path is actionable evidence, not an opaque native identifier.
+        why = clean(reason) if value.get('pre_submission_failure') is True else failure_reason(reason, text)
         if value.get('launch_only') is True:
             return (f"Not delivered to {name}: {why}. Saved; resend it with --delivery inbox-only "
                     f"for manual reading, or attach with mv2 attach {name}.")
         if value.get('pre_submission_failure') is True:
             return (f"Not delivered to {name}: {why}. Saved without submission; repair the named file, "
+                    f"then mv2 deliver {name} --retry.")
+        if value.get('wake_refused') is True or value.get('definite_failure') is True:
+            return (f"Not delivered to {name}: {why}. Saved; fix the reason, "
                     f"then mv2 deliver {name} --retry.")
         if check:
             return f"{name}: could not check delivery: {why}. Saved; resume it, then mv2 deliver {name} --check."

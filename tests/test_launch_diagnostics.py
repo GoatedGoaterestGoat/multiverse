@@ -95,6 +95,12 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                              wait=True, wait_timeout=5)
         self.assertFalse(first['ready'])
         directory = agents.directory(self.root, first['id'])
+        # A damaged native transcript supplies no negative consumption proof.
+        # The separate failed-wake tests cover a missing/complete transcript.
+        from multiverse.harnesses.claude import claude_home
+        transcript = claude_home() / 'projects' / '-fixture' / (read(directory / 'properties.json')['native_session_id'] + '.jsonl')
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{"type":')
         sent = send.run(self.root, agent=first['id'], text='Do this exactly once')
         self.assertTrue(sent['saved'])
         message = inbox(directory, all_messages=True)['messages'][-1]

@@ -520,6 +520,18 @@ def retarget_message(directory, properties, message, tracking):
     return tracking
 
 
+def _launch_only_delivery(adapter, session, delivery):
+    """A declared missing delivery path, distinct from a broken connection."""
+    # Connected sessions do not need an extra capability/process observation.
+    if session.endpoint and session.native_id:
+        return None
+    capabilities = getattr(adapter, 'capabilities', None)
+    if capabilities is None:
+        return None
+    capability = capabilities(session).get('send_follow_up' if delivery == 'follow-up' else 'send_steer')
+    return capability if capability and capability.mechanism == 'launch-only' else None
+
+
 def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
@@ -602,6 +614,12 @@ def deliver(root, reference, message_id, retry=False, check=False):
             result = {'state': 'error', 'reason': f'Pre-submission session check failed: {error}', 'ok': False, 'message_id': message_id}
             update_message(directory, message_id, submission_state='failed', attempts=[*previous, result])
             return result
+        launch_only = _launch_only_delivery(adapter, session, selected_mode)
+        if launch_only is not None:
+            receipt = {'state': 'unavailable', 'ok': False, 'reason': launch_only.reason,
+                       'value': {'launch_only': True}}
+            update_message(directory, message_id, submission_state='failed', attempts=[*previous, receipt])
+            return receipt
         attempt = {'state': 'unknown', 'reason': 'Submission in progress', 'message_id': message_id,
                    'native_session_id': session.native_id, 'mode': selected_mode, 'agent_id': session.agent_id,
                    'launch_id': session.launch_id, 'at': now()}
@@ -640,7 +658,9 @@ def send_or_wake(root, reference, message_id, retry=False):
         wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
         capability = adapter.capabilities(session).get('wake') if wake else None
         if wake and (capability is None or capability.state != 'supported'):
-            receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt'}
+            launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None
+            receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt',
+                       'value': {'launch_only': launch_only, 'wake_refused': True}}
             update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
             return receipt
     if not wake:
@@ -657,7 +677,8 @@ def send_or_wake(root, reference, message_id, retry=False):
         return {**receipt, 'notices': launched['notices']} if launched.get('notices') else receipt
     except Exception as error:
         _, tracking = message_record(directory, message_id)
-        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}'}
+        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
+                   'value': {'wake_refused': True}}
         # If startup was registered, uncertainty belongs to the runner. Never
         # turn a possibly submitted command-line prompt into a retryable failure.
         if tracking.get('submission_state', 'pending') in ('pending', 'failed'):

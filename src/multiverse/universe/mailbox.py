@@ -64,9 +64,21 @@ def _messages(agent_dir):
     return data, cursor, messages
 
 
+def _ledger_damage(path, reason):
+    return ValueError(f'{path}: {reason}; back up and repair or reset the file, '
+                      'then check delivery before retrying')
+
+
+def _ledger(path):
+    try:
+        return records.runtime(path)
+    except records.RecordError as error:
+        raise _ledger_damage(error.file, error.reason) from error
+
+
 def _states(agent_dir):
     path = agent_dir / 'inbox-state.json'
-    states = records.runtime(path)
+    states = _ledger(path)
     for identifier, state in states.items():
         if (not isinstance(state, dict)
                 or ('submission_state' in state and (not isinstance(state['submission_state'], str)
@@ -74,7 +86,7 @@ def _states(agent_dir):
                 or (state.get('native_receipt') is not None and not isinstance(state['native_receipt'], dict))
                 or ('attempts' in state and (not isinstance(state['attempts'], list)
                     or any(not isinstance(attempt, dict) for attempt in state['attempts'])))):
-            raise records.RecordError(path, f'invalid delivery tracking for {identifier!r}')
+            raise _ledger_damage(path, f'invalid delivery tracking for {identifier!r}')
 
     # Retired per-message read markers have no effect on delivery or read position.
     states = {identifier: {key: value for key, value in state.items() if key != 'acknowledged_at'}
@@ -82,21 +94,21 @@ def _states(agent_dir):
     states = {identifier: state for identifier, state in states.items() if state}
     legacy = agent_dir / 'native-delivery.json'
     if legacy.exists():
-        for identifier, attempts in records.runtime(legacy).items():
+        for identifier, attempts in _ledger(legacy).items():
             if (not isinstance(attempts, list) or any(not isinstance(attempt, dict) for attempt in attempts)
                     or any(attempt.get('state') not in ('native_queued', 'ok', 'error', 'unavailable', 'unknown', 'pending')
                            for attempt in attempts)):
-                raise records.RecordError(legacy, f'invalid delivery attempts for {identifier!r}')
+                raise _ledger_damage(legacy, f'invalid delivery attempts for {identifier!r}')
             if identifier not in states and attempts:
                 last = attempts[-1]
                 states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                     'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
     for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
-        failed = records.runtime(proof)
+        failed = _ledger(proof)
         identifier = failed.get('message_id')
         if (failed.get('schema') != 1 or identifier != proof.stem
                 or not isinstance(identifier, str) or not isinstance(failed.get('reason'), str)):
-            raise records.RecordError(proof, 'invalid pre-submission failure record')
+            raise _ledger_damage(proof, 'invalid pre-submission failure record')
         previous = states.get(identifier, {})
         if previous.get('submission_state', 'pending') in ('pending', 'failed'):
             receipt = {'state': 'error', 'ok': False, 'reason': failed['reason'],
@@ -104,6 +116,26 @@ def _states(agent_dir):
             states[identifier] = {**previous, 'submission_state': 'failed',
                                   'attempts': previous.get('attempts') or [receipt]}
     return states
+
+
+def delivery_problem(agent_dir, name):
+    """Count definite failures in real inbox messages, without native queries.
+
+    Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
+    rather than making the agent's identity or terminal record unusable.
+    """
+    if not any((agent_dir / entry).exists() for entry in ('inbox-state.json', 'native-delivery.json', 'inbox-unsubmitted')):
+        return None
+    with lock(agent_dir / '.inbox.lock'):
+        states = _states(agent_dir)
+        failed = {identifier for identifier, state in states.items()
+                  if state.get('submission_state') == 'failed'}
+        if not failed:
+            return None
+        _, _, messages = _messages(agent_dir)
+        count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
+                    and message.get('id') in failed for _, message in messages)
+    return f'{count} messages not delivered: mv2 deliver {name} --retry' if count else None
 
 
 def preflight_delivery(agent_dir):

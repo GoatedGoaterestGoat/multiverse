@@ -268,6 +268,8 @@ class CodexAdapter(ConfiguredAdapter):
         if session.native_relay and session.native_relay.get('state') == 'lost':
             result['send_steer'] = result['send_follow_up'] = Capability(
                 'unavailable', session.native_relay['reason'], required=True)
+        if not self._uses_bridge(session):
+            result['send_steer'] = result['send_follow_up'] = replace(result['send_steer'], mechanism='launch-only')
         if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
         elif self.get_usage(session).state == 'ok':

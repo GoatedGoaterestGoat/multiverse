@@ -34,6 +34,9 @@ def check(root, notes=None):
                     problem = f"{item['name']}: missing workspace folder: {workdir}"
                     found.append((problem, problem))
                 runtime = item.get("runtime", {})
+                if item.get('delivery_problem'):
+                    problem = f"{scope}: {item['delivery_problem']}"
+                    found.append((problem, problem))
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
                 recovery = runtime.get('auto_recovery') or {}
                 connection_error = item.get('connection_error')

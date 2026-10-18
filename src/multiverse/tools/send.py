@@ -110,7 +110,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             return ({**result, "state": "queued", "saved": True,
                     "reason": "Saved for explicit inbox reading"}, {})
         if preflight_error:
-            reason = f"{directory / 'inbox-state.json'}: {preflight_error}"
+            reason = (preflight_error if str(directory) in preflight_error else
+                      f"{directory / 'inbox-state.json'}: {preflight_error}")
             mailbox.record_unsubmitted(directory, message['id'], reason)
             receipt = {'state': 'error', 'ok': False, 'reason': reason,
                        'value': {'pre_submission_failure': True}}

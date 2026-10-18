@@ -94,6 +94,10 @@ def listing(root, recursive=False, only=None):
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
+                try:
+                    delivery_problem = mailbox.delivery_problem(path.parent, properties['name'])
+                except (OSError, ValueError, TypeError, KeyError):
+                    delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append(text_defaults({**properties, "usage": measured, "tokens": display.usage_total(measured),
                              "usage_detail": display.usage_details(measured), "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
@@ -104,6 +108,7 @@ def listing(root, recursive=False, only=None):
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
+                             "delivery_problem": delivery_problem,
                              "runtime": facts}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))

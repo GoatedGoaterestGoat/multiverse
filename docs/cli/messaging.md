@@ -73,6 +73,10 @@ mv2 deliver worker --check    # settle uncertain deliveries, record confirmation
 mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
+`--check` also reports definite failures and exits nonzero while any checked
+message failed. It does not resend them. List, inspect and doctor show how many
+messages were not delivered and the `mv2 deliver NAME --retry` command.
+
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
 
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`
@@ -93,6 +97,11 @@ mv2 inbox --wait --timeout 5m          # wait for the next inbox-only message
 ```
 
 Plain `inbox` shows unread `inbox-only` messages and marks them read once printed. Messages delivered directly already reached the agent's conversation, so `inbox` doesn't repeat them. `--all` shows the full history, and `--json` adds the delivery details. When nothing matches, the line names the filter, such as `No messages since 2026-10-17T00:00:00Z.` or `No messages in the last 2h.`
+
+An unreadable or damaged delivery ledger is reported with its full file path and
+a repair/reset hint, including for `inbox --all` and `--peek`. Back it up before
+repairing or resetting it. Check uncertain deliveries before retrying; resetting
+bookkeeping is not evidence that the agent never received an older message.
 
 `--wait` without `--timeout` waits indefinitely. When a timeout runs out, `inbox` prints a line and exits 1.
 
