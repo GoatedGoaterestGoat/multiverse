@@ -158,6 +158,9 @@ class RefreshTest(unittest.TestCase):
         shutil.rmtree(self.template)
         with self.assertRaisesRegex(ValueError, "was made from template .*template, which can't be found.*--template"):
             self.plan()
+        with self.assertRaisesRegex(ValueError, "project .*was made from template") as caught:
+            self.plan()
+        self.assertIn(f"mv2 -u {self.root} refresh --template", str(caught.exception))
         with self.assertRaisesRegex(ValueError, "Unknown template: elsewhere"):
             self.plan(template="elsewhere")
 
