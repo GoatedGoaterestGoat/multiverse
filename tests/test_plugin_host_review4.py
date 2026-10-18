@@ -2,11 +2,13 @@
 call's child processes go with its worker."""
 import os
 from pathlib import Path
+import select
 import signal
 import subprocess
 import sys
 import threading
 import time
+import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -130,6 +132,12 @@ def _process_state(pid):
     return subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()[:1]
 
 
+# Without os.waitid the supervisor uses a kqueue (macOS before Python 3.13; the BSDs). Linux always has os.waitid,
+# which ProcessGroupTest covers there.
+WITHOUT_WAITID = unittest.skipUnless(hasattr(select, "kqueue"), "the path without os.waitid needs a kqueue")
+
+
+@WITHOUT_WAITID
 class WithoutWaitidTest(Fixture):
     """The supervisor sees a worker end without reaping it, so it can still end what the worker left in its process
     group, where os.waitid is missing too (macOS before Python 3.13)."""
@@ -162,6 +170,7 @@ class WithoutWaitidTest(Fixture):
         self.assertEqual(_process_state(worker.pid), "Z", "the check reaped the worker")
 
 
+@WITHOUT_WAITID
 class ProcessGroupWithoutWaitidTest(ProcessGroupTest):
     """A stuck call's child goes with its worker where os.waitid is missing too."""
 
