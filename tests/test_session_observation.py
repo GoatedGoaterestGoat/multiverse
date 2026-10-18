@@ -36,8 +36,10 @@ class SessionObservationTest(BaseTest):
             'get_usage': lambda session: NativeResult('ok', value={'native_id': session.native_id}), **hooks})
 
     def test_an_exact_observation_rebinds_before_use(self):
-        """An exact observation of a native /new or /clear rebinds before usage is measured or a message is targeted;
-        a break goes unnoticed because the first message after the change goes to the old conversation."""
+        """An exact observation of a native /new or /clear rebinds before usage is measured or a message is targeted,
+        and a listing whose observation coincides with the runner writing its exit describes the stopped launch it
+        returns; a break goes unnoticed because the first message after the change goes to the old conversation, or
+        the row shows an exit code yet still says alive (LC-24, 02569a6)."""
         target = str(uuid4())
         with patch.object(harnesses, 'load', return_value=self.observing(target)):
             result = native.usage_snapshot(self.root, self.properties, self.facts)
@@ -51,6 +53,23 @@ class SessionObservationTest(BaseTest):
         self.assertTrue(result['ok'])
         message, = inbox(self.directory, all_messages=True)['messages']
         self.assertEqual(message['target_session'], after)
+        with self.subTest('a listing whose observation coincides with the runner writing its exit'):
+            write(self.directory / 'runtime.json', self.facts)
+            wrote = []
+
+            def observer(session):
+                if not wrote:  # the runner's exit writer takes no launch lock, so it can land mid-observation
+                    write(self.directory / 'runtime.json', {**self.facts, 'state': 'stopped', 'exit_code': 0})
+                    wrote.append(True)
+                return ObservedBinding(native_id=str(uuid4()), home=str(self.work), evidence='fixture-process-file')
+
+            def terminal(properties, facts, snapshots=None):
+                return {'live': 'stopped' if 'exit_code' in facts else 'alive', 'reason': ''}
+
+            with patch.object(harnesses, 'load', return_value=self.observing(None, observed_binding=observer)), \
+                    patch.object(lifecycle, 'observe', side_effect=terminal):
+                [row] = lifecycle.listing(self.root)
+            self.assertEqual((row['runtime'].get('exit_code'), row['live']), (0, 'stopped'))
 
     def test_rebind_needs_exact_current_launch_evidence(self):
         """No rebind and no measurement happen unless the evidence is exact, from the current launch, with a matching

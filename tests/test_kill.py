@@ -1,12 +1,14 @@
 """Real, isolated tmux shutdown stages and exact-launch process ownership."""
 import os
+from pathlib import Path
+import shutil
 import signal
 import threading
 import time
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse.universe import agents, records
+from multiverse.universe import agents, records, relocate, templates
 from multiverse.runtime import lifecycle
 from multiverse.runtime import native
 from multiverse.store import read
@@ -120,24 +122,45 @@ class KillTest(TerminalBase):
             self.assertNotIn(launched['runtime']['tmux']['pane'], self.backend.snapshot()[0])
 
     def test_a_dead_wrapper_is_removed_without_signals_or_the_daemon(self):
-        """A dead wrapper left by an older or interrupted runner is removed without signals or the native daemon, and
-        resume then keeps the session; fragile because only older runners create it, and a break leaves undeletable
-        panes or signals a reused pid."""
+        """A dead wrapper left by an older or interrupted runner is removed, by kill without signals or the native
+        daemon, and by a move or a removal of its agent, each keeping the session; fragile because only older runners
+        create it, and a break leaves undeletable panes, signals a reused pid, or leaves a terminal behind for
+        records already moved to another universe or the trash (02569a6)."""
         launched, directory = self.spawn()
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
-        pane = launched['runtime']['tmux']['pane']
-        self.retain_wrapper(launched, directory)
-        with patch.object(native, 'stop', side_effect=ConnectionRefusedError(61, 'Connection refused')), \
-                patch.object(Tmux, 'signal_child') as signal_child:
-            result = lifecycle.kill(self.root, launched['id'])
-        signal_child.assert_not_called()
-        self.assertEqual(result['state'], 'dormant')
-        self.assertEqual(result['native_cancellation']['state'], 'unknown')
-        self.assertIn('unconfirmed', agents.runtime(directory)['error'])
-        self.assertNotIn(pane, self.backend.snapshot()[0])
-        resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
-        self.assertEqual(resumed['native_session_id'], identifier)
+        with self.subTest('kill'):
+            pane = launched['runtime']['tmux']['pane']
+            self.retain_wrapper(launched, directory)
+            with patch.object(native, 'stop', side_effect=ConnectionRefusedError(61, 'Connection refused')), \
+                    patch.object(Tmux, 'signal_child') as signal_child:
+                result = lifecycle.kill(self.root, launched['id'])
+            signal_child.assert_not_called()
+            self.assertEqual(result['state'], 'dormant')
+            self.assertEqual(result['native_cancellation']['state'], 'unknown')
+            self.assertIn('unconfirmed', agents.runtime(directory)['error'])
+            self.assertNotIn(pane, self.backend.snapshot()[0])
+            resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
+            self.assertEqual(resumed['native_session_id'], identifier)
+        destination = templates.create(self.root / 'subverses/review', 'review', workdir=self.work)
+        shutil.copytree(self.root / 'harnesses/fake', destination / 'harnesses/fake')
+        with self.subTest('a move to another universe'):
+            until(lambda: agents.runtime(directory).get('pid'))
+            pane = resumed['runtime']['tmux']['pane']
+            self.retain_wrapper(resumed, directory)
+            relocate.move_agent(self.root, launched['id'], destination)
+            self.assertNotIn(pane, self.backend.snapshot()[0])
+            self.assertEqual(lifecycle.listing(destination)[0]['live'], 'dormant')
+            resumed = lifecycle.start(destination, resume=launched['id'], socket_path=self.socket)
+            self.assertEqual(resumed['native_session_id'], identifier)
+        with self.subTest('a removal to the trash'):
+            moved = agents.directory(destination, launched['id'])
+            until(lambda: agents.runtime(moved).get('pid'))
+            pane = resumed['runtime']['tmux']['pane']
+            self.retain_wrapper(resumed, moved)
+            removed = relocate.remove_agent(destination, launched['id'])
+            self.assertNotIn(pane, self.backend.snapshot()[0])
+            self.assertEqual(read(Path(removed['trash']) / 'properties.json')['native_session_id'], identifier)
 
     def test_kill_never_controls_a_pane_or_process_it_cannot_prove_is_its_own(self):
         """kill never controls a pane tagged with another launch or signals a pid that is not its child, and both
