@@ -83,6 +83,16 @@ class CommandNoticeTest(NativeBackendTest):
                 self.assertIsNotNone(runner.retry_startup(launch, request, self.adapter, first,
                     runner.STARTUP_SECONDS + 1, child, native_id=self.properties.get('native_session_id')))
             child.assert_called_once()
+        with self.subTest('unsupported screen keeps the ordinary short retry window'):
+            write(launch / 'request.json', request)
+            write(self.directory / 'runtime.json', {**baseline,
+                'native_startup_observation': {'state': 'unsupported'}})
+            child = Mock(return_value=second)
+            with patch.object(self.adapter, 'startup_retryable', return_value=True, create=True), \
+                    patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')):
+                self.assertIsNotNone(runner.retry_startup(launch, request, self.adapter, first, .1,
+                    child, native_id=self.properties.get('native_session_id')))
+            child.assert_called_once()
         with self.subTest('a wait settling the screen during diagnostic capture wins over retry'):
             write(launch / 'request.json', request)
             write(self.directory / 'runtime.json', {**baseline, 'startup_checked': True,

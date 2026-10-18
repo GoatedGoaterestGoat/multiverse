@@ -438,7 +438,7 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
         return (facts.get('launch_id') == launch.name and facts.get('pid') == process.pid
                 and facts.get('state') in ('starting', 'running') and not facts.get('ending_at')
                 and (not facts.get('startup_checked') or pending)
-                and observed in (None, 'pending')
+                and observed in (None, 'pending', 'unsupported')
                 and elapsed <= (STARTUP_WINDOW_SECONDS if pending else STARTUP_SECONDS)
                 and not facts.get('startup_retry') and not facts.get('native_refusal')
                 and facts.get('startup_delivery') not in ('waiting', 'ready')
