@@ -53,9 +53,14 @@ class RuntimeWriterUpgradeTest(BaseTest):
             data = json.loads(fixture_text(filename))
             # Only relocate private paths; identity, authority and sidecar bytes
             # otherwise retain the actual writer's data and absence of fields.
-            work = data['provenance']['work']
-            data = json.loads(json.dumps(data).replace(str(Path(work).resolve()), str(self.work))
-                              .replace(work, str(self.work)))
+            # Use captured aliases, not this host's resolution of /tmp. Longest
+            # first keeps /tmp from partially replacing macOS's /private/tmp.
+            paths = {data['provenance']['work'],
+                     *(row['properties']['workspace'] for row in data['records'])}
+            relocated = json.dumps(data)
+            for path in sorted(paths, key=len, reverse=True):
+                relocated = relocated.replace(path, str(self.work))
+            data = json.loads(relocated)
             yield filename, data
 
     def install(self, data, row):

@@ -4,7 +4,7 @@ The gzip JSON files retain actual records from main `52b9df4b` and
 `483a014e2d7c1ccdda72f688e89a24976dd61ece`. Each contains 181 snapshots,
 the exact writer commit and source hashes, harness definitions, and launch JSON
 sidecars. They are compressed only to avoid repeating large bootstrap arguments.
-The test relocates private paths; it does not add authority fields to a record.
+The test relocates private paths and maps each recorded workspace to its own temporary directory, without relying on the capturing host's `/tmp` aliases. It does not add authority fields to a record or change the retained captures.
 
 `generate.py` ran each version's actual lifecycle, runner, adapters and private
 tmux server. Only the provider executable and native IPC were doubled. The
