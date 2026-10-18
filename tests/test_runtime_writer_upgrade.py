@@ -18,12 +18,14 @@ from test_multiverse import BaseTest
 FIXTURES = Path(__file__).parent / 'fixtures/runtime-writers'
 GENERATOR_SOURCE = os.environ.get('MV2_GENERATE_RUNTIME_MATRIX')
 GENERATOR_OUTPUT = os.environ.get('MV2_RUNTIME_MATRIX_OUTPUT')
+GENERATOR_ENDING = os.environ.get('MV2_RUNTIME_MATRIX_ENDING') == '1'
 
 
 @unittest.skipUnless(GENERATOR_SOURCE and GENERATOR_OUTPUT, 'manual historical fixture capture')
 class GenerateRuntimeMatrix(BaseTest):
     def test_generate(self):
-        result = subprocess.run([sys.executable, str(FIXTURES / 'generate.py'),
+        generator = 'generate-ending.py' if GENERATOR_ENDING else 'generate.py'
+        result = subprocess.run([sys.executable, str(FIXTURES / generator),
                                  GENERATOR_SOURCE, GENERATOR_OUTPUT], text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=600)
         print(result.stdout, flush=True)
@@ -35,8 +37,8 @@ class ReachedTerminal(RuntimeError):
 
 
 class RuntimeWriterUpgradeTest(BaseTest):
-    def fixtures(self):
-        for filename in ('main52.json.gz', 'current483.json.gz'):
+    def fixtures(self, filenames=('main52.json.gz', 'current483.json.gz')):
+        for filename in filenames:
             data = json.loads(gzip.decompress((FIXTURES / filename).read_bytes()))
             # Only relocate private paths; identity, authority and sidecar bytes
             # otherwise retain the actual writer's data and absence of fields.
@@ -125,3 +127,26 @@ class RuntimeWriterUpgradeTest(BaseTest):
                                 lifecycle.start(self.root, resume=props['id'])
                             self.assertIsInstance(caught.exception.__cause__, ReachedTerminal)
                             backend.create.assert_called_once()
+
+    def test_actual_kill_writer_ending_records_stay_valid_and_refuse_duplicates(self):
+        for filename, data in self.fixtures(('ending-main52.json.gz', 'ending-current483.json.gz')):
+            rows = [row for row in data['records'] if row['label'] == 'ending']
+            self.assertEqual(len(rows), 9)
+            self.assertEqual(len({row['profile'] for row in rows}), 9)
+            for row in rows:
+                with self.subTest(writer=filename, profile=row['profile']):
+                    directory = self.install(data, row)
+                    props, facts = row['properties'], row['runtime']
+                    self.assertEqual(facts['state'], 'ending')
+                    self.assertIsNone(missing_runtime.damage(directory, facts))
+                    before = (directory / 'runtime.json').read_bytes()
+                    backend = Mock()
+                    with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                         patch.object(lifecycle, 'observe', return_value={'live': 'ending'}), \
+                         patch.object(attachments, 'wait'), \
+                         patch.object(native, 'session_snapshot', return_value=(props, facts)), \
+                         patch.object(missing_runtime, 'discover', side_effect=AssertionError('healthy record discovery')):
+                        with self.assertRaisesRegex(ValueError, 'running or its liveness is unknown'):
+                            lifecycle.start(self.root, resume=props['id'])
+                    backend.create.assert_not_called()
+                    self.assertEqual((directory / 'runtime.json').read_bytes(), before)

@@ -50,3 +50,23 @@ The generator retains its private raw workspace for review. Its private tmux
 server and children are closed in `finally`; no native CLI, real home or daemon
 is used. Fresh captures require updating source hashes and reviewing provenance,
 not replacing assertions merely because a newer run differs.
+
+## Ending-state follow-up
+
+`ending-main52.json.gz` and `ending-current483.json.gz` retain 64 additional
+snapshots from each original writer, including one actual `state: ending` record
+per supported profile. `generate-ending.py` uses the same lifecycle, adapter,
+runner and private-process framework. It captures immediately after the real
+kill writer stores `ending`, before that kill signals the child; it never writes
+a synthetic ending state. The hold, live-refusal, kill and resume cycle remains
+real. Each bundle carries the exact writer and generator hashes. Both captures
+completed successfully in a combined 91 s; the external evidence directory's
+`ending-cleanup.json` records no remaining writer processes.
+
+The upgrade regression validates all 18 ending records and confirms a healthy
+ending launch still refuses a duplicate, without changing its runtime bytes or
+invoking damaged-authority discovery. Process observations are substituted, as
+in the main upgrade matrix; no captured PID or socket is used.
+
+To regenerate these captures, use the same command above with
+`MV2_RUNTIME_MATRIX_ENDING=1` and a separate output directory.
