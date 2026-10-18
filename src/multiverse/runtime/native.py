@@ -549,7 +549,7 @@ def launch_only_receipt(adapter, session, message, tracking, live):
     if live in ('stopped', 'dormant') and wake is not None and wake.state == 'supported':
         return None
     return {'state': 'unavailable', 'ok': False, 'reason': capability.reason,
-            'value': {'launch_only': True}}
+            'value': {'launch_only': True, 'final': True}}
 
 
 def launch_only_filter(root, directory, properties, facts, live):
@@ -686,7 +686,7 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         launch_only = _launch_only_delivery(adapter, session, selected_mode)
         if launch_only is not None:
             receipt = {'state': 'unavailable', 'ok': False, 'reason': launch_only.reason,
-                       'value': {'launch_only': True}}
+                       'value': {'launch_only': True, 'final': True}}
             update_message(directory, message_id, submission_state='launch-only', final_reason='launch-only',
                            attempts=[*previous, receipt])
             return receipt
@@ -712,11 +712,13 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
         state = {'native_queued': 'accepted', 'ok': 'accepted', 'pending': 'pending',
                  'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]
-        final = state == 'failed' and isinstance(result.value, dict) and result.value.get('launch_only') is True
+        final = (state == 'failed' and isinstance(result.value, dict)
+                 and result.value.get('launch_only') is True and result.value.get('final') is not False)
         if final:
             state = 'launch-only'
+            receipt['value'] = {**result.value, 'final': True}
         update_message(directory, message_id, submission_state=state, attempts=[*previous, receipt],
-                       native_receipt=result.value, **({'final_reason': 'launch-only'} if final else {}))
+                       native_receipt=receipt.get('value'), **({'final_reason': 'launch-only'} if final else {}))
         return receipt
 
 
@@ -765,7 +767,7 @@ def send_or_wake(root, reference, message_id, retry=False, *, new_message=False)
         if wake and (capability is None or capability.state != 'supported'):
             launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None
             receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt',
-                       'value': {'launch_only': launch_only, 'wake_refused': True}}
+                       'value': {'launch_only': launch_only, 'final': launch_only, 'wake_refused': True}}
             update_message(directory, message_id, submission_state='launch-only' if launch_only else 'failed',
                            attempts=[*tracking.get('attempts', []), receipt],
                            **({'final_reason': 'launch-only'} if launch_only else {}))

@@ -1,4 +1,5 @@
 """Claude inbox bridge: launch options, steering frames and receipts, with no Claude session."""
+from dataclasses import replace
 import hashlib
 import json
 import re
@@ -177,23 +178,41 @@ class ClaudeBridgeTest(BaseTest):
             fell_back = SessionHandle('agent', 'claude', str(self.work),
                                       native_mode={'policy': 'auto', 'mode': 'plain', 'fallback_reason': reason},
                                       **{**running, 'endpoint': None, 'bridge': None})
-            offered = adapter.capabilities(fell_back)
-            for name in ('send_steer', 'send_follow_up'):
-                self.assertEqual(offered[name].state, 'unavailable')
-                self.assertEqual(offered[name].reason, 'This agent is launch-only: ' + reason)
-                # The typed flag core reads: no kill-and-resume advice (CLAUDE-1), and ledger repair may close its
-                # messages (CLAUDE-13).
-                self.assertEqual(offered[name].mechanism, 'launch-only')
-            self.assertNotEqual(offered['get_delivery'].state, 'supported')
-            self.assertNotEqual(offered['ask'].state, 'supported')
-            executor = Mock()
-            for delivery in ('steer', 'follow-up'):
-                message = Message(str(uuid4()), 'body', delivery=delivery, framed='Message from reviewer:\nbody')
-                result = adapter.send(fell_back, message, executor)
-                self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True}))
-            result = adapter.ask(fell_back, 'Why?', executor)
-            self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True}))
-            executor.write_lines.assert_not_called()
+            # Launch-only by the harness's own setting is final: nothing a launch does connects it, so core advises no
+            # restart (CLAUDE-1) and ledger repair may close its messages (CLAUDE-13). An auto launch that fell back
+            # only because this Claude was too old connects once Claude is updated and the agent resumed, so its
+            # refusals stay retryable and carry no launch-only marker (Shao, a8925af).
+            off = SessionHandle('agent', 'claude', str(self.work),
+                                native_mode={'policy': 'plain', 'mode': 'plain', 'fallback_reason': None},
+                                **{**running, 'endpoint': None, 'bridge': None})
+            for case, harness, launch, cause, final in (
+                    ('fell back', adapter, fell_back, reason, False),
+                    ('set to false', self.bridge(False), off, 'its harness sets inbox_bridge to false', True)):
+                with self.subTest(case):
+                    offered = harness.capabilities(launch)
+                    for name in ('send_steer', 'send_follow_up'):
+                        self.assertEqual((offered[name].state, offered[name].reason, offered[name].mechanism),
+                                         ('unavailable', 'This agent is launch-only: ' + cause,
+                                          'launch-only' if final else None))
+                    self.assertNotEqual(offered['get_delivery'].state, 'supported')
+                    self.assertNotEqual(offered['ask'].state, 'supported')
+                    executor = Mock()
+                    for delivery in ('steer', 'follow-up'):
+                        message = Message(str(uuid4()), 'body', delivery=delivery, framed='Message from reviewer:\nbody')
+                        result = harness.send(launch, message, executor)
+                        self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True, 'final': final}))
+                    result = harness.ask(launch, 'Why?', executor)
+                    self.assertEqual((result.state, result.value), ('unavailable', {'launch_only': True, 'final': final}))
+                    executor.write_lines.assert_not_called()
+            # Launched while the setting was off, with it on now: a resume connects it, so it is a restart case.
+            for state, cause in (('running', 'The multiverse mod has not registered for this launch'),
+                                 ('stopped', "This agent isn't running: resume it first")):
+                with self.subTest('off then, on now', state=state):
+                    then = replace(off, state=state)
+                    offered = adapter.capabilities(then)
+                    self.assertEqual((offered['send_steer'].reason, offered['send_steer'].mechanism), (cause, None))
+                    result = adapter.send(then, Message(str(uuid4()), 'body', delivery='steer', framed='x'), Mock())
+                    self.assertEqual((result.state, result.reason, result.value), ('unavailable', cause, None))
         with self.subTest('the installed version is read once per binary and is never fatal'):
             from multiverse.harnesses import claude as module
             fake = self.work / 'bin' / 'claude-fake'

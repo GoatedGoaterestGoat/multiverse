@@ -11,7 +11,7 @@ from multiverse.tools import deliver, doctor, inspect, list_agents, send
 from multiverse.universe import mailbox, templates
 from multiverse import harnesses
 from multiverse.harnesses.claude import BRIDGE, CONVERSATION_MISSING, FRESH_SESSION, NEVER_USED, NOT_REGISTERED
-from multiverse.harnesses.types import Message, NativeEndpoint, SessionHandle
+from multiverse.harnesses.types import NativeResult, Message, NativeEndpoint, SessionHandle
 from test_multiverse import BaseTest
 
 TOO_OLD = 'Claude Code 2.1.279 is older than 2.1.280, which the multiverse mod needs'
@@ -79,8 +79,8 @@ class DeliveryProblemTest(BaseTest):
         def bridged(state='running', **fields):
             return claude(state, mode='bridge', endpoint=endpoint, **fields)
 
-        def launch_only(cause):
-            return f'This agent is launch-only: {cause}', {'launch_only': True}
+        def launch_only(cause, final=True):
+            return f'This agent is launch-only: {cause}', {'launch_only': True, 'final': final}
         setting = launch_only('its harness sets inbox_bridge to false')
         stopped = "This agent isn't running: resume it first", None
         registered = {'bridge': BRIDGE, 'session_file': str(self.work / 'agent/session.jsonl')}
@@ -91,13 +91,13 @@ class DeliveryProblemTest(BaseTest):
             # inbox_bridge false: the setting is the cause, also after a fresh start added its note.
             ('setting', plain, claude(policy='plain'), 'launch-only', setting),
             ('setting, fresh start', plain, claude(policy='plain', fallback=NEVER_USED), 'launch-only', setting),
-            ('setting, stopped', auto, claude('stopped', policy='plain'), 'launch-only', setting),
+            ('setting, stopped', auto, claude('stopped', policy='plain'), None, stopped),
             # Unset (auto) on a Claude too old for the mod: the version is the cause, never the fresh-start note.
-            ('too old', auto, claude(fallback=TOO_OLD), 'launch-only', launch_only(TOO_OLD)),
-            ('too old, missing', auto, claude(fallback=f'{TOO_OLD}; {CONVERSATION_MISSING}'), 'launch-only',
-             launch_only(TOO_OLD)),
-            ('too old, older record', auto, claude(fallback=f'{TOO_OLD}; {FRESH_SESSION}'), 'launch-only',
-             launch_only(TOO_OLD)),
+            ('too old', auto, claude(fallback=TOO_OLD), None, launch_only(TOO_OLD, False)),
+            ('too old, missing', auto, claude(fallback=f'{TOO_OLD}; {CONVERSATION_MISSING}'), None,
+             launch_only(TOO_OLD, False)),
+            ('too old, older record', auto, claude(fallback=f'{TOO_OLD}; {FRESH_SESSION}'), None,
+             launch_only(TOO_OLD, False)),
             # A bridged launch whose mod has not registered yet should be connected: a restart case, no flag.
             ('not registered', auto, bridged(), None, (NOT_REGISTERED, None)),
             ('starting', auto, bridged('starting'), None, (NOT_REGISTERED, None)),
@@ -134,7 +134,7 @@ class DeliveryProblemTest(BaseTest):
 
     def test_launch_only_refusal_is_final_and_failed_wakes_stay_retryable(self):
         """A launch-only refusal is final and never retried, also for a custom harness after a ledger reset, while a
-        failed wake and a pre-submission failure stay retryable; fragile because three ledger generations and two
+        failed wake, pre-submission failure and temporary fallback stay retryable; fragile because three ledger generations and two
         delivery mechanisms share submission_state, and a break silently loses or duplicates messages (LC-23,
         CLAUDE-13, e5bbba0)."""
         never = patch.object(native, 'send_or_wake', side_effect=AssertionError('a final refusal must not be resent'))
@@ -143,7 +143,7 @@ class DeliveryProblemTest(BaseTest):
                 message = self.message(state)
                 mailbox.update_message(self.directory, message['id'], native_receipt={'launch_only': True},
                     attempts=[{'state': 'unavailable', 'ok': False, 'reason': 'This harness is launch-only',
-                               'value': {'launch_only': True}}])
+                               'value': {'launch_only': True, 'final': True}}])
                 tracking = mailbox.message_record(self.directory, message['id'])[1]
                 self.assertEqual(tracking['submission_state'], 'launch-only' if state == 'failed' else state)
                 if state == 'failed':
@@ -178,6 +178,37 @@ class DeliveryProblemTest(BaseTest):
                 with patch.object(lifecycle, 'start', side_effect=wake) as start:
                     self.assertTrue(deliver.run(root, agent='recipient', retry=True)['ok'])
                 start.assert_called_once()
+        with self.subTest('auto fallbacks and older final markers remain retryable after bridge recovery'):
+            for old_state in (None, 'failed', 'launch-only'):
+                with self.subTest(old_state=old_state):
+                    root = self.universe('transient-' + str(old_state))
+                    facts = {**self.running(), 'native_mode': {
+                        'mode': 'plain', 'policy': 'auto', 'fallback_reason': TOO_OLD}}
+                    directory = self.recipient(root, facts)
+                    with patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                            patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                            patch.object(native.NativeExecutor, 'check_session'):
+                        if old_state is None:
+                            result = send.run(root, agent='recipient', text='keep for bridge')
+                            self.assertFalse(result['ok'])
+                            message = mailbox.inbox(directory, all_messages=True)['messages'][0]
+                        else:
+                            message = mailbox.append_message(directory, 'keep for bridge', {}, delivery='steer')
+                            mailbox.update_message(directory, message['id'], submission_state=old_state,
+                                final_reason='launch-only', attempts=[{'state': 'unavailable', 'ok': False,
+                                    'value': {'launch_only': True}}])
+                        before = (directory / 'inbox-state.json').read_bytes()
+                        self.assertEqual(mailbox.message_record(directory, message['id'])[1]['submission_state'], 'failed')
+                        self.assertIn('1 message not delivered', list_agents.run(root, wide=True))
+                        self.assertEqual((directory / 'inbox-state.json').read_bytes(), before)
+                        with patch.object(harnesses.ClaudeAdapter, 'capabilities', return_value={}), \
+                                patch.object(harnesses.ClaudeAdapter, 'send',
+                                             return_value=NativeResult('ok', value={'transcript_confirmed': True})) as submit:
+                            self.assertTrue(deliver.run(root, agent='recipient', retry=True)['ok'])
+                            submit.assert_called_once()
+                            deliver.run(root, agent='recipient', retry=True)
+                            self.assertEqual(submit.call_count, 1)
+
         with self.subTest('a custom harness, running then stopped'):
             root = self.universe('custom')
             write(root / 'harnesses/custom/harness.json', CUSTOM)
@@ -200,6 +231,10 @@ class DeliveryProblemTest(BaseTest):
             fixture = json.loads(OLD_LEDGER.read_text())
             attempt = fixture['tracking']['attempts'][-1]
             root = self.universe('upgraded')
+            manifest = root / 'harnesses/claude/harness.json'
+            definition = read(manifest)
+            definition['settings']['inbox_bridge'] = False
+            write(manifest, definition)
             directory = root / 'state/agents' / attempt['agent_id']
             write(directory / 'properties.json', {'id': directory.name, 'name': 'recipient', 'harness': 'claude',
                 'task': '', 'universe_id': read(root / 'universe.json')['id'], 'workspace': str(self.work),

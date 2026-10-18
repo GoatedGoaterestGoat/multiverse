@@ -58,7 +58,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME was stopped; resuming it with your message.` | The agent is starting with your message as its prompt | Nothing |
 | `NAME is starting; your message will be delivered when ready.` | It's waiting for the session to be ready | Nothing |
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
-| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A launch-only agent instead points to inbox-only delivery or attaching; restarting it does not add messaging |
+| `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose expected connection broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first. A harness configured without messaging instead points to inbox-only delivery or attaching; an automatic fallback stays retryable after a bridge resume |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
@@ -85,11 +85,17 @@ messages on a running launch-only agent, without repeatedly asking an unsupporte
 receipt API. This launch-only classification never makes accepted or uncertain
 tracking retryable.
 
-A refused live delivery to a launch-only agent is final. It stays in inbox
+A refused live delivery is final when the harness is configured without messaging. It stays in inbox
 history as `launch-only`, but is not counted as a failure to retry and does not
 make doctor report a problem. Resend with `--delivery inbox-only` for manual
 reading, or attach. A new send to a stopped agent still wakes it when its harness
 supports that; a failed wake remains retryable when consumption is ruled out.
+
+A plain launch caused by an automatic fallback is temporary: fix its cause, then
+resume with a working bridge and run `mv2 deliver NAME --retry`. The same applies
+after enabling messaging for an agent originally launched without it. Older
+refusals that lack explicit final evidence are classified by the current harness
+setting; accepted and uncertain deliveries are never reopened.
 
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
 

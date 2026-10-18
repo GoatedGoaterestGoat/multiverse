@@ -583,14 +583,17 @@ class Bridge:
 
     `launched`: this launch loaded the mod (not plain, not an auto fallback). `registered`: the mod
     reported itself for this launch, so its inbox exists. `ready`: steering, `ask` and receipts can be used
-    now. `reason` says why not. `launch_only`: the launch has no connection by design, so restarting it can't
-    give it one. None of this is a service or a reconnectable terminal.
+    now. `reason` says why not. `launch_only`: the launch has no connection, so restarting it as it is can't
+    give it one. `final`: that is the harness's own setting (inbox_bridge false), so no later launch will
+    either; an auto launch that fell back because this Claude was too old is not final, since it connects
+    once Claude is updated and the agent resumed. None of this is a service or a reconnectable terminal.
     """
     launched: bool
     registered: bool
     ready: bool
     reason: str | None
     launch_only: bool = False
+    final: bool = False
 
 
 def bridge_of(enabled, session):
@@ -602,21 +605,27 @@ def bridge_of(enabled, session):
     registered = bool(launched and session.native_id and session.endpoint
                       and session.endpoint.transport == 'unix-lines' and session.bridge == BRIDGE)
     ready = registered and session.state == 'running'
-    launch_only = plain or not enabled
+    # Launch-only: restarting as configured now can't connect it. The setting is off (final), or an auto launch
+    # fell back because this Claude was too old (until it is updated). A launch made while the setting was off,
+    # with it on now, is a restart case: a resume connects it.
+    launch_only = not enabled or (plain and launch.get('policy') != 'plain')
     if ready:
         reason = None
     elif launch_only:  # first: resuming a launch-only agent would not connect it
-        reason = f'{LAUNCH_ONLY}: {launch_only_cause(launch if plain else {"policy": "plain"})}'
+        cause = launch_only_cause({'policy': 'plain'} if not enabled else launch)
+        reason = f'{LAUNCH_ONLY}: {cause}'
     elif session.state in ('stopped', 'dormant', 'failed'):
         reason = NOT_RUNNING
     else:
         reason = NOT_REGISTERED
-    return Bridge(launched, registered, ready, reason, launch_only)
+    return Bridge(launched, registered, ready, reason, launch_only, final=launch_only and not enabled)
 
 
 def unavailable(bridge):
-    """Why send or ask can't run now; a launch-only one is flagged, so core advises no restart."""
-    return NativeResult('unavailable', bridge.reason, {'launch_only': True} if bridge.launch_only else None)
+    """Why send or ask can't run now. A launch-only one is flagged, so core advises no plain restart, and says
+    whether that is final (core may close its messages) or lasts until Claude is updated and the agent resumed."""
+    return NativeResult('unavailable', bridge.reason,
+                        {'launch_only': True, 'final': bridge.final} if bridge.launch_only else None)
 
 
 class ClaudeAdapter(ConfiguredAdapter):
@@ -838,7 +847,7 @@ class ClaudeAdapter(ConfiguredAdapter):
         for name in ('send_steer', 'send_follow_up'):
             result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if bridge.ready
                             else Capability('unavailable', bridge.reason,
-                                mechanism='launch-only' if bridge.launch_only else None, required=True))
+                                mechanism='launch-only' if bridge.final else None, required=True))
         if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
         result['ask'] = (Capability('supported', mechanism='claude-model-fork') if bridge.ready and session.session_file

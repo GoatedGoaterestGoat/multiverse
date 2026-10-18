@@ -104,10 +104,16 @@ def _states(agent_dir):
                 states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                     'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
     for state in states.values():
-        last = (state.get('attempts') or [{}])[-1]
-        value = last.get('value')
-        if state.get('submission_state') == 'failed' and isinstance(value, dict) and value.get('launch_only') is True:
+        last = state.get('last_receipt') or (state.get('attempts') or [{}])[-1]
+        value = last.get('value') if isinstance(last, dict) else None
+        final = isinstance(value, dict) and value.get('launch_only') is True and value.get('final') is True
+        if state.get('submission_state') == 'failed' and final:
             state.update(submission_state='launch-only', final_reason='launch-only')
+        elif state.get('submission_state') == 'launch-only' and not final:
+            # Earlier writers also finalized temporary fallbacks. Re-evaluate
+            # those definite refusals against current policy, without a write.
+            state['submission_state'] = 'failed'
+            state.pop('final_reason', None)
     for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
         failed = _ledger(proof)
         identifier = failed.get('message_id')

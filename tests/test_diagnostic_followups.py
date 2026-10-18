@@ -153,11 +153,16 @@ class RefusalUpgradeTest(BaseTest):
         """Ledger records from a real main@52b9df4 fixture are read, counted and finalized without the file being
         rewritten; fragile because the ledger format changed repeatedly and old records persist in real universes, so
         a break miscounts or rewrites delivery evidence."""
-        with self.subTest('a refusal main wrote is not counted, and counting does not migrate it'):
-            before = self.path.read_bytes()
-            self.assertNotIn('not delivered', list_agents.run(self.root, wide=True))
-            self.assertFalse(any('not delivered' in reason for reason in doctor.run(self.root)['problems']))
-            self.assertEqual(self.path.read_bytes(), before)
+        for enabled in (False, True):
+            with self.subTest(current_bridge_setting=enabled):
+                manifest = self.root / 'harnesses/claude/harness.json'
+                definition = read(manifest)
+                definition['settings']['inbox_bridge'] = enabled
+                write(manifest, definition)
+                before = self.path.read_bytes()
+                self.assertEqual('not delivered' in list_agents.run(self.root, wide=True), enabled)
+                self.assertEqual(any('not delivered' in reason for reason in doctor.run(self.root)['problems']), enabled)
+                self.assertEqual(self.path.read_bytes(), before)
         message = self.record['message']
         tracking = self.record['tracking']
         for state in ('accepted', 'unknown', 'submitting'):
