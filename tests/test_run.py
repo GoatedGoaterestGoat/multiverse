@@ -333,11 +333,12 @@ class RunnerTest(unittest.TestCase):
             time.sleep(0.05)
         return path.exists()
 
-    def stopped_once(self, started, *args):
-        """Run the runner until a test writes `started`, then press Ctrl-C; return its exit status and output."""
+    def stopped_once(self, started, *args, seconds=30):
+        """Run the runner until a test writes `started` (within `seconds`), then press Ctrl-C; return its exit status
+        and output."""
         runner = subprocess.Popen(self.command(*args), text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.addCleanup(lambda: runner.poll() is None and runner.kill())
-        self.assertTrue(self.wait_for(started))
+        self.assertTrue(self.wait_for(started, seconds))
         runner.send_signal(signal.SIGINT)
         output = runner.communicate(timeout=60)[0]
         return runner.returncode, output
@@ -652,7 +653,7 @@ class RunnerTest(unittest.TestCase):
         self.module("test_group", f"""
             import signal, subprocess, sys, time, unittest
             from pathlib import Path
-            from isolation import track
+            from isolation import TRACKED, track
             class Group(unittest.TestCase):
                 def test_daemon_group(self):
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)  # so no cleanup of its own runs
@@ -662,11 +663,17 @@ class RunnerTest(unittest.TestCase):
                     track(pid=leader.pid)
                     Path({str(ready)!r} + ".go").write_text("")
                     leader.wait()  # exited and reaped
-                    time.sleep(1.5)  # long enough for the worker's next look at its group
+                    helpers = Path({str(helpers)!r}).read_text().split()
+                    deadline = time.monotonic() + 60  # until the worker has seen both in the group, however loaded
+                    while time.monotonic() < deadline:
+                        seen = Path(TRACKED).read_text()
+                        if all(f'"pid": {{pid}},' in seen for pid in helpers):
+                            break
+                        time.sleep(0.05)
                     Path({str(ready)!r} + ".done").write_text("")
                     time.sleep(600)
             """)
-        code, output = self.stopped_once(self.work / "ready.done", "--grace", "1")
+        code, output = self.stopped_once(self.work / "ready.done", "--grace", "1", seconds=90)
         first, second = (int(pid) for pid in helpers.read_text().split())
         for pid in (first, second):
             self.addCleanup(self.kill_if_running, pid)
@@ -706,7 +713,7 @@ class RunnerTest(unittest.TestCase):
         runner.wait()
         return worker, helper
 
-    def gone_soon(self, *pids, seconds=15):
+    def gone_soon(self, *pids, seconds=30):
         deadline = time.monotonic() + seconds
         while any(self.alive(pid) for pid in pids) and time.monotonic() < deadline:
             time.sleep(0.05)
