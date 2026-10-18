@@ -8,6 +8,26 @@ class BridgeUnavailable(ValueError):
     """Preparation failed before a native child or conversation was started."""
 
 
+class LocalProtocolError(Exception):
+    """Reject one correlated relay frame without changing launch health.
+
+    The connection view supplies a previously correlated request ID. None drops
+    the frame. Client replies reject client requests or native responses;
+    upstream replies reject native server requests. No primary callbacks run.
+    """
+    def __init__(self, message: str, *, request_id=None, destination='client', code=-32602):
+        if request_id is not None and (isinstance(request_id, bool) or not isinstance(request_id, (str, int))):
+            raise ValueError('Local protocol request ID must be a string or integer')
+        if destination not in ('client', 'upstream'):
+            raise ValueError('Local protocol reply destination must be client or upstream')
+        if isinstance(code, bool) or not isinstance(code, int) or not -(2 ** 31) <= code < 2 ** 31:
+            raise ValueError('Local protocol error code must be a signed 32-bit integer')
+        if not isinstance(message, str):
+            raise ValueError('Local protocol error message must be a string')
+        super().__init__(message)
+        self.request_id, self.destination, self.code = request_id, destination, code
+
+
 def normalize_session_id(value: str) -> str:
     """Normalize the UUID used by current harnesses; never discover a session."""
     try:
