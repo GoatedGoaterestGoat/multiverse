@@ -8,6 +8,9 @@ import unittest
 class PiBridgeTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node is required for Pi bridge tests')
     def test_bridge_lifecycle_and_delivery(self):
+        """The TypeScript Pi extension (socket server, registration, receipts, steer and follow-up) works against fakes
+        in Node; fragile because it targets Pi's private extension API and is the only test of that code where Pi is not
+        installed."""
         node = shutil.which('node')
         major = int(subprocess.check_output([node, '--version'], text=True).lstrip('v').split('.')[0])
         if major < 22:

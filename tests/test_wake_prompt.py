@@ -21,6 +21,9 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('pi') and shutil.which('tmux'), 'Pi and tmux required')
 class PiWakePromptTest(TerminalBase):
     def test_plain_pi_resume_submits_literal_prompt_and_stays_interactive(self):
+        """A woken real Pi resumes the same session interactively with the prompt as a user turn, and a bridged wake
+        holds a second message until the extension registers; fragile because it depends on Pi's resume CLI and
+        registration timing, which only a live Pi shows."""
         path = self.root / 'harnesses/pi/harness.json'
         spec = read(path)
         spec['settings']['args'] = ['--offline', '--no-extensions', '--no-skills', '--no-context-files',
@@ -71,6 +74,9 @@ class PiWakePromptTest(TerminalBase):
 @unittest.skipUnless(shutil.which('claude') and shutil.which('tmux'), 'Claude and tmux required')
 class ClaudeWakePromptTest(TerminalBase):
     def test_plain_claude_resume_submits_prompt_and_stays_interactive(self):
+        """A real Claude resumed with -- prompt against a local provider gets past startup dialogs, submits the prompt
+        and stays interactive; fragile because Claude's CLI and dialogs change between versions, and only a live run
+        catches a prompt swallowed by a new dialog."""
         seen = []
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
