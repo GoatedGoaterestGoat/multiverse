@@ -1,5 +1,7 @@
 """External checks for the dashboard fixes delegated on 500655d."""
 import json
+import re
+import time
 import unittest
 from qa import test_dashboard_plugin_failure as dashboard
 
@@ -42,6 +44,18 @@ class PluginHostUnknownReasonTests(dashboard.DashboardFixture):
 
 
 class RepairedPluginProofTests(dashboard.DashboardFixture):
+    def select_plugin(self, name):
+        """Put the Plugins screen's cursor on `name`: which row that is depends on the other plugins installed.
+
+        The details under the table start with the selected plugin's name and version."""
+        pattern = re.compile(rf'│ {re.escape(name)} \S+ ·')
+        for _ in range(20):
+            if pattern.search(self.screen()):
+                return
+            self.tmux('send-keys', '-t', 'ui', 'Down')
+            time.sleep(.3)
+        self.fail(f'The Plugins screen never selected {name}:\n' + self.screen())
+
     def test_repaired_plugin_runs_its_new_action_after_failed_configure_save(self):
         """docs/use/plugins.md: changed plugin files retry and repaired dashboard contributions work."""
         source = ('from multiverse.plugins import api\ndef register(mv):\n'
@@ -59,6 +73,7 @@ class RepairedPluginProofTests(dashboard.DashboardFixture):
         self.start_dashboard()
         self.tmux('send-keys', '-t', 'ui', 'P')
         self.until(lambda s: 'repairable' in s and 'failed to load' in s)
+        self.select_plugin('repairable')
         self.tmux('send-keys', '-t', 'ui', 'Enter')
         self.until(lambda s: 'Settings · repairable' in s)
         self.tmux('send-keys', '-t', 'ui', 'Tab')
@@ -71,6 +86,7 @@ class RepairedPluginProofTests(dashboard.DashboardFixture):
         (directory / 'plugin.py').write_text(source.replace('"integer"', '"int"'))
         self.tmux('send-keys', '-t', 'ui', 'F5')
         self.tmux('send-keys', '-t', 'ui', 'P')
+        self.select_plugin('repairable')
         self.until(lambda s: 'Repair proof' in s and 'failed to load' not in s)
         self.tmux('send-keys', '-t', 'ui', 'Enter')
         self.until(lambda s: 'Settings · repairable' in s and 'Count' in s)
