@@ -89,6 +89,23 @@ class DiscoveryTest(BaseTest):
                 relocate.remove_agent(self.root, 'lost')
             self.assertEqual(runtime.read_bytes(), before)
             self.assertFalse((self.root / 'trash').exists())
+        for content in (b'{torn', b'[]', b'', b'\xff'):
+            runtime.write_bytes(content)
+            with self.subTest(remove_torn=content), \
+                    patch.object(missing_runtime.Tmux, 'snapshot', return_value=({'%2': self.pane}, None)), \
+                    self.assertRaisesRegex(records.RecordError, 'running terminal.*mv2 kill'):
+                relocate.remove_agent(self.root, 'lost')
+            self.assertEqual(runtime.read_bytes(), content)
+        original_open = Path.open
+        def unreadable(path, *args, **kwargs):
+            if path == runtime:
+                raise PermissionError(13, 'fixture denied runtime', str(path))
+            return original_open(path, *args, **kwargs)
+        for operation in (relocate.remove_agent, lifecycle.kill):
+            with self.subTest(unreadable=operation.__name__), patch.object(Path, 'open', unreadable), \
+                    patch.object(missing_runtime, 'discover', side_effect=AssertionError('unreadable is not absent')), \
+                    self.assertRaisesRegex(records.RecordError, 'cannot safely read.*Restore'):
+                operation(self.root, 'lost')
         runtime.unlink()
         shutil.rmtree(self.launch)
         with self.subTest(remove='no runtime and no history'), \
@@ -100,7 +117,9 @@ class DiscoveryTest(BaseTest):
         write(self.launch / 'request.json', self.request)
         write(runtime, {'launch_id': None, 'state': 'running', 'pid': 12345})
         before = runtime.read_bytes()
-        with self.subTest(remove='complete absence'), \
+        runtime.write_bytes(b'{torn')
+        before = runtime.read_bytes()
+        with self.subTest(remove='complete absence with torn runtime'), \
                 patch.object(missing_runtime.Tmux, 'snapshot', return_value=({}, None)), \
                 patch.object(attachments, 'recorded_process_problem', return_value=None), \
                 patch.object(attachments, 'problem', return_value=None), \

@@ -152,8 +152,12 @@ verified backup. Alternatively, after independently verifying that this agent's
 terminal, runner and child are all gone, remove the damaged `runtime.json` and
 resume. Deleting a record does not stop a process.
 
-Kill can close a uniquely tagged terminal even when runtime.json is missing or
-its launch authority is damaged.
+Kill can close a uniquely tagged terminal even when runtime.json is missing,
+contains unreadable JSON, or has damaged launch authority. Move and remove also
+check tags and retained process records before treating readable malformed bytes
+as lost authority; they preserve those bytes in the moved record. A file that
+cannot be read because of permissions must be made readable first. Recovery
+rechecks the record before acting, so a concurrent repair is never overwritten.
 Discovery skips an earlier launch whose request was never written; a malformed
 or unreadable request still refuses recovery with its path and repair advice.
 It never guesses a child PID or contacts a shared server from the conversation

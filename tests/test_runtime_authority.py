@@ -151,7 +151,7 @@ class DamagedRuntimeTest(unittest.TestCase):
         self.assertEqual(len(self.tagged(self.other['id'])), 1)
 
     def test_kill_recovers_only_the_damaged_agent(self):
-        """kill on a live agent with a damaged or missing runtime closes exactly its pane by tags, leaves the other
+        """kill on a live agent with a damaged, torn or missing runtime closes exactly its pane by tags, leaves the other
         agent alive and the agent resumable, and refuses a pane tagged with another saved launch; fragile because
         recovery finds the pane by tags, not the record, and a wrong match kills another agent while a miss leaves an
         invisible process."""
@@ -170,7 +170,7 @@ class DamagedRuntimeTest(unittest.TestCase):
         finally:
             self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', original['launch_id'])
             shutil.rmtree(foreign)
-        for label in ('launch authority', 'missing file', 'wrong pane', 'wrong socket'):
+        for label in ('launch authority', 'missing file', 'wrong pane', 'wrong socket', 'torn JSON'):
             with self.subTest(damage=label):
                 facts = self.live()
                 if label == 'missing file':
@@ -178,7 +178,9 @@ class DamagedRuntimeTest(unittest.TestCase):
                     stopped = lifecycle.kill(self.lab, 'worker')
                     self.assertIn('runtime.json', stopped['native_cancellation']['reason'])
                 else:
-                    if label == 'launch authority':
+                    if label == 'torn JSON':
+                        self.path.write_bytes(b'{torn')
+                    elif label == 'launch authority':
                         write(self.path, {**facts, 'launch_id': None, 'tmux': []})
                     else:
                         field, value = (('pane', '%999') if label == 'wrong pane'

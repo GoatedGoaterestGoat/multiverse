@@ -20,11 +20,14 @@ class RelocateAuthorityBoundaryTest(BaseTest):
         """For remove and resume, a runtime.json replaced while discovery runs is neither overwritten nor trashed;
         fragile because it races a concurrent launch, and losing the fresh record is silent."""
         operations = (('remove', lambda: relocate.remove_agent(self.root, 'worker')),
+                      ('remove with torn JSON', lambda: relocate.remove_agent(self.root, 'worker')),
                       ('resume', lambda: lifecycle.start(self.root, resume='worker',
                                                          socket_path=str(self.work / 'absent.sock'))))
         for operation, call in operations:
             with self.subTest(operation=operation):
                 write(self.path, self.facts)
+                if operation == 'remove with torn JSON':
+                    self.path.write_text('{torn')
                 replacement = {**self.facts, 'launch_id': uid()}
 
                 def discovery(*args, **kwargs):

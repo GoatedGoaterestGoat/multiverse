@@ -27,14 +27,13 @@ def _stopped(agent_dir):
             raise records.RecordError(agent_dir / 'properties.json',
                                       'core records changed during orphan discovery; retry with the current record')
         return  # No authority was invented, and no terminal was controlled.
-    properties, previous = records.properties(agent_dir / "properties.json"), runtime(agent_dir)
+    properties = records.properties(agent_dir / "properties.json")
+    previous, malformed = missing_runtime.recovery_snapshot(agent_dir)
     # _hold owns the launch lock. Broken terminal/generation identity cannot
     # turn an unmatched pane into permission to rename its live records.
-    if missing_runtime.damage(agent_dir, previous) or not (agent_dir / 'runtime.json').exists():
+    if malformed is not None or missing_runtime.damage(agent_dir, previous) or not (agent_dir / 'runtime.json').exists():
         missing_runtime.require_stopped(agent_dir, properties, facts=previous, operation='move or remove')
-        if runtime(agent_dir) != previous:
-            raise records.RecordError(agent_dir / 'runtime.json',
-                                      'changed during terminal discovery; retry with the current record')
+        missing_runtime._unchanged(agent_dir, previous, malformed)
         return  # Absence was independently proved; never rewrite damaged facts.
     facts = interrupted_preparation(previous, agent_dir)
     if facts is not previous and facts.get('state') != 'failed':
@@ -115,8 +114,8 @@ def _subverse(path):
 
 def move_agent(root, reference, destination):
     root, destination = exact(root), exact(destination)
-    agent_dir = directory(root, reference)
-    properties = read(agent_dir / "properties.json")
+    agent_dir = directory(root, reference, allow_damaged=True)
+    properties = records.properties(agent_dir / "properties.json")
     if destination == root:
         raise ValueError(f'{properties["name"]} is already in that universe')
     if not (destination / "harnesses" / properties["harness"] / "harness.json").is_file():

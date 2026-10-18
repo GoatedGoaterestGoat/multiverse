@@ -7,6 +7,7 @@ or authority to contact a shared native server directly.
 from pathlib import Path
 from uuid import UUID
 import os
+import json
 import re
 
 from .. import harnesses
@@ -39,6 +40,36 @@ def _problem(directory, reason, *, recommend_kill=True):
     return records.RecordError(directory / 'runtime.json', reason + remedy + ' before retrying. '
         'If independently verified that this agent\'s terminal, runner and child are all gone, remove the damaged '
         'runtime.json and retry')
+
+
+
+def recovery_snapshot(directory):
+    """Readable malformed bytes are lost authority; unreadable bytes still refuse recovery."""
+    path = directory / 'runtime.json'
+    try:
+        return records.runtime(path), None
+    except records.RecordError:
+        try:
+            with path.open('rb') as stream:
+                raw = stream.read(records.MAX_BYTES + 1)
+        except FileNotFoundError:
+            return {}, None
+        except OSError as error:
+            raise _problem(directory, f'cannot safely read {path}: {error}', recommend_kill=False) from error
+        if len(raw) > records.MAX_BYTES:
+            raise _problem(directory, f'{path} is too large to inspect safely', recommend_kill=False)
+        try:
+            data = json.loads(raw.decode('utf-8'))
+        except (ValueError, RecursionError):
+            data = None
+        if isinstance(data, dict):
+            return data, None  # A writer repaired it between the two reads.
+        return {}, raw
+
+
+def _unchanged(directory, facts, malformed):
+    if recovery_snapshot(directory) != (facts, malformed):
+        raise _problem(directory, 'runtime record changed during terminal discovery; retry with the current record')
 
 
 def damage(directory, facts):
@@ -233,9 +264,9 @@ def _qualified_facts(root, directory, properties, terminal, launch_id, request, 
 def kill(root, directory, *, attachment_only=False):
     """Close one verified pane; unavailable native cancellation is reported honestly."""
     with lock(directory / '.launch.lock', create_parent=False):
-        previous = records.runtime(directory / 'runtime.json')
+        previous, malformed = recovery_snapshot(directory)
         properties = records.properties(directory / 'properties.json')
-        if ((directory / 'runtime.json').exists() and damage(directory, previous) is None
+        if (malformed is None and (directory / 'runtime.json').exists() and damage(directory, previous) is None
                 and mismatch(directory, previous, observe(properties, previous)) is None):
             return None  # Caller retries its normal path; never replace fresh facts.
         condition = ('was missing' if not (directory / 'runtime.json').exists()
@@ -248,6 +279,7 @@ def kill(root, directory, *, attachment_only=False):
             raise _problem(directory, 'multiple tagged terminals remain; refusing to choose a launch')
         if not found:
             require_stopped(directory, properties, facts=previous, operation='kill')
+            _unchanged(directory, previous, malformed)
             return {'id': directory.name, 'state': 'dormant', 'native_cancellation': {
                 'state': 'unknown', 'reason': f'runtime.json {condition}; no running terminal was found. Native cancellation is unconfirmed'}}
         backend, terminal, launch_id, request = found[0]
@@ -255,8 +287,7 @@ def kill(root, directory, *, attachment_only=False):
         facts = _qualified_facts(root, directory, properties, terminal, launch_id, request, adapter)
         # State ending blocks workers/new input. This is recovered tag/request
         # metadata only: no child PID, native grant or shared-service proof.
-        if agents.runtime(directory) != previous:
-            raise _problem(directory, 'runtime record changed during terminal discovery; retry with the current record')
+        _unchanged(directory, previous, malformed)
         write(directory / 'runtime.json', facts)
         cancellation = NativeResult('unknown', f'runtime.json {condition}; native cancellation could not be verified')
         if attachment_only:
