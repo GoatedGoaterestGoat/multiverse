@@ -4,9 +4,18 @@ from ..store import existing_lock, lock, now, read, write
 from . import sessions, records
 
 
+def record_paths(root):
+    """An existing agent folder remains an identity even if its file vanished."""
+    folder = root / 'state' / 'agents'
+    try:
+        return sorted(path / 'properties.json' for path in folder.iterdir() if path.is_dir())
+    except FileNotFoundError:
+        return []
+
+
 def directory(root, reference, *, allow_damaged=False):
     matches, damaged = [], []
-    for path in (root / "state" / "agents").glob("*/properties.json"):
+    for path in record_paths(root):
         try:
             data = records.properties(path)
         except records.RecordError as error:
@@ -48,8 +57,13 @@ def name_matches(path, name):
         return False
 
 
-def check_available_name(root, name):
-    for path in (root / "state" / "agents").glob("*/properties.json"):
+def check_available_name(root, name, *, locked=False, exclude=None):
+    if not locked:
+        with lock(root / 'state' / '.agents.lock'):
+            return check_available_name(root, name, locked=True, exclude=exclude)
+    for path in record_paths(root):
+        if path.parent == exclude:
+            continue
         if name_matches(path, name):
             raise ValueError(f"This universe already has an agent named {name}; "
                              f"pick another name or resume it with mv2 resume {name}")

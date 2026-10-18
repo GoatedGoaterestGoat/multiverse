@@ -98,8 +98,26 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 If an agent's `properties.json` or `runtime.json` cannot be read, list and inspect
 show that agent with its file and reason. Other agents remain readable. Doctor
 reports the damage as a problem and exits nonzero. Use the damaged row's UUID
-when its name cannot be recovered. Commands that would act on the damaged agent
-refuse until its record is repaired; listing does not rewrite or reset it.
+when its name cannot be recovered. An existing agent folder still reserves its
+UUID when properties.json is missing. Commands that would act on damaged
+identity refuse until it is repaired; listing does not rewrite or reset it.
+
+A missing runtime.json is reported even though the agent's name and harness
+remain readable. Before resume or wake, mv2 checks the launch's recorded and
+current tmux servers for its exact universe, agent and launch tags, and checks
+recorded process identities. A surviving terminal or process prevents a second
+launch. An unreachable server names the discovery problem instead of guessing
+that the agent stopped. If neither a terminal nor a process remains, resume
+starts a new launch and says that runtime.json was missing.
+
+Kill can close a uniquely tagged terminal even when runtime.json is missing.
+It never guesses a child PID or contacts a shared server from the conversation
+UUID alone. Native cancellation uses only a validated generation-private relay
+when available; otherwise the result says cancellation is unconfirmed. Other
+clients and their server are not closed. A failed preparation keeps a named,
+failed record that doctor reports and mv2 remove can clear. New agent folders
+are published with complete minimal properties, including during concurrent
+spawns.
 Name and conversation claims skip a readable damaged peer only when its bytes
 (and, for conversations, its lineage journal) do not mention the requested name
 or UUID. A possible collision or unreadable evidence names the peer and refuses

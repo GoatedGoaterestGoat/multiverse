@@ -26,7 +26,7 @@ def check(root, notes=None):
             for item in lifecycle.listing(scope):
                 damage = item.get('damaged')
                 if damage:
-                    problem = f"{item['name']}: {damage['file']}: {damage['reason']}"
+                    problem = f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}"
                     found.append((problem, problem))
                     continue  # No inbox, compaction or process action on damaged records.
                 workdir = item.get('workspace')

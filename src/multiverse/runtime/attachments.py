@@ -22,6 +22,12 @@ def begin(launch, started):
                                    'pid': os.getpid(), 'pid_started': started, 'at': now()})
 
 
+def record_child(launch, pid, started):
+    """Future launches retain their sampled child identity if runtime.json is lost."""
+    record = read(launch / 'cleanup.json')
+    write(launch / 'cleanup.json', {**record, 'child_pid': pid, 'child_started': started, 'child_at': now()})
+
+
 def finish(launch, errors=()):
     record = read(launch / 'cleanup.json')
     write(launch / 'cleanup.json', {**record, 'state': 'failed' if errors else 'complete',
@@ -226,6 +232,9 @@ def problem(directory, facts):
         complete = record.get('state') == 'complete'
         if not complete and not gone(record, record.get('at')):
             return _blocked('native connections', path, record.get('pid'), record.get('pid_started'), observations)
+        child = {'pid': record.get('child_pid'), 'pid_started': record.get('child_started')}
+        if not complete and 'child_pid' in record and not gone(child, record.get('child_at')):
+            return _blocked('child process', path, child['pid'], child.get('pid_started'), observations)
         if not complete and facts.get('pid') and not gone(facts, exit_at):
             return _blocked('child process', path, facts['pid'], facts.get('pid_started'), observations)
     else:

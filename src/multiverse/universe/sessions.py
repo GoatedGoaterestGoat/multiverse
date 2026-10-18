@@ -134,8 +134,9 @@ def claim(root, directory, data, native_id, home=None):
     own_provider = provider(root, data)
     own_directory = directory.resolve()
     own_home = canonical_home(home) if home is not None else data.get('native_session_home')
+    from .agents import record_paths
     for scope in tree(top(root)):
-        for path in (scope / 'state' / 'agents').glob('*/properties.json'):
+        for path in record_paths(scope):
             if path.parent.resolve() == own_directory:
                 continue
             try:

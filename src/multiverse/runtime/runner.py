@@ -555,7 +555,12 @@ def main():
         if request.get('observe_refusal') and attachment.get('readiness') == 'process':
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
         process = subprocess.Popen(request["argv"], env=env, stdin=None)
-        update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=process_started(process.pid))
+        child_started = process_started(process.pid)
+        try:
+            attachments.record_child(launch, process.pid, child_started)
+        except (OSError, ValueError):
+            pass  # Extra recovery evidence must not prevent primary PID registration.
+        update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=child_started)
         if request.get('observe_refusal'):
             from multiverse import harnesses
             adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])

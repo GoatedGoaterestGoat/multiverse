@@ -10,7 +10,7 @@ from contextlib import ExitStack
 import os
 
 from . import exact, parent, trash, tree, workspace
-from .agents import directory, runtime, update_runtime, name_matches
+from .agents import directory, runtime, update_runtime, name_matches, record_paths
 from . import sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
@@ -21,6 +21,9 @@ def _stopped(agent_dir):
     """Require native exit and remove any retained, owned terminal wrapper."""
     properties, facts = read(agent_dir / "properties.json"), runtime(agent_dir)
     if not facts.get("launch_id"):
+        if not (agent_dir / 'runtime.json').exists():
+            from ..runtime import missing_runtime
+            missing_runtime.require_stopped(agent_dir, properties)
         return
     state = observe(properties, facts)
     if state["live"] not in ('stopped', 'dormant'):
@@ -38,7 +41,7 @@ def _stopped(agent_dir):
 
 def _agents(scope):
     return sorted(p.parent for root in tree(scope)
-                  for p in (root / "state" / "agents").glob("*/properties.json"))
+                  for p in record_paths(root))
 
 
 def _hold(stack, agent_dirs):
@@ -94,7 +97,7 @@ def move_agent(root, reference, destination):
         raise ValueError(f'{properties["name"]} is already in that universe')
     if not (destination / "harnesses" / properties["harness"] / "harness.json").is_file():
         raise ValueError(f'The destination has no {properties["harness"]} harness configured')
-    for path in (destination / "state" / "agents").glob("*/properties.json"):
+    for path in record_paths(destination):
         if name_matches(path, properties["name"]):
             raise ValueError(f'The destination already has an agent named {properties["name"]}')
     target = destination / "state" / "agents" / agent_dir.name
@@ -104,7 +107,7 @@ def move_agent(root, reference, destination):
         moved = _session_claims(destination, agent_dir)
         # Spawn publishes names under the same namespace before agents.lock.
         stack.enter_context(lock(destination / 'state' / '.agents.lock'))
-        for path in (destination / 'state' / 'agents').glob('*/properties.json'):
+        for path in record_paths(destination):
             if name_matches(path, properties['name']):
                 raise ValueError(f'The destination already has an agent named {properties["name"]}')
         target.parent.mkdir(parents=True, exist_ok=True)

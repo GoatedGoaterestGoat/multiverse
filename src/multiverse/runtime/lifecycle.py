@@ -1,5 +1,6 @@
 """An agent's process lifecycle: launch (spawn, resume, wake), readiness, listing and kill."""
 from dataclasses import asdict, replace
+from contextlib import contextmanager
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import signal
 import socket
 import sys
 import time
+import tempfile
 
 from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
@@ -17,7 +19,7 @@ from ..terminal.tmux import Tmux, observe, owned, status_setup
 from ..universe import agents, catalog, mailbox, records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
-from . import native, attachments, agent_identity, registration
+from . import native, attachments, agent_identity, registration, missing_runtime
 
 TEARDOWN_TIMEOUT = 10
 
@@ -35,9 +37,10 @@ def damaged_row(scope, error, properties=None):
     except ValueError:
         shown = str(error.file)
     label = error.file.name if error.file.suffix == ".json" else shown
+    recover = {'recover': 'kill'} if getattr(error, 'recover', None) == 'kill' else {}
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
             "live": "unknown", "status": "unknown", "phase": text("phase") or "unknown",
-            "summary": f"damaged: {label}: {error.reason}", "damaged": {"file": shown, "reason": error.reason}}
+            "summary": f"damaged: {label}: {error.reason}", "damaged": {"file": shown, "reason": error.reason, **recover}}
 
 
 def text_defaults(row):
@@ -59,9 +62,9 @@ def listing(root, recursive=False, only=None):
     rows, snapshots = [], {}
     for scope in universe.tree(root) if recursive else [root]:
         agents_dir = scope / "state" / "agents"
-        paths = [agents_dir / only / "properties.json"] if only is not None else sorted(agents_dir.glob("*/properties.json"))
+        paths = [agents_dir / only / "properties.json"] if only is not None else agents.record_paths(scope)
         for path in paths:
-            if only is not None and not path.is_file():
+            if only is not None and not path.parent.is_dir():
                 continue
             try:
                 properties = records.properties(path)
@@ -70,6 +73,11 @@ def listing(root, recursive=False, only=None):
                 continue
             try:
                 facts = records.runtime(path.parent / "runtime.json")
+                if not (path.parent / 'runtime.json').exists() and missing_runtime.launches(path.parent):
+                    error = records.RecordError(path.parent / 'runtime.json',
+                        'is missing; terminal ownership must be checked before another launch')
+                    error.recover = 'kill'
+                    raise error
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
                 continue
@@ -162,11 +170,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         previous = runtime(agent_dir)
         if previous and observe(properties, previous)['live'] in ('stopped', 'dormant'):
             attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
-    if _recovery:
+    proposed_launch = uid() if not resume else None
+    if not resume:
+        launch_lock = lambda path: _publish_record(root, agent_dir, properties, proposed_launch)
+    elif _recovery:
         launch_lock = existing_lock
     else:
-        agent_dir.mkdir(parents=True, exist_ok=True)
-        launch_lock = lock
+        launch_lock = lambda path: lock(path, create_parent=False)
     with launch_lock(agent_dir / ".launch.lock"):
         if resume:
             # _record's snapshot predates this lock; a /clear report may have
@@ -179,6 +189,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if not workdir.is_dir():
                 raise ValueError(f'Workspace does not exist: {workdir}')
         previous = runtime(agent_dir)
+        missing_notices = (missing_runtime.require_stopped(agent_dir, properties, socket_path)
+                           if resume and not (agent_dir / 'runtime.json').exists() else [])
         if _recovery:
             _check_recovery(previous, properties, _recovery)
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
@@ -188,7 +200,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if resume_message_id is not None:
             resume_prompt, tracking = _wake_prompt(root, agent_dir, properties, resume_message_id)
         session = SessionHandle.from_records(properties, previous or {}, agent_dir) if resume else None
-        launch_id = uid()
+        launch_id = proposed_launch or uid()
         launch = agent_dir / "launches" / launch_id
         bootstrap = catalog.bootstrap(root, properties)
         if adapter.bootstrap:
@@ -225,7 +237,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
-        notices = _resume_notices(adapter, session, ambient, context.environment) if resume else []
+        notices = display.notice_lines(missing_notices,
+                    _resume_notices(adapter, session, ambient, context.environment) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
@@ -269,7 +282,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             with agents.sessions.namespace(root), lock(root / "state" / ".agents.lock"):
                 if read(root / 'universe.json')['id'] != properties['universe_id']:
                     raise ValueError('Universe changed before the agent could be published')
-                check_available_name(root, name)
+                check_available_name(root, name, locked=True, exclude=agent_dir)
                 if properties.get('native_session_id'):
                     agents.sessions.claim(root, agent_dir, properties, properties['native_session_id'])
                 write(agent_dir / "properties.json", properties)
@@ -440,6 +453,32 @@ def _resume_notices(adapter, session, caller_environment, effective_environment)
 
 
 # Steps of start() that need nothing from its launch lock.
+
+@contextmanager
+def _publish_record(root, agent_dir, properties, launch_id):
+    """Publish a complete identity folder atomically, retaining its launch lock.
+
+    Preparation can take seconds. No peer may mistake its not-yet-written
+    properties for a missing record, or reserve the same name concurrently.
+    """
+    with tempfile.TemporaryDirectory(prefix='.agent-create-', dir=root / 'state') as temporary:
+        staging = Path(temporary)
+        with lock(staging / '.launch.lock'):
+            with agents.sessions.namespace(root), lock(root / 'state' / '.agents.lock'):
+                check_available_name(root, properties['name'], locked=True)
+                if agent_dir.exists():
+                    raise ValueError(f'Agent directory already exists: {agent_dir}')
+                write(staging / 'properties.json', properties)
+                agent_dir.parent.mkdir(parents=True, exist_ok=True)
+                staging.rename(agent_dir)
+            try:
+                yield
+            except BaseException as error:
+                if not (agent_dir / 'runtime.json').exists():
+                    write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
+                          'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
+                          'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
+                raise
 
 def _record(root, name, task, harness, model, resume):
     """The saved agent to resume, or a new record not yet written: (directory, properties, harness, model)."""
@@ -694,8 +733,14 @@ def terminal_action(root, reference, action):
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference)
+    if not (agent_dir / 'runtime.json').exists():
+        recovered = missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
+        if recovered is not None:
+            return recovered
     with lock(agent_dir / '.launch.lock'):
         facts = runtime(agent_dir)
+        if not facts:
+            raise records.RecordError(agent_dir / 'runtime.json', 'disappeared during stop; retry to discover the tagged terminal')
         properties = read(agent_dir / 'properties.json')
         live = observe(properties, facts)['live']
         if live == 'dormant':
