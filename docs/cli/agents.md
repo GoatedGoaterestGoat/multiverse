@@ -63,6 +63,8 @@ mv2 resume worker --model opus --wait
 
 Before stop completes or a replacement terminal starts, mv2 waits for its old connections to close. If process identity cannot be verified, the error names the PID, command, start time and record path. Inspect those before retrying; do not kill a process just because it reused an old PID. Unclaimed reconnect workers expire after 60 seconds.
 
+Linux launches record the process's start ticks and boot ID, so a wall-clock adjustment cannot change its identity. Older records can also prove PID reuse from their stopped or dormant time, or prove that the launch predates this boot. If inspection is unavailable, restore it first. If you independently verify that the old process has exited but its stale evidence still blocks recovery, back up the named record and remove its obsolete PID and start-token fields (or its obsolete cleanup or role record), then retry. Never discard evidence for a live or unverified process.
+
 A `steer` or `follow-up` message to a stopped agent also resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window ends without either, the command uses process readiness and says that screen startup could not be confirmed. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.

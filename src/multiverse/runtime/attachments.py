@@ -14,7 +14,7 @@ import time
 
 from ..store import existing_lock, lock, now, read, uid, write
 from ..universe import agents
-from .process import START, process_started, process_snapshot, process_command
+from .process import START, LINUX_START, valid_start, boot_time, process_started, process_snapshot, process_command
 
 
 def begin(launch, started):
@@ -148,6 +148,14 @@ def _at(value):
 
 
 def _start_time(value):
+    if isinstance(value, str) and (token := LINUX_START.fullmatch(value)):
+        try:
+            if Path('/proc/sys/kernel/random/boot_id').read_text().strip() == token[1]:
+                boot = boot_time()
+                return boot + int(token[2]) / os.sysconf('SC_CLK_TCK') if boot is not None else None
+        except (OSError, ValueError):
+            pass
+        return None
     if not isinstance(value, str) or not START.fullmatch(value):
         return None
     try:
@@ -174,9 +182,11 @@ def _observation(pid, observations):
     return observations[pid]
 
 
-def _gone(pid, started=None, *, recorded_at=None, observations=None):
+def _gone(pid, started=None, *, recorded_at=None, before_boot=False, observations=None):
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
+    if before_boot and (started is None or isinstance(started, str) and START.fullmatch(started)):
+        return True  # A legacy launch cannot have survived this machine's reboot.
     absent, snapshot = _observation(pid, observations if observations is not None else {})
     if absent or (snapshot and snapshot[1][0] in ('Z', 'X')):
         return True
@@ -184,9 +194,26 @@ def _gone(pid, started=None, *, recorded_at=None, observations=None):
         return False
     if started is not None:
         # Corrupt tokens are not proof of a different process.
-        return _start_time(started) is not None and snapshot[0] != started
+        if not valid_start(started) or not valid_start(snapshot[0]):
+            return False
+        if bool(LINUX_START.fullmatch(started)) != bool(LINUX_START.fullmatch(snapshot[0])):
+            return False  # A clock-derived legacy token is not comparable with ticks.
+        return snapshot[0] != started
     boundary, current = _at(recorded_at), _start_time(snapshot[0])
     return boundary is not None and current is not None and current > boundary
+
+
+def _before_boot(facts):
+    started = _at(facts.get('started_at'))
+    if started is None:
+        return False
+    # New Linux identities already name their boot; never let a wall-clock
+    # adjustment override a matching tick identity.
+    if any(isinstance(facts.get(key), str) and LINUX_START.fullmatch(facts[key])
+           for key in ('pid_started', 'runner_started')):
+        return False
+    boot = boot_time()
+    return boot is not None and started < boot
 
 
 @lru_cache(maxsize=128)
@@ -206,7 +233,9 @@ def _blocked(label, path, pid, started, observations):
             f'started {current}; {why}. Record: {path}. '
             'Inspect that PID and the record; wait for the verified old process to exit, then retry. '
             'If the identity is unavailable or the record is damaged, restore process inspection or repair '
-            'the record only after verifying the old process has exited')
+            'the record only after verifying the old process has exited. Back up the named record, then remove '
+            'its stale PID and start-token fields (or remove a stale cleanup/role record) and retry; '
+            'never remove live or unverified process evidence')
 
 
 def recorded_process_problem(directory, facts):
@@ -216,8 +245,9 @@ def recorded_process_problem(directory, facts):
     malformed or unavailable identity never authorizes a signal or a restart.
     """
     observations = {}
-    boundary = facts.get('stopped_at') or (facts.get('observed_at')
+    boundary = facts.get('stopped_at') or facts.get('dormant_at') or (facts.get('observed_at')
                                          if type(facts.get('exit_code')) is int else None)
+    before_boot = _before_boot(facts)
     for key, started_key, label in (('runner_pid', 'runner_started', 'recorded runner'),
                                      ('pid', 'pid_started', 'recorded child process')):
         if key not in facts:
@@ -225,7 +255,7 @@ def recorded_process_problem(directory, facts):
         pid, started = facts[key], facts.get(started_key)
         if type(pid) is not int or pid <= 0:
             return f'Cannot prove the {label} has exited: {key} is invalid in {directory / "runtime.json"}'
-        if not _gone(pid, started, recorded_at=boundary, observations=observations):
+        if not _gone(pid, started, recorded_at=boundary, before_boot=before_boot, observations=observations):
             return _blocked(label, directory / 'runtime.json', pid, started, observations)
     return None
 
@@ -242,7 +272,7 @@ def attested_running(facts):
     for key, start, label in (('pid', 'pid_started', 'child'),
                               ('runner_pid', 'runner_started', 'runner')):
         pid, token = facts.get(key), facts.get(start)
-        if type(pid) is not int or pid <= 0 or _start_time(token) is None:
+        if type(pid) is not int or pid <= 0 or not valid_start(token):
             continue
         absent, snapshot = _observation(pid, observations)
         if (not absent and snapshot and snapshot[0] == token
@@ -258,12 +288,13 @@ def problem(directory, facts):
     launch = directory / 'launches' / launch_id
     path = launch / 'cleanup.json'
     observations = {}  # One identity sample per PID per scan, never a cross-launch cache.
+    before_boot = _before_boot(facts)
     def gone(record, boundary):
         return _gone(record.get('pid'), record.get('pid_started'), recorded_at=boundary,
-                     observations=observations)
+                     before_boot=before_boot, observations=observations)
     # stopped_at/observed exit postdate process creation; started_at does not.
     exited = isinstance(facts.get('exit_code'), int) and not isinstance(facts.get('exit_code'), bool)
-    exit_at = facts.get('stopped_at') or (facts.get('observed_at') if exited else None)
+    exit_at = facts.get('stopped_at') or facts.get('dormant_at') or (facts.get('observed_at') if exited else None)
     if path.exists():
         try:
             record = read(path)

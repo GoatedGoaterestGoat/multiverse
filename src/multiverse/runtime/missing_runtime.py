@@ -87,7 +87,7 @@ def damage(directory, facts):
                 reason = f'{key} must be a positive process ID'
                 break
         for key in ('pid_started', 'runner_started'):
-            if key in facts and facts[key] is not None and attachments._start_time(facts[key]) is None:
+            if key in facts and facts[key] is not None and not attachments.valid_start(facts[key]):
                 reason = f'{key} must be a process start token or null'
                 break
         if 'exit_code' in facts and type(facts['exit_code']) is not int:

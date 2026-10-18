@@ -1,12 +1,14 @@
 """A saved process identity never substitutes a later reused PID, and never guesses when it cannot tell."""
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 import os
+from pathlib import Path
 import subprocess
 import sys
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse.runtime import attachments, lifecycle, missing_runtime
+from multiverse.runtime import attachments, lifecycle, missing_runtime, process
 from multiverse.runtime.process import process_snapshot, process_started
 from multiverse.store import read, write
 from multiverse.universe import records
@@ -45,15 +47,54 @@ class ProcessEvidenceTest(BaseTest):
         return directory, properties, launch
 
     def test_process_evidence_decides_gone_live_or_unknown(self):
-        """A saved pid and start time against the live process, read with TZ=UTC and LC_ALL=C, decide live (same
+        """Boot-scoped Linux ticks or macOS UTC start times decide live (same
         start), gone (reused, zombie, absent) or unknown (unreadable, malformed, out of range, denied), and only gone
         ever releases, for attachment teardown, recovery and require_stopped alike; fragile because start strings are
-        written by different processes in different locales, and both error directions (signalling a reused pid, a
+        written across clock changes, reboots and locales, and both error directions (signalling a reused pid, a
         duplicate launch) are silent (1022b20, 2bcf1af, 49d878c)."""
         proof, lost, orphaned = self.record('proof', launched=False), self.record('lost'), self.record('orphaned')
+        with self.subTest('Linux identities use boot-scoped ticks, independent of wall-clock steps'):
+            boot = '11111111-1111-4111-8111-111111111111'
+            token = f'linux:{boot}:12345'
+            stat = '42 (name with ) parentheses) S ' + '0 ' * 18 + '12345 0'
+            def proc_text(path, *args, **kwargs):
+                return stat if str(path) == '/proc/42/stat' else boot
+            with patch.object(sys, 'platform', 'linux'), patch.object(Path, 'read_text', proc_text), \
+                    patch.object(process.subprocess, 'run', side_effect=AssertionError('no wall-clock ps identity')):
+                self.assertEqual(process_started(42), token)
+                self.assertEqual(process_snapshot(42), (token, 'S'))
+        with self.subTest('tick identity distinguishes reuse and never opens cleanup after a clock step'):
+            token = 'linux:11111111-1111-4111-8111-111111111111:12345'
+            for saved, gone in ((token, False), (token[:-5] + '12344', True),
+                                (token.replace('11111111-', '22222222-', 1), True),
+                                ('linux:damaged:12345', False)):
+                with self.subTest(saved=saved), \
+                        patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
+                    self.assertEqual(attachments._gone(42, saved), gone)
+            with patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
+                self.assertIsNotNone(attachments.attested_running({'pid': 42, 'pid_started': token}))
+        for boundary in ('dormant_at', 'started_at'):
+            with self.subTest('legacy dormant or previous-boot record releases reused PIDs', boundary=boundary):
+                directory, launch, facts = self.attachment(finished=False)
+                old = {**facts, 'state': 'running', 'runner_pid': os.getpid(), 'pid': os.getpid(), boundary: self.old}
+                # Only the previous-boot row needs a boot boundary; dormant_at
+                # compares the actual current process start to the saved exit.
+                with (patch.object(attachments, 'boot_time', return_value=datetime.now(timezone.utc).timestamp(), create=True)
+                      if boundary == 'started_at' else nullcontext()):
+                    self.assertIsNone(attachments.problem(directory, old))
+                    self.assertIsNone(attachments.recorded_process_problem(directory, old))
+        with self.subTest('a wall-clock step cannot override a current Linux tick identity'):
+            directory, _, facts = self.attachment(finished=False)
+            current = 'linux:11111111-1111-4111-8111-111111111111:12345'
+            with patch.object(attachments, '_observation', return_value=(False, (current, 'S'))), \
+                    patch.object(attachments, 'boot_time', return_value=datetime.now(timezone.utc).timestamp()), \
+                    patch.object(attachments, '_command', return_value='child'):
+                self.assertIsNotNone(attachments.recorded_process_problem(directory,
+                    {**facts, 'started_at': self.old, 'pid': 42, 'pid_started': current}))
         with self.subTest('the start probe'):
             result = subprocess.CompletedProcess([], 0, 'Fri Oct 16  22:47:45 2026\n', '')
-            with patch('multiverse.runtime.process.subprocess.run', return_value=result) as run:
+            with patch.object(sys, 'platform', 'darwin'), \
+                    patch('multiverse.runtime.process.subprocess.run', return_value=result) as run:
                 self.assertEqual(process_started(123), 'Fri Oct 16 22:47:45 2026')
             self.assertEqual(run.call_args.args[0], ['ps', '-p', '123', '-o', 'lstart='])
             self.assertEqual(run.call_args.kwargs['env']['TZ'], 'UTC')
@@ -68,6 +109,7 @@ class ProcessEvidenceTest(BaseTest):
                        subprocess.CompletedProcess([], 0, 'not a start time', ''),
                        OSError('no ps'), subprocess.TimeoutExpired('ps', 2)):
             with self.subTest('an unreadable start is never guessed', result=result), \
+                    patch.object(sys, 'platform', 'darwin'), \
                     patch('multiverse.runtime.process.subprocess.run',
                           **({'side_effect': result} if isinstance(result, Exception) else {'return_value': result})):
                 self.assertIsNone(process_started(123))
@@ -109,14 +151,18 @@ class ProcessEvidenceTest(BaseTest):
             old = {**facts, 'runner_pid': os.getpid(), 'pid': os.getpid(), 'exit_code': 0, 'stopped_at': self.old}
             self.assertIsNone(attachments.problem(directory, old))
             slow = {**old, 'started_at': self.old, 'stopped_at': datetime.now(timezone.utc).isoformat()}
-            problem = attachments.problem(directory, slow)
+            # This row concerns one boot; a separate row covers an earlier boot.
+            with patch.object(attachments, 'boot_time', return_value=0):
+                problem = attachments.problem(directory, slow)
             self.assertIsNotNone(problem, 'A legitimate process can start after pre-spawn started_at')
             self.assertIn(str(os.getpid()), problem)
         with self.subTest('a denied probe still sees reuse, and an unknown identity is actionable'):
             directory, launch, facts = self.attachment()
             role = self.legacy_role(launch, at=datetime.now(timezone.utc).isoformat())
             with patch.object(attachments.os, 'kill', side_effect=PermissionError):
-                self.assertTrue(attachments._gone(os.getpid(), 'Thu Jan 1 00:00:00 1970'))
+                current = process_started(os.getpid())
+                reused = current.rsplit(':', 1)[0] + ':0' if current.startswith('linux:') else 'Thu Jan 1 00:00:00 1970'
+                self.assertTrue(attachments._gone(os.getpid(), reused))
                 problem = attachments.problem(directory, facts)
             self.assertIn(str(os.getpid()), problem)
             self.assertIn(process_started(os.getpid()), problem)
