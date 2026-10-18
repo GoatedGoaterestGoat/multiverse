@@ -567,6 +567,21 @@ def prompt_recorded(native_id, prompt, since, environment):
     return prompt_evidence(native_id, prompt, since, environment)[0]
 
 
+def ignored_storage(caller, effective):
+    """A caller's CLAUDE_CONFIG_DIR that the resume replaced with the recorded one, named as Codex names an
+    ignored CODEX_HOME; None when they are the same storage or either is unset."""
+    requested, saved = (caller or {}).get('CLAUDE_CONFIG_DIR'), (effective or {}).get('CLAUDE_CONFIG_DIR')
+    if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+        return None
+    try:
+        kept = Path(saved).expanduser().resolve()
+        if Path(requested).expanduser().resolve() == kept:
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None  # a diagnostic can't claim a storage choice it couldn't check
+    return f'Kept its saved Claude storage {json.dumps(str(kept))}; ignored CLAUDE_CONFIG_DIR={json.dumps(requested)}.'
+
+
 def launch_only_cause(launch):
     """Why a launch has no connection by design: its harness setting, or what kept an auto launch from the mod."""
     if launch.get('policy') == 'plain':
@@ -663,8 +678,10 @@ class ClaudeAdapter(ConfiguredAdapter):
         return self._with_bridge(fresh or command, context)
 
     def resume_notice(self, session, caller_environment, effective_environment):
-        """The line a resume result adds when it starts the session fresh; same evidence as `resume`."""
-        return fresh_start(session, effective_environment)
+        """What a resume result adds: a caller's CLAUDE_CONFIG_DIR it ignored for the storage recorded at spawn,
+        and a fresh start (same evidence as `resume`)."""
+        notes = [ignored_storage(caller_environment, effective_environment), fresh_start(session, effective_environment)]
+        return ' '.join(note for note in notes if note) or None
 
     def startup_prompt_evidence(self, session, prompt, since, environment):
         """For a launch that exited during startup with a wake prompt: whether its Claude recorded the prompt.

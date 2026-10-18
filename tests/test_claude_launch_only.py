@@ -63,9 +63,9 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
 
     def test_fresh_resume_reports_lost_or_unused_conversation(self):
         """A fresh resume says whether the saved conversation is missing or was never used, from receipts, Claude's
-        history.jsonl and context reported after the latest /clear, and damaged files never block it; a break goes
-        unnoticed because the resume succeeds either way and only the note tells the user their work was lost
-        (74887d9)."""
+        history.jsonl and context reported after the latest /clear, and damaged files never block it, and an ignored
+        CLAUDE_CONFIG_DIR is named; a break goes unnoticed because the resume succeeds either way and only the note
+        tells the user their work was lost, or that their storage choice was not used (74887d9, qa-lifecycle 12bf723)."""
         with self.subTest('a saved conversation'):
             native = str(uuid4())
             path = self.storage / 'projects' / '-w' / f'{native}.jsonl'
@@ -73,6 +73,27 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
             path.write_text('{"type": "user"}\n')
             self.assertIsNone(self.notice(self.session(native)))
             self.assertIn('--resume', self.resumed(self.session(native)).argv)
+        with self.subTest('a CLAUDE_CONFIG_DIR the resume ignored'):
+            # A resume keeps the storage recorded at spawn (lifecycle 620e411); the caller's other value is named,
+            # as Codex names an ignored CODEX_HOME.
+            native = str(uuid4())
+            path = self.storage / 'projects' / '-w' / f'{native}.jsonl'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"type": "user"}\n')
+            other = str(self.work / 'other-claude')
+            alias = self.work / 'storage-alias'
+            alias.symlink_to(self.storage)
+            kept = str(self.storage.resolve())
+            ignored = f'Kept its saved Claude storage "{kept}"; ignored CLAUDE_CONFIG_DIR="{other}".'
+            for caller, expected in (({'CLAUDE_CONFIG_DIR': other}, ignored), ({'CLAUDE_CONFIG_DIR': str(alias)}, None),
+                                     ({'CLAUDE_CONFIG_DIR': str(self.storage)}, None), ({}, None),
+                                     ({'CLAUDE_CONFIG_DIR': ''}, None)):
+                with self.subTest(caller=caller):
+                    self.assertEqual(self.adapter.resume_notice(self.session(native), caller, self.environment), expected)
+            # A fresh start keeps its own note after this one.
+            fresh = self.adapter.resume_notice(self.session(str(uuid4())), {'CLAUDE_CONFIG_DIR': other}, self.environment)
+            self.assertTrue(fresh.startswith(ignored + ' '), fresh)
+            self.assertIn('stopped before its first message', fresh)
         with self.subTest('no evidence of a message'):
             self.forget()
             native = str(uuid4())

@@ -27,7 +27,8 @@ the first message); a session Claude has no transcript for restarts fresh under
 the same UUID with `--session-id`, without replaying its task, and says so in the
 resume result (the `resume_notice` hook) and the agent's details, where core keeps
 it with the launch's notices (never in `fallback_reason`, which is for a plain
-launch's cause). The note tells
+launch's cause). The same hook names a caller's `CLAUDE_CONFIG_DIR` that the resume
+ignored for the storage recorded at spawn, as Codex names an ignored `CODEX_HOME`. The note tells
 "stopped before its first message" from "the saved conversation is missing"
 (Claude deletes transcripts after `cleanupPeriodDays`) by what outlives the
 transcript: a message to this session whose receipt the mod wrote, context the
