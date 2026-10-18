@@ -497,11 +497,15 @@ def main():
                 proxy.close()
                 roles['relay'].close()
                 proxy = None
+                from multiverse.display import notice_lines
+                notices = notice_lines(request.get('resume_notices', request.get('notices')),
+                                       fallback.get('notices'))
                 selection = {**(fallback.get('native_mode') or {}), 'fallback_reason': f'Native launch relay unavailable: {error}'}
                 request = {**request, 'argv': fallback['argv'], 'unset_env': fallback['unset_env'],
                            'env': {**fallback.get('environment', {}), **request['env']},
                            'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
-                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment')}
+                           'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
+                           'notices': notices}
                 write(launch / 'request.json', request)
                 env = launch_environment(request)
                 # A sender may have queued input while relay startup was still
@@ -523,6 +527,7 @@ def main():
                     update_runtime(agent_dir, launch.name, state='running', control_endpoint=None,
                                    startup_delivery=None, native_mode=selection, native_relay=None, error=None,
                                    native_service=None, attachment=fallback.get('attachment'),
+                                   launch_notices=notices,
                                    # Recorded by lifecycle for the fallback; no plugin code runs here.
                                    plugins=fallback.get('plugins') or {'plugins': {}, 'status_items': []})
                     with lock(agent_dir / '.properties.lock'):
@@ -544,6 +549,8 @@ def main():
                     shutil.rmtree(service_dir, ignore_errors=True)
                     service_dir = None
                 attachment = fallback.get('attachment') or {}
+                for notice in notices:
+                    print(notice, flush=True)
         # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
         if request.get('observe_refusal') and attachment.get('readiness') == 'process':
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})

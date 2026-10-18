@@ -369,16 +369,18 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 # Apply the final resolved policy before releasing the runner.
                 backend.run('set-option', '-t', terminal['session'], 'mouse', 'on')
             argv = list(command.argv)
+            selected_notices = display.notice_lines(notices, command.notices)
             endpoint = asdict(shared_endpoint or command.control_endpoint) if shared_endpoint or command.control_endpoint else None
             update_runtime(agent_dir, launch_id, control_endpoint=endpoint,
                            native_mode=command.native_mode, plugins=plugins_record(root, command),
                            native_service=asdict(service) if service else None,
                            attachment=asdict(command.attachment) if command.attachment else None,
+                           launch_notices=selected_notices,
                            startup_delivery='waiting' if endpoint else None)
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {**_request(argv, env, command, endpoint, resume_message_id),
-                                           'notices': notices,
+                                           'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,
@@ -419,7 +421,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                f"Failed record preserved. {recovery}.") from error
     result = (wait_ready(root, agent_dir, launch_id, adapter, wait_timeout) if wait
               else launch_result(root, agent_dir))
-    notices = [*result.get('notices', []), *notices]
+    notices = display.notice_lines(result.get('notices'), result.get('runtime', {}).get('launch_notices'))
     return {**result, 'notices': notices} if notices else result
 
 
@@ -527,8 +529,10 @@ def _request(argv, env, command, endpoint, resume_message_id):
 
 def launch_result(root, agent_dir):
     properties, facts = read(agent_dir / 'properties.json'), runtime(agent_dir)
+    notices = display.notice_lines(facts.get('launch_notices'))
     return {**properties, 'universe': str(root), 'runtime': facts,
-            'session': asdict(SessionHandle.from_records(properties, facts, agent_dir))}
+            'session': asdict(SessionHandle.from_records(properties, facts, agent_dir)),
+            **({'notices': notices} if notices else {})}
 
 
 def _event(agent_dir, kind, launch=None, data=None, properties=None):

@@ -68,9 +68,23 @@ def outcome(record, verb, failure):
 
 
 def with_notices(summary, record):
-    notices = record.get("notices")
-    lines = [clean(item).strip() for item in notices if isinstance(item, str) and item.strip()] if isinstance(notices, list) else []
-    return "\n".join([summary, *lines])
+    return "\n".join([summary, *notice_lines(record.get('notices'))])
+
+
+def notice_lines(*groups):
+    """Optional presentation strings: one line each, no duplicates or coercion."""
+    result = []
+    seen = set()
+    for group in groups:
+        if not isinstance(group, (list, tuple)):
+            continue
+        for value in group:
+            if isinstance(value, str):
+                line = clean(value).strip()
+                if line and line not in seen:
+                    seen.add(line)
+                    result.append(line)
+    return result
 
 
 def agent_name(root, reference):

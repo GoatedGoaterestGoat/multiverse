@@ -837,7 +837,12 @@ Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
 therefore returns an optional `RpcProxySpec` in its `CommandSpec`.
 A command candidate may also carry `notices`, a tuple of presentation strings.
 A plain fallback carries its own notices, independently of the bridge candidate;
-these strings never change permissions or launch selection. Core serializes
+these strings never change permissions or launch selection. Core sanitizes and
+records only the selected candidate's notices in the launch request and runtime.
+Spawn, resume, readiness waits and message wakes return them in text and JSON.
+A runner-selected fallback replaces the discarded candidate's notices before
+starting the child, preserving independent saved-storage notices; inspect also
+shows these notes when an asynchronous fallback happened after the CLI returned. Core serializes
 it in the launch request, creates a private 0700 socket directory, and starts the
 relay in the runner before starting the TUI. The provider supplies pure request
 and reply interpretation; core owns WebSocket connections, backpressure, size

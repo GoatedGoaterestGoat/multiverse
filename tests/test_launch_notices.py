@@ -106,6 +106,9 @@ class LaunchNoticeCliTest(TerminalBase):
             labels = {'CODEX_HOME': 'Codex home', 'CODEX_SQLITE_HOME': 'Codex database home'}
             expected = ' '.join(f'Kept its saved {labels[key]} {json.dumps(saved_environment[key])}; '
                                 f'ignored {key}={json.dumps(environment[key])}.' for key in keys)
+            permission = (f'Codex: mv2 omitted its extra writable agent folder for {json.dumps(properties["name"])} '
+                          f'({json.dumps(str(directory))}); no writable sandbox flag was selected. '
+                          'To allow it, give the harness --sandbox workspace-write.')
             with self.subTest(options=options):
                 process = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
                                           'resume', properties['id'], *options], env=environment,
@@ -113,11 +116,11 @@ class LaunchNoticeCliTest(TerminalBase):
                 self.assertEqual(process.returncode, 0, process.stderr)
                 if '--json' in options:
                     result = json.loads(process.stdout)
-                    self.assertEqual(result['notices'], [expected])
+                    self.assertEqual(result['notices'], [expected, permission])
                     self.assertEqual(result['native_session_id'], properties['native_session_id'])
                 else:
-                    self.assertEqual(process.stdout.splitlines()[-1], expected)
-                    self.assertEqual(len(process.stdout.splitlines()), 2)
+                    self.assertEqual(process.stdout.splitlines()[1:], [expected, permission])
+                    self.assertEqual(len(process.stdout.splitlines()), 3)
                     self.assertIn(': ready.' if '--wait' in options else ').', process.stdout.splitlines()[0])
                 until(lambda: (directory / 'seen.json').exists())
                 self.assertEqual(read(directory / 'seen.json'), saved_environment)
