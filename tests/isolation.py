@@ -19,6 +19,7 @@ import tempfile
 from unittest import mock
 
 import home_safety  # captures the real ~/.multiverse at import, before any test moves HOME
+import tracking
 
 # What a test must not inherit from the shell or agent running the suite: the agent's identity, universe,
 # tmux server and messaging socket, and the harnesses' homes. MV2_CLI and MV2_PYTHON name this checkout's code.
@@ -76,3 +77,5 @@ def track(*, tmux_socket=None, pid=None):
     if record:
         with open(TRACKED, "a") as out:
             out.write(json.dumps(record) + "\n")
+        if "group" in record:
+            tracking.sample(TRACKED)  # who is in it now, while its leader is known to be alive

@@ -829,6 +829,71 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn("units without a result", result.stdout)
         self.assertEqual(result.stdout.splitlines()[-1], "FAILED (errors=1, skipped=1)")
 
+    def test_a_group_tracked_and_left_before_the_runners_first_look_still_loses_its_helper(self):
+        # The leader exits and the unit ends well within the worker's first periodic look (reviewer's probe).
+        helper_file, release, leader = self.work / "helper", self.work / "release", self.work / "leader.py"
+        leader.write_text(textwrap.dedent(f"""
+            import subprocess, sys, time
+            from pathlib import Path
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", {str(self.work)!r}])
+            Path({str(helper_file)!r}).write_text(str(child.pid))
+            while not Path({str(release)!r}).exists():
+                time.sleep(0.005)
+            """))
+        self.module("test_fast", f"""
+            import subprocess, sys, time, unittest
+            from pathlib import Path
+            from isolation import track
+            class Fast(unittest.TestCase):
+                def test_group(self):
+                    leader = subprocess.Popen([sys.executable, {str(leader)!r}], start_new_session=True)
+                    while not Path({str(helper_file)!r}).exists():
+                        time.sleep(0.005)
+                    track(pid=leader.pid)
+                    Path({str(release)!r}).touch()
+                    leader.wait()
+            """)
+        result = self.run_tests("test_fast")
+        helper = self.pid_in(helper_file)
+        self.addCleanup(self.kill_if_running, helper)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.gone_soon(helper), "the helper outlived the unit that tracked its group")
+
+    def test_a_group_is_sampled_only_while_a_process_already_recorded_in_it_is_there(self):
+        sys.path.insert(0, str(RUNNER.parent))
+        self.addCleanup(sys.path.remove, str(RUNNER.parent))
+        import tracking
+        from multiverse.runtime.process import process_started
+        child = "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)', sys.argv[1]]); "
+        leader = subprocess.Popen([sys.executable, "-c", "import subprocess, sys, time; " + child + "time.sleep(600)",
+                                   str(self.work)], start_new_session=True)
+        self.addCleanup(lambda: self.kill_group(leader))
+        deadline = time.monotonic() + 30
+        while len([pid for pid, group, _, _ in tracking.processes() if group == leader.pid]) < 2:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.05)
+        tracked = self.work / "tracked.jsonl"
+        # A record of a leader with another start time: the group with its number is someone else's.
+        tracked.write_text(json.dumps({"pid": leader.pid, "started": "Thu Jan  1 00:00:00 1970",
+                                       "group": leader.pid}) + "\n")
+        tracking.sample(tracked)
+        self.assertEqual(len(tracked.read_text().splitlines()), 1)  # nothing recorded
+        tracked.write_text(json.dumps({"pid": leader.pid, "started": process_started(leader.pid),
+                                       "group": leader.pid}) + "\n")
+        tracking.sample(tracked)
+        tracking.sample(tracked)  # once each
+        members = [json.loads(line) for line in tracked.read_text().splitlines()[1:]]
+        self.assertEqual([member["member_of"] for member in members], [leader.pid])  # its child; the leader is known
+        self.assertNotEqual(members[0]["pid"], leader.pid)
+
+    @staticmethod
+    def kill_group(process):
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        process.wait()
+
     def kill_if_running(self, pid):
         """Kill `pid` if it is still one this test started (never a process that took the number since)."""
         command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True, capture_output=True).stdout

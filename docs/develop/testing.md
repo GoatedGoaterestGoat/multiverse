@@ -29,7 +29,7 @@ The live Codex and Pi modules depend on the installed versions and on timing. Th
 | `test_tui*.py`, `test_portal.py`, `test_ui_independent.py` | The dashboard |
 | `test_compaction.py` | Tree compaction, independent of any harness |
 | `test_docs.py` | Relative links in the docs, and the generated CLI reference |
-| `run.py`, `test_run.py` | The parallel runner (not a test module), and its tests |
+| `run.py`, `tracking.py`, `test_run.py` | The parallel runner, and what it records to end after a unit (not test modules); the runner's tests |
 | `isolation.py`, `home_safety.py` | Each test's own HOME and environment, and the guard on the real `~/.multiverse` (not test modules) |
 | `native_safety.py` | The Codex daemon guard (not a test module) |
 | `native_processes.py` | Ends the processes of a private Codex server before its test removes the home (not a test module) |

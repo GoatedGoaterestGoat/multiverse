@@ -40,6 +40,8 @@ import time
 import traceback
 import unittest
 
+import tracking  # beside this file
+
 HERE = Path(__file__).resolve().parent
 SHARD_SECONDS = 20  # a module the record says takes longer is split into shards of about this
 UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
@@ -152,70 +154,14 @@ def _watchdog(runner, worker_alive, worker, grace, tracked):
         pass  # none left (macOS also refuses a group of only zombies)
 
 
-def _records(path):
-    """What a unit's tests tracked (isolation.track) and its worker saw in their groups (_observe), one JSON object
-    a line; a line cut short when the unit was killed is skipped."""
-    try:
-        lines = Path(path).read_text().splitlines()
-    except (OSError, TypeError):
-        return []
-    records = []
-    for line in lines:
-        try:
-            record = json.loads(line)
-        except ValueError:
-            continue
-        if isinstance(record, dict):
-            records.append(record)
-    return records
-
-
-def _process():
-    """mv2's multiverse.runtime.process, from this checkout."""
-    if str(HERE.parent / "src") not in sys.path:
-        sys.path.insert(0, str(HERE.parent / "src"))
-    from multiverse.runtime import process
-    return process
-
-
-def _processes():
-    """(pid, process group, state, start) of every process, the start in the form process_started gives; [] when
-    ps cannot say."""
-    START = _process().START
-    try:
-        output = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], capture_output=True, text=True,
-                                stdin=subprocess.DEVNULL, env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
-                                timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return []
-    found = []
-    for line in output.splitlines():
-        fields = line.split()
-        if len(fields) == 8 and fields[0].isdigit() and fields[1].isdigit() and START.fullmatch(" ".join(fields[3:])):
-            found.append((int(fields[0]), int(fields[1]), fields[2], " ".join(fields[3:])))
-    return found
-
-
 def _observe(tracked):
-    """Record, with its start time, every process seen in a process group a test tracked, for as long as the group
-    lasts: its leader can exit first and leave helpers behind, and Run.end_tracked ends the group only while a
-    process recorded here is still in it. A group seen empty is not watched again, since its number may later
-    belong to another group."""
-    recorded, gone, idle = set(), set(), threading.Event()
+    """Record who is in the process groups the unit's tests tracked (tracking.sample) every OBSERVE_SECONDS, so that
+    a group whose leader exits first can still be ended with its helpers."""
+    idle = threading.Event()
     while True:
         # Not time.sleep: a test may patch it, for every thread, to drive a fake clock (test_codex_recovery does).
         idle.wait(OBSERVE_SECONDS)
-        groups = {record["group"] for record in _records(tracked) if type(record.get("group")) is int} - gone
-        if not groups:
-            continue
-        found = [(pid, group, started) for pid, group, state, started in _processes() if group in groups]
-        gone |= groups - {group for _, group, _ in found}
-        lines = [json.dumps({"member_of": group, "pid": pid, "started": started}) + "\n"
-                 for pid, group, started in found if (pid, started) not in recorded]
-        if lines:
-            recorded.update((pid, started) for pid, _, started in found)
-            with open(tracked, "a") as out:
-                out.write("".join(lines))
+        tracking.sample(tracked)
 
 
 def inventory(start):
@@ -300,6 +246,7 @@ def worker(start, target, shard, shards, report, verbosity, watch, grace):
         threading.Thread(target=_observe, args=(tracked,), daemon=True).start()
     result = unittest.TextTestRunner(resultclass=_Result, verbosity=verbosity, stream=sys.stderr).run(
         unittest.TestSuite(tests))
+    tracking.sample(tracked)  # once more: who is in the tracked groups as the unit ends, before its leaders are gone
     errors = [[test.id(), text] for test, text in result.errors]
     try:
         home_safety.check()  # what no test's own check reported, such as a write by a thread that outlived it
@@ -334,8 +281,8 @@ def _holder():
         directory = os.getcwd()
     except OSError:
         directory = "?"
-    return {"pid": os.getpid(), "started": _process().process_started(os.getpid()), "cwd": directory,
-            "agent_id": agent_id, "agent": agent}
+    started = tracking.process_module().process_started(os.getpid())
+    return {"pid": os.getpid(), "started": started, "cwd": directory, "agent_id": agent_id, "agent": agent}
 
 
 class Run:
@@ -441,7 +388,7 @@ class Run:
         """Which other runs hold this machine's slots, from what each wrote into its slot: the agent (or "not an
         agent"), how many slots, its pid and directory. A record whose process has gone, or whose pid now belongs to
         another process, is not theirs; a slot no record names is held by an older tests/run.py, which writes none."""
-        process_started, runs = _process().process_started, {}
+        process_started, runs = tracking.process_module().process_started, {}
         for index in range(self.budget):
             try:
                 record = json.loads((self.slots / f"slot-{index}").read_text())
@@ -527,9 +474,9 @@ class Run:
 
         A process is ended only while its start time is the one recorded, never a later process that took its
         number. A tracked group leader's whole group is ended while any process recorded in it (the leader, or a
-        member its worker saw, _observe) is still there, even after the leader itself has gone: a group's number
+        member its worker saw, tracking.sample) is still there, even after the leader itself has gone: a group's number
         cannot be reused while a process is in it, so a later group with the same number holds none of those."""
-        records, ended = _records(path), []
+        records, ended = tracking.records(path), []
         for socket in dict.fromkeys(record["tmux_socket"] for record in records
                                     if isinstance(record.get("tmux_socket"), str)):
             if not os.path.exists(socket):
@@ -541,12 +488,11 @@ class Run:
                 stopped = None
             if stopped is not None and stopped.returncode == 0:
                 ended.append(f"the tmux server on {socket}")
-        identities = {(record["pid"], record["started"]) for record in records
-                      if type(record.get("pid")) is int and isinstance(record.get("started"), str)}
+        identities = tracking.identities(records)
         groups = {record[key] for record in records for key in ("group", "member_of") if type(record.get(key)) is int}
         if not identities:
             return ended
-        live = {(pid, started): group for pid, group, state, started in _processes()
+        live = {(pid, started): group for pid, group, state, started in tracking.processes()
                 if (pid, started) in identities and not state.startswith("Z")}
         killed = set()
         for group in sorted(group for group in groups if group in live.values()):
