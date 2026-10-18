@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from unittest.mock import patch
 from uuid import uuid4
@@ -244,7 +245,8 @@ class ClaudeUnreadableStorageTest(BaseTest):
         self.storage = self.work / 'claude-config'
         self.environment = {'CLAUDE_CONFIG_DIR': str(self.storage)}
         self.enterContext(patch.dict(os.environ, self.environment))
-        self.project = self.storage / 'projects' / '-w'
+        # Claude files a session under its launch directory's real path, every non-alphanumeric character a '-'.
+        self.project = self.storage / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(self.work))
 
     def saved(self):
         """A new session whose transcript, with the prompt and one response, is in a readable project folder."""
@@ -261,8 +263,10 @@ class ClaudeUnreadableStorageTest(BaseTest):
 
     def test_an_unreadable_storage_folder_never_proves_absence(self):
         """A Claude storage folder that cannot be read never counts as proof that a transcript is absent, for wake
-        evidence, resume and usage; fragile because pathlib.glob silently skips unreadable folders, so any new scan
-        brings back a resend, an abandoned conversation or a wrong number (152f9c9)."""
+        evidence, resume and usage, but only one whose name could be this agent's workspace's blocks; fragile because
+        pathlib.glob silently skips unreadable folders, and the folder name copies Claude's private, lossy rule (NFC,
+        UTF-16 code units, a hash past 200), shared with GOAT: a wrong name skips the folder holding the session and
+        resends a prompt, or lets one unrelated folder stop every agent (152f9c9, qa-compaction's 9f0331f retest)."""
         with self.subTest('wake evidence'):
             self.saved()
             from multiverse.harnesses.claude import prompt_recorded
@@ -302,6 +306,66 @@ class ClaudeUnreadableStorageTest(BaseTest):
             self.assertEqual(found, (None, f"Claude's transcript {transcript} can't be read: restore read access to it"))
             self.assertIs(ask('startup_prompt_evidence'), False)
             self.assertIsNone(ask('startup_prompt_evidence_reason'))
+        with self.subTest("another workspace's unreadable folder"):
+            # Another tester's scratch folder, or a root-owned one a `sudo claude` left, is no place Claude files this
+            # agent's sessions, so it must not stop this agent's lookups.
+            from multiverse.harnesses.claude import NEVER_USED, fresh_start
+            adapter = harnesses.load(self.root, 'claude')
+            self.saved()
+            agent = self.work / 'agent-elsewhere'
+            agent.mkdir()
+            session = SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native, state='failed',
+                                    session_file=str(agent / 'session.jsonl'))
+            unused = replace(session, native_id=str(uuid4()))
+            other = self.storage / 'projects' / '-private-tmp-scratch'
+            other.mkdir()
+            self.lock(other)
+            found = (adapter.startup_prompt_evidence(session, self.PROMPT, self.SINCE, self.environment),
+                     adapter.startup_prompt_evidence(session, 'another prompt', self.SINCE, self.environment),
+                     fresh_start(unused, self.environment) == NEVER_USED, adapter.get_usage(session).state)
+            other.chmod(0o700)
+            self.assertEqual(found, (True, False, True, 'ok'))
+            # A Claude worktree under the workspace is filed under its name plus "-...": that folder still blocks.
+            worktree = self.storage / 'projects' / (self.project.name + '--claude-worktrees-a')
+            worktree.mkdir()
+            self.lock(worktree)
+            found = adapter.startup_prompt_evidence(session, 'another prompt', self.SINCE, self.environment)
+            worktree.chmod(0o700)
+            self.assertIsNone(found)
+            # A recheck keeps the failed launch's own handle (f76d7f4): its workspace, not properties.json's, names the
+            # folder that can hold the session, even after the agent moved on to another workspace.
+            ran = self.work / 'ran-here'
+            ran.mkdir()
+            write(agent / 'properties.json', {'id': session.agent_id, 'harness': 'claude', 'workspace': str(self.work)})
+            snapshot = replace(session, workspace=str(ran))
+            for locked, blocks in ((self.project, False),
+                                   (self.storage / 'projects' / re.sub(r'[^A-Za-z0-9]', '-', os.path.realpath(ran)), True)):
+                with self.subTest(locked=locked.name[-12:]):
+                    locked.mkdir(exist_ok=True)
+                    self.lock(locked)
+                    found = adapter.startup_prompt_evidence(snapshot, 'another prompt', self.SINCE, self.environment)
+                    locked.chmod(0o700)
+                    self.assertEqual(found, None if blocks else False)
+        with self.subTest("Claude's folder names"):
+            # The table GOAT shares (agreed with compaction and mv2-lead): Bun replaces UTF-16 code units after NFC,
+            # and past 200 units adds a hash only Bun can compute, so a long name is matched by its first 200 plus "-".
+            from multiverse.harnesses.claude import could_hold, project_key
+            for path, key in (('/Users/x/proj', '-Users-x-proj'), ('/private/tmp/claude-501/-Users-x', '-private-tmp-claude-501--Users-x'),
+                              ('/w/run-2.1.289', '-w-run-2-1-289'), ('/w/caf\u00e9', '-w-caf-'), ('/w/cafe\u0301', '-w-caf-'),
+                              ('/w/\U0001F600', '-w---')):
+                with self.subTest(path=path):
+                    self.assertEqual(project_key(path), key)
+            long = '/' + 'a' * 229  # 230 code units
+            for name, workspaces, holds in (
+                    ('-Users-x-proj', ('/Users/x/proj',), True), ('-users-X-PROJ', ('/Users/x/proj',), True),
+                    ('-Users-x-proj--claude-worktrees-a', ('/Users/x/proj',), True),
+                    ('-Users-x-proj-old', ('/Users/x/proj',), True),  # a sibling over-blocks: rare and safe
+                    ('-Users-x-other', ('/Users/x/proj',), False), ('-private-tmp-scratch', ('/Users/x/proj',), False),
+                    ('-Users-x-pro', ('/Users/x/proj',), False),
+                    (project_key(long)[:200] + '-1x2y3z', (long,), True), ('-' + 'a' * 199 + 'b-1x2y3z', (long,), False),
+                    ('-Users-x-other', (), True), ('-Users-x-other', ('relative/proj',), True)):  # no usable workspace
+                with self.subTest(name=name[:40], workspaces=[w[:20] for w in workspaces]):
+                    self.assertIs(could_hold(name, workspaces), holds)
         with self.subTest('resume'):
             self.saved()
             from multiverse.harnesses.claude import fresh_start

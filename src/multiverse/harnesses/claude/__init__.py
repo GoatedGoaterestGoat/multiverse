@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import re
+import unicodedata
 import shutil
 import subprocess
 import sys
@@ -81,11 +82,37 @@ class Unreadable(Exception):
         self.path = str(path)
 
 
-def session_transcripts(native_id, environment=None):
+PROJECT_KEY_LENGTH = 200  # past this, Claude shortens a project folder's name and adds a hash only Bun computes
+
+
+def project_key(path):
+    """Claude's project folder name for a launch directory: the NFC path, every UTF-16 code unit that isn't
+    an ASCII letter or digit replaced by '-', as Bun does (so a character outside the BMP gives '--')."""
+    return ''.join(c if c.isascii() and c.isalnum() else '-' * (2 if ord(c) > 0xFFFF else 1)
+                   for c in unicodedata.normalize('NFC', str(path)))
+
+
+def could_hold(name, workspaces):
+    """Whether Claude could file a session launched in one of `workspaces` under the project folder `name`.
+
+    The name is lossy, so this errs towards yes: the folder's name, ignoring case, is a workspace's key or
+    starts with it plus '-' (Claude's own worktrees under the workspace, and the hashed form past 200 units).
+    With no absolute workspace to go by, any folder could.
+    """
+    keys = {project_key(form)[:PROJECT_KEY_LENGTH].casefold()
+            for workspace in workspaces if isinstance(workspace, str) and os.path.isabs(workspace)
+            for form in (workspace, os.path.realpath(workspace))}
+    folded = name.casefold()
+    return not keys or any(folded == key or folded.startswith(key + '-') for key in keys)
+
+
+def session_transcripts(native_id, environment=None, workspaces=()):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
 
-    Raises Unreadable when a folder can't be listed or searched. pathlib's glob skips those silently, so a
-    scan that finds nothing would otherwise read as proof the transcript is absent.
+    Raises Unreadable when a folder can't be listed or searched and could hold the session: Claude files it
+    under its launch directory's name, so with `workspaces` (the launch's own, never re-read) an unreadable
+    folder of another workspace is skipped. pathlib's glob skips every unreadable folder silently, so a scan
+    that finds nothing would otherwise read as proof the transcript is absent.
     """
     projects = claude_home(environment) / 'projects'
     try:
@@ -103,8 +130,9 @@ def session_transcripts(native_id, environment=None):
             found.append((candidate.stat().st_mtime, candidate))
         except FileNotFoundError:
             continue
-        except OSError as error:  # a project folder that can't be searched could hold it
-            raise Unreadable(entry.path) from error
+        except OSError as error:
+            if could_hold(entry.name, workspaces):  # a project folder that can't be searched could hold it
+                raise Unreadable(entry.path) from error
     return [path for _, path in sorted(found)]
 
 
@@ -122,7 +150,7 @@ def subagent_transcripts(main):
     return sorted(found)
 
 
-def has_saved_conversation(native_id, environment=None):
+def has_saved_conversation(native_id, environment=None, workspaces=()):
     """Whether Claude has written a transcript for this session.
 
     Claude writes nothing until the first message, so a session that was never
@@ -130,7 +158,7 @@ def has_saved_conversation(native_id, environment=None):
     says yes: resume then tries the conversation, and Claude says if it is gone.
     """
     try:
-        return bool(session_transcripts(native_id, environment))
+        return bool(session_transcripts(native_id, environment, workspaces))
     except Unreadable:
         return True
 
@@ -279,13 +307,13 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_reading(native_id):
+def context_reading(native_id, workspaces=()):
     """(tokens, timestamp) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
     excluded: they have their own context windows.
     """
-    mains = session_transcripts(native_id)
+    mains = session_transcripts(native_id, workspaces=workspaces)
     if not mains:
         return None
     with _transcripts_lock:
@@ -311,10 +339,10 @@ def moment(text):
         return None
 
 
-def measured_usage(native_id):
+def measured_usage(native_id, workspaces=()):
     """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
     than total a scan that skipped part of the storage."""
-    mains = session_transcripts(native_id)
+    mains = session_transcripts(native_id, workspaces=workspaces)
     if not mains:
         return None
     paths = [mains[-1], *subagent_transcripts(mains[-1])]
@@ -391,7 +419,7 @@ LAUNCH_ONLY = 'This agent is launch-only'
 
 def fresh_start(session, environment):
     """The note for resuming `session` fresh, or None when Claude has its conversation and resume continues it."""
-    if not session.native_id or has_saved_conversation(session.native_id, environment):
+    if not session.native_id or has_saved_conversation(session.native_id, environment, (session.workspace,)):
         return None
     return CONVERSATION_MISSING if had_conversation(session, environment) else NEVER_USED
 
@@ -485,7 +513,7 @@ def launch_storage(session, environment):
     return {'HOME': source['HOME']} if source.get('HOME') and os.path.isabs(source['HOME']) else None
 
 
-def prompt_evidence(native_id, prompt, since, environment):
+def prompt_evidence(native_id, prompt, since, environment, workspaces=()):
     """(answer, why) for whether Claude recorded `prompt`, a launch's command-line first prompt, in session
     `native_id` from `since` on, reading the storage `environment` names.
 
@@ -497,7 +525,7 @@ def prompt_evidence(native_id, prompt, since, environment):
     if not native_id or not text or start is None or start.tzinfo is None or not environment:
         return None, None
     try:
-        paths = session_transcripts(native_id, environment)
+        paths = session_transcripts(native_id, environment, workspaces)
     except Unreadable as error:
         return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
     damaged = None
@@ -629,12 +657,14 @@ class ClaudeAdapter(ConfiguredAdapter):
     def startup_prompt_evidence(self, session, prompt, since, environment):
         """For a launch that exited during startup with a wake prompt: whether its Claude recorded the prompt.
         Core makes the message a definite failure only on False; True or None keep it uncertain."""
-        return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment))[0]
+        return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
+                               (session.workspace,))[0]
 
     def startup_prompt_evidence_reason(self, session, prompt, since, environment):
         """Asked after startup_prompt_evidence said None: what can't be read and what to fix, in one line
         without the command (core adds it), or None when Claude has nothing to add."""
-        answer, why = prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment))
+        answer, why = prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment),
+                                      (session.workspace,))
         return why if answer is None else None
 
     def _snapshot_flag(self, command):
@@ -852,8 +882,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         except (OSError, ValueError, TypeError):
             pass
         try:
-            usage = measured_usage(session.native_id)
-            reading = context_reading(session.native_id)
+            usage = measured_usage(session.native_id, (session.workspace,))
+            reading = context_reading(session.native_id, (session.workspace,))
         except Unreadable as error:
             return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}

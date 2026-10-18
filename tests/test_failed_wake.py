@@ -3,6 +3,7 @@ import json
 import os
 import sys
 from unittest.mock import Mock, patch
+from multiverse.harnesses.claude import project_key
 from multiverse.runtime import runner
 from multiverse.store import read, uid, write
 from multiverse.tools import deliver
@@ -56,7 +57,7 @@ class FailedWakeTest(BaseTest):
     def test_check_revisits_failed_wake_evidence_without_replaying_the_prompt(self):
         """An unreadable startup transcript must not strand a wake or authorize replay against a later launch's evidence."""
         config = self.work / 'private-config'
-        project = config / 'projects' / 'workspace'
+        project = config / 'projects' / project_key(os.path.realpath(self.work))  # as Claude names the launch's folder
         project.mkdir(parents=True)
         self.addCleanup(project.chmod, 0o700)
         properties = read(self.directory / 'properties.json')

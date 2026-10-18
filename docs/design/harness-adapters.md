@@ -59,7 +59,17 @@ missing facts never authorize retry. A new wake clears the preceding snapshot.
 
 Every transcript lookup lists
 Claude's folders itself rather than with a glob, which skips unreadable folders
-silently: when part of the storage can't be read, resume tries the saved
+silently. Only a folder that could hold the session counts: Claude names a project
+folder after the real path it was launched in, NFC-normalized, with every UTF-16
+code unit that isn't an ASCII letter or digit replaced by `-` (past 200 units, the
+first 200 plus `-` and a hash). So an unreadable folder blocks when its name,
+ignoring case, is the key of the handle's workspace (as recorded or as its real
+path) or starts with that key plus `-`, which covers Claude's own worktrees under
+the workspace and the hashed long form. Another workspace's unreadable folder is
+skipped; with no absolute workspace, every unreadable folder blocks. The handle's
+workspace is the launch's own, so a recheck of a failed wake reads that launch's
+folder even after the agent moved on. GOAT applies the same rule to its search.
+When part of the storage that could hold the session can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as
 proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
 every resume. Claude Code keeps a conversation's system prompt as recorded at its
