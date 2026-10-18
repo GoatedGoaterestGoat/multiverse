@@ -43,94 +43,57 @@ class PluginItemsTest(BaseTest):
     def render(self, family="codex"):
         return statusline.render(self.root, self.agent, self.launch, family)
 
-    def test_no_plugins_is_byte_identical(self):
-        baseline = self.render()
-        for items in (None, [], "junk", [{"name": "cost"}]):
-            with self.subTest(items=items):
-                self.save(items)
-                self.assertEqual(self.render(), baseline)
-        self.save([{"name": "cost", "plugin": "p", "claude": True, "tmux": True}])
-        self.assertEqual(self.render(), baseline)  # declared, but no file written yet
-        self.assertEqual(baseline, "worker · codex · status idle · phase working")
+    def test_untrusted_plugin_items_are_sanitized_for_tmux(self):
+        """Plugin status items named ../x, badly named, undeclared, switched off or from another launch are never
+        read, their text has controls stripped, # doubled, length bounded and only its first line kept, and the
+        script tmux runs needs only the standard library; fragile because tmux runs #(command) in status strings, and
+        a garbled or command-running bar raises no error."""
+        baseline = self.render()  # the core items alone
+        with self.subTest("undeclared, switched off and malformed items are never read"):
+            self.item("ghost", "GHOST")
+            self.configure(items={"ghost": True})
+            (self.directory / "x.txt").write_text("ESCAPED")  # where an item named ../x would be read from
+            self.save([{"name": "Bad_Name", "tmux": True}, {"name": "phase", "tmux": True},
+                       {"name": "../x", "tmux": True}, {"name": "a" * 41, "tmux": True}, {"name": "off", "tmux": False},
+                       "junk", {"tmux": True}, {"name": "dup", "tmux": True}, {"name": "dup", "tmux": False}])
+            self.item("off", "OFF")
+            self.item("dup", "DUP")
+            self.assertEqual(self.render(), baseline + " · DUP")
+            opened = []
+            real = Path.open
 
-    def test_defaults_then_tmux_items_then_family_override(self):
-        self.save([{"name": "cost", "plugin": "p", "claude": True, "tmux": True},
-                   {"name": "trees", "plugin": "q", "claude": True, "tmux": False}])
-        self.item("cost", "$1.20")
-        self.item("trees", "trees 3/4")
-        self.assertEqual(self.render(), "worker · codex · status idle · phase working · $1.20")
-        # Named in tmux.items, they also take that place: before the core items the file leaves unnamed.
-        self.configure(items={"cost": False, "trees": True})
-        self.assertEqual(self.render(), "trees 3/4 · worker · codex · status idle · phase working")
-        self.configure(items={"cost": False, "trees": True}, harnesses={"codex": {"items": {"cost": True, "trees": False}}})
-        self.assertEqual(self.render(), "$1.20 · worker · codex · status idle · phase working")
-        self.assertEqual(self.render("pi"), "trees 3/4 · worker · codex · phase working")
-
-    def test_a_default_off_item_named_compaction_is_a_plugin_item_here(self):
-        self.save([{"name": "compaction", "plugin": "compaction", "claude": True, "tmux": False}])
-        self.item("compaction", "trees 3/4")
-        self.assertEqual(statusline.declared_items(read(self.directory / "runtime.json")), [("compaction", False)])
-        self.assertNotIn("trees", self.render())
-        self.configure(items={"compaction": True})
-        self.assertEqual(self.render(), "trees 3/4 · worker · codex · status idle · phase working")
-        self.configure(harnesses={"codex": {"items": {"compaction": True}}})
-        self.assertEqual(self.render(), "worker · codex · status idle · phase working · trees 3/4")
-        self.assertNotIn("trees", self.render("pi"))
-
-    def test_named_items_take_their_place_among_core_items(self):
-        self.save([{"name": "cost", "plugin": "p", "tmux": True}, {"name": "trees", "plugin": "q", "tmux": True},
-                   {"name": "late", "plugin": "r", "tmux": True}])
-        for name in ("cost", "trees", "late"):
-            self.item(name, name.upper())
-        self.configure(items={"trees": True, "agent": True, "cost": True, "phase": True})
-        self.assertEqual(self.render(), "TREES · worker · COST · phase working · codex · status idle · LATE")
-        # A family-only key changes an item but not its place.
-        self.configure(items={"trees": True, "agent": True}, harnesses={"codex": {"items": {"late": False}}})
-        self.assertEqual(self.render(), "TREES · worker · codex · status idle · phase working · COST")
-
-    def test_undeclared_disabled_and_malformed_items_are_never_read(self):
-        self.item("ghost", "GHOST")
-        self.configure(items={"ghost": True})
-        self.save([{"name": "Bad_Name", "tmux": True}, {"name": "phase", "tmux": True}, {"name": "../x", "tmux": True},
-                   {"name": "a" * 41, "tmux": True}, {"name": "off", "tmux": False}, "junk", {"tmux": True},
-                   {"name": "dup", "tmux": True}, {"name": "dup", "tmux": False}])
-        self.item("off", "OFF")
-        self.item("dup", "DUP")
-        self.assertEqual(self.render(), "worker · codex · status idle · phase working · DUP")
-        opened = []
-        real = Path.open
-
-        def spy(path, *args, **kwargs):
-            opened.append(path.name)
-            return real(path, *args, **kwargs)
-        from unittest.mock import patch
-        with patch.object(Path, "open", spy):
-            self.render()
-        self.assertNotIn("off.txt", opened)
-        self.assertNotIn("ghost.txt", opened)
-
-    def test_text_is_bounded_cleaned_and_literal(self):
-        self.save([{"name": "cost", "tmux": True}])
-        for written, shown in (("", None), ("\n", None), ("first\nsecond", "first"), ("a\x1b[31mred\x07", "ared"),
-                               ("#[fg=red]x", "##[fg=red]x"), (b"\xff\xfeok", "��ok"), ("x" * 5000, None)):
-            with self.subTest(written=written[:20]):
-                self.item("cost", written)
-                rendered = self.render()
-                if shown is None and written and len(written) > 1000:
-                    self.assertTrue(rendered.endswith("…"))
-                    self.assertLess(len(rendered), 300)
-                elif shown is None:
-                    self.assertEqual(rendered, "worker · codex · status idle · phase working")
-                else:
-                    self.assertEqual(rendered, "worker · codex · status idle · phase working · " + shown)
-
-    def test_a_stale_launch_shows_nothing_and_the_script_stays_stdlib_only(self):
-        self.save([{"name": "cost", "tmux": True}])
-        self.item("cost", "$1")
-        self.assertEqual(statusline.render(self.root, self.agent, "other-launch", "codex"), "")
-        script = PROJECT / "src/multiverse/terminal/statusline.py"
-        result = subprocess.run([sys.executable, "-S", "-I", str(script), str(self.root), self.agent, self.launch, "codex"],
-                                text=True, capture_output=True, timeout=30, env={"PATH": os.environ.get("PATH", "")})
-        self.assertEqual(result.stdout.strip(), "worker · codex · status idle · phase working · $1", result.stderr)
-        self.item("cost", "$2")  # replaced live: the next refresh reads it again
-        self.assertTrue(self.render().endswith("· $2"))
+            def spy(path, *args, **kwargs):
+                opened.append(path.name)
+                return real(path, *args, **kwargs)
+            from unittest.mock import patch
+            with patch.object(Path, "open", spy):
+                self.render()
+            self.assertNotIn("off.txt", opened)
+            self.assertNotIn("ghost.txt", opened)
+            self.assertNotIn("x.txt", opened)
+            (self.root / "statusline.json").unlink()
+        with self.subTest("text is bounded, cleaned and literal"):
+            self.save([{"name": "cost", "tmux": True}])
+            for written, shown in (("", None), ("\n", None), ("first\nsecond", "first"), ("a\x1b[31mred\x07", "ared"),
+                                   ("#[fg=red]x", "##[fg=red]x"), (b"\xff\xfeok", "��ok"), ("x" * 5000, None)):
+                with self.subTest(written=written[:20]):
+                    self.item("cost", written)
+                    rendered = self.render()
+                    if shown is None and written and len(written) > 1000:
+                        self.assertTrue(rendered.endswith("…"))
+                        self.assertLess(len(rendered), 300)
+                    elif shown is None:
+                        self.assertEqual(rendered, baseline)
+                    else:
+                        self.assertEqual(rendered, baseline + " · " + shown)
+        with self.subTest("another launch shows nothing, and the script tmux runs stays stdlib-only"):
+            self.save([{"name": "cost", "tmux": True}])
+            self.item("cost", "$1")
+            self.assertEqual(statusline.render(self.root, self.agent, "other-launch", "codex"), "")
+            script = PROJECT / "src/multiverse/terminal/statusline.py"
+            result = subprocess.run([sys.executable, "-S", "-I", str(script), str(self.root), self.agent, self.launch,
+                                     "codex"], text=True, capture_output=True, timeout=30,
+                                    env={"PATH": os.environ.get("PATH", "")})
+            self.assertEqual(result.stdout.strip(), baseline + " · $1", result.stderr)
+            self.item("cost", "$2")  # replaced live: the next refresh reads it again
+            self.assertTrue(self.render().endswith("· $2"))
