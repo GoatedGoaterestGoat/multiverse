@@ -2,6 +2,7 @@
 from copy import deepcopy
 from dataclasses import replace
 import os
+import tempfile
 import unittest
 from unittest.mock import patch
 from uuid import uuid4
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex import CodexAdapter
+from multiverse.harnesses.codex.identity import storage_environment
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHandle
 
 
@@ -259,3 +261,17 @@ class SharedIdentityTest(unittest.TestCase):
                             self.assertEqual({key: plain.environment[key] for key in adapter.storage_env
                                               if key in plain.environment}, expected)
                             self.assertEqual(plain.environment['DEBUG'], 'keep')
+        with tempfile.TemporaryDirectory(prefix='mv2-codex-storage-alias-') as temporary:
+            for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
+                with self.subTest(retargeted_storage=key):
+                    parent = Path(temporary).resolve() / key
+                    saved, original, different = (parent / name for name in ('saved', 'original', 'different'))
+                    saved.mkdir(parents=True)
+                    different.mkdir()
+                    context = self.context('alias')
+                    context = replace(context, environment={**context.environment, key: str(saved)})
+                    before = storage_environment(context)
+                    saved.rename(original)
+                    saved.symlink_to(different, target_is_directory=True)
+                    self.assertEqual(storage_environment(context), {**before, key: str(different)})
+                    self.assertEqual(context.environment[key], str(saved), 'Selection never rewrites the saved input')
