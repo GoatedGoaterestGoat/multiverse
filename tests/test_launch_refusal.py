@@ -24,6 +24,7 @@ class LaunchRefusalTest(BaseTest):
               'workspace': str(self.work), 'native_session_id': self.thread})
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'starting',
                                               'startup_delivery': 'waiting'})
+        (self.directory / 'launches' / self.launch).mkdir(parents=True)
         self.evidence = {'source': 'native-rpc', 'method': 'thread/resume', 'code': -32600,
                          'message': 'This conversation is open in another app', 'native_id': self.thread}
 
@@ -249,6 +250,126 @@ class LaunchRefusalTest(BaseTest):
         self.assertIn('could not be confirmed', result['notices'][0])
         self.assertEqual(monitor.stopped.elapsed, 55)
         self.assertGreaterEqual(default_timeout - monitor.stopped.elapsed, 5)
+
+    def test_default_wait_does_not_wait_for_a_screen_query_already_in_flight(self):
+        import threading
+        class Clock:
+            elapsed = 0.
+            def monotonic(self):
+                return self.elapsed
+            def sleep(self, seconds):
+                self.elapsed += seconds
+        clock = Clock()
+        entered, release = threading.Event(), threading.Event()
+        attachment = {'readiness': 'process'}
+        agents.update_runtime(self.directory, self.launch, state='running', pid=123,
+                              startup_checked=True, startup_delivery=None, attachment=attachment,
+                              native_versions={'cli': '0.163.0'},
+                              native_startup_observation={'state': 'pending'})
+        write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': attachment})
+        frame = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
+        backend = Mock()
+        def query(command, *args):
+            if command == 'capture-pane':
+                entered.set()
+                release.wait(10)
+                return frame['text']
+            return '0\t0\t0\t80'
+        backend.run.side_effect = query
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+        default_timeout = python_inspect.signature(lifecycle.start).parameters['wait_timeout'].default
+        with patch.object(runner.time, 'monotonic', side_effect=clock.monotonic), \
+                patch.object(lifecycle.time, 'sleep', side_effect=clock.sleep), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch('multiverse.plugins.events.subscribers', return_value=True), \
+                patch.object(lifecycle, '_event') as announced, \
+                patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
+            monitor.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, default_timeout)
+            finally:
+                release.set()
+                monitor.thread.join(2)
+        self.assertTrue(result['ready'], result)
+        self.assertLessEqual(clock.elapsed, default_timeout - 4.9)
+        self.assertIn('could not be confirmed', result['notices'][0])
+        self.assertNotIn('native_refusal', agents.runtime(self.directory))
+        ready = [call for call in announced.call_args_list if call.args[1] == 'agent.ready']
+        self.assertEqual(len(ready), 1)
+        self.assertTrue((self.directory / 'launches' / self.launch / 'ready-event').exists())
+        self.assertFalse(monitor.thread.is_alive())
+
+    def test_expiry_and_native_refusal_are_atomic_and_short_explicit_wait_is_unchanged(self):
+        agents.update_runtime(self.directory, self.launch, state='running', pid=123, startup_checked=True,
+                              startup_delivery=None, attachment={'readiness': 'process'},
+                              native_startup_observation={'state': 'pending'})
+        write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': {'readiness': 'process'}})
+        self.assertTrue(refusal.settle_startup(self.directory, self.launch, 'unverified'))
+        with patch.object(refusal.time, 'monotonic', return_value=1):
+            self.assertIsNone(refusal.record(self.directory, self.launch, self.evidence, observation_deadline=55))
+        self.assertNotIn('native_refusal', agents.runtime(self.directory))
+        self.assertFalse((self.directory / 'launches' / self.launch / 'native-refusal.json').exists())
+        agents.update_runtime(self.directory, self.launch, native_startup_observation={'state': 'pending'})
+        elapsed = [0.]
+        with patch.object(lifecycle.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(lifecycle.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            result = lifecycle.wait_ready(self.root, self.directory, self.launch,
+                CodexAdapter.configured('codex', {'inbox_bridge': False}), 1)
+        self.assertTrue(result['timed_out'])
+        self.assertEqual(elapsed[0], 1)
+        self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'pending')
+
+    def test_expired_screen_does_not_announce_ready_before_startup_delivery(self):
+        agents.update_runtime(self.directory, self.launch, state='running', pid=123, startup_checked=True,
+                              startup_delivery='waiting', attachment={'readiness': 'process'},
+                              native_startup_observation={'state': 'pending'})
+        write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': {'readiness': 'process'}})
+        elapsed = [0.]
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        with patch.object(lifecycle.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch.object(lifecycle.time, 'sleep', side_effect=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds)), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch('multiverse.plugins.events.subscribers', return_value=True), \
+                patch.object(lifecycle, '_event') as announced:
+            result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, 60, include_delivery=False)
+            self.assertTrue(result['ready'])
+            self.assertFalse(announced.called)
+            self.assertFalse((self.directory / 'launches' / self.launch / 'ready-event').exists())
+            agents.update_runtime(self.directory, self.launch, startup_delivery='ready')
+            lifecycle.note_ready(self.root, self.directory, self.launch)
+            lifecycle.note_ready(self.root, self.directory, self.launch)
+        self.assertEqual(len([call for call in announced.call_args_list if call.args[1] == 'agent.ready']), 1)
+
+    def test_late_screen_refusal_never_recreates_a_removed_agent(self):
+        import shutil
+        shutil.rmtree(self.directory)
+        with self.assertRaises(ValueError):
+            refusal.record(self.directory, self.launch, self.evidence, observation_deadline=55)
+        self.assertFalse(self.directory.exists())
+
+    def test_frame_completed_after_observation_deadline_cannot_refuse_startup(self):
+        frame = json.loads((Path(__file__).parent / 'fixtures/codex/refusal-0.163.0.json').read_text())[0]
+        elapsed = [0.]
+        agents.update_runtime(self.directory, self.launch, state='running',
+                              attachment={'readiness': 'process'}, native_versions={'cli': '0.163.0'},
+                              native_startup_observation={'state': 'pending'})
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+        backend = Mock()
+        def query(command, *args):
+            if command == 'capture-pane':
+                elapsed[0] = 56.
+                return frame['text']
+            return '0\t0\t0\t80'
+        backend.run.side_effect = query
+        with patch.object(runner.time, 'monotonic', side_effect=lambda: elapsed[0]), \
+                patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
+            monitor._run()
+        self.assertNotIn('native_refusal', agents.runtime(self.directory))
+        self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'unverified')
 
     def test_definite_startup_queue_fails_but_a_registered_wake_prompt_stays_uncertain(self):
         queued = append_message(self.directory, 'not submitted', {}, delivery='steer', target_session=self.thread)

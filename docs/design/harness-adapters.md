@@ -948,7 +948,10 @@ The plain startup observer runs only for a supported native layout, with a
 readiness wait leaves a five-second margin beyond observation; explicit wait
 timeouts are unchanged. At the observation bound, an unrecognized screen
 (including an unanswered trust prompt) falls back to process readiness with a
-notice instead of blocking the launch. It stops sooner after validated
+notice instead of blocking the launch. The readiness waiter can settle this
+bound while a pane query is still in flight. The observer discards frames
+completed after the bound; expiry and refusal publication serialize on the
+runtime lock, so a late frame cannot reclassify an unverified startup. It stops sooner after validated
 bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
 perform no pane polling; later TUI navigation is outside this startup observer.
 

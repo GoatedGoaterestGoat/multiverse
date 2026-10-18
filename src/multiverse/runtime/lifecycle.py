@@ -593,12 +593,18 @@ def note_ready(root, agent_dir, launch_id):
         live = observe(properties, facts)['live']
         if not launch_ready(adapter, properties, facts, agent_dir, read(launch / 'request.json'), live):
             return
-        try:
-            os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
-        except FileExistsError:
-            return
-        _event(agent_dir, 'agent.ready', launch_id, {}, properties)
+        _record_ready(agent_dir, launch_id, properties)
     except Exception:
+        pass
+
+
+def _record_ready(agent_dir, launch_id, properties):
+    """The caller already checked readiness and subscriber interest. No native query."""
+    try:
+        marker = agent_dir / 'launches' / launch_id / 'ready-event'
+        os.close(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        _event(agent_dir, 'agent.ready', launch_id, {}, properties)
+    except (OSError, ValueError):
         pass
 
 
@@ -607,6 +613,8 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
     deadline = time.monotonic() + timeout
     exit_deadline = None
+    screen_deadline = None
+    screen_expired = False
     while True:
         result = launch_result(root, agent_dir)
         facts = result['runtime']
@@ -616,8 +624,23 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             return {**result, 'ok': False, 'ready': False, 'error': facts['reason']}
         if (facts.get('native_relay') or {}).get('state') == 'lost':
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
+        if (facts.get('native_startup_observation') or {}).get('state') == 'pending':
+            from . import refusal
+            if screen_deadline is None:
+                screen_deadline = refusal.startup_deadline(facts)
+            if not screen_expired and time.monotonic() >= screen_deadline:
+                screen_expired = True
+                refusal.settle_startup(agent_dir, launch_id, 'unverified')
+                continue  # Re-read refusal/generation/state after atomic settlement.
         live = observe(result, facts)['live']
         if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
+            if screen_expired and launch_ready(adapter, result, facts, agent_dir, request, live):
+                try:
+                    from ..plugins import events
+                    if events.subscribers(root, 'agent.ready'):
+                        _record_ready(agent_dir, launch_id, result)
+                except Exception:
+                    pass  # Optional events never hold up readiness.
             if (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
                 result = {**result, 'notices': [*result.get('notices', []),
                     'Startup could not be confirmed from the native screen; continuing with process readiness.']}

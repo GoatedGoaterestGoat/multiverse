@@ -1,6 +1,5 @@
 """One terminal child per launch; no central supervisor or model loop."""
 import asyncio
-from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
@@ -21,8 +20,6 @@ from multiverse.runtime.process import process_started
 STARTUP_SECONDS = 2
 OUTPUT_LINES = 40
 OUTPUT_BYTES = 8192
-# Finish five seconds before the default 60-second readiness wait.
-REFUSAL_STARTUP_SECONDS = 55
 
 
 def bounded_output(text):
@@ -335,14 +332,10 @@ class RefusalMonitor:
         if self.thread.is_alive():
             raise TimeoutError('Native refusal observation is still closing')
 
-    def _settled(self, state):
-        def changes(facts):
-            if (facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
-                    or facts.get('native_refusal') or (facts.get('attachment') or {}).get('readiness') != 'process'):
-                return None
-            return {'native_startup_observation': {'state': state, 'at': now()}}
+    def _settled(self, state, *, deadline=None):
+        from multiverse.runtime.refusal import settle_startup
         try:
-            if mutate_runtime(self.agent_dir, self.launch_id, changes) is not None:
+            if settle_startup(self.agent_dir, self.launch_id, state, deadline=deadline):
                 from multiverse.runtime.lifecycle import note_ready
                 note_ready(self.root, self.agent_dir, self.launch_id)
         except (OSError, ValueError):
@@ -352,21 +345,12 @@ class RefusalMonitor:
         from multiverse.plugins.harness import version_of
         from multiverse.runtime import native, refusal
         from multiverse.terminal.tmux import owned
-        deadline = time.monotonic() + REFUSAL_STARTUP_SECONDS
         facts = runtime(self.agent_dir)
+        deadline = refusal.startup_deadline(facts)
         if (facts.get('launch_id') != self.launch_id or facts.get('ending_at')
                 or facts.get('state') not in ('starting', 'running')
                 or (facts.get('native_relay') or {}).get('state') == 'lost'):
             return
-        # Count setup time too, so the bounded observation finishes before a
-        # default readiness wait begun after setup. Freeze the wall-clock age
-        # into a monotonic deadline once; later clock changes cannot extend it.
-        try:
-            began = datetime.fromisoformat(facts['started_at'])
-            age = (datetime.now(timezone.utc) - began).total_seconds()
-            deadline -= min(REFUSAL_STARTUP_SECONDS, max(0, age))
-        except (KeyError, TypeError, ValueError, OverflowError):
-            pass
         versions = facts.get('native_versions')
         version = (versions.get('cli') if isinstance(versions, dict) else None) or version_of(self.executable)
         if self.supports is not None and not self.supports(version):
@@ -392,6 +376,8 @@ class RefusalMonitor:
                     cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}\t#{pane_width}').split('\t')
                     # Recheck tags after both observations as well as before.
                     owned(properties, facts)
+                if time.monotonic() >= deadline:
+                    break  # A slow pane query cannot extend startup classification.
                 x = y = width = None
                 if len(cursor) in (3, 4):
                     try:
@@ -410,10 +396,10 @@ class RefusalMonitor:
                             'cursor_x': x, 'cursor_y': y, 'width': width, 'native_id': properties.get('native_session_id')}
                 evidence = self.describe(snapshot)
                 if evidence is not None:
-                    refusal.record(self.agent_dir, self.launch_id, evidence)
+                    refusal.record(self.agent_dir, self.launch_id, evidence, observation_deadline=deadline)
                     return
                 if callable(self.started) and self.started(snapshot) is True:
-                    self._settled('started')
+                    self._settled('started', deadline=deadline)
                     return  # Settles startup observation only; no binding or permission authority.
             except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 pass  # Unavailable or unknown evidence cannot identify a refusal.
