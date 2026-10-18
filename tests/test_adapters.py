@@ -143,6 +143,20 @@ class NativeDeliveryTest(BaseTest):
                                  ('unavailable', {'launch_only': True, 'final': True} if flagged else None))
                 executor.request.assert_not_called()
 
+    def test_settings_env_refuses_names_mv2_manages_or_reads(self):
+        """A harness's settings.env can't set mv2's MV2_* identity, the names every launch fixes, or the storage the
+        harness's sessions are read from; a break goes unnoticed because the agent still starts, but as another agent
+        or writing sessions where mv2 never looks (#19, Shao a8925af)."""
+        for name, adapter in harnesses.BUILTINS.items():
+            for key in ('MV2_AGENT_ID', 'MV2_UNIVERSE', 'PATH', 'HOME', 'CODEX_THREAD_ID', 'CLAUDECODE', *adapter.storage_env):
+                with self.subTest(harness=name, key=key):
+                    with self.assertRaisesRegex(ValueError, f'env cannot set {key}'):
+                        adapter.configured(name, {'env': {key: 'x'}})
+            with self.subTest(harness=name, key='an ordinary name'):
+                self.assertEqual(adapter.configured(name, {'env': {'DEBUG': '1'}}).environment, {'DEBUG': '1'})
+        self.assertEqual({key for adapter in harnesses.BUILTINS.values() for key in adapter.storage_env},
+                         {'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'CODEX_SQLITE_HOME'})
+
     def test_native_subprocess_scrubs_identity_and_preserves_literal_argv(self):
         """Native helper commands run without the caller's MV2_*, CODEX_THREAD_ID or CLAUDECODE and with literal argv;
         a break goes unnoticed because the command succeeds, but a daemon it starts carries one agent's identity into
