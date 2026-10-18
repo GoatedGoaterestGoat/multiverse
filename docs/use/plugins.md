@@ -142,7 +142,7 @@ A broken plugin loses only its own part of mv2:
 - Its column shows `—`.
 - Its panel shows one line saying why.
 - Its inspector line shows `unavailable`.
-- Its command fails with `mv2: plugin NAME: …`.
+- Its command fails with `mv2: plugin NAME: …`. An error the command gives on purpose (a `ValueError`, `OSError`, `KeyError` or `RuntimeError`) prints `mv2: MESSAGE`, as a built-in command's does.
 
 A launch goes on without the plugin and records why in the agent's `runtime.json`. For Claude Code, `mv2 inspect` shows the reason on its `Note:` line. No plugin can stop a launch, a send, `mv2 list` or the dashboard.
 
