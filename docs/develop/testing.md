@@ -41,7 +41,7 @@ def test_runs_at_once_share_the_machines_slots(self):
 | `test_multiverse.py` | Shared fixtures, file protocol, catalog, terminal integration |
 | `test_adapters.py`, `test_operations.py`, `test_native_*.py`, `test_harnesses.py` | The adapter contract, core native execution, real launches with fake CLIs |
 | `test_claude_*.py`, `test_codex_*.py`, `test_pi_*.py` | One harness each |
-| `test_tui*.py`, `test_portal.py`, `test_ui_independent.py` | The dashboard |
+| `test_tui*.py`, `test_portal.py` | The dashboard |
 | `test_compaction.py` | Tree compaction, independent of any harness |
 | `test_docs.py` | Relative links in the docs, and the generated CLI reference |
 | `run.py`, `tracking.py`, `test_run.py` | The parallel runner, and what it records to end after a unit (not test modules); the runner's tests |
@@ -58,8 +58,8 @@ Most modules need only Python, with no tmux, sockets or model. The rest skip whe
 
 | Needs | Modules | Without it |
 | --- | --- | --- |
-| tmux | Tests on `TerminalBase`: terminal tests in `test_multiverse`, `test_harnesses`, `test_kill`, `test_auto_exit`, `test_attach_return`, `test_attachment_teardown`, `test_launch_diagnostics`, `test_launch_registration`, `test_native_service`, `test_process_identity`, `test_tmux_statusline`, `test_wait`, `test_wake`, `test_claude_boundary`, `test_claude_resume`; also `test_helper_stdin` and one test in `test_run` | Skipped |
-| `codex`, and tmux for most | `test_codex_daemon`, `test_codex_daemon_cwd`, `test_codex_mouse`, `test_codex_permissions`, `test_codex_timing`, `test_codex_refusal_native`, `test_codex_shared_identity`, the native tests in `test_codex_plugins`, and the live part of `test_codex_recovery` | Skipped |
+| tmux | Tests on `TerminalBase`: terminal tests in `test_multiverse`, `test_harnesses`, `test_kill`, `test_auto_exit`, `test_attach_return`, `test_attachment_teardown`, `test_launch_diagnostics`, `test_launch_display_followups`, `test_launch_notices`, `test_launch_registration`, `test_native_service`, `test_resume_placeholders`, `test_spawn_socket`, `test_tmux_statusline`, `test_claude_boundary`, `test_claude_resume`, `test_codex_auto`, `qa.test_lifecycle_spec`; the shared live group in `test_runtime_authority`; also `test_helper_stdin` and one test in `test_run` | Skipped |
+| `codex`, and tmux for most | `test_codex_daemon`, `test_codex_permissions`, `test_codex_timing`, `test_codex_refusal_native`, `test_codex_shared_identity`, `test_codex_side_native`, `test_codex_queue_continuation_native`, the native tests in `test_codex_plugins`, and the live part of `test_codex_recovery` | Skipped |
 | `pi` and tmux | `test_pi_timing`, Pi tests in `test_multiverse` and `test_wake_prompt` | Skipped |
 | `claude` | The mod and typeahead plugin tests in `test_claude_bridge`; with tmux, the Claude test in `test_wake_prompt` | Skipped |
 | Node 22+ | `test_pi_bridge` | Skipped |
