@@ -32,9 +32,11 @@ def _uuid(value):
         return False
 
 
-def _problem(directory, reason):
-    return records.RecordError(directory / 'runtime.json', reason +
-        '. Restore the runtime record from a verified backup, or use mv2 kill to close the verified terminal before retrying. '
+def _problem(directory, reason, *, recommend_kill=True):
+    remedy = '. Restore the runtime record from a verified backup'
+    if recommend_kill:
+        remedy += ', or use mv2 kill to close the verified terminal'
+    return records.RecordError(directory / 'runtime.json', reason + remedy + ' before retrying. '
         'If independently verified that this agent\'s terminal, runner and child are all gone, remove the damaged '
         'runtime.json and retry')
 
@@ -173,12 +175,13 @@ def discover(directory, properties, socket_path=None, *, facts=None):
 def require_stopped(directory, properties, socket_path=None, *, facts=None, operation=None):
     if discover(directory, properties, socket_path, facts=facts):
         refusal = f'refusing to {operation} this agent' if operation else 'refusing a duplicate launch'
-        raise _problem(directory, 'a running terminal is still tagged for this agent; ' + refusal)
+        raise _problem(directory, 'a running terminal is still tagged for this agent; ' + refusal,
+                       recommend_kill=operation != 'kill')
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
-        raise _problem(directory, reason)
+        raise _problem(directory, reason, recommend_kill=operation != 'kill')
     for launch in launches(directory):
         if reason := attachments.problem(directory, {'launch_id': launch.name}):
-            raise _problem(directory, reason)
+            raise _problem(directory, reason, recommend_kill=operation != 'kill')
     if facts or (directory / 'runtime.json').exists():
         return ['runtime.json had damaged launch authority; no running terminal or recorded process was found, '
                 'so this starts a new launch']
@@ -231,7 +234,7 @@ def kill(root, directory, *, attachment_only=False):
         if len(found) > 1:
             raise _problem(directory, 'multiple tagged terminals remain; refusing to choose a launch')
         if not found:
-            require_stopped(directory, properties, facts=previous)
+            require_stopped(directory, properties, facts=previous, operation='kill')
             return {'id': directory.name, 'state': 'dormant', 'native_cancellation': {
                 'state': 'unknown', 'reason': f'runtime.json {condition}; no running terminal was found. Native cancellation is unconfirmed'}}
         backend, terminal, launch_id, request = found[0]

@@ -56,6 +56,22 @@ def text_defaults(row):
     return row
 
 
+def _listing_observation(properties, facts, snapshots):
+    terminal = facts.get('tmux') or {}
+    cached = terminal.get('socket') in snapshots
+    observation = observe(properties, facts, snapshots)
+    if cached and observation['live'] == 'dormant' and facts.get('state') in ('starting', 'running'):
+        # Another row may have captured the server before this pane was tagged.
+        snapshots.pop(terminal.get('socket'), None)
+        observation = observe(properties, facts, snapshots)
+    if facts.get('preparing') is True and facts.get('state') == 'starting':
+        if observation['live'] == 'dormant':
+            observation = {'live': 'unknown', 'reason': 'Launch is being prepared'}
+        elif observation['live'] == 'unknown' and terminal:
+            facts = {**facts, 'preparing': False}  # An unreadable server remains a diagnostic.
+    return facts, observation
+
+
 def listing(root, recursive=False, only=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
@@ -85,10 +101,11 @@ def listing(root, recursive=False, only=None):
                 rows.append(damaged_row(scope, error, properties))
                 continue
             try:
-                observation = observe(properties, facts, snapshots)
+                facts, observation = _listing_observation(properties, facts, snapshots)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
                 observed_key = observation_key(properties, facts)
+                preparing_launch = facts.get('launch_id') if facts.get('preparing') is True else None
                 identity_problem = None
                 try:
                     properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
@@ -97,8 +114,10 @@ def listing(root, recursive=False, only=None):
                     facts = records.runtime(path.parent / "runtime.json")
                 if error := missing_runtime.damage(path.parent, facts):
                     raise error
+                if preparing_launch and facts.get('launch_id') == preparing_launch and facts.get('state') == 'starting':
+                    facts = {**facts, 'preparing': True}  # Reconciliation may reread the same launch without this display hint.
                 if observation_key(properties, facts) != observed_key:
-                    observation = observe(properties, facts, snapshots)
+                    facts, observation = _listing_observation(properties, facts, snapshots)
                 if error := missing_runtime.mismatch(path.parent, facts, observation):
                     raise error
                 measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else

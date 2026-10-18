@@ -112,7 +112,9 @@ core records refuse the move. Any surviving core record or
 launch directory, or an error inspecting one, keeps the usual recovery checks.
 
 While a launch is being prepared, both the text listing and `mv2 list --json`
-show its live state as `starting`.
+show its live state as `starting`, including the short interval while its
+terminal is being tagged and published. An unreadable terminal server is still
+reported as unknown.
 
 If an agent's `properties.json` or `runtime.json` cannot be read, list and inspect
 show that agent with its file and reason. Other agents remain readable. Doctor

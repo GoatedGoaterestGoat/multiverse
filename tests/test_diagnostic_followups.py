@@ -67,7 +67,7 @@ class DefinitionFollowupTest(BaseTest):
         with lock(directory / '.launch.lock'):
             self.assertEqual(doctor.run(self.root)['problems'], [])
         self.assertTrue(doctor.run(self.root)['problems'])
-    def test_progress_writes_preserve_preparing_but_generation_or_terminal_changes_do_not(self):
+    def test_progress_and_terminal_writes_preserve_preparing_but_generation_or_state_changes_do_not(self):
         directory = self.root / 'state/agents' / uid()
         facts = {'launch_id': uid(), 'state': 'starting', 'host': 'fixture'}
         write(directory / 'runtime.json', facts)
@@ -75,7 +75,8 @@ class DefinitionFollowupTest(BaseTest):
         with lock(directory / '.launch.lock'):
             for changes, expected in (({'observed_at': now(), 'native_versions': {'cli': 'fixture'}}, True),
                                       ({'launch_id': uid()}, False), ({'state': 'failed'}, False),
-                                      ({'tmux': {'pane': '%1'}}, False)):
+                                      ({'tmux': {'socket': str(self.work / 'absent.sock'),
+                                                 'session': '$1', 'pane': '%1'}}, True)):
                 with self.subTest(changes=changes):
                     write(directory / 'runtime.json', {**facts, **changes})
                     self.assertEqual(agents.launch_in_progress(directory, facts), expected)

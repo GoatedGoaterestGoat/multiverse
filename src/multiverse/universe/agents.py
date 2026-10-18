@@ -133,8 +133,8 @@ def interrupted_preparation(facts, agent_dir):
 
 
 def launch_in_progress(agent_dir, facts):
-    """The full pre-terminal record is expected while its publisher owns the lock."""
-    if facts.get('state') != 'starting' or facts.get('tmux') is not None:
+    """Publication can still be in progress after its terminal record appears."""
+    if facts.get('state') != 'starting':
         return False
     try:
         identifier = normalize_session_id(facts.get('launch_id'))
@@ -148,8 +148,7 @@ def launch_in_progress(agent_dir, facts):
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
                 current = runtime(agent_dir)
-                return (current.get('launch_id') == identifier and current.get('state') == 'starting'
-                        and current.get('tmux') is None)
+                return current.get('launch_id') == identifier and current.get('state') == 'starting'
             fcntl.flock(handle, fcntl.LOCK_UN)
     except OSError:
         pass
