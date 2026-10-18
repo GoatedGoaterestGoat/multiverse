@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import cli
 from multiverse.runtime import lifecycle, native
 from multiverse.store import write
-from multiverse.tools import ask, capabilities, init, inbox, kill, remove, session_bind, stop, trash
+from multiverse.tools import ask, capabilities, init, inbox, kill, move, remove, session_bind, stop, subverse, trash
 from multiverse.universe import relocate, trash as trash_store
 from test_multiverse import BaseTest
 
@@ -109,6 +109,24 @@ class RecordCommandsTest(BaseTest):
         record = json.loads(self.command('init', str(other), '--json')[0])
         self.assertEqual((record['name'], record['universe']), ('other', str(other / '.multiverse')))
 
+    def test_subverse_and_move_answer_in_a_sentence(self):
+        out, _, code = self.command('subverse', 'docs')
+        self.assertEqual((out, code), (f'Created subverse docs in {self.root / "subverses/docs"}.', 0))
+        record = json.loads(self.command('subverse', 'notes', '--json')[0])
+        self.assertEqual((record['name'], record['universe']), ('notes', str(self.root / 'subverses/notes')))
+        self.command('subverse', 'review')
+        review = self.root / 'subverses/review'
+        moved = {'id': AGENT_ID, 'name': 'worker', 'harness': 'codex', 'universe': str(review)}
+        with patch.object(relocate, 'move_agent', return_value=moved):
+            self.assertEqual(self.command('move', 'worker', 'review'), (f'Moved worker to review ({review}).', '', 0))
+            self.assertEqual(json.loads(self.command('move', 'worker', 'review', '--json')[0]), moved)
+        target = self.work / 'elsewhere/.multiverse'
+        subverse = {'universe': str(target), 'name': 'verify', 'schema': 1}
+        with patch.object(relocate, 'exact', side_effect=lambda value, root=None: Path(value)), \
+                patch.object(relocate, 'move_subverse', return_value=subverse):
+            self.assertEqual(self.command('move', '--subverse', 'review/verify', str(self.work / 'elsewhere'))[0],
+                             f'Moved subverse verify to {target}.')
+
     def test_ask_prints_the_answer_and_fails_when_there_is_none(self):
         answered = {'state': 'ok', 'reason': 'Answered', 'value': {'answer': 'The parser.', 'usage': {}}}
         with patch.object(native, 'operation', return_value=answered):
@@ -168,6 +186,7 @@ class RecordCommandsTest(BaseTest):
         target.mkdir()
         self.assertEqual(init.run(directory=str(target))['name'], 'py')
         for arguments in (['kill', 'x'], ['stop', 'x'], ['remove', 'x'], ['trash'], ['init'], ['ask', 'x', '--question', 'q'],
+                          ['subverse', 'x'], ['move', 'x', 'y'],
                           ['capabilities', '--agent', 'x'], ['session-bind', '--session-id', str(uuid4())]):
             with self.subTest(arguments=arguments):
                 self.assertTrue(hasattr(cli.tool(arguments[0]), 'cli_run'))

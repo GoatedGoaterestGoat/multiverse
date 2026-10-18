@@ -60,6 +60,7 @@ BRIDGE = 'claude-mod-v1'
 NOT_REGISTERED = 'The multiverse mod has not registered for this launch'
 NO_KEY = 'Claude has not published the inbox key for this launch'
 RELAUNCHED = "Claude relaunched itself (/restart) without mv2's inbox; restart the agent"
+NOT_RUNNING = "This agent isn't running: resume it first"
 TOKEN = re.compile(r'^[0-9a-f]{32}$')
 USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens')
 
@@ -446,8 +447,10 @@ def bridge_of(enabled, session):
     launch_only = plain or not enabled
     if ready:
         reason = None
-    elif launch_only:
+    elif launch_only:  # first: resuming a launch-only agent would not connect it
         reason = f'{LAUNCH_ONLY}: {launch_only_cause(launch if plain else {"policy": "plain"})}'
+    elif session.state in ('stopped', 'dormant', 'failed'):
+        reason = NOT_RUNNING
     else:
         reason = NOT_REGISTERED
     return Bridge(launched, registered, ready, reason, launch_only)

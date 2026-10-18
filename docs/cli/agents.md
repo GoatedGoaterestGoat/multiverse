@@ -79,7 +79,7 @@ mv2 trash                                  # list what's in the trash
 mv2 trash --empty                          # delete it permanently
 ```
 
-Stop agents before you move or remove them. A subverse can move only when all its agents are stopped. A moved agent keeps its inbox and conversation. `remove` prints `Moved NAME to the trash.`, and `trash` lists one entry per line, such as `agent worker, removed 2026-10-18 00:30 UTC`. Both take `--json` for the records.
+Stop agents before you move or remove them. A subverse can move only when all its agents are stopped. A moved agent keeps its inbox and conversation. `move` prints `Moved NAME to UNIVERSE (PATH).` or `Moved subverse NAME to PATH.`, and `remove` prints `Moved NAME to the trash.`, and `trash` lists one entry per line, such as `agent worker, removed 2026-10-18 00:30 UTC`. All three take `--json` for the records.
 
 A removed agent or subverse goes to `trash/` with a record of where it came from. Moving it back restores it. Top-level universes can't be moved or removed this way.
 

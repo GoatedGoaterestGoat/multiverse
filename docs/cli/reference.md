@@ -72,7 +72,7 @@ mv2 init [--name NAME] [--template TEMPLATE] [--json] [directory]
 Create a nested, independent universe.
 
 ```sh
-mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] name
+mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] [--json] name
 ```
 
 | Argument | Value | Description | Default |
@@ -80,6 +80,7 @@ mv2 subverse [--template TEMPLATE] [--workspace WORKSPACE] name
 | `name` |  |  |  |
 | `--template` | `TEMPLATE` |  | `base` |
 | `--workspace` | `WORKSPACE` |  |  |
+| `--json` |  | Print the subverse's record as JSON |  |
 
 ## list
 
@@ -190,7 +191,7 @@ mv2 kill [--attachment-only] [--json] agent
 Move a stopped agent, or a subverse whose agents are all stopped, to another universe.
 
 ```sh
-mv2 move [--subverse] target destination
+mv2 move [--subverse] [--json] target destination
 ```
 
 | Argument | Value | Description | Default |
@@ -198,6 +199,7 @@ mv2 move [--subverse] target destination
 | `target` |  | Agent name/UUID, or with --subverse a subverse path or name |  |
 | `destination` |  | Universe directory, or a subverse path such as cad-lab/verification |  |
 | `--subverse` |  | Move a subverse instead of an agent |  |
+| `--json` |  | Print the moved record as JSON |  |
 
 ## remove
 

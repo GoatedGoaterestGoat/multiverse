@@ -30,7 +30,7 @@ mv2 subverse feature-x --template development --workspace ~/worktrees/feature-x
 mv2 -u .multiverse/subverses/review spawn --name reviewer --task 'Review the open PR.'
 ```
 
-A subverse is a universe at `subverses/NAME/` with its own definitions, agents and view. It uses its parent's workspace unless `--workspace` points somewhere else, such as an existing Git worktree. mv2 doesn't create the worktree for you. A name can use letters, numbers, `_` and `-`, up to 64 characters.
+A subverse is a universe at `subverses/NAME/` with its own definitions, agents and view. `subverse` prints `Created subverse NAME in PATH.`; `--json` prints the record. It uses its parent's workspace unless `--workspace` points somewhere else, such as an existing Git worktree. mv2 doesn't create the worktree for you. A name can use letters, numbers, `_` and `-`, up to 64 characters.
 
 Subverses don't inherit their parent's prompts after creation. Each one gets a clean copy of its template. To move or remove one, use `mv2 move --subverse` or `mv2 remove --subverse`; see [agents](agents.md#move-and-remove).
 

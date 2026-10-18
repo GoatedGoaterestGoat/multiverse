@@ -5,6 +5,7 @@ A launch-only agent (inbox_bridge false, or a Claude Code too old for the mod) c
 it, so its unavailable results carry a typed `launch_only` flag that core's advice reads. A bridged launch whose
 mod hasn't registered gets no flag: that connection should exist.
 """
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -79,6 +80,28 @@ class ClaudeLaunchOnlyTest(BaseTest):
             self.assertEqual((result.state, result.reason, result.value), ('unavailable', NOT_REGISTERED, None))
         # Claude does implement ask: until the mod registers, it says that, not "No native implementation".
         self.assertEqual(adapter.capabilities(session)['ask'].reason, NOT_REGISTERED)
+
+    def test_a_stopped_agent_says_it_is_not_running_and_to_resume_it(self):
+        adapter = self.adapter()
+        message = Message(str(uuid4()), 'hi', framed='Message from lead:\nhi')
+        for state in ('stopped', 'dormant', 'failed'):
+            with self.subTest(state=state):
+                session = SessionHandle('agent', 'claude', str(self.work), launch_id='launch', native_id=str(uuid4()),
+                                        state=state, endpoint=NativeEndpoint('unix-lines', str(self.work / 'in.sock')),
+                                        bridge='claude-mod-v1', session_file=str(self.work / 'agent/session.jsonl'),
+                                        native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
+                for result in (adapter.ask(session, 'why?', Mock()), adapter.send(session, message, Mock())):
+                    self.assertEqual((result.state, result.reason, result.value),
+                                     ('unavailable', "This agent isn't running: resume it first", None))
+                self.assertEqual(adapter.capabilities(session)['ask'].reason, "This agent isn't running: resume it first")
+        # A stopped launch-only agent still says it is launch-only: resuming would not connect it.
+        stopped_plain = replace(self.plain('plain'), state='stopped')
+        self.assertTrue(adapter.ask(stopped_plain, 'why?', Mock()).reason.startswith('This agent is launch-only'))
+        # Starting up is still the mod not having registered yet.
+        starting = SessionHandle('agent', 'claude', str(self.work), launch_id='launch', native_id=str(uuid4()), state='starting',
+                                 endpoint=NativeEndpoint('unix-lines', str(self.work / 'in.sock')),
+                                 native_mode={'policy': 'auto', 'mode': 'bridge', 'fallback_reason': None})
+        self.assertEqual(adapter.ask(starting, 'why?', Mock()).reason, NOT_REGISTERED)
 
     def harness(self, setting, version=(2, 1, 302), probe=False):
         self.adapter(setting)
