@@ -277,8 +277,9 @@ class LaunchTextTest(BaseTest):
             with self.assertRaises(ValueError) as caught:
                 spawn.cli_run(self.root, name='codex-ui')
             self.assertEqual(str(caught.exception), 'codex-ui did not start: tmux server unreachable')
-            with self.assertRaises(RuntimeError):  # --json keeps the original failure
-                spawn.cli_run(self.root, name='codex-ui', json=True)
+            record = spawn.cli_run(self.root, name='codex-ui', json=True)
+            self.assertIs(record['ok'], False)
+            self.assertEqual(record['error'], str(failure))  # JSON keeps the original failure.
 
     def test_json_keeps_the_whole_record_and_the_python_functions_are_unchanged(self):
         record = self.record(ok=False, error='x')

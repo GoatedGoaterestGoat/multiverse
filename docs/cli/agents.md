@@ -144,3 +144,5 @@ A preflight failure prints `mv2: NAME did not start: REASON` (or `did not resume
 for resume). A failed native launch with a retained terminal shows LIVE stopped
 and its error; a failure before terminal creation has no wrapper and is dormant
 with the error. Inspect and doctor retain the reason in either case.
+With `--json`, preflight refusals also return a record on stdout with `ok: false`,
+the agent's name and the reason, and exit 1. Any saved failed record is retained.

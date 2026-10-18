@@ -32,7 +32,8 @@ def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", mode
                      wait=wait, wait_timeout=wait_timeout)
     except (RuntimeError, ValueError) as error:
         if json:
-            raise
+            from ._launch import failure_record
+            return failure_record(root, name, error)
         problem = cause(error, name, "did not start")
         try:
             saved = agents.directory(universe.resolve(root), name)
