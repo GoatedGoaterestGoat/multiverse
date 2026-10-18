@@ -104,7 +104,14 @@ def calling_socket(environment=None):
             raise ValueError('Calling agent identity does not match its saved record')
     else:
         return env.get('MV2_TMUX_SOCKET')
-    facts = read(directory / 'runtime.json')
+    from ..universe import records
+    path = directory / 'runtime.json'
+    try:
+        facts = records.runtime(path)
+        if not facts:
+            raise records.RecordError(path, 'is missing or has no launch record')
+    except records.RecordError as error:
+        raise ValueError(f"Calling agent's {path}: {error.reason}; restore its runtime record before spawning a child") from None
     if caller is None and facts.get('launch_id') != env['MV2_LAUNCH_ID']:
         raise ValueError('Outdated launch; cannot select the calling agent\'s tmux server')
     terminal = facts.get('tmux')

@@ -54,7 +54,7 @@ class SpawnSocketTest(TerminalBase):
             self.assertEqual(child['runtime']['tmux']['socket'], self.socket)
 
     def test_bad_socket_or_agent_proof_never_falls_back_to_the_default_server(self):
-        """Wrong proof fields or a damaged tmux record (None, [], empty, int, NUL) raise instead of falling back to the
+        """Wrong proof fields, missing/torn runtime or a damaged tmux record raise instead of falling back to the
         default server; fragile because falling back to the default is the natural failure of or-None code
         (bec1f85)."""
         parent, directory, environment = self.stable_parent()
@@ -64,6 +64,20 @@ class SpawnSocketTest(TerminalBase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 agent_identity.calling_socket({**environment, **change})
         try:
+            for mode in ('stable', 'legacy'):
+                caller = dict(environment)
+                if mode == 'legacy':
+                    caller.pop('MV2_IDENTITY_MODE')
+                    caller['MV2_LAUNCH_ID'] = facts['launch_id']
+                for contents in (None, '{torn'):
+                    with self.subTest(mode=mode, runtime=contents):
+                        path = directory / 'runtime.json'
+                        if contents is None:
+                            path.unlink(missing_ok=True)
+                        else:
+                            path.write_text(contents)
+                        with self.assertRaisesRegex(ValueError, str(path)):
+                            agent_identity.calling_socket(caller)
             for terminal in (None, [], {'socket': None}, {'socket': ''}, {'socket': 7}, {'socket': 'bad\0socket'}):
                 write(directory / 'runtime.json', {**facts, 'tmux': terminal})
                 with self.subTest(terminal=terminal), self.assertRaisesRegex(ValueError, 'no recorded tmux'):
