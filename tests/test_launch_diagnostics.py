@@ -181,6 +181,8 @@ class LaunchDiagnosticTerminalTest(TerminalBase):
                 self.assertTrue(result['saved'])
                 saved = inbox(directory, all_messages=True)['messages'][0]
                 until(lambda: message_record(directory, saved['id'])[1].get('submission_state') == 'failed')
+                # The mailbox failure and runtime diagnostic are separate writes.
+                until(lambda: agents.runtime(directory).get('reason'))
                 tracking = message_record(directory, saved['id'])[1]
                 self.assertEqual(tracking['delivery_method'], 'resume_prompt')
                 self.assertEqual(tracking['attempts'][-1]['state'], 'error')
