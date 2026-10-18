@@ -14,7 +14,7 @@ from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
 from ..terminal.tmux import Tmux, observe, owned, status_setup
-from ..universe import agents, catalog, mailbox
+from ..universe import agents, catalog, focus, mailbox
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
 from . import native, attachments, agent_identity, registration
@@ -57,7 +57,7 @@ def listing(root, recursive=False, only=None):
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
-                             "runtime": facts})
+                             "focus": focus.current(path.parent), "runtime": facts})
             except (OSError, ValueError, KeyError) as error:
                 rows.append({"id": path.parent.name, "name": path.parent.name, "universe": str(scope),
                              "live": "unknown", "status": "unknown", "phase": "unknown", "summary": str(error)})

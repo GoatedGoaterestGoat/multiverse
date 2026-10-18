@@ -1,7 +1,7 @@
 """Check uncertain native deliveries or retry a recipient's definite failures."""
 from .. import store, universe
 from ..runtime import native
-from ..universe import agents, mailbox
+from ..universe import agents, focus, mailbox
 from ._common import delivery_summary
 from ._messaging import delivery_line
 
@@ -22,8 +22,16 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     directory = agents.directory(root, agent)
     name = store.read(directory / 'properties.json')['name']
     launch_id = agents.runtime(directory).get('launch_id')
+    history = mailbox.inbox(directory, limit=None, all_messages=True)['messages']
+    held = focus.current(directory) if retry else None
+    if held and any(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
+                    and message['tracking']['submission_state'] == 'failed' for message in history):
+        reason = f'{name} is focused {focus.ends(held)} and takes only inbox-only messages; retry after it unfocuses.'
+        if _present:
+            _present(f'Not retried: {reason}')
+        return {'messages': [], 'ok': False, 'state': 'focused', 'reason': reason, 'focus': held}
     results = []
-    for message in mailbox.inbox(directory, limit=None, all_messages=True)['messages']:
+    for message in history:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
         tracking = message['tracking']

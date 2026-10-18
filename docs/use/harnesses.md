@@ -190,7 +190,9 @@ Each agent's tmux bar shows a short live line instead of tmux's session list and
 | Pi, custom | `reader · pi · phase working · inbox 2` |
 | Claude | `reader · claude` (its status line carries the rest) |
 
-The `tmux` block of `statusline.json` chooses the items: `agent`, `harness`, `status`, `phase`, `summary`, `inbox` and `context`. List them in `tmux.items` in the order you want. Items you leave out follow in their default order.
+While an agent is focused, its bar also shows `focused`, with the time left of a timed focus, such as `focused 18m`.
+
+The `tmux` block of `statusline.json` chooses the items: `agent`, `harness`, `focus`, `status`, `phase`, `summary`, `inbox` and `context`. List them in `tmux.items` in the order you want. Items you leave out follow in their default order.
 
 `tmux.harnesses.ADAPTER.items` turns items on or off for one adapter (`codex`, `claude` or `pi`), whatever the profile is called. Use it to change Codex's `status` or Claude's `phase` and `inbox`, which have built-in adapter defaults:
 

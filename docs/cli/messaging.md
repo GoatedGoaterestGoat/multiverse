@@ -53,6 +53,7 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | `NAME: cannot yet tell whether it received the message.` | Delivery is uncertain | Run `mv2 deliver NAME --check` before sending again |
 | `Not delivered to NAME: REASON. Saved; …` | It was definitely not delivered | Fix the reason, then run `mv2 deliver NAME --retry`. For a running agent whose messaging broke, the line says to run `mv2 kill NAME` and `mv2 resume NAME` first |
 | `Saved to NAME's inbox; it sees it at its next check.` | It was an `inbox-only` message | Nothing |
+| `Not sent: NAME is focused until …` | The agent is [focused](#focus-an-agent), so nothing was saved | Send it again with `--delivery inbox-only`, or wait until it unfocuses |
 
 A delivered message has not necessarily been read or answered. Wait for a reply, or check the agent's phase with `mv2 list`.
 
@@ -64,6 +65,27 @@ mv2 deliver worker --retry    # resend messages that definitely failed
 ```
 
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
+
+## Focus an agent
+
+An agent whose reply needs the user's answer focuses itself before it ends its turn. While it is focused, other agents' messages can't start new work and bury the question.
+
+```sh
+mv2 focus --turn       # until its next turn ends
+mv2 focus --for 20m    # for a time such as 5m, 20m, 1h or 1h30m, at most 1d
+mv2 focus              # until mv2 unfocus
+mv2 unfocus            # end it, and say how many unread inbox messages wait
+```
+
+While an agent is focused:
+
+- `steer` and `follow-up` messages to it are refused. Nothing is saved, `send` exits 1, and its result says to send `--delivery inbox-only` instead.
+- `inbox-only` messages are saved as usual.
+- `deliver --retry` to it is refused until it unfocuses. `deliver --check` still works.
+
+`unfocus` prints how many unread inbox messages wait, and how many of them arrived during the focus. A turn focus started in the middle of a turn lets that turn end first. It needs a harness that reports its status over a live connection, so `focus --turn` is refused while the agent's status is `unknown`.
+
+Inside an agent, `focus` and `unfocus` act on the agent itself, and an agent can't change another agent's focus. You can name any agent, as in `mv2 focus worker --for 1h`, or press `f` in the [dashboard](../reference/dashboard.md#message-focus-kill-and-resume). `mv2 list`, `mv2 inspect` and the agent's tmux bar show who is focused and until when.
 
 ## Read an inbox
 

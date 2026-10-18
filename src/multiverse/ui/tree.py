@@ -4,13 +4,16 @@ from pathlib import Path
 
 from .. import display
 from ..display import clean
+from ..universe import focus
 
 
 def with_usage(agent):
     """Display fields from the agent's native usage reading."""
     reading = agent.get("usage") if isinstance(agent.get("usage"), dict) else {}
+    held = agent.get("focus")
     return {**agent, "context": display.context_display(reading), "context_level": display.context_level(reading),
-            "cost": display.cost_display(reading), "context_line": display.context_line(reading)}
+            "cost": display.cost_display(reading), "context_line": display.context_line(reading),
+            "focus_line": ("Focused " + focus.ends(held) + ": only inbox-only messages reach it") if held else "Not focused"}
 
 
 def rate_limits(items):
@@ -39,6 +42,7 @@ def counts(items):
     return {"total": len(items), "alive": sum(a.get("live") in ('alive', 'ending') for a in items),
             "blocked": sum(a.get("phase") == "blocked" for a in items),
             "waiting": sum(a.get("status") == "waiting" for a in items),
+            "focused": sum(bool(a.get("focus")) for a in items),
             "unknown": sum(a.get("live") == "unknown" for a in items)}
 
 

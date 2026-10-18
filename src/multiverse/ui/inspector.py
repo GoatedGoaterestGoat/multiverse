@@ -186,6 +186,11 @@ def progress(state, row):
     state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
 
 
+def focused(state, row):
+    if row.get("focus"):
+        state.append("\n◉ " + clean(row.get("focus_line", "Focused")) + " · f unfocuses", style=theme.MAUVE)
+
+
 def context(state, row):
     state.append("\n" + clean(row.get("context_line", "Context: N/A")), style=theme.SUBTEXT0)
 
@@ -218,7 +223,7 @@ def versions(state, row):
                      + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
 
 
-AGENT_FACTS = (identity, progress, context, native_mode, launch_error, relay_loss, versions)
+AGENT_FACTS = (identity, progress, focused, context, native_mode, launch_error, relay_loss, versions)
 
 
 def agent_state(row):

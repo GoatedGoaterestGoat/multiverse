@@ -43,7 +43,7 @@ Footer { background: $mv-mantle; }
 .inspecting #inspector { display: block; }
 #inspect-name { height: 1; }
 #inspect-meta { height: 1; color: $mv-overlay1; }
-#inspect-state { height: auto; max-height: 4; color: $mv-subtext0; }
+#inspect-state { height: auto; max-height: 5; color: $mv-subtext0; }
 #inspect-label { height: 1; margin-top: 1; color: $mv-overlay1; }
 #inspect-work { height: auto; max-height: 4; color: $mv-text; }
 #inspect-group { height: 1fr; margin-top: 1; }
@@ -64,13 +64,13 @@ Footer { background: $mv-mantle; }
 .drawer #inspector { width: 100%; max-width: 100%; height: 12; max-height: 60%; border-left: none; border-top: solid $mv-surface1; }
 .drawer #inspect-label { display: none; }
 .drawer #inspect-meta { display: none; }
-.drawer #inspect-state { max-height: 3; }
+.drawer #inspect-state { max-height: 4; }
 .drawer #inspect-work { max-height: 2; }
 .drawer #pane-scroll { margin-top: 0; }
 .short.drawer #inspect-work { max-height: 1; }
 .drawer #inspect-group { margin-top: 0; }
 .narrow #totals { width: auto; }
-Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background: $mv-crust 75%; }
+Form, Choice, Details, ArtifactPreview, PluginsScreen { align: center middle; background: $mv-crust 75%; }
 #dialog { width: 72; max-width: 94%; height: auto; max-height: 90%; border: round $mv-teal; background: $mv-base; padding: 1 2; }
 #dialog-title { text-style: bold; height: auto; margin-bottom: 1; }
 #dialog-description { height: auto; color: $mv-subtext0; margin-bottom: 1; }
@@ -80,6 +80,8 @@ Form, Details, ArtifactPreview, PluginsScreen { align: center middle; background
 .multiline { height: 7; border: round $mv-surface1; margin-bottom: 1; }
 .multiline:focus { border: round $mv-teal; }
 #form-error { height: auto; color: $mv-red; }
+#choices { height: auto; max-height: 12; border: none; background: $mv-base; padding: 0; }
+#choices > .option-list--option-highlighted { background: $mv-cursor-focus; color: $mv-teal; text-style: bold; }
 .short #dialog { padding: 0 1; }
 .short #dialog-title { margin-bottom: 0; }
 .short #form-fields { max-height: 50vh; }

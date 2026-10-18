@@ -38,6 +38,8 @@ Put global options before the command, as in `mv2 -u /path/to/project list`. Eve
 | [`inspect`](#inspect) | Show an agent's key facts and the end of its live terminal. |
 | [`send`](#send) | Save and deliver a message to the exact native session. |
 | [`inbox`](#inbox) | Read messages as sender/content blocks; use --json for scripts. |
+| [`focus`](#focus) | Focus an agent while it needs the user: only inbox-only messages reach it, others are refused. |
+| [`unfocus`](#unfocus) | End an agent's focus: messages reach it normally again. Says what waits in its inbox. |
 | [`report`](#report) | Report agent phase and current work. |
 | [`status`](#status) | Alias for [`report`](#report). |
 | [`session-bind`](#session-bind) | Record a native session UUID for exact resume. |
@@ -286,6 +288,36 @@ mv2 inbox [--agent AGENT] [--all] [--after AFTER] [--peek] [--json] [--last LAST
 | `--since` | `SINCE` | Filter --all by ISO timestamp or duration such as 30m or 2h |  |
 | `--wait` |  | Wait for an unread message |  |
 | `--timeout` | `TIMEOUT` | Limit --wait (seconds, or a duration such as 30s or 2m) |  |
+
+## focus
+
+Focus an agent while it needs the user: only inbox-only messages reach it, others are refused.
+
+```sh
+mv2 focus [--json] [--for DURATION | --turn] [agent]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  | Agent name (default: yourself inside an agent session) |  |
+| `--json` |  | Return the focus record as JSON |  |
+| `--for` | `DURATION` | End the focus after a duration such as 5m, 20m or 1h (default: until mv2 unfocus) |  |
+| `--turn` |  | End the focus when the agent's next turn ends; mid-turn, that is the turn after this one |  |
+
+Use at most one of `--for`, `--turn`.
+
+## unfocus
+
+End an agent's focus: messages reach it normally again. Says what waits in its inbox.
+
+```sh
+mv2 unfocus [--json] [agent]
+```
+
+| Argument | Value | Description | Default |
+| --- | --- | --- | --- |
+| `agent` |  | Agent name (default: yourself inside an agent session) |  |
+| `--json` |  | Return the result as JSON |  |
 
 ## report
 

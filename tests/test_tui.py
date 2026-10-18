@@ -14,7 +14,7 @@ from textual import events
 from multiverse.ui.tree import agent_key, group_key
 from tui_demo import DemoBackend
 from multiverse.ui.drafts import SubverseDraft
-from multiverse.ui.screens import Details, Form, KEYS
+from multiverse.ui.screens import Choice, Details, Form, KEYS
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.columns import COLUMNS
 from isolation import isolate
@@ -168,6 +168,54 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.backend.messages[0]["to"], original)
             self.assertIn("\n", self.backend.messages[0]["text"])
 
+    async def test_focus_toggle_marks_the_agent_and_its_messages_go_to_the_inbox(self):
+        async with self.app.run_test(size=(140, 32)) as pilot:
+            await self.settle(pilot)
+            agent = dict(self.app.selected)
+            key = agent_key(agent)
+            await pilot.press("f", "escape")
+            await self.settle(pilot)
+            self.assertNotIsInstance(self.app.screen, Choice)
+            self.assertIsNone(self.app.visible_agents[key].get("focus"))
+            await pilot.press("f")
+            self.assertIsInstance(self.app.screen, Choice)
+            choices = self.app.screen.query_one("#choices", OptionList)
+            self.assertEqual([str(choices.get_option_at_index(i).prompt) for i in range(choices.option_count)],
+                             ["5 minutes", "20 minutes", "1 hour", "Until its next turn ends", "Until unfocused"])
+            await pilot.press("down", "enter")
+            await self.settle(pilot)
+            row = self.app.visible_agents[key]
+            self.assertIsNotNone(row["focus"]["until"])
+            self.assertIn("◉", self.app.query_one("#agents", DataTable).get_cell(key, "name").plain)
+            self.assertIn("1 focused", str(self.app.query_one("#totals", Static).render()))
+            self.assertIn(f'Focused {agent["name"]} until', str(self.app.query_one("#status", Static).render()))
+            self.assertIn("min left", str(self.app.query_one("#selection", Static).render()))
+            await pilot.press("p")
+            await self.settle(pilot)
+            self.assertIn("f unfocuses", str(self.app.query_one("#inspect-state", Static).render()))
+            await pilot.press("p", "m")
+            self.assertIn("(focused)", str(self.app.screen.query_one("#dialog-title").render()))
+            self.app.screen.query_one("#field-text", TextArea).load_text("Answer when you can")
+            await pilot.press("ctrl+enter")
+            await self.settle(pilot)
+            self.assertEqual(self.backend.messages[-1]["delivery"], "inbox-only")
+            self.assertIn("Saved to its inbox", str(self.app.query_one("#status", Static).render()))
+            await pilot.press("f")
+            await self.settle(pilot)
+            self.assertIsNone(self.app.visible_agents[key].get("focus"))
+            self.assertIn(f'Unfocused {agent["name"]}', str(self.app.query_one("#status", Static).render()))
+            self.assertNotIn("◉", self.app.query_one("#agents", DataTable).get_cell(key, "name").plain)
+            # A turn focus is offered only while the harness reports turns; this agent is stopped.
+            stopped = next(a for a in self.backend.agents if a["name"] == "training-check")
+            self.app.select_key(agent_key(stopped))
+            await pilot.press("f")
+            choices = self.app.screen.query_one("#choices", OptionList)
+            self.assertNotIn("Until its next turn ends",
+                             [str(choices.get_option_at_index(i).prompt) for i in range(choices.option_count)])
+            await pilot.press("end", "enter")
+            await self.settle(pilot)
+            self.assertIsNone(self.app.visible_agents[agent_key(stopped)]["focus"]["until"])
+
     async def test_empty_initial_prompt_can_spawn_and_failed_delivery_is_visible(self):
         async with self.app.run_test(size=(120, 32)) as pilot:
             await self.settle(pilot)
@@ -199,7 +247,7 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 self.app.screen.query_one('#field-text', TextArea).load_text('Continue the saved task')
                 await pilot.press('ctrl+enter')
                 await self.settle(pilot)
-            self.assertEqual(sent.call_args.args[1:], (selected, 'Continue the saved task'))
+            self.assertEqual(sent.call_args.args[1:], (selected, 'Continue the saved task', 'steer'))
             status = str(self.app.query_one('#status', Static).render())
             self.assertIn('pending', status)
             self.assertIn('Resuming with this message', status)

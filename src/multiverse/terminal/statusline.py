@@ -3,6 +3,7 @@
 The wrapper invokes this file with exact root, agent, launch and adapter-family
 arguments; tmux's command environment need not belong to the displayed agent.
 """
+from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
@@ -13,7 +14,7 @@ import unicodedata
 
 DEFAULTS = {
     'refresh_seconds': 2,
-    'items': {'agent': True, 'harness': True, 'status': False, 'phase': True,
+    'items': {'agent': True, 'harness': True, 'focus': True, 'status': False, 'phase': True,
               'summary': False, 'inbox': True, 'context': False},
     'harnesses': {'codex': {'items': {'status': True}},
                   'claude': {'items': {'phase': False, 'inbox': False}}},
@@ -135,6 +136,25 @@ def unread(directory):
         return None
 
 
+def focus_text(directory):
+    """`focused`, `focused 18m` or `focused (turn)` while the agent's focus lasts; universe.focus owns the file."""
+    record = read_object(directory / 'focus.json')
+    if not isinstance(record.get('since'), str):
+        return ''
+    until = record.get('until')
+    if until is None:
+        return 'focused (turn)' if record.get('turns') else 'focused'
+    try:
+        stamp = datetime.fromisoformat(until)
+        left = ((stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)) - datetime.now(timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        return ''
+    if left <= 0:
+        return ''
+    minutes = math.ceil(left / 60)
+    return f'focused {minutes}m' if minutes < 60 else f'focused {minutes // 60}h{minutes % 60:02d}m'
+
+
 def number(value):
     return (isinstance(value, (int, float)) and not isinstance(value, bool)
             and 0 <= value <= 2**63 - 1 and math.isfinite(value))
@@ -226,6 +246,10 @@ def render(root, agent_id, launch_id, family=''):
             name = clean(properties.get('harness'), 40)
             if name:
                 parts.append(name)
+        elif item == 'focus':
+            text = focus_text(directory)
+            if text:
+                parts.append(text)
         elif item == 'status':
             if status and not (items['phase'] and phase == status):
                 parts.append(f'status {status}')

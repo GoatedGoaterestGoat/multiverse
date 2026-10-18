@@ -4,8 +4,8 @@ from pathlib import Path
 import sys
 from .. import universe
 from ..runtime import native
-from ..store import read, lock
-from ..universe import agents
+from ..store import lock, now, read
+from ..universe import agents, focus
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
 from ._messaging import delivery_line, failure_reason
@@ -60,8 +60,13 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             name = read(directory / 'properties.json')['name']
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only)
             running = bool(_present and receipt.get('state') in ('error', 'unavailable') and _running(directory))
-            line = (f"Saved to {name}'s inbox; it sees it at its next check." if result['delivery'] == 'inbox-only'
-                    else delivery_line(name, receipt, delivery=delivery, text=text, running=running))
+            if result['state'] == 'focused':
+                result['reason'] = refusal(name, result['focus'])
+                line = 'Not sent: ' + result['reason']
+            elif result['delivery'] == 'inbox-only':
+                line = f"Saved to {name}'s inbox; it sees it at its next check."
+            else:
+                line = delivery_line(name, receipt, delivery=delivery, text=text, running=running)
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
@@ -79,10 +84,21 @@ def _running(directory):
         return False
 
 
+def refusal(name, record):
+    """Why a focused agent refused a message, and what the sender can do instead."""
+    return (f"{name} is focused {focus.ends(record)} because it needs the user's attention, so it takes only "
+            f"inbox-only messages. Send again with --delivery inbox-only; {name} reads it from its inbox.")
+
+
 def _send_one(root, directory, text, sender, delivery, queue_only):
     with lock(directory / '.send.lock'):
         if queue_only:
             delivery = 'inbox-only'
+        held = focus.current(directory) if delivery != 'inbox-only' else None
+        if held:
+            # Refused, not saved: the sender decides whether it is worth an inbox-only message.
+            return ({'at': now(), 'from': sender, 'text': text, 'delivery': delivery, 'state': 'focused',
+                     'saved': False, 'ok': False, 'focus': held}, {})
         binding_error = None
         with lock(directory / '.launch.lock'):
             properties = read(directory / 'properties.json')

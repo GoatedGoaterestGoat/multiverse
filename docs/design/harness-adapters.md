@@ -1273,6 +1273,7 @@ this independent block after `items`:
   "items": {
     "agent": true,
     "harness": true,
+    "focus": true,
     "status": false,
     "phase": true,
     "summary": false,
@@ -1300,6 +1301,9 @@ defaults also work with older files that have no `tmux` block.
 `phase` and `summary` share a segment, positioned at the first enabled one.
 Summary is optional and capped at 60 characters, cutting at a word where
 possible. Text has terminal control sequences removed and tmux formats escaped.
+`focus` shows `focused` while the agent is focused (`focused 18m` with the time
+left of a timed focus, `focused (turn)` until its next turn ends), read from the
+agent's `focus.json`; an expired or unreadable record shows nothing.
 `inbox` counts unread inbox-only messages without marking them read, capped at
 `50+`; an unread tail over 1 MiB or invalid data shows `inbox ?`. Native-delivered
 steer/follow-up messages do not count. Optional `context` shows measured latest

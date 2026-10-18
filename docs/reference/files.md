@@ -136,7 +136,7 @@ This file sets the items on the Claude status line and on every agent's tmux sta
 | `schema` | Always `1`. |
 | `items` | Items on the Claude status line: `agent`, `phase`, `summary`, `inbox`, `compaction`. On by default: `phase`, `inbox`, `compaction`. |
 | `tmux.refresh_seconds` | How often tmux redraws the bar, 1 to 60 (default `2`). It is read at spawn and resume. |
-| `tmux.items` | Items on the tmux bar: `agent`, `harness`, `status`, `phase`, `summary`, `inbox`, `context`. On by default: `agent`, `harness`, `phase`, `inbox`. |
+| `tmux.items` | Items on the tmux bar: `agent`, `harness`, `focus`, `status`, `phase`, `summary`, `inbox`, `context`. On by default: `agent`, `harness`, `focus`, `phase`, `inbox`. |
 | `tmux.harnesses.ADAPTER.items` | On/off overrides for one adapter (`codex`, `claude`, `pi`). The built-in overrides turn `status` on for Codex, and `phase` and `inbox` off for Claude. Change those here, not in `tmux.items`. |
 
 A plugin's items, such as the compaction plugin's `compaction`, are keys in `items` and `tmux.items`, like the core items. They show only for agents launched while their plugin was on. The plugin says whether each item is on by default.
@@ -224,7 +224,7 @@ This file sets how the dashboard shows this universe. Every field is optional. S
 | --- | --- |
 | `title` | Name on the universe's row. It defaults to `universe.json` `name`. |
 | `accent` | `#rrggbb`, or `auto` for a color picked from the universe ID. |
-| `columns` | Agent columns, in order: `name`, `harness`, `live`, `status`, `context`, `cost`, `phase`, `summary`, `id`, `universe`, `task`, `updated_at`. `activity` and `tokens` are aliases of `status` and `context`. `name` always shows. The default is `name`, `harness`, `live`, `status`, `context`, `phase`, `summary`. The universe the dashboard opens at sets the columns for the whole tree. |
+| `columns` | Agent columns, in order: `name`, `harness`, `live`, `status`, `focus`, `context`, `cost`, `phase`, `summary`, `id`, `universe`, `task`, `updated_at`. `activity` and `tokens` are aliases of `status` and `context`. `name` always shows. The default is `name`, `harness`, `live`, `status`, `context`, `phase`, `summary`. The universe the dashboard opens at sets the columns for the whole tree. |
 | `widgets` | Up to 32 panels shown when you open this universe. |
 
 | Widget `type` | Fields |
@@ -244,6 +244,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |
 | `inbox-state.json` | Delivery attempts and receipts per message. |
+| `focus.json` | While the agent is [focused](../cli/messaging.md#focus-an-agent): `since`, `until` (a time, or `null`), `turns` (turn ends still to come, or `null`) and `by` (`agent` or `user`). |
 | `session.jsonl` | The native conversation, for Pi and other harnesses that use `{session_file}`. |
 | `sessions.jsonl` | The agent's session lineage: one line per verified native session change, such as Claude's `/clear`, with the old and new session IDs. Written only after a change. See [session lineage](../design/session-lineage.md). |
 | `NAME/` | A plugin's state for this agent. The compaction plugin's `compaction/` holds `config.json` (the agent's own scheduler), `trees/`, `status.json` and `build.log`. |

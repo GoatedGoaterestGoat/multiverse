@@ -14,7 +14,7 @@ from isolation import isolate
 DEFAULT_ITEMS = {'agent': False, 'phase': True, 'summary': False, 'inbox': True, 'compaction': True}
 TEMPLATES = ('base',)
 # What the tmux bar may show (codex-ui's renderer owns their meaning); the Claude mod's own items are the five above.
-TMUX_ITEMS = {'agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'context'}
+TMUX_ITEMS = {'agent', 'harness', 'focus', 'status', 'phase', 'summary', 'inbox', 'context'}
 
 
 class StatusLineFileTest(unittest.TestCase):

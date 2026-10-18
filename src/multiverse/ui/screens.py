@@ -3,7 +3,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Footer, Input, Label, Static, TextArea
+from textual.widgets import Footer, Input, Label, OptionList, Static, TextArea
+from textual.widgets.option_list import Option
 
 from ..display import clean
 from ..universe import slug
@@ -22,6 +23,9 @@ Esc            Clear search, cancel a move, or close the current dialog
 AGENTS & GROUPS
 n              New agent in the selected group
 m              Message the selected agent
+f              Focus the selected agent (5 min, 20 min, 1 hour, its next turn or
+               until unfocused), or unfocus it. A focused agent (◉) refuses steer
+               and follow-up messages; inbox-only messages still arrive
 K / s          Kill (with confirmation); s is an alias
 r              Resume a stopped or dormant agent
 v              Full agent details or group configuration
@@ -105,6 +109,35 @@ class Form(ModalScreen[dict | None]):
                     return
             values[key] = value
         self.dismiss(values)
+
+
+class Choice(ModalScreen[str | None]):
+    """Pick one of `options`, given as (key, label) pairs: Enter chooses, Esc cancels."""
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, title, options, description=""):
+        super().__init__()
+        self.choice_title, self.options, self.description = title, options, description
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="dialog"):
+            yield Label(self.choice_title, id="dialog-title", markup=False)
+            if self.description:
+                yield Static(self.description, id="dialog-description", markup=False)
+            yield OptionList(*(Option(label, id=key) for key, label in self.options), id="choices")
+        yield Footer()
+
+    def on_mount(self):
+        choices = self.query_one("#choices", OptionList)
+        choices.highlighted = 0
+        choices.focus()
+
+    def on_option_list_option_selected(self, event):
+        event.stop()
+        self.dismiss(event.option.id)
+
+    def action_cancel(self):
+        self.dismiss(None)
 
 
 class Details(ModalScreen):

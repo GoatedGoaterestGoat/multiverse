@@ -1,7 +1,7 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
-from . import sessions
+from . import focus, sessions
 
 
 def directory(root, reference):
@@ -60,6 +60,9 @@ def mutate_runtime(agent_dir, launch_id, changes_for, *, create_parent=False):
     if data.get('status') != before:
         # After the lock: recording an event never holds up the runtime record.
         _event(agent_dir, "agent.status", launch_id, {"from": before, "to": data.get('status')})
+        # A turn ends when the harness goes idle from working or waiting on the person.
+        if data.get('status') == 'idle' and before in ('working', 'waiting'):
+            focus.turn_ended(agent_dir)
     return data
 
 

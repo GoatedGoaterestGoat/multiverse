@@ -38,7 +38,7 @@ CORE_EVENTS = ("agent.created", "agent.launched", "agent.ready", "agent.status",
 EVENT_PATTERN = re.compile(r"(\*|[a-z][a-z0-9-]*\.(\*|[a-z][a-z0-9_-]*))")
 FAMILIES = ("claude", "codex", "pi")
 # Status-line items core draws itself (Claude's line and the tmux bar); a plugin's item takes another name.
-CORE_ITEMS = frozenset({"agent", "harness", "status", "phase", "summary", "inbox", "context"})
+CORE_ITEMS = frozenset({"agent", "harness", "focus", "status", "phase", "summary", "inbox", "context"})
 VERSION = re.compile(r"\d+\.\d+\.\d+")
 PERMISSIONS = {
     "agents.read": "read this universe's agents: names, state, reported work, terminal tails and usage",

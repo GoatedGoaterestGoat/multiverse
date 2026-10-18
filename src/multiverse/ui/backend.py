@@ -4,8 +4,8 @@ from pathlib import Path
 from .. import universe
 from ..harnesses import load as load_harness
 from ..store import read
-from ..tools import (ask, get_usage, attach, capabilities, deliver, inspect, kill, list_agents, move,
-                     native_status, remove, resume, send, spawn, stop, subverse)
+from ..tools import (ask, get_usage, attach, capabilities, deliver, focus, inspect, kill, list_agents, move,
+                     native_status, remove, resume, send, spawn, stop, subverse, unfocus)
 from .. import plugins
 from . import columns, plugin_panels, theme
 from .columns import COLUMNS
@@ -75,6 +75,12 @@ class LocalBackend:
     def send(self, root, reference, text, delivery='steer', queue_only=False):
         return send.run(root, agent=reference, text=text, sender={"name": "user", "agent_id": None},
                         delivery=delivery, queue_only=queue_only)
+
+    def focus(self, root, reference, duration=None, turn=False):
+        return focus.run(root, agent=reference, duration=duration, turn=turn, as_user=True)
+
+    def unfocus(self, root, reference):
+        return unfocus.run(root, agent=reference, as_user=True)
 
     def ask(self, root, reference, question):
         return ask.run(root, agent=reference, question=question)

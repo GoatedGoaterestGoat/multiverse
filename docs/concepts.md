@@ -46,7 +46,9 @@ Every message is saved to the recipient's inbox first, and then delivered. You c
 | `follow-up` | When the current turn ends |
 | `inbox-only` | Not delivered. The agent reads it with `mv2 inbox` at its next check |
 
-A `steer` or `follow-up` message to a stopped agent resumes it, with the message as its first prompt. A saved or delivered message has not necessarily been read or answered. Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
+A `steer` or `follow-up` message to a stopped agent resumes it, with the message as its first prompt. A saved or delivered message has not necessarily been read or answered.
+
+An agent that waits on your answer can **focus**. While it is focused, it refuses `steer` and `follow-up` messages, so nothing buries its question, and `inbox-only` messages still arrive. See [focus an agent](cli/messaging.md#focus-an-agent). Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
 
 ## Agent state
 

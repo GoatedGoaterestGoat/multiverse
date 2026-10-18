@@ -1,10 +1,17 @@
-"""Commands on an agent (message, kill, resume, attach) and the runner that keeps backend calls off the event loop."""
+"""Commands on an agent (message, focus, kill, resume, attach) and the runner that keeps backend calls off the event loop."""
 import asyncio
 from pathlib import Path
 
 from textual import work
 
-from .screens import Form
+from ..display import clean
+from ..universe import focus
+from .screens import Choice, Form
+
+# The focus lengths the dashboard offers: (choice, label, backend arguments).
+FOCUS_LENGTHS = (("5m", "5 minutes", {"duration": "5m"}), ("20m", "20 minutes", {"duration": "20m"}),
+                 ("1h", "1 hour", {"duration": "1h"}), ("turn", "Until its next turn ends", {"turn": True}),
+                 ("on", "Until unfocused", {}))
 
 
 class AgentCommands:
@@ -42,10 +49,36 @@ class AgentCommands:
     def action_message(self):
         if self.ready() and self.selected:
             agent = dict(self.selected)
-            self.push_screen(Form(f'Message {agent["name"]}', [("text", "Message", "", True, True)]),
+            held = agent.get("focus")
+            # A focused agent takes only inbox-only messages, from the person too.
+            title, delivery, description = (f'Message {agent["name"]}', "steer", "") if not held else (
+                f'Message {agent["name"]} (focused)', "inbox-only",
+                f'{agent["name"]} is focused {focus.ends(held)}, so this message goes to its inbox without '
+                f'interrupting it. To answer it directly, attach with Enter.')
+            self.push_screen(Form(title, [("text", "Message", "", True, True)], description=clean(description)),
                              lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
-                                                                  agent["id"], values["text"], describe=sent)
+                                                                  agent["id"], values["text"], delivery, describe=sent)
                              if values is not None else None)
+
+    def action_toggle_focus(self):
+        if not (self.ready() and self.selected):
+            return
+        agent = dict(self.selected)
+        root, name = Path(agent["universe"]), agent["name"]
+        if agent.get("focus"):
+            self.submit_operation("Unfocus", self.backend.unfocus, root, agent["id"], describe=unfocused)
+            return
+        # A turn focus ends on a reported turn end, so it is offered only while the harness reports turns.
+        lengths = [entry for entry in FOCUS_LENGTHS
+                   if entry[0] != "turn" or agent.get("status") in ("working", "waiting", "idle")]
+        def chosen(key):
+            arguments = next((entry[2] for entry in lengths if entry[0] == key), None)
+            if arguments is not None:
+                self.submit_operation("Focus", self.backend.focus, root, agent["id"], arguments.get("duration"),
+                                      arguments.get("turn", False), describe=focused)
+        self.push_screen(Choice(f"Focus {name}", [entry[:2] for entry in lengths], description=clean(
+            f"While {name} is focused, steer and follow-up messages to it are refused and their senders are "
+            f"told to send inbox-only, so nothing buries what it needs from you. Esc cancels.")), chosen)
 
     def action_stop(self):
         self.action_kill()
@@ -100,10 +133,27 @@ class AgentCommands:
 
 def sent(result):
     """Status for a sent message: saved, then whatever native delivery reported."""
-    receipt = (result or {}).get('native_delivery', {})
+    result = result or {}
+    if result.get('state') == 'focused':
+        return "Not sent: " + result.get('reason', 'the agent is focused'), True
+    if result.get('delivery') == 'inbox-only':
+        return "Saved to its inbox; it reads it at its next inbox check.", False
+    receipt = result.get('native_delivery', {})
     state = receipt.get('state', 'queued')
     detail = receipt.get('reason', 'delivery and an answer may follow')
     return f"Message saved; {state}: {detail}", state in ('error', 'unavailable')
+
+
+def focused(result):
+    return f"Focused {result['agent']} {result['ends']}: steer and follow-up messages to it are refused.", False
+
+
+def unfocused(result):
+    """Status for an unfocus: messages reach the agent again, and what waits in its inbox."""
+    count = result.get('unread', 0)
+    line = (f"Unfocused {result['agent']}; messages reach it normally again." if result.get('was_focused')
+            else f"{result['agent']} was not focused.")
+    return line + (f" It has {count} unread inbox {'message' if count == 1 else 'messages'}." if count else ""), False
 
 
 def killed(result):
