@@ -56,7 +56,7 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | Variable | What mv2 does with it |
 | --- | --- |
 | `CODEX_HOME`, `CODEX_SQLITE_HOME` | Reads them from its own environment to find Codex sessions and the shared Codex app-server. Set them where mv2 runs, because a harness's `env` can't set them. |
-| `CLAUDE_CONFIG_DIR` | Reads it from its own environment to find Claude transcripts. Set it where mv2 runs, because a harness's `env` can't set it. |
+| `CLAUDE_CONFIG_DIR` | Reads it from the spawning environment to choose Claude's storage. Set it where mv2 runs, because a harness's `env` can't set it. A resume keeps the recorded value or absence; if it ignores a different value, its result names the kept storage and the ignored override. |
 | `CODEX_THREAD_ID`, `CLAUDECODE` | Removes the parent's values before a launch. Codex supplies its own `CODEX_THREAD_ID` to its tools. |
 | `CLAUDE_CODE_CHILD_SESSION` | Always removes it when inherited. Claude Code sets it for its own tool subprocesses, and a Claude agent that inherits it saves no transcript. A harness's `env` can still set it. |
 | `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
@@ -72,4 +72,5 @@ frontend, service and tools. The native child receives the launching command's
 removed, so an older tmux server cannot supply a different home. A resume that
 would change the saved conversation's storage, including a plain launch whose
 saved path now follows a different symlink, is refused before its launch records
-change. The error shows both paths; restore the original storage at the saved path, or spawn a new agent for the new storage.
+change. The error shows both paths; restore the original storage at the saved
+path, or spawn a new agent for the new storage.

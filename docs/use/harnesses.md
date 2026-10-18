@@ -19,6 +19,8 @@ Some things work the same in both modes:
 - A message to a stopped agent resumes it with that message.
 - Resume continues the exact conversation.
 
+Claude Code and Codex keep the storage recorded at spawn. If a resume ignores a changed `CLAUDE_CONFIG_DIR`, `CODEX_HOME` or `CODEX_SQLITE_HOME`, its result names the kept path and the ignored override.
+
 ## Compare harnesses
 
 | | Claude Code | Codex | Pi | Custom command |
@@ -88,7 +90,7 @@ Claude Code draws every plugin's status line in yellow, with `⚠` and the plugi
 
 The live connection runs through Codex's shared app-server daemon. There is one daemon per OS user and Codex home, shared by every agent, project and dashboard. Spawn and resume start or reuse it with `codex app-server daemon start`, then connect the agent's terminal through a private relay. mv2 never stops, restarts or updates the daemon. Closing the dashboard leaves it running.
 
-**Codex home.** Set `CODEX_HOME` (and `CODEX_SQLITE_HOME`, if you use it) in the environment you run mv2 from, not in harness `env`. Codex launches select canonical storage paths, including the default home, in plain mode and automatic fallback too; the tmux server's inherited values do not choose another home. A connected agent remembers these storage paths and keeps using them on resume. If you pass a different value for a saved path, the resume result names the kept path and the ignored override. A saved path that resolves somewhere else, such as after a symlink change, is refused. Restore the original storage at its saved path, or spawn another agent to use different storage. Adding `CODEX_SQLITE_HOME` to an agent that never used it changes its storage scope and is refused.
+**Codex home.** Set `CODEX_HOME` (and `CODEX_SQLITE_HOME`, if you use it) in the environment you run mv2 from, not in harness `env`. Codex launches select canonical storage paths, including the default home, in plain mode and automatic fallback too; the tmux server's inherited values do not choose another home. Every Codex agent remembers these storage paths and keeps using them on resume. If you pass a different value for a saved path, the resume result names the kept path and the ignored override. A saved path that resolves somewhere else, such as after a symlink change, is refused. Restore the original storage at its saved path, or spawn another agent to use different storage. Adding `CODEX_SQLITE_HOME` to an agent that never used it changes its storage scope and is refused.
 
 **Fallback.** With `inbox_bridge` unset, the agent starts launch-only in these cases:
 
