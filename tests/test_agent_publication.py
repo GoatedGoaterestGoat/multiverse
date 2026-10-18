@@ -1,12 +1,13 @@
-"""An agent directory appears only after its minimal identity is complete."""
+"""An agent directory appears only after its minimal identity is complete, and every end of a preparation is safe."""
 import concurrent.futures
+from contextlib import ExitStack
 import threading
 from unittest.mock import patch
 
 from multiverse import harnesses
-from multiverse.runtime import lifecycle
-from multiverse.store import read, write
-from multiverse.universe import agents
+from multiverse.runtime import lifecycle, missing_runtime
+from multiverse.store import read, uid, write
+from multiverse.universe import agents, relocate
 from multiverse import display
 from multiverse.tools import doctor
 from test_multiverse import BaseTest
@@ -22,6 +23,9 @@ class PublicationTest(BaseTest):
         self.adapter = harnesses.load(self.root, 'sleeper')
 
     def test_preparation_never_exposes_a_folder_without_properties(self):
+        """An agent folder appears only with complete minimal properties and reads as starting while it is prepared;
+        fragile because only concurrent readers (dashboard, doctor) see the window, and a break shows intermittent
+        damaged rows during every spawn (f7cf2ce)."""
         entered, release = threading.Event(), threading.Event()
         def prepare(context):
             entered.set()
@@ -49,75 +53,57 @@ class PublicationTest(BaseTest):
             with self.assertRaisesRegex(ValueError, 'preparation fixture'):
                 future.result()
 
-    def test_failed_preparation_remains_named_and_removable(self):
-        with patch.object(harnesses, 'load', return_value=self.adapter), \
-                patch.object(self.adapter, 'spawn', side_effect=ValueError('preparation fixture fails')):
-            with self.assertRaisesRegex(ValueError, 'preparation fixture'):
-                lifecycle.start(self.root, name='failed', harness='sleeper')
-        directory = agents.directory(self.root, 'failed')
-        self.assertEqual(read(directory / 'runtime.json')['state'], 'failed')
-        self.assertIn('preparation fixture fails', read(directory / 'runtime.json')['error'])
-        from multiverse.universe.relocate import remove_agent
-        remove_agent(self.root, directory.name)
-        self.assertEqual(list((self.root / 'state' / 'agents').glob('*/properties.json')), [])
-
-    def test_abandoned_pre_child_stage_is_failed_and_can_be_removed(self):
-        directory, properties, _, _ = lifecycle._record(self.root, 'abandoned', None, 'sleeper', None, None)
-        from multiverse.store import uid
-        with lifecycle._publish_record(self.root, directory, properties, uid()):
-            pass  # Like a killed preparer: the minimal stage remains, but its lock is released.
-        row = lifecycle.listing(self.root)[0]
-        self.assertEqual(row['live'], 'dormant')
-        self.assertEqual(row['runtime']['state'], 'failed')
-        self.assertFalse(row['runtime']['preparing'])
-        self.assertIn('preparation ended', '\n'.join(doctor.run(self.root)['problems']))
-        from multiverse.universe.relocate import remove_agent
-        remove_agent(self.root, directory.name)
-        self.assertFalse(directory.exists())
-
-    def test_preparing_flag_with_child_evidence_cannot_bypass_stopped_check(self):
-        directory, properties, _, _ = lifecycle._record(self.root, 'unknown', None, 'sleeper', None, None)
-        from multiverse.store import uid
-        launch_id = uid()
-        with lifecycle._publish_record(self.root, directory, properties, launch_id):
-            write(directory / 'launches' / launch_id / 'request.json', {'argv': ['/bin/sleep', '600']})
-        row = lifecycle.listing(self.root)[0]
-        self.assertEqual(row['live'], 'unknown')
-        self.assertIn('runtime.json', row['damaged']['file'])
-        self.assertEqual(display.live_label(row), 'unknown')
-        self.assertFalse(doctor.run(self.root)['ok'])
-        self.assertIn('runtime.json', '\n'.join(doctor.run(self.root)['problems']))
-        with self.assertRaisesRegex(ValueError, 'running or its liveness is unknown'):
-            lifecycle.start(self.root, resume='unknown')
-        before = (directory / 'runtime.json').read_bytes()
-        with self.assertRaisesRegex(ValueError, 'runtime.json: preparation record has native startup evidence') as caught:
-            lifecycle.kill(self.root, 'unknown')
-        self.assertIn('repair or remove', str(caught.exception))
-        self.assertIn('mv2 kill unknown', str(caught.exception))
-        self.assertEqual((directory / 'runtime.json').read_bytes(), before)
-
-    def test_same_name_is_reserved_once_and_different_names_prepare_together(self):
-        entered = threading.Barrier(2)
-        def prepare(context):
-            entered.wait(5)
-            raise ValueError('preparation fixture fails')
-        with patch.object(harnesses, 'load', return_value=self.adapter), \
-                patch.object(self.adapter, 'spawn', side_effect=prepare), \
-                concurrent.futures.ThreadPoolExecutor() as pool:
-            futures = [pool.submit(lifecycle.start, self.root, name=name, harness='sleeper')
-                       for name in ('one', 'two')]
-            for future in futures:
+    def test_preparation_end_states(self):
+        """A failed preparation stays named and removable, an abandoned one is failed, never starting, and removable
+        without discovery, and a preparing flag with native child evidence is a damaged unknown row that resume, kill
+        and remove refuse; fragile because preparing is a crash state only a killed preparer produces, and a break
+        strands undeletable agents or starts a second child (e5bbba0, 1eb2abc)."""
+        with self.subTest('failed preparation'):
+            with patch.object(harnesses, 'load', return_value=self.adapter), \
+                    patch.object(self.adapter, 'spawn', side_effect=ValueError('preparation fixture fails')):
                 with self.assertRaisesRegex(ValueError, 'preparation fixture'):
-                    future.result()
-        self.assertEqual({read(path)['name'] for path in (self.root / 'state' / 'agents').glob('*/properties.json')}, {'one', 'two'})
-        def same():
-            try:
-                lifecycle.start(self.root, name='same', harness='sleeper')
-            except ValueError as error:
-                return str(error)
-        with patch.object(harnesses, 'load', return_value=self.adapter), \
-                patch.object(self.adapter, 'spawn', side_effect=ValueError('preparation fixture fails')), \
-                concurrent.futures.ThreadPoolExecutor() as pool:
-            results = list(pool.map(lambda _: same(), range(4)))
-        self.assertEqual(sum('preparation fixture fails' in result for result in results), 1)
-        self.assertEqual(sum('already has an agent named same' in result for result in results), 3)
+                    lifecycle.start(self.root, name='failed', harness='sleeper')
+            directory = agents.directory(self.root, 'failed')
+            self.assertEqual(read(directory / 'runtime.json')['state'], 'failed')
+            self.assertIn('preparation fixture fails', read(directory / 'runtime.json')['error'])
+            relocate.remove_agent(self.root, directory.name)
+            self.assertFalse(directory.exists())
+        with self.subTest('abandoned before the child'):
+            directory, properties, _, _ = lifecycle._record(self.root, 'abandoned', None, 'sleeper', None, None)
+            with lifecycle._publish_record(self.root, directory, properties, uid()):
+                pass  # Like a killed preparer: the minimal stage remains, but its lock is released.
+            row = lifecycle.listing(self.root, only=directory.name)[0]
+            self.assertEqual(row['live'], 'dormant')
+            self.assertNotEqual(display.live_label(row), 'starting')
+            self.assertEqual(row['runtime']['state'], 'failed')
+            self.assertFalse(row['runtime']['preparing'])
+            self.assertIn('preparation ended', '\n'.join(doctor.run(self.root)['problems']))
+            before = (directory / 'runtime.json').read_bytes()
+            unexpected = AssertionError('no discovery for minimal preparation')
+            with patch.object(missing_runtime, 'discover', side_effect=unexpected), ExitStack() as stack:
+                relocate._hold(stack, [directory])
+            self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+            relocate.remove_agent(self.root, directory.name)
+            self.assertFalse(directory.exists())
+        with self.subTest('preparing with native child evidence'):
+            directory, properties, _, _ = lifecycle._record(self.root, 'unknown', None, 'sleeper', None, None)
+            launch_id = uid()
+            with lifecycle._publish_record(self.root, directory, properties, launch_id):
+                write(directory / 'launches' / launch_id / 'request.json', {'argv': ['/bin/sleep', '600']})
+                row = lifecycle.listing(self.root, only=directory.name)[0]  # while its publisher holds the lock
+                self.assertNotEqual(display.live_label(row), 'starting')
+                self.assertIn('native startup evidence', row['damaged']['reason'])
+            row = lifecycle.listing(self.root)[0]
+            self.assertEqual(row['live'], 'unknown')
+            self.assertIn('runtime.json', row['damaged']['file'])
+            self.assertEqual(display.live_label(row), 'unknown')
+            self.assertFalse(doctor.run(self.root)['ok'])
+            self.assertIn('runtime.json', '\n'.join(doctor.run(self.root)['problems']))
+            with self.assertRaisesRegex(ValueError, 'running or its liveness is unknown'):
+                lifecycle.start(self.root, resume='unknown')
+            before = (directory / 'runtime.json').read_bytes()
+            for operation in (lifecycle.kill, relocate.remove_agent):
+                with self.assertRaisesRegex(ValueError, 'runtime.json.*native startup evidence'):
+                    operation(self.root, 'unknown')
+                self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+            self.assertTrue(directory.exists())

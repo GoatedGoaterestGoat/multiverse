@@ -1,8 +1,8 @@
-"""Outside-in agent lifecycle and messaging checks: the mv2 CLI, documented files and tmux only.
+"""LifecycleFixture for outside-in lifecycle checks: the mv2 CLI, documented files and tmux only. It has no tests of
+its own; qa.test_missing_agent_records and qa.test_lifecycle_spec use it.
 
 Agents are schema-1 command harnesses (docs/reference/files.md), so no model runs.
 """
-import concurrent.futures
 import json
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ import tempfile
 import time
 import unittest
 
-# LC-9 from qa-lifecycle 279e4e8; use this checkout and test interpreter.
+# From qa-lifecycle 279e4e8; use this checkout and test interpreter.
 MV2 = str(Path(__file__).resolve().parents[2] / 'bin/mv2')
 
 
@@ -95,43 +95,3 @@ class LifecycleFixture(unittest.TestCase):
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(.1)
-
-
-class DamagedRecordStaysLocal(LifecycleFixture):
-    """docs/use/troubleshooting.md: an agent whose record can't be read shows unknown, and mv2 doctor names the problem.
-    One damaged record must not stop the universe's other agents from being stopped, messaged or spawned (LC-9)."""
-
-    def damage_other_agent(self, content):
-        self.mv2('spawn', '--name', 'good', '--harness', 'sleeper', '--wait')
-        self.mv2('spawn', '--name', 'bad', '--harness', 'sleeper', '--wait')
-        bad = self.agents()['bad']['id']
-        properties = self.root / 'state' / 'agents' / bad / 'properties.json'
-        self.original = properties.read_text()
-        self.addCleanup(properties.write_text, self.original)  # so stop_agents can end it
-        properties.write_text(content)
-        return bad
-
-    def check_good_agent_still_works(self):
-        send = self.mv2('send', 'good', '--delivery', 'inbox-only', '--text', 'still reachable', check=False)
-        self.assertEqual(send.returncode, 0, send.stderr)
-        kill = self.mv2('kill', 'good', check=False)
-        self.assertEqual(kill.returncode, 0, kill.stderr)
-        spawn = self.mv2('spawn', '--name', 'new', '--harness', 'sleeper', check=False)
-        self.assertEqual(spawn.returncode, 0, spawn.stderr)
-
-    def test_truncated_properties_of_one_agent_leave_the_others_usable(self):
-        self.damage_other_agent('{"name": ')
-        self.check_good_agent_still_works()
-
-    def test_non_object_properties_do_not_crash_list_or_doctor(self):
-        self.damage_other_agent('[]')
-        for command in ('list', 'doctor'):
-            result = self.mv2(command, check=False)
-            self.assertNotIn('Traceback', result.stdout + result.stderr, f'mv2 {command}')
-        self.check_good_agent_still_works()
-
-    def test_doctor_names_the_damaged_file(self):
-        self.damage_other_agent('{"name": ')
-        doctor = self.mv2('doctor', check=False)
-        self.assertNotEqual(doctor.returncode, 0)
-        self.assertIn('properties.json', doctor.stdout + doctor.stderr)

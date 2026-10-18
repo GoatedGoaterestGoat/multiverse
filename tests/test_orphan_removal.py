@@ -16,17 +16,10 @@ class OrphanRemovalTest(BaseTest):
         self.note = self.directory / 'compaction' / 'note.json'
         write(self.note, {'leftover': True})
 
-    def test_record_free_folder_is_removed_to_trash_with_contents_intact(self):
-        row = lifecycle.listing(self.root)[0]
-        self.assertEqual(row['damaged'].get('recover'), 'remove')
-        with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
-                patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
-            removed = relocate.remove_agent(self.root, self.directory.name)
-        self.assertFalse(self.directory.exists())
-        self.assertEqual(removed['id'], self.directory.name)
-        self.assertEqual(read(Path(removed['trash']) / 'compaction/note.json'), {'leftover': True})
-
-    def test_exact_tagged_terminal_or_unreadable_server_blocks_orphan_removal(self):
+    def test_an_orphan_folder_is_removed_only_with_independent_proof(self):
+        """A record-free agent folder goes to trash intact only when no exact-tagged terminal or unreadable server
+        suggests a live launch, and surviving core evidence never gets the remove hint; fragile because the folder has
+        no record to prove absence, and a wrong removal trashes a running agent (bd3d410)."""
         pane = {'pane_id': '%1', 'session_id': '$1', 'pane_pid': '123', 'pane_dead': '0',
                 '@mv2_agent_id': self.directory.name,
                 '@mv2_universe_id': read(self.root / 'universe.json')['id'], '@mv2_launch_id': uid()}
@@ -37,21 +30,9 @@ class OrphanRemovalTest(BaseTest):
                 relocate.remove_agent(self.root, self.directory.name)
             self.assertTrue(self.note.exists())
             self.assertFalse((self.root / 'trash').exists())
-
-    def test_new_core_evidence_during_discovery_is_not_moved(self):
-        def snapshot(backend):
-            write(self.directory / 'runtime.json', {'state': 'starting'})
-            return {}, None
-        with patch.object(Tmux, 'snapshot', snapshot), self.assertRaisesRegex(records.RecordError, 'changed'):
-            relocate.remove_agent(self.root, self.directory.name)
-        self.assertTrue(self.note.exists())
-        self.assertTrue((self.directory / 'runtime.json').exists())
-        self.assertFalse((self.root / 'trash').exists())
-
-    def test_surviving_core_evidence_never_gets_remove_recovery_hint(self):
         for name in ('runtime.json', 'sessions.jsonl', 'launches'):
             path = self.directory / name
-            with self.subTest(name=name):
+            with self.subTest(evidence=name):
                 path.mkdir() if name == 'launches' else path.write_text('{}\n')
                 try:
                     row = lifecycle.listing(self.root)[0]
@@ -60,3 +41,24 @@ class OrphanRemovalTest(BaseTest):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
                     path.rmdir() if name == 'launches' else path.unlink()
+        with self.subTest('no evidence'):
+            row = lifecycle.listing(self.root)[0]
+            self.assertEqual(row['damaged'].get('recover'), 'remove')
+            with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
+                    patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
+                removed = relocate.remove_agent(self.root, self.directory.name)
+            self.assertFalse(self.directory.exists())
+            self.assertEqual(removed['id'], self.directory.name)
+            self.assertEqual(read(Path(removed['trash']) / 'compaction/note.json'), {'leftover': True})
+
+    def test_new_core_evidence_during_discovery_is_not_moved(self):
+        """Core evidence that appears while orphan discovery runs stops the move; fragile because it is a race with a
+        starting launch that hand-testing never hits (bd3d410)."""
+        def snapshot(backend):
+            write(self.directory / 'runtime.json', {'state': 'starting'})
+            return {}, None
+        with patch.object(Tmux, 'snapshot', snapshot), self.assertRaisesRegex(records.RecordError, 'changed'):
+            relocate.remove_agent(self.root, self.directory.name)
+        self.assertTrue(self.note.exists())
+        self.assertTrue((self.directory / 'runtime.json').exists())
+        self.assertFalse((self.root / 'trash').exists())

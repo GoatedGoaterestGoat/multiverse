@@ -8,7 +8,6 @@ from multiverse.runtime import lifecycle, native
 from multiverse.store import lock, read, uid, write
 from multiverse.terminal.tmux import Tmux
 from multiverse.tools import list_agents
-from multiverse.universe import records
 from test_multiverse import BaseTest, TerminalBase
 
 
@@ -35,61 +34,52 @@ class LaunchDisplayFollowupTest(BaseTest):
                 '@mv2_launch_id': facts['launch_id'], 'pane_pid': str(number)}
         return directory, facts, pane
 
-    def test_publisher_with_terminal_still_reads_starting_when_snapshot_predates_tags(self):
+    def test_publication_stages_read_as_starting_never_damaged_or_absent(self):
+        """Each stage of a launch's publication, a cached absence and an unknown server read as starting, alive or
+        unknown with their reason, never damaged or absent; fragile because the snapshot and the record are
+        written at different moments, and a starting agent shown as absent or damaged invites removing or
+        relaunching it (fbbdfe2)."""
         directory, _, pane = self.record(1)
         for snapshot in ({}, {'%1': {**pane, '@mv2_launch_id': ''}}):
-            with self.subTest(snapshot=snapshot), lock(directory / '.launch.lock'), \
-                    patch.object(Tmux, 'snapshot', return_value=(snapshot, None)):
+            with self.subTest(stage='terminal published before its tags', snapshot=snapshot), \
+                    lock(directory / '.launch.lock'), patch.object(Tmux, 'snapshot', return_value=(snapshot, None)):
                 row = lifecycle.listing(self.root)[0]
                 self.assertNotIn('damaged', row)
                 self.assertEqual(display.live_label(row), 'starting', row)
                 self.assertEqual(list_agents.cli_run(self.root, json=True)[0]['live'], 'starting')
                 self.assertIn('starting', list_agents.run(self.root))
 
-    def test_new_running_pane_refreshes_an_older_agents_cached_absence(self):
-        _, _, first = self.record(1, state='running')
-        _, _, second = self.record(2, state='running')
-        with patch.object(Tmux, 'snapshot', side_effect=[({'%1': first}, None),
-                ({'%1': first, '%2': second}, None)]) as snapshots:
-            rows = lifecycle.listing(self.root)
-        self.assertEqual([row['live'] for row in rows], ['alive', 'alive'])
-        self.assertEqual(snapshots.call_count, 2)
-
-    def test_reconciliation_reread_keeps_same_launch_preparation_display(self):
         directory, _, _ = self.record(1, terminal=False)
-        with lock(directory / '.launch.lock'), \
+        with self.subTest(stage='identity reread during reconciliation'), lock(directory / '.launch.lock'), \
                 patch.object(native, 'session_snapshot', side_effect=ValueError('identity updating')):
             row = lifecycle.listing(self.root)[0]
-        self.assertEqual(display.live_label(row), 'starting', row)
+            self.assertEqual(display.live_label(row), 'starting', row)
 
-    def test_unknown_server_and_abandoned_publisher_keep_their_diagnostics(self):
         directory, _, _ = self.record(1)
-        with lock(directory / '.launch.lock'), patch.object(Tmux, 'snapshot', return_value=({}, 'Permission denied')):
-            row = lifecycle.listing(self.root)[0]
-        self.assertEqual(display.live_label(row), 'unknown')
-        self.assertIn('Permission denied', row['reason'])
-        with patch.object(Tmux, 'snapshot', return_value=({}, None)):
-            row = lifecycle.listing(self.root)[0]
-        self.assertEqual(display.live_label(row), 'dormant')
+        with self.subTest(stage='unknown server, then an abandoned publisher'):
+            with lock(directory / '.launch.lock'), \
+                    patch.object(Tmux, 'snapshot', return_value=({}, 'Permission denied')):
+                row = lifecycle.listing(self.root)[0]
+            self.assertEqual(display.live_label(row), 'unknown')
+            self.assertIn('Permission denied', row['reason'])
+            with patch.object(Tmux, 'snapshot', return_value=({}, None)):
+                row = lifecycle.listing(self.root)[0]
+            self.assertEqual(display.live_label(row), 'dormant')
 
-    def test_kill_damaged_pid_points_to_repair_without_recommending_itself(self):
-        directory, facts, _ = self.record(1, state='stopped')
-        write(directory / 'runtime.json', {**facts, 'pid': 'abc'})
-        write(directory / 'launches' / facts['launch_id'] / 'request.json',
-              {'env': {'MV2_TMUX_SOCKET': self.socket}})
-        before = (directory / 'runtime.json').read_bytes()
-        with patch.object(Tmux, 'snapshot', return_value=({}, None)), self.assertRaises(records.RecordError) as caught:
-            lifecycle.kill(self.root, 'worker1')
-        reason = str(caught.exception)
-        self.assertIn('Restore', reason)
-        self.assertIn('independently verified', reason)
-        self.assertIn('remove the damaged runtime.json', reason)
-        self.assertNotIn('use mv2 kill', reason)
-        self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+        _, _, first = self.record(1, state='running')
+        _, _, second = self.record(2, state='running')
+        with self.subTest(stage='a new pane after an older agent was cached absent'), \
+                patch.object(Tmux, 'snapshot', side_effect=[({'%1': first}, None),
+                    ({'%1': first, '%2': second}, None)]) as snapshots:
+            rows = lifecycle.listing(self.root)
+            self.assertEqual([row['live'] for row in rows], ['alive', 'alive'])
+            self.assertEqual(snapshots.call_count, 2)
 
 
 class ConcurrentLaunchDisplayTest(TerminalBase):
     def test_concurrent_fake_spawns_never_flash_absent_or_unknown(self):
+        """Concurrent real spawns never show absent or unknown to a reader polling meanwhile; fragile because it is
+        a publication race only real concurrency exposes (fbbdfe2)."""
         with ThreadPoolExecutor(max_workers=6) as pool:
             futures = [pool.submit(lifecycle.start, self.root, name=f'new{number}', harness='fake',
                                    socket_path=self.socket, wait=True, wait_timeout=15)

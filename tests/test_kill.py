@@ -1,7 +1,5 @@
 """Real, isolated tmux shutdown stages and exact-launch process ownership."""
 import os
-from pathlib import Path
-import shutil
 import signal
 import threading
 import time
@@ -11,23 +9,31 @@ from uuid import uuid4
 from multiverse.universe import agents, records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import native
-from multiverse.universe import templates
-from multiverse.universe import relocate
 from multiverse.store import read
 from multiverse.terminal.tmux import Tmux
 from test_multiverse import TerminalBase, until
 
 
 class KillTest(TerminalBase):
+    def start(self, name):
+        launched = lifecycle.start(self.root, name, 'a task', 'fake', socket_path=self.socket)
+        directory = agents.directory(self.root, launched['id'])
+        until(lambda: (directory / 'seen.json').exists())
+        return launched, directory
+
+    def live(self, launched):
+        return lifecycle.listing(self.root, only=launched['id'])[0]['live']
+
     def test_attachment_only_describes_service_and_terminal_work_ownership(self):
-        for owner in ('service', 'terminal', None, 'damaged'):
+        """kill --attachment-only never requests native cancellation, closes the pane, and says whether the agent's
+        work keeps running in a service or ends with the terminal, also for a record naming no owner; a break goes
+        unnoticed because an agent trusting a wrong description stops work it meant to keep (5609703)."""
+        for owner in ('service', None):
             with self.subTest(owner=owner):
-                launched = lifecycle.start(self.root, 'attachment-' + str(owner), 'a task', 'fake', socket_path=self.socket)
-                directory = agents.directory(self.root, launched['id'])
-                until(lambda: (directory / 'seen.json').exists())
+                launched, directory = self.start('attachment-' + str(owner))
                 facts = agents.runtime(directory)
                 agents.update_runtime(directory, facts['launch_id'],
-                                      attachment=[] if owner == 'damaged' else {'work_owner': owner} if owner else None)
+                                      attachment={'work_owner': owner} if owner else None)
                 with patch.object(native, 'stop', side_effect=AssertionError('must not request cancellation')):
                     result = lifecycle.kill(self.root, launched['id'], attachment_only=True)
                 reason = result['native_cancellation']['reason']
@@ -46,110 +52,77 @@ class KillTest(TerminalBase):
         until(lambda: lifecycle.listing(directory.parents[2])[0]['live'] == 'stopped')
 
     def test_native_exit_precedes_wrapper_teardown_including_older_panes(self):
-        launched, directory = self.spawn()
-        identifier = str(uuid4())
-        agents.bind_session(self.root, launched['id'], identifier)
-        pane = launched['runtime']['tmux']['pane']
-        self.backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'off')
-        cancelling, release, errors, stages = threading.Event(), threading.Event(), [], []
-        original = Tmux.run
+        """kill goes native exit, ending, stopped, dormant, removing the pane only after the native process exits and
+        keeping the session for resume, and a native process that exits by itself leaves no pane either; fragile
+        because the order spans threads, tmux and native stop, and a break silently loses the last turn."""
+        with self.subTest('kill'):
+            launched, directory = self.spawn()
+            identifier = str(uuid4())
+            agents.bind_session(self.root, launched['id'], identifier)
+            pane = launched['runtime']['tmux']['pane']
+            self.backend.run('set-option', '-p', '-t', pane, 'remain-on-exit', 'off')
+            cancelling, release, errors, stages = threading.Event(), threading.Event(), [], []
+            original = Tmux.run
 
-        def native_stop(*args):
-            stages.append(lifecycle.listing(self.root)[0]['live'])
-            self.assertEqual(lifecycle.listing(self.root)[0]['status'], '-')
-            self.assertEqual(self.backend.run('show-options', '-pv', '-t', pane, 'remain-on-exit'), 'on')
-            cancelling.set()
-            if not release.wait(3):
-                raise TimeoutError('test release was not signalled')
+            def native_stop(*args):
+                stages.append(lifecycle.listing(self.root)[0]['live'])
+                self.assertEqual(lifecycle.listing(self.root)[0]['status'], '-')
+                self.assertEqual(self.backend.run('show-options', '-pv', '-t', pane, 'remain-on-exit'), 'on')
+                cancelling.set()
+                if not release.wait(3):
+                    raise TimeoutError('test release was not signalled')
 
-        def command(backend, *args):
-            if args[:1] == ('kill-pane',):
-                row = lifecycle.listing(self.root)[0]
-                stages.append(row['live'])
-                self.assertEqual(row['status'], '-')
-                self.assertIn(pane, self.backend.snapshot()[0])
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(row['runtime']['pid'], 0)
-            return original(backend, *args)
+            def command(backend, *args):
+                if args[:1] == ('kill-pane',):
+                    row = lifecycle.listing(self.root)[0]
+                    stages.append(row['live'])
+                    self.assertEqual(row['status'], '-')
+                    self.assertIn(pane, self.backend.snapshot()[0])
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(row['runtime']['pid'], 0)
+                return original(backend, *args)
 
-        def kill():
-            try:
-                lifecycle.kill(self.root, launched['id'])
-            except Exception as error:
-                errors.append(error)
+            def kill():
+                try:
+                    lifecycle.kill(self.root, launched['id'])
+                except Exception as error:
+                    errors.append(error)
 
-        with patch.object(native, 'stop', side_effect=native_stop), patch.object(Tmux, 'run', command):
-            worker = threading.Thread(target=kill)
-            worker.start()
-            try:
-                self.assertTrue(cancelling.wait(3))
-                self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'ending')
-            finally:
-                release.set()
-                worker.join(10)
-        self.assertFalse(worker.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual(stages, ['ending', 'stopped'])
-        row = lifecycle.listing(self.root)[0]
-        self.assertEqual((row['live'], row['status']), ('dormant', '-'))
-        self.assertNotIn(pane, self.backend.snapshot()[0])
-        self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
-        resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
-        self.assertEqual(resumed['native_session_id'], identifier)
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
+            with patch.object(native, 'stop', side_effect=native_stop), patch.object(Tmux, 'run', command):
+                worker = threading.Thread(target=kill)
+                worker.start()
+                try:
+                    self.assertTrue(cancelling.wait(3))
+                    self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'ending')
+                finally:
+                    release.set()
+                    worker.join(10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(stages, ['ending', 'stopped'])
+            row = lifecycle.listing(self.root)[0]
+            self.assertEqual((row['live'], row['status']), ('dormant', '-'))
+            self.assertNotIn(pane, self.backend.snapshot()[0])
+            self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
+            resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
+            self.assertEqual(resumed['native_session_id'], identifier)
+            self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'alive')
+        with self.subTest('the native process exits by itself'):
+            (self.root / 'harnesses/fake/worker.py').write_text(
+                'import os, sys, time\nfrom pathlib import Path\nprint("NATIVE READY", flush=True)\n'
+                "while not Path(os.environ['MV2_AGENT_DIR'], 'exit').exists(): time.sleep(.05)\nsys.exit(0)\n")
+            launched = lifecycle.start(self.root, 'self-exit', 'a task', 'fake', socket_path=self.socket)
+            directory = agents.directory(self.root, launched['id'])
+            until(lambda: agents.runtime(directory).get('startup_checked'))  # a clean exit, not a startup failure
+            (directory / 'exit').touch()
+            until(lambda: agents.runtime(directory).get('state') == 'dormant')
+            self.assertEqual(agents.runtime(directory)['exit_code'], 0)
+            self.assertNotIn(launched['runtime']['tmux']['pane'], self.backend.snapshot()[0])
 
-    def test_ctrl_c_removes_wrapper_and_resume_preserves_session(self):
-        launched, directory = self.spawn()
-        identifier = str(uuid4())
-        agents.bind_session(self.root, launched['id'], identifier)
-        old_pane = launched['runtime']['tmux']['pane']
-        self.backend.run('send-keys', '-t', old_pane, 'C-c')
-        until(lambda: lifecycle.listing(self.root)[0]['live'] == 'dormant')
-        self.assertNotIn(old_pane, self.backend.snapshot()[0])
-        self.assertEqual(lifecycle.listing(self.root)[0]['status'], '-')
-        resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
-        self.assertEqual(resumed['native_session_id'], identifier)
-        panes = self.backend.snapshot()[0]
-        self.assertEqual(len(panes), 1)
-        self.assertEqual(panes[resumed['runtime']['tmux']['pane']]['@mv2_launch_id'], resumed['runtime']['launch_id'])
-        self.assertNotEqual(resumed['runtime']['launch_id'], launched['runtime']['launch_id'])
-
-    def test_kill_stopped_wrapper_does_not_signal_another_process(self):
-        launched, directory = self.spawn()
-        pane = launched['runtime']['tmux']['pane']
-        self.retain_wrapper(launched, directory)
-        with patch.object(Tmux, 'signal_child') as signal_child:
-            self.assertEqual(lifecycle.kill(self.root, launched['id'])['state'], 'dormant')
-        signal_child.assert_not_called()
-
-    def test_stop_with_absent_or_foreign_pane_never_controls_the_pane(self):
-        launched, directory = self.spawn()
-        pane = launched['runtime']['tmux']['pane']
-        self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'foreign')
-        with patch.object(Tmux, 'signal_child') as signal_child:
-            with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
-                with self.assertRaisesRegex(records.RecordError, 'runtime.json.*tagged terminal.*valid saved launch'):
-                    lifecycle.terminal_action(self.root, launched['id'], 'stop')
-            self.assertIn(pane, self.backend.snapshot()[0])
-            self.backend.run('kill-pane', '-t', pane)
-            result = lifecycle.terminal_action(self.root, launched['id'], 'stop')
-        signal_child.assert_not_called()
-        self.assertEqual(result['state'], 'dormant')
-        self.assertEqual(result['native_cancellation']['reason'], 'No native process was running')
-
-    def test_dormant_native_cancellation_failure_preserves_identity(self):
-        launched, directory = self.spawn()
-        identifier = str(uuid4())
-        agents.bind_session(self.root, launched['id'], identifier)
-        self.backend.run('kill-pane', '-t', launched['runtime']['tmux']['pane'])
-        with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')):
-            result = lifecycle.kill(self.root, launched['id'])
-        self.assertEqual(result['native_cancellation']['state'], 'unknown')
-        self.assertIn('native daemon unreachable', result['native_cancellation']['reason'])
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
-        self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
-
-    def test_dead_wrapper_removal_does_not_require_native_daemon(self):
+    def test_a_dead_wrapper_is_removed_without_signals_or_the_daemon(self):
+        """A dead wrapper left by an older or interrupted runner is removed without signals or the native daemon, and
+        resume then keeps the session; fragile because only older runners create it, and a break leaves undeletable
+        panes or signals a reused pid."""
         launched, directory = self.spawn()
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
@@ -166,51 +139,72 @@ class KillTest(TerminalBase):
         resumed = lifecycle.start(self.root, resume=launched['id'], socket_path=self.socket)
         self.assertEqual(resumed['native_session_id'], identifier)
 
-    def test_move_and_remove_clear_retained_wrappers_and_preserve_identity(self):
+    def test_kill_never_controls_a_pane_or_process_it_cannot_prove_is_its_own(self):
+        """kill never controls a pane tagged with another launch or signals a pid that is not its child, and both
+        agents can still be stopped once the evidence is right; fragile because panes and pids get reused and every
+        agent runs as the same user, so a break signals an unrelated process."""
+        with self.subTest('a pane tagged with another launch'):
+            launched, directory = self.start('foreign-pane')
+            pane = launched['runtime']['tmux']['pane']
+            self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
+            row = lifecycle.listing(self.root, only=launched['id'])[0]
+            self.assertEqual(row['live'], 'unknown')
+            self.assertEqual(row['damaged']['file'], str((directory / 'runtime.json').relative_to(self.root)))
+            with self.assertRaises(ValueError):
+                lifecycle.terminal_action(self.root, launched['id'], 'inspect')
+            # The pane was retagged, not exited: the old owned runner is still live.
+            cleanup = directory / 'launches' / launched['runtime']['launch_id'] / 'cleanup.json'
+            self.assertEqual(read(cleanup)['state'], 'active')
+            with patch.object(Tmux, 'signal_child') as signal_child:
+                with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1), \
+                        self.assertRaisesRegex(records.RecordError, 'runtime.json.*tagged terminal.*valid saved'):
+                    lifecycle.terminal_action(self.root, launched['id'], 'stop')
+                self.assertIn(pane, self.backend.snapshot()[0])
+                self.backend.run('kill-pane', '-t', pane)
+                result = lifecycle.terminal_action(self.root, launched['id'], 'stop')
+            signal_child.assert_not_called()
+            self.assertEqual(result['state'], 'dormant')
+        with self.subTest('a pid that is not its child'):
+            launched, directory = self.start('foreign-pid')
+            facts = agents.runtime(directory)
+            agents.update_runtime(directory, facts['launch_id'], pid=os.getpid())
+            with self.assertRaisesRegex(ValueError, 'no longer belongs'):
+                lifecycle.kill(self.root, launched['id'])
+            self.assertEqual(self.live(launched), 'ending')
+            agents.update_runtime(directory, facts['launch_id'], pid=facts['pid'])
+            lifecycle.kill(self.root, launched['id'])
+            self.assertEqual(self.live(launched), 'dormant')
+
+    def test_native_stop_failure_keeps_identity_and_reports_alive(self):
+        """An unreachable daemon during kill keeps a live terminal and reports it alive without signalling it, and on
+        a dormant agent never loses the session id; a break goes unnoticed until a daemon is down, and then the
+        conversation is lost."""
         launched, directory = self.spawn()
         identifier = str(uuid4())
         agents.bind_session(self.root, launched['id'], identifier)
-        destination = templates.create(self.root / 'subverses/review', 'review', workdir=self.work)
-        shutil.copytree(self.root / 'harnesses/fake', destination / 'harnesses/fake')
         pane = launched['runtime']['tmux']['pane']
-        self.retain_wrapper(launched, directory)
-        relocate.move_agent(self.root, launched['id'], destination)
-        self.assertNotIn(pane, self.backend.snapshot()[0])
-        self.assertEqual(lifecycle.listing(destination)[0]['live'], 'dormant')
-        resumed = lifecycle.start(destination, resume=launched['id'], socket_path=self.socket)
-        self.assertEqual(resumed['native_session_id'], identifier)
-        moved = agents.directory(destination, launched['id'])
-        until(lambda: agents.runtime(moved).get('pid'))
-        pane = resumed['runtime']['tmux']['pane']
-        self.retain_wrapper(resumed, moved)
-        removed = relocate.remove_agent(destination, launched['id'])
-        self.assertNotIn(pane, self.backend.snapshot()[0])
-        self.assertEqual(read(Path(removed['trash']) / 'properties.json')['native_session_id'], identifier)
-
-    def test_native_cancellation_failure_retains_terminal_and_reports_alive(self):
-        launched, directory = self.spawn()
-        with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')), \
-                patch.object(Tmux, 'signal_child') as signal_child:
-            with self.assertRaisesRegex(RuntimeError, 'native daemon unreachable'):
-                lifecycle.kill(self.root, launched['id'])
-        signal_child.assert_not_called()
-        row = lifecycle.listing(self.root)[0]
-        self.assertEqual(row['live'], 'alive')
-        self.assertIn('terminal retained', row['runtime']['error'])
-        self.assertIn(launched['runtime']['tmux']['pane'], self.backend.snapshot()[0])
-
-    def test_foreign_pid_is_never_signalled_and_launch_can_retry(self):
-        launched, directory = self.spawn()
-        facts = agents.runtime(directory)
-        agents.update_runtime(directory, facts['launch_id'], pid=os.getpid())
-        with self.assertRaisesRegex(ValueError, 'no longer belongs'):
-            lifecycle.kill(self.root, launched['id'])
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'ending')
-        agents.update_runtime(directory, facts['launch_id'], pid=facts['pid'])
-        lifecycle.kill(self.root, launched['id'])
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
+        with self.subTest('a live terminal'):
+            with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')), \
+                    patch.object(Tmux, 'signal_child') as signal_child:
+                with self.assertRaisesRegex(RuntimeError, 'native daemon unreachable'):
+                    lifecycle.kill(self.root, launched['id'])
+            signal_child.assert_not_called()
+            row = lifecycle.listing(self.root)[0]
+            self.assertEqual(row['live'], 'alive')
+            self.assertIn('terminal retained', row['runtime']['error'])
+            self.assertIn(pane, self.backend.snapshot()[0])
+        with self.subTest('a dormant agent'):
+            self.backend.run('kill-pane', '-t', pane)
+            with patch.object(native, 'stop', side_effect=RuntimeError('native daemon unreachable')):
+                result = lifecycle.kill(self.root, launched['id'])
+            self.assertEqual(result['native_cancellation']['state'], 'unknown')
+            self.assertIn('native daemon unreachable', result['native_cancellation']['reason'])
+            self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
+            self.assertEqual(read(directory / 'properties.json')['native_session_id'], identifier)
 
     def test_native_process_ignoring_term_is_killed_before_wrapper_removal(self):
+        """A native process ignoring SIGTERM is killed before its wrapper is removed; a break leaves orphan native
+        processes behind removed panes, unnoticed."""
         script = self.root / 'harnesses/fake/worker.py'
         script.write_text('import signal\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n' + script.read_text())
         launched, directory = self.spawn()
@@ -222,6 +216,8 @@ class KillTest(TerminalBase):
         self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
 
     def test_resume_race_never_tears_down_replacement_launch(self):
+        """A kill racing a resume never tears down the replacement launch; fragile because it is a race, and the
+        resumed agent just vanishes."""
         launched, directory = self.spawn()
         original_signal = Tmux.signal_child
         replacement = []

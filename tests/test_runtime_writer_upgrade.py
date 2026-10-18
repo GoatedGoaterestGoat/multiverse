@@ -1,5 +1,6 @@
 """Actual old/current core writers remain valid across authority validation."""
 from contextlib import ExitStack
+from functools import cache
 import gzip
 import json
 import os
@@ -26,6 +27,8 @@ GENERATOR_ENDING = os.environ.get('MV2_RUNTIME_MATRIX_ENDING') == '1'
 @unittest.skipUnless(GENERATOR_SOURCE and GENERATOR_OUTPUT, 'manual historical fixture capture')
 class GenerateRuntimeMatrix(BaseTest):
     def test_generate(self):
+        """Regenerates the real-writer fixtures from a given mv2 checkout when asked (skipped otherwise); kept with the
+        records it produces so the matrix can be rebuilt for a new writer."""
         generator = 'generate-ending.py' if GENERATOR_ENDING else 'generate.py'
         result = subprocess.run([sys.executable, str(FIXTURES / generator),
                                  GENERATOR_SOURCE, GENERATOR_OUTPUT], text=True,
@@ -38,10 +41,16 @@ class ReachedTerminal(RuntimeError):
     pass
 
 
+@cache
+def fixture_text(filename):
+    """One decompressed fixture, read once for every test that uses it."""
+    return gzip.decompress((FIXTURES / filename).read_bytes()).decode()
+
+
 class RuntimeWriterUpgradeTest(BaseTest):
     def fixtures(self, filenames=('main52.json.gz', 'current483.json.gz')):
         for filename in filenames:
-            data = json.loads(gzip.decompress((FIXTURES / filename).read_bytes()))
+            data = json.loads(fixture_text(filename))
             # Only relocate private paths; identity, authority and sidecar bytes
             # otherwise retain the actual writer's data and absence of fields.
             work = data['provenance']['work']
@@ -66,6 +75,9 @@ class RuntimeWriterUpgradeTest(BaseTest):
         return directory
 
     def test_every_actual_writer_snapshot_retains_valid_authority(self):
+        """Every runtime record real older (main52) and current mv2 wrote, at each lifecycle stage and for each harness
+        profile, keeps valid authority; fragile because any tightening of damage() silently flags every agent started by
+        an older mv2 as damaged after an upgrade."""
         profiles = set()
         for filename, data in self.fixtures():
             self.assertEqual(len(data['records']), 181)
@@ -80,6 +92,9 @@ class RuntimeWriterUpgradeTest(BaseTest):
         self.assertEqual(len(profiles), 9)
 
     def test_live_records_refuse_duplicates_and_ended_records_reach_resume_preparation(self):
+        """On real writer records, resume refuses live ones as duplicates and takes ended ones to terminal creation for
+        each real adapter; fragile because resume reads adapter fields older writers lack, exercised only after an
+        upgrade."""
         # Process/IPC observations describe the recorded stage. This exercises
         # the real resume entry point and each real adapter, up to (but never
         # through) creating a new terminal. The capture generator separately
@@ -131,6 +146,8 @@ class RuntimeWriterUpgradeTest(BaseTest):
                             backend.create.assert_called_once()
 
     def test_actual_kill_writer_ending_records_stay_valid_and_refuse_duplicates(self):
+        """The 18 ending records a real kill wrote stay valid and refuse a duplicate launch; fragile because ending is a
+        short window that only real kill timing produces."""
         for filename, data in self.fixtures(('ending-main52.json.gz', 'ending-current483.json.gz')):
             rows = [row for row in data['records'] if row['label'] == 'ending']
             self.assertEqual(len(rows), 9)
@@ -154,6 +171,8 @@ class RuntimeWriterUpgradeTest(BaseTest):
                     self.assertEqual((directory / 'runtime.json').read_bytes(), before)
 
     def test_real_writer_records_keep_their_relocation_boundary(self):
+        """On real writer records, ended agents may be moved or removed and live ones may not; a break either strands
+        old agents or trashes a running one, and only real writer bytes show it (1eb2abc)."""
         checked = 0
         filenames = ('main52.json.gz', 'current483.json.gz',
                      'ending-main52.json.gz', 'ending-current483.json.gz')
