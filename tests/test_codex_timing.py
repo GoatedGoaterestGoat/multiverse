@@ -18,6 +18,7 @@ from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.universe.mailbox import inbox, append_message
 from multiverse.store import read, write
 from native_safety import isolated_home
+from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
@@ -25,6 +26,7 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexTimingTest(TerminalBase):
     def test_native_tui_steering_and_after_turn_queue(self):
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         records = []
         work = self.work
 

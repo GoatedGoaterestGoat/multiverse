@@ -27,6 +27,7 @@ from multiverse.universe.mailbox import inbox
 from multiverse.store import read, write
 from multiverse.tools import send
 from native_safety import check_spawn, isolated_home
+from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
@@ -34,6 +35,7 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class CodexDaemonTest(TerminalBase):
     def test_concurrent_universes_share_daemon_and_keep_native_identity(self):
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         seen_requests = []
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):

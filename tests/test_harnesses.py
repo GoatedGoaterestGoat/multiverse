@@ -15,6 +15,7 @@ from multiverse import harnesses as adapters
 from multiverse.cli import parser
 from multiverse.ui.backend import harnesses
 from multiverse.store import read, write
+from native_cli import forbidden_python, mv2_launcher
 from test_multiverse import BaseTest, TerminalBase, until
 
 
@@ -49,6 +50,10 @@ class HarnessFilesTest(BaseTest):
 class HarnessLaunchTest(TerminalBase):
     def setUp(self):
         super().setUp()
+        # A stand-in callback must not rediscover Python from PATH or bin/mv2.
+        bad_python = forbidden_python(self.work)
+        self.enterContext(patch.dict(os.environ, {'PATH': str(bad_python) + os.pathsep + os.environ['PATH']}))
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         self.enterContext(patch('multiverse.runtime.native.start_shared_service',
             side_effect=AssertionError('Fake CLI contracts must never prepare a native daemon')))
 
