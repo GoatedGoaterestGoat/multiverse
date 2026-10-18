@@ -11,8 +11,8 @@ from multiverse import cli
 
 ROOT = Path(__file__).resolve().parents[1]
 REFERENCE = ROOT / "docs" / "cli" / "reference.md"
-# Rationale and lab records may cite files that have since moved; they are not checked.
-SKIPPED = (ROOT / "docs" / "design", ROOT / "docs" / "lab-notes", ROOT / "lab-notes")
+# Design records may cite files that have since moved; they are not checked.
+SKIPPED = (ROOT / "docs" / "design",)
 
 FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,}).*?^ {0,3}\1[`~]*[ \t]*$", re.MULTILINE | re.DOTALL)
 CODE_SPAN = re.compile(r"(`+)(?!`).*?(?<!`)\1(?!`)")
@@ -122,6 +122,17 @@ class CliReferenceTest(unittest.TestCase):
         result = subprocess.run([sys.executable, str(ROOT / "scripts" / "gen_cli_docs.py"), "--check"],
                                 capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class VersionBadgeTest(unittest.TestCase):
+    def test_readme_badges_show_the_checked_versions(self):
+        table = (ROOT / "docs" / "reference" / "compatibility.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for harness, label in (("Claude Code", "Claude%20Code"), ("Codex CLI", "Codex")):
+            with self.subTest(harness=harness):
+                checked = re.search(rf"^\| {harness} \| ([^ |]+) \|", table, re.MULTILINE).group(1)
+                badge = re.search(rf"img\.shields\.io/badge/{label}-([^-]+)-", readme).group(1)
+                self.assertEqual(badge, checked, f"Set the README's {harness} badge to {checked}, as docs/reference/compatibility.md says")
 
 
 if __name__ == "__main__":

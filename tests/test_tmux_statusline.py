@@ -47,10 +47,9 @@ class StatusRendererTest(BaseTest):
         write(self.root / 'statusline.json', {'schema': 1, 'tmux': tmux})
 
     def test_template_and_code_defaults_match_including_key_order(self):
-        for name in ('base', 'development', 'testing'):
-            data = read(templates.TEMPLATES / name / 'statusline.json')['tmux']
-            self.assertEqual(data, statusline.DEFAULTS)
-            self.assertEqual(list(data['items']), list(statusline.DEFAULTS['items']))
+        data = read(templates.TEMPLATES / 'base' / 'statusline.json')['tmux']
+        self.assertEqual(data, statusline.DEFAULTS)
+        self.assertEqual(list(data['items']), list(statusline.DEFAULTS['items']))
         self.assertNotIn('ctx', self.render())
         self.assertEqual(self.render(), 'worker · codex · status waiting · phase working')
         self.properties['harness'] = 'claude'

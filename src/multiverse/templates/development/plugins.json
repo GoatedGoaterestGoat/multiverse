@@ -1,6 +1,0 @@
-{
-  "schema": 1,
-  "enabled": {
-    "compaction": true
-  }
-}

@@ -1,3 +1,0 @@
-include bin/mv2
-include tests/mock-provider.ts
-include scripts/render_tui.py

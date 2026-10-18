@@ -1,6 +1,6 @@
 # Codex
 
-`settings.inbox_bridge` defaults to auto when absent: each spawn/resume tries the bridge, then launches plain with a recorded reason if preparation is unavailable. Set `true` to require the bridge and fail on errors, or `false` to always launch plain. Base, development and testing templates all use auto. Claude and Pi retain their opt-in behavior. Existing explicit settings are preserved.
+`settings.inbox_bridge` defaults to auto when absent: each spawn/resume tries the bridge, then launches plain with a recorded reason if preparation is unavailable. Set `true` to require the bridge and fail on errors, or `false` to always launch plain. The base template uses auto. Claude and Pi retain their opt-in behavior. Existing explicit settings are preserved.
 
 Auto reuses daemon startup/socket checks and checks CLI `--help` for `--remote`; it does not start another service or speculative conversation. Missing daemon support, startup/config RPC failure or unavailable local relay preparation can select plain before the child starts. Bridge-incompatible launch preferences also produce a recorded plain fallback; invalid settings remain errors. After a native child starts, identity or permission failures never trigger a plain restart. Inspect `runtime.json.native_mode` for `policy`, `mode` and `fallback_reason`; `mv2 capabilities --agent AGENT` reports that selection in its spawn/resume reasons, and the dashboard inspector displays it. Resume reevaluates availability and keeps the saved UUID, workspace and native storage.
 

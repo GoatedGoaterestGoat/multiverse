@@ -1,4 +1,4 @@
-"""Independent LAB-SESSION-004 regression using real runner subprocesses."""
+"""Every shipped harness clears the parent agent's identity, checked through the real runner."""
 import json
 import os
 from pathlib import Path
@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from uuid import uuid4
 
-SOURCE = Path(os.environ.get('MV2_SESSION_TEST_SOURCE', Path(__file__).resolve().parents[1] / 'src'))
+SOURCE = Path(__file__).resolve().parents[1] / 'src'
 sys.path.insert(0, str(SOURCE))
 from multiverse.store import read, write
 from multiverse.harnesses import load
@@ -17,7 +17,7 @@ from multiverse.harnesses import load
 class CrossHarnessParentIdentity(unittest.TestCase):
     def test_every_shipped_manifest_clears_both_parent_markers(self):
         manifests = sorted((SOURCE / 'multiverse/templates').glob('*/harnesses/*/harness.json'))
-        self.assertGreaterEqual(len(manifests), 5, 'Include base and both reusable role templates')
+        self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi'})
         for manifest in manifests:
             with self.subTest(manifest=str(manifest.relative_to(SOURCE))):
                 spec = load(manifest.parents[2], manifest.parent.name).spec
@@ -43,7 +43,6 @@ class CrossHarnessParentIdentity(unittest.TestCase):
                     self.assertEqual(result.returncode, 0, result.stderr)
                     seen = read(output)
                     inherited = sorted(set(seen) & {'CODEX_THREAD_ID', 'CLAUDECODE'})
-                    print(str(manifest.relative_to(SOURCE)), 'inherited_native_markers=', inherited)
                     self.assertEqual(seen.get('MV2_AGENT_ID'), 'child-agent')
                     self.assertEqual(inherited, [])
 

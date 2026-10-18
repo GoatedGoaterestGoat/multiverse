@@ -809,7 +809,7 @@ reaches mv2 through the CLI and the helper.
 ### Codex
 
 Written by `plugins-codex`. Its evidence and the full inventory of config keys
-are in [lab-notes/plugins-codex.md](../lab-notes/plugins-codex.md).
+are in [codex-plugins.md](codex-plugins.md).
 
 Codex has native plugins, skills, MCP servers and lifecycle hooks. The checked
 CLI has no Pi-style extension and no Claude-style `--plugin-dir`. mv2's first
