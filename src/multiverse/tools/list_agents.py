@@ -1,6 +1,6 @@
 """Read properties and observe matching tmux panes."""
 from pathlib import Path
-from ..display import error_text, shorten, state
+from ..display import error_text, shorten, state, live_label
 from ..runtime import lifecycle
 from .. import universe
 
@@ -49,6 +49,16 @@ def run(root=None, *, recursive=False, json=False, wide=False):
         if row.get('recovery_note'):
             lines.append('  Note: Reconnected automatically.')
     return "\n".join(lines)
+
+
+def cli_run(root=None, *, recursive=False, json=False, wide=False):
+    result = run(root, recursive=recursive, json=json, wide=wide)
+    if not json:
+        return result
+    # The dashboard uses run(json=True) and retains the core observation enum.
+    return [{**row, 'live': live_label(row),
+             **({'reason': 'Launch is being prepared'} if live_label(row) == 'starting' else {})}
+            for row in result]
 
 
 if __name__ == "__main__":

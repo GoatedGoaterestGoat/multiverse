@@ -230,6 +230,27 @@ def recorded_process_problem(directory, facts):
     return None
 
 
+def attested_running(facts):
+    """Positive runner/child identity only; never turn an unknown PID into proof.
+
+    The runner can briefly outlive an exited child while cleaning up. That
+    overlap is not evidence that a missing terminal record is inconsistent.
+    """
+    observations = {}
+    if 'pid' in facts and _gone(facts['pid'], facts.get('pid_started'), observations=observations):
+        return None
+    for key, start, label in (('pid', 'pid_started', 'child'),
+                              ('runner_pid', 'runner_started', 'runner')):
+        pid, token = facts.get(key), facts.get(start)
+        if type(pid) is not int or pid <= 0 or _start_time(token) is None:
+            continue
+        absent, snapshot = _observation(pid, observations)
+        if (not absent and snapshot and snapshot[0] == token
+                and snapshot[1] and snapshot[1][0] not in ('Z', 'X')):
+            return f'recorded {label} PID {pid} is still alive with its matching process start time'
+    return None
+
+
 def problem(directory, facts):
     launch_id = facts.get('launch_id')
     if not launch_id:

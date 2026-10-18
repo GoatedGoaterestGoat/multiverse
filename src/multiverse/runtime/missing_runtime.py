@@ -12,7 +12,7 @@ import re
 from .. import harnesses
 from ..harnesses.types import NativeResult
 from ..store import lock, now, read, write
-from ..terminal.tmux import Tmux, matches
+from ..terminal.tmux import Tmux, matches, observe
 from ..universe import agents, mailbox, records
 from . import attachments
 from .native import NativeExecutor
@@ -34,7 +34,9 @@ def _uuid(value):
 
 def _problem(directory, reason):
     return records.RecordError(directory / 'runtime.json', reason +
-        '. Restore the runtime record from a verified backup, or use mv2 kill to close the verified terminal before retrying')
+        '. Restore the runtime record from a verified backup, or use mv2 kill to close the verified terminal before retrying. '
+        'If independently verified that this agent\'s terminal, runner and child are all gone, remove the damaged '
+        'runtime.json and retry')
 
 
 def damage(directory, facts):
@@ -93,6 +95,24 @@ def damage(directory, facts):
     error = _problem(directory, reason + '; terminal ownership must be checked before another launch')
     error.recover = 'kill'
     return error
+
+
+def mismatch(directory, facts, observation):
+    """An absent owned pane contradicts a positively attested active process.
+
+    Reuse the caller's terminal observation. Healthy panes, unknown servers and
+    normal teardown never add process queries to listing or launch checks.
+    """
+    if (observation['live'] != 'dormant' or not facts.get('tmux')
+            or facts.get('state') not in ('starting', 'running')
+            or 'exit_code' in facts or facts.get('ending_at') or facts.get('stopped_at')):
+        return None
+    if reason := attachments.attested_running(facts):
+        error = _problem(directory, 'recorded terminal has no owned pane, but the ' + reason +
+                         '; terminal identity is inconsistent')
+        error.recover = 'kill'
+        return error
+    return None
 
 
 def discover(directory, properties, socket_path=None, *, facts=None):
@@ -198,12 +218,16 @@ def kill(root, directory, *, attachment_only=False):
     """Close one verified pane; unavailable native cancellation is reported honestly."""
     with lock(directory / '.launch.lock', create_parent=False):
         previous = records.runtime(directory / 'runtime.json')
-        if (directory / 'runtime.json').exists() and damage(directory, previous) is None:
+        properties = records.properties(directory / 'properties.json')
+        if ((directory / 'runtime.json').exists() and damage(directory, previous) is None
+                and mismatch(directory, previous, observe(properties, previous)) is None):
             return None  # Caller retries its normal path; never replace fresh facts.
         condition = ('was missing' if not (directory / 'runtime.json').exists()
                      else 'had damaged launch authority')
-        properties = records.properties(directory / 'properties.json')
         found = discover(directory, properties, facts=previous)
+        saved_launch = previous.get('launch_id')
+        if _uuid(saved_launch) and any(row[2] != saved_launch for row in found):
+            raise _problem(directory, 'tagged terminal belongs to a different saved launch; refusing to adopt it')
         if len(found) > 1:
             raise _problem(directory, 'multiple tagged terminals remain; refusing to choose a launch')
         if not found:

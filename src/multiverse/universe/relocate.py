@@ -37,6 +37,8 @@ def _stopped(agent_dir):
     if not facts.get("launch_id"):
         return  # A genuinely never-launched record has nothing to stop.
     state = observe(properties, facts)
+    if error := missing_runtime.mismatch(agent_dir, facts, state):
+        raise error
     if state["live"] not in ('stopped', 'dormant'):
         raise ValueError(f'Agent {properties["name"]} is {state["live"]}; stop it first'
                          + (f' ({state["reason"]})' if state["reason"] else ""))

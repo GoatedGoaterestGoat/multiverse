@@ -5,8 +5,8 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 from multiverse import harnesses
-from multiverse.harnesses.types import SessionHandle, NativeResult, CommandSpec
-from multiverse.runtime import lifecycle, native
+from multiverse.harnesses.types import SessionHandle, NativeResult, CommandSpec, ObservedBinding
+from multiverse.runtime import attachments, lifecycle, native
 from multiverse.store import read, write, lock
 from multiverse.universe import agents
 from multiverse.tools import send
@@ -186,3 +186,73 @@ class SessionObservationTest(BaseTest):
             [row] = lifecycle.listing(self.root)
         self.assertEqual(row['usage']['state'], 'error')
         adapter.get_usage.assert_not_called()
+
+    def test_public_send_cannot_reconcile_a_mismatched_terminal(self):
+        token = 'Sat Oct 17 12:00:00 2026'
+        self.facts.update(pid_started=token)
+        write(self.directory / 'runtime.json', self.facts)
+        target = str(uuid4())
+        observed = []
+        def observer(session):
+            observed.append(session.native_id)
+            return ObservedBinding(native_id=target, home=str(self.work), evidence='fixture-process-file')
+        adapter = SimpleNamespace(observed_binding=observer)
+        with patch.object(harnesses, 'load', return_value=adapter), \
+             patch.object(native, 'observe', return_value={'live': 'dormant', 'reason': 'Recorded pane is absent'}), \
+             patch.object(attachments, '_observation', return_value=(False, (token, 'S'))):
+            result = send.run(self.root, agent=self.identity, text='must remain queued on the primary', sender={'name':'user'})
+        print('SEND', {'ok': result.get('ok'), 'observer_calls': len(observed),
+                       'original_id': self.old, 'saved_id': read(self.directory / 'properties.json')['native_session_id']}, flush=True)
+        self.assertEqual(observed, [], 'public send must detect runtime mismatch before native identity reconciliation')
+        self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.old)
+        self.assertFalse((self.directory / 'sessions.jsonl').exists())
+
+    def test_listing_refreshes_observation_for_new_reconciled_exit_facts(self):
+        target = str(uuid4())
+        exited = {**self.facts, 'state': 'stopped', 'exit_code': 0}
+        changed = False
+        def observer(session):
+            nonlocal changed
+            if not changed:
+                changed = True
+                # The runner's exit writer needs no launch lock and may run
+                # while a provider identity observation is in progress.
+                write(self.directory / 'runtime.json', exited)
+            return ObservedBinding(native_id=target, home=str(self.work), evidence='fixture-process-file')
+        adapter = SimpleNamespace(observed_binding=observer,
+            get_usage=lambda session: NativeResult('ok', value={'native_id':session.native_id}))
+        def terminal(properties, facts, snapshots=None):
+            return {'live':'stopped' if 'exit_code' in facts else 'alive', 'reason':''}
+        with patch.object(harnesses, 'load', return_value=adapter), \
+             patch.object(lifecycle, 'observe', side_effect=terminal):
+            row, = lifecycle.listing(self.root)
+        print('LIST', {'live': row.get('live'), 'runtime_state':row.get('runtime',{}).get('state'),
+                       'exit_code':row.get('runtime',{}).get('exit_code')}, flush=True)
+        self.assertEqual(row['runtime']['exit_code'], 0, 'actual reconciliation returned newer exit facts')
+        self.assertEqual(row['live'], 'stopped', 'terminal observation must describe returned runtime facts')
+
+    def test_bad_properties_during_early_observation_do_not_abort_listing(self):
+        properties = {k: v for k, v in self.properties.items() if k != 'universe_id'}
+        write(self.directory / 'properties.json', properties)
+        pane = {'pane_id': '%1', 'session_id': '$1', 'pane_pid': '123', 'pane_dead': '0',
+                '@mv2_agent_id': self.identity,
+                '@mv2_universe_id': 'private-universe', '@mv2_launch_id': self.launch}
+        from multiverse.terminal.tmux import Tmux
+        with patch.object(Tmux, 'snapshot', return_value=({'%1': pane}, None)), \
+             patch.object(harnesses, 'load', return_value=SimpleNamespace()):
+            rows = lifecycle.listing(self.root)
+        self.assertEqual(len(rows), 1)
+        self.assertIn('damaged', rows[0], 'malformed records must remain isolated to their own row')
+
+    def test_healed_terminal_recovery_drops_stale_dormant_observation(self):
+        token = 'Sat Oct 17 12:00:00 2026'
+        self.facts.update(pid_started=token)
+        write(self.directory / 'runtime.json', self.facts)
+        from multiverse.runtime import missing_runtime
+        with patch.object(attachments, '_observation', return_value=(False, (token, 'S'))), \
+             patch.object(lifecycle, 'observe', side_effect=[{'live': 'dormant'}, {'live': 'alive'}]), \
+             patch.object(missing_runtime, 'observe', return_value={'live': 'alive'}), \
+             patch.object(lifecycle, 'owned', side_effect=RuntimeError('normal owned terminal reached')) as owned:
+            with self.assertRaisesRegex(RuntimeError, 'normal owned terminal reached'):
+                lifecycle.kill(self.root, self.identity, attachment_only=True)
+        owned.assert_called_once()

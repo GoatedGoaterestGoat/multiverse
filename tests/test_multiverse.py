@@ -19,7 +19,7 @@ from isolation import isolate, track
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-from multiverse.universe import agents
+from multiverse.universe import agents, records
 from multiverse.runtime import lifecycle
 from multiverse import universe
 from multiverse.universe import catalog
@@ -233,13 +233,16 @@ class TerminalTest(TerminalBase):
         result, directory = self.spawn()
         pane = result["runtime"]["tmux"]["pane"]
         self.backend.run("set-option", "-p", "-t", pane, "@mv2_launch_id", "someone-else")
-        self.assertEqual(lifecycle.listing(self.root)[0]["live"], "dormant")
+        row = lifecycle.listing(self.root)[0]
+        self.assertEqual(row['live'], 'unknown')
+        self.assertEqual(row['damaged']['file'], str((directory / 'runtime.json').relative_to(self.root)))
+        self.assertIn('terminal identity is inconsistent', row['damaged']['reason'])
         with self.assertRaises(ValueError):
             lifecycle.terminal_action(self.root, result["id"], "inspect")
         # The pane was retagged, not exited: the old owned runner is still live.
         self.assertEqual(read(directory / 'launches' / result['runtime']['launch_id'] / 'cleanup.json')['state'], 'active')
         with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
-            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+            with self.assertRaisesRegex(records.RecordError, 'runtime.json.*tagged terminal.*valid saved launch'):
                 lifecycle.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
 
@@ -252,12 +255,15 @@ class TerminalTest(TerminalBase):
             lifecycle.start(self.root, resume=result['id'], socket_path=self.socket)
         pane = result['runtime']['tmux']['pane']
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'someone-else')
-        self.assertEqual(lifecycle.listing(self.root)[0]['live'], 'dormant')
+        row = lifecycle.listing(self.root)[0]
+        self.assertEqual(row['live'], 'unknown')
+        self.assertEqual(row['damaged']['file'], str((agent_dir / 'runtime.json').relative_to(self.root)))
+        self.assertIn('terminal identity is inconsistent', row['damaged']['reason'])
         with self.assertRaises(ValueError):
             lifecycle.terminal_action(self.root, result['id'], 'inspect')
         self.assertEqual(read(agent_dir / 'launches' / result['runtime']['launch_id'] / 'cleanup.json')['state'], 'active')
         with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
-            with self.assertRaisesRegex(RuntimeError, 'still closing'):
+            with self.assertRaisesRegex(records.RecordError, 'runtime.json.*tagged terminal.*valid saved launch'):
                 lifecycle.terminal_action(self.root, result['id'], 'stop')
         self.assertIn(pane, self.backend.snapshot()[0])
 

@@ -20,7 +20,7 @@ from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message
                                BridgeUnavailable, NativeServiceHandle, ServiceIdentity, AttachmentSpec)
 from ..harnesses.types import ObservedBinding, normalize_session_id
 from ..store import lock, now, read
-from ..terminal.tmux import owned, observe
+from ..terminal.tmux import owned, observe, observation_key
 from ..universe import agents, records
 from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
 
@@ -725,11 +725,17 @@ def send_or_wake(root, reference, message_id, retry=False):
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
         facts = agents.runtime(directory)
-        if damage := missing_runtime.damage(directory, facts):
+        properties = records.properties(directory / 'properties.json')
+        observation = None
+        damage = missing_runtime.damage(directory, facts)
+        if damage is None:
+            observation = observe(properties, facts)
+            if damage := missing_runtime.mismatch(directory, facts, observation):
+                return _wake_failure(directory, message_id, damage)
+        if damage:
             if (tracking.get('submission_state', 'pending') not in ('pending', 'failed')
                     or tracking.get('submission_state') == 'failed' and not retry):
                 return _wake_failure(directory, message_id, damage)
-            properties = records.properties(directory / 'properties.json')
             try:
                 missing_runtime.require_stopped(directory, properties, facts=facts)
             except (OSError, ValueError, RuntimeError) as error:
@@ -739,8 +745,15 @@ def send_or_wake(root, reference, message_id, retry=False):
             executor = None
             live = 'dormant'  # Independent discovery, never the damaged record, proved this.
         else:
+            observed_key = observation_key(properties, facts)
             _, adapter, session, executor = context(root, reference, reconcile=True)
-            live = observe(executor.properties, executor.facts)['live']
+            if damage := missing_runtime.damage(directory, executor.facts):
+                return _wake_failure(directory, message_id, damage)
+            if observation_key(executor.properties, executor.facts) != observed_key:
+                observation = observe(executor.properties, executor.facts)
+            if damage := missing_runtime.mismatch(directory, executor.facts, observation):
+                return _wake_failure(directory, message_id, damage)
+            live = (observation or observe(executor.properties, executor.facts))['live']
         state = tracking.get('submission_state', 'pending')
         eligible = state == 'pending' or (retry and state == 'failed')
         wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')

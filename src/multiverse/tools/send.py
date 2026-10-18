@@ -102,7 +102,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                     facts = agents.runtime(directory)
                     # Preserve the saved target while send_or_wake independently
                     # discovers terminal ownership; damaged facts cannot reconcile.
-                    if missing_runtime.damage(directory, facts) is None:
+                    if (missing_runtime.damage(directory, facts) is None
+                            and missing_runtime.mismatch(directory, facts, native.observe(properties, facts)) is None):
                         properties, _ = native.session_snapshot(root, directory, properties, facts,
                                                                 launch_locked=True)
                 except Exception as error:

@@ -8,7 +8,7 @@ import time
 from unittest.mock import patch
 from uuid import uuid4
 
-from multiverse.universe import agents
+from multiverse.universe import agents, records
 from multiverse.runtime import lifecycle
 from multiverse.runtime import native
 from multiverse.universe import templates
@@ -128,7 +128,7 @@ class KillTest(TerminalBase):
         self.backend.run('set-option', '-p', '-t', pane, '@mv2_launch_id', 'foreign')
         with patch.object(Tmux, 'signal_child') as signal_child:
             with patch.object(lifecycle, 'TEARDOWN_TIMEOUT', .1):
-                with self.assertRaisesRegex(RuntimeError, 'still closing'):
+                with self.assertRaisesRegex(records.RecordError, 'runtime.json.*tagged terminal.*valid saved launch'):
                     lifecycle.terminal_action(self.root, launched['id'], 'stop')
             self.assertIn(pane, self.backend.snapshot()[0])
             self.backend.run('kill-pane', '-t', pane)

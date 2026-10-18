@@ -102,6 +102,9 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 
 ## Damaged records
 
+While a launch is being prepared, both the text listing and `mv2 list --json`
+show its live state as `starting`.
+
 If an agent's `properties.json` or `runtime.json` cannot be read, list and inspect
 show that agent with its file and reason. Other agents remain readable. Doctor
 reports the damage as a problem and exits nonzero. Use the damaged row's UUID
@@ -119,6 +122,18 @@ that the agent stopped. If neither a terminal nor a process remains, resume
 starts a new launch with a note naming the missing or damaged runtime record.
 Unknown process identity is not proof of exit, and refusal leaves the damaged
 record unchanged.
+
+A valid-looking pane or socket can also be wrong. If it has no owned pane while
+the recorded runner or child is still alive with a matching process start time,
+list and doctor name `runtime.json` as inconsistent, and resume refuses. Kill
+can find and close the uniquely tagged terminal for that exact saved launch;
+it never adopts a different generation. A missing process-start token, a reused
+PID, or failed process inspection does not establish that identity.
+
+If damaged process fields prevent recovery, restore `runtime.json` from a
+verified backup. Alternatively, after independently verifying that this agent's
+terminal, runner and child are all gone, remove the damaged `runtime.json` and
+resume. Deleting a record does not stop a process.
 
 Kill can close a uniquely tagged terminal even when runtime.json is missing or
 its launch authority is damaged.

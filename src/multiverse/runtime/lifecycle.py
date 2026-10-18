@@ -15,7 +15,7 @@ import tempfile
 from .. import display, harnesses, universe
 from ..harnesses.types import LaunchContext, SessionHandle, NativeResult, BridgeUnavailable
 from ..store import existing_lock, lock, now, read, uid, write
-from ..terminal.tmux import Tmux, observe, owned, status_setup
+from ..terminal.tmux import Tmux, observe, observation_key, owned, status_setup
 from ..universe import agents, catalog, mailbox, records
 from ..universe.agents import check_available_name, directory, runtime, update_runtime
 from ..universe.mailbox import message_record, update_message
@@ -80,13 +80,22 @@ def listing(root, recursive=False, only=None):
                 rows.append(damaged_row(scope, error, properties))
                 continue
             try:
+                observation = observe(properties, facts, snapshots)
+                if error := missing_runtime.mismatch(path.parent, facts, observation):
+                    raise error
+                observed_key = observation_key(properties, facts)
                 identity_problem = None
                 try:
                     properties, facts = native.session_snapshot(scope, path.parent, properties, facts)
                 except Exception as error:
                     identity_problem = str(error)
                     facts = records.runtime(path.parent / "runtime.json")
-                observation = observe(properties, facts, snapshots)
+                if error := missing_runtime.damage(path.parent, facts):
+                    raise error
+                if observation_key(properties, facts) != observed_key:
+                    observation = observe(properties, facts, snapshots)
+                if error := missing_runtime.mismatch(path.parent, facts, observation):
+                    raise error
                 measured = (NativeResult('error', identity_problem).to_dict() if identity_problem is not None else
                             native.usage_snapshot(scope, properties, facts, reconciled=True))
                 relay = facts.get('native_relay') or {}
@@ -172,9 +181,12 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     properties["workspace"] = str(workdir)
     if resume:
         previous = runtime(agent_dir)
-        if (previous and missing_runtime.damage(agent_dir, previous) is None
-                and observe(properties, previous)['live'] in ('stopped', 'dormant')):
-            attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
+        if previous and missing_runtime.damage(agent_dir, previous) is None:
+            observation = observe(properties, previous)
+            if error := missing_runtime.mismatch(agent_dir, previous, observation):
+                raise error
+            if observation['live'] in ('stopped', 'dormant'):
+                attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
     proposed_launch = uid() if not resume else None
     if not resume:
         launch_lock = lambda path: _publish_record(root, agent_dir, properties, proposed_launch)
@@ -184,6 +196,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         launch_lock = lambda path: lock(path, create_parent=False)
     with launch_lock(agent_dir / ".launch.lock"):
         missing_notices = []
+        previous_observation = None
         if resume:
             # _record's snapshot predates this lock; a /clear report may have
             # rebound the conversation while we waited for it.
@@ -199,8 +212,18 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                               'changed during terminal discovery; retry with the current record')
                 previous = {}  # Discard damaged authority only after independent absence proof.
             else:
+                previous_observation = observe(properties, previous)
+                if error := missing_runtime.mismatch(agent_dir, previous, previous_observation):
+                    raise error
+                observed_key = observation_key(properties, previous)
                 properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
                                                                 adapter=adapter, launch_locked=True)
+                if error := missing_runtime.damage(agent_dir, previous):
+                    raise error
+                if observation_key(properties, previous) != observed_key:
+                    previous_observation = observe(properties, previous)
+                if error := missing_runtime.mismatch(agent_dir, previous, previous_observation):
+                    raise error
             workdir = Path(properties['workspace']).resolve()
             if not workdir.is_dir():
                 raise ValueError(f'Workspace does not exist: {workdir}')
@@ -209,10 +232,13 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if not resume and agents.preparing(previous) and previous['launch_id'] == proposed_launch:
             previous = {}  # This call published the minimal record while holding this lock.
         else:
-            previous = agents.interrupted_preparation(previous, agent_dir)
+            prepared = agents.interrupted_preparation(previous, agent_dir)
+            if prepared is not previous:
+                previous_observation = None
+            previous = prepared
         if _recovery:
             _check_recovery(previous, properties, _recovery)
-        if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
+        if previous and (previous_observation or observe(properties, previous))["live"] not in ('stopped', 'dormant'):
             raise ValueError("Agent is running or its liveness is unknown; refusing a duplicate launch")
         if previous and (closing := attachments.problem(agent_dir, previous)):
             raise RuntimeError(closing + '; retry after terminal cleanup finishes')
@@ -759,10 +785,17 @@ def terminal_action(root, reference, action):
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference)
-    if not (agent_dir / 'runtime.json').exists() or missing_runtime.damage(agent_dir, runtime(agent_dir)):
+    initial = runtime(agent_dir)
+    initial_observation = None
+    damaged = missing_runtime.damage(agent_dir, initial)
+    if not damaged and (agent_dir / 'runtime.json').exists():
+        initial_observation = observe(records.properties(agent_dir / 'properties.json'), initial)
+        damaged = missing_runtime.mismatch(agent_dir, initial, initial_observation)
+    if not (agent_dir / 'runtime.json').exists() or damaged:
         recovered = missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
         if recovered is not None:
             return recovered
+        initial_observation = None  # Recovery found it healthy; the earlier pane snapshot is stale.
     with lock(agent_dir / '.launch.lock'):
         previous = runtime(agent_dir)
         facts = agents.interrupted_preparation(previous, agent_dir)
@@ -777,7 +810,13 @@ def kill(root, reference, *, attachment_only=False):
         if not facts:
             raise records.RecordError(agent_dir / 'runtime.json', 'disappeared during stop; retry to discover the tagged terminal')
         properties = read(agent_dir / 'properties.json')
-        live = observe(properties, facts)['live']
+        observation = initial_observation if facts == initial else None
+        if error := missing_runtime.damage(agent_dir, facts):
+            raise error  # Changed after the outer recovery check; retry with these facts.
+        observation = observation or observe(properties, facts)
+        if error := missing_runtime.mismatch(agent_dir, facts, observation):
+            raise error  # Recovery must recheck positive identity under its own lock.
+        live = observation['live']
         if live == 'dormant':
             backend = pane = None
         else:
