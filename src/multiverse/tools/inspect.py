@@ -51,7 +51,13 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     note = None if live else (answer or note or row.get("reason") or "it is not running")  # kept for --json
     error = damage_reason or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
     fallback = (row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason")
-    notices = notice_lines(row.get('runtime', {}).get('launch_notices'))
+    # The launch's plugin problems (a plugin left out because it broke). A bridged Claude launch also puts them in
+    # its fallback reason; a plain one has none, so only the plugins record says why.
+    recorded = row.get('runtime', {}).get('plugins')
+    problems = recorded.get('problems') if isinstance(recorded, dict) else None
+    problems = [item for item in problems if isinstance(item, str) and item not in (fallback or '')] \
+        if isinstance(problems, list) else []
+    notices = notice_lines(row.get('runtime', {}).get('launch_notices'), problems)
     if json:
         result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
                 "status": row.get("status"), "phase": row.get("phase"), "summary": row.get("summary", ""),

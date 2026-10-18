@@ -161,6 +161,7 @@ class LaunchPlanTest(PluginTestCase):
             self.assertEqual(plan.plugins["picky"]["state"], "skipped")
             self.assertTrue(any(problem.startswith("plugin picky was left out: its settings cannot be used")
                                 and "level must be 1 or 2" in problem for problem in plan.problems), plan.problems)
+            self.assertEqual(plan.record()["problems"], plan.problems)  # recorded, so inspect can say it
 
     def test_usage_adjusters_never_change_what_they_were_given(self):
         """Plugin usage adjusters get a copy, adjust only ok results, and mutation or exceptions never corrupt

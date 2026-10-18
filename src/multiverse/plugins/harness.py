@@ -83,8 +83,11 @@ class LaunchPlan:
     error: str | None = None  # why no plugin could be considered at all
 
     def record(self):
-        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing."""
-        return {"plugins": self.plugins, "status_items": self.status_items, **({"error": self.error} if self.error else {})}
+        """runtime.json's `plugins`: what each plugin added to this launch, or why it added nothing, and the
+        launch's plugin problems (a plugin left out because it broke), which mv2 inspect shows."""
+        return {"plugins": self.plugins, "status_items": self.status_items,
+                **({"problems": list(self.problems)} if self.problems else {}),
+                **({"error": self.error} if self.error else {})}
 
     def skip(self, name, reason):
         entry = self.plugins.setdefault(name, {})
