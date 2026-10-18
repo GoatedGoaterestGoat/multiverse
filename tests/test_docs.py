@@ -127,5 +127,20 @@ class CliReferenceTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class VersionBadgeTest(unittest.TestCase):
+    def test_readme_badges_show_the_checked_versions(self):
+        """The README's Claude Code and Codex badges show the versions compatibility.md says were checked; a version
+        bump edits both by hand, and a badge left behind tells every reader the wrong version, with nothing to show it.
+        """
+        table = (ROOT / "docs" / "reference" / "compatibility.md").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for harness, label in (("Claude Code", "Claude%20Code"), ("Codex CLI", "Codex")):
+            with self.subTest(harness=harness):
+                checked = re.search(rf"^\| {harness} \| ([^ |]+) \|", table, re.MULTILINE).group(1)
+                badge = re.search(rf"img\.shields\.io/badge/{label}-([^-]+)-", readme).group(1)
+                self.assertEqual(badge, checked, f"Set the README's {harness} badge to {checked}, "
+                                                 "as docs/reference/compatibility.md says")
+
+
 if __name__ == "__main__":
     unittest.main()
