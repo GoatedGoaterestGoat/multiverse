@@ -48,6 +48,8 @@ class DecidedSpecQuestions(LifecycleFixture):
         result = self.mv2('spawn', '--name', 'm', '--harness', 'missing', '--wait', check=False)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('m did not start: Harness executable not found', result.stderr)
+        self.assertIn('mv2 remove m', result.stderr)
+        self.assertIn('resume', result.stderr)
 
     def test_invalid_move_destination_names_the_destination(self):
         self.mv2('spawn', '--name', 'a', '--harness', 'sleeper', '--wait')
