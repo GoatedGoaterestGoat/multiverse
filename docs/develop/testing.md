@@ -19,6 +19,21 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 
 The live Codex and Pi modules depend on the installed versions and on timing. They can fail on a machine for reasons unrelated to your change. Before blaming a change, run the same module on `main` in another worktree and compare.
 
+## What deserves a test
+
+Fewer tests are better. A test earns its place only if it guards behaviour that is easy to break, or whose break would be hard to notice. Before adding one, write in one line which feature it tests and why. That line is its docstring:
+
+```python
+def test_runs_at_once_share_the_machines_slots(self):
+    """Concurrent runs, whatever each one's -j, never run more units at once than the machine's slots; a broken
+    lock shows only as load and timing flakes in other agents' runs."""
+```
+
+- If you can't write that line, don't add the test.
+- Don't test wording, formatting, layout, or simple argument parsing and CLI plumbing.
+- Give each behaviour one home. To cover another case of something already tested, add a row to its table-driven test instead of a near-identical test.
+- A bug fix keeps one test that would have caught the bug, if the bug could plausibly come back.
+
 ## Layout
 
 | Files | Cover |

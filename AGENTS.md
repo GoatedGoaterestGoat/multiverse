@@ -52,7 +52,7 @@ env -u MV2_AGENT_ID -u MV2_LAUNCH_ID -u MV2_UNIVERSE \
 - Pin `PYTHONPATH` to your checkout. The shared `.venv` has an editable install of the main checkout, so without the pin you test main's code.
 - Unset `MV2_AGENT_ID`, `MV2_LAUNCH_ID` and `MV2_UNIVERSE`. You are an mv2 agent, and the tests must not act as you.
 - The live Codex and Pi modules (`test_codex_daemon`, `test_codex_daemon_cwd`, `test_codex_mouse`, `test_codex_permissions`, `test_codex_recovery`, `test_codex_timing`, `test_pi_timing`, `test_wake_prompt`) can fail for environmental reasons, such as the installed versions or timing. Before calling a failure a regression, run the same module on a clean `main` worktree and compare.
-- Write new tests with the fixtures in [docs/develop/testing.md](docs/develop/testing.md). Never let a test touch the user's Codex home or daemon.
+- Add a test only for behaviour that is easy to break, or whose break would go unnoticed, and make that one-line reason its docstring ([what deserves a test](docs/develop/testing.md#what-deserves-a-test)). Write it with the fixtures in [docs/develop/testing.md](docs/develop/testing.md). Never let a test touch the user's Codex home or daemon.
 
 ## Change docs with behavior
 
