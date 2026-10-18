@@ -36,8 +36,8 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     if not text.strip():
         raise ValueError("Message text must not be empty")
     if sender is None:
-        from ..runtime.agent_identity import actor
-        caller = actor()
+        from ..runtime.agent_identity import sender_actor
+        caller = sender_actor()
         sender = caller.sender() if caller else {"agent_id": os.environ.get("MV2_AGENT_ID"), "universe": os.environ.get("MV2_UNIVERSE"),
                   "name": "agent" if os.environ.get("MV2_AGENT_ID") else "user"}
     references = [reference.strip() for reference in agent.split(',')]

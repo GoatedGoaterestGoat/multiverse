@@ -143,3 +143,8 @@ the harness's exact conversation record shows no consumption of its starting
 prompt. The result says it was saved for explicit retry. Evidence of consumption,
 unreadable records, and harnesses without this check remain uncertain; no
 automatic resend occurs.
+
+A send from a legacy launch must carry that agent's exact current launch ID,
+just as report does. An outdated launch is refused before any message is saved.
+Declared stable conversation identities retain their existing native-session
+and storage proof; they do not acquire a replacement terminal's launch ID.

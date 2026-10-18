@@ -209,6 +209,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         # Created only when the adapter requests a native service below.
         service_dir = Path('/tmp') / ('mv2-native-' + launch_id)
         values = _values(properties, bootstrap, agent_dir, harness, harness_dir, launch, workdir, model, service_dir)
+        if resume:
+            values['task'] = resume_prompt or ''
         cli_path = _cli_path()
         # This launch's own identity, known before the adapter is asked, so a command prepared only once (plain)
         # can name it, e.g. in a plugin's MCP server. It always wins over ambient or saved values, and the
@@ -258,7 +260,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             old_backend.run('kill-pane', '-t', old_pane)
         launch.mkdir(parents=True)
         (launch / "bootstrap.md").write_text(bootstrap)
-        (launch / "task.md").write_text(resume_prompt if resume_prompt is not None else properties["task"])
+        (launch / "task.md").write_text(values['task'])
         env = {key: value for key, value in target.items() if key != "PATH"}
         if resume:
             env.update(saved)

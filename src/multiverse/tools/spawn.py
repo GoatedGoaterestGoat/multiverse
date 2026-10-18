@@ -29,7 +29,7 @@ def cli_run(root=None, *, name, task=None, task_file=None, harness="codex", mode
     try:
         record = run(root, name=name, task=task, task_file=task_file, harness=harness, model=model,
                      wait=wait, wait_timeout=wait_timeout)
-    except RuntimeError as error:
+    except (RuntimeError, ValueError) as error:
         if json:
             raise
         raise cause(error, name, "did not start") from error

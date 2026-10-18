@@ -134,3 +134,13 @@ Starting without `--wait` returns after setup; that command's normal exit does n
 The agent's record stays, marked `failed`, with the error. The error includes the last lines of the agent's terminal. `mv2 list`, `mv2 inspect` and `mv2 doctor` all show it. Fix the cause, then run `mv2 resume NAME`.
 
 If the launch never got as far as a native session, `resume` says so. In that case, remove the failed record with `mv2 remove NAME` to free its name, then spawn again. See [troubleshooting](../use/troubleshooting.md).
+
+Resume never replays the original task. In a custom harness recipe, `{task}`
+and the contents of `{task_file}` contain only a wake message on resume, or are
+empty when there is no wake message. The saved original task remains in the
+agent's properties and original launch history.
+
+A preflight failure prints `mv2: NAME did not start: REASON` (or `did not resume`
+for resume). A failed native launch with a retained terminal shows LIVE stopped
+and its error; a failure before terminal creation has no wrapper and is dormant
+with the error. Inspect and doctor retain the reason in either case.

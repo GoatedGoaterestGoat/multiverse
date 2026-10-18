@@ -142,7 +142,7 @@ class WakeRunnerTest(TerminalBase):
     def test_runner_records_failed_prompt_startup_without_claiming_acceptance(self):
         agent_id, native_id = str(uuid4()), str(uuid4())
         directory = self.root / 'state/agents' / agent_id
-        write(directory / 'properties.json', {'id': agent_id, 'universe_id': 'test', 'name': 'failed-wake',
+        write(directory / 'properties.json', {'id': agent_id, 'universe_id': read(self.root / 'universe.json')['id'], 'name': 'failed-wake',
             'task': 'original task', 'harness': 'claude', 'workspace': str(self.work), 'native_session_id': native_id})
         broken = self.work / 'broken-native'
         broken.write_text('#!/nonexistent/interpreter\n')

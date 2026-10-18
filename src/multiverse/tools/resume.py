@@ -18,7 +18,7 @@ def run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False
 def cli_run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False):
     try:
         record = run(root, agent=agent, model=model, wait=wait, wait_timeout=wait_timeout)
-    except RuntimeError as error:
+    except (RuntimeError, ValueError) as error:
         if json:
             raise
         raise cause(error, agent, "did not resume") from error

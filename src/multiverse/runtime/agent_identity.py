@@ -57,6 +57,35 @@ class AgentActor:
         return {'agent_id': self.identity, 'universe': str(self.root), 'name': self.name}
 
 
+def sender_actor(environment=None):
+    """Stable conversation authority, or the exact current legacy launch.
+
+    A launch-strict sender cannot fall through to an operator merely because it
+    predates saved identity policies. No process observation or adoption occurs.
+    """
+    env = os.environ if environment is None else environment
+    caller = actor(env)
+    if caller is not None:
+        return caller
+    if not any(env.get(key) for key in ('MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')):
+        return None
+    if any(not isinstance(env.get(key), str) or not env[key]
+           for key in ('MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AGENT_DIR', 'MV2_LAUNCH_ID')):
+        raise ValueError('Calling agent identity is incomplete; cannot send as this agent')
+    from ..universe import agents, records
+    root = Path(env['MV2_UNIVERSE']).resolve()
+    identity = normalize_session_id(env['MV2_AGENT_ID'])
+    directory = root / 'state' / 'agents' / identity
+    properties = records.properties(directory / 'properties.json', harness_optional=True)
+    if (identity != env['MV2_AGENT_ID'] or properties.get('id') != identity
+            or properties.get('universe_id') != read(root / 'universe.json')['id']
+            or Path(env['MV2_AGENT_DIR']).resolve() != directory.resolve()):
+        raise ValueError('Calling agent identity does not match its saved record')
+    if agents.runtime(directory).get('launch_id') != env['MV2_LAUNCH_ID']:
+        raise ValueError('Outdated launch; refusing to send as this agent')
+    return AgentActor(root, directory, identity, properties['name'])
+
+
 def calling_socket(environment=None):
     """Resolve an agent's current terminal server without trusting cached native socket values."""
     env = os.environ if environment is None else environment
