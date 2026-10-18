@@ -100,6 +100,8 @@ The live connection runs through Codex's shared app-server daemon. There is one 
 
 **Permissions.** Put sandbox and approval flags that must hold on resume in `args`, not `spawn_args`. On a connected resume, mv2 applies `--sandbox`, `--ask-for-approval` and `--dangerously-bypass-approvals-and-sandbox` to the saved conversation. It then checks that Codex accepted them.
 
+On launch-only spawn and resume, including automatic fallback, mv2 requests an extra writable root for the agent folder only when the launch's arguments explicitly select `--sandbox workspace-write`, `--sandbox danger-full-access`, `--dangerously-bypass-approvals-and-sandbox` or `--approve-for-me`. Otherwise it omits that request and prints a note, leaving Codex's own permissions and trust prompts in control. mv2 does not infer a grant from your Codex config or project trust. Any `--add-dir` arguments you supply remain unchanged and Codex validates them.
+
 ```json
 {"schema": 2, "adapter": "codex", "settings": {"args": ["--sandbox", "workspace-write"]}}
 ```

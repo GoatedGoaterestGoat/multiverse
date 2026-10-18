@@ -32,6 +32,54 @@ def tui_arguments(argv):
     return argv
 
 
+def plain_arguments(argv, recipe, values):
+    """Omit only the built-in agent root without explicit writable CLI grants.
+
+    The recipe locates mv2's own pair before the appended user arguments. Never
+    infer permission from a profile, configuration file or project trust.
+    """
+    argv = list(argv)
+    own_root = next((index for index in range(len(recipe) - 1)
+                     if recipe[index:index + 2] == ['--add-dir', '{agent_dir}']), None)
+    if (own_root is None or argv[own_root:own_root + 2] != ['--add-dir', values['agent_dir']]
+            or _explicit_writable(argv)):
+        return argv, False
+    del argv[own_root:own_root + 2]
+    return argv, True
+
+
+def _explicit_writable(argv):
+    # Values of other options are opaque: a model, path or config literal that
+    # happens to contain a sandbox flag must not become a permission declaration.
+    takes_value = {'-c', '--config', '--cd', '-C', '--add-dir', '--profile', '-p',
+                   '--model', '-m', '--remote', '--remote-auth-token-env',
+                   '--ask-for-approval', '-a', '--image', '-i', '--local-provider',
+                   '--enable', '--disable'}
+    sandboxes, bypass, automatic = [], False, False
+    end = argv.index('--') if '--' in argv else len(argv)
+    index = 1
+    while index < end:
+        arg = argv[index]
+        flag, equal, value = arg.partition('=')
+        if arg.startswith('-s') and not arg.startswith('--') and len(arg) > 2:
+            flag, equal, value = '-s', '=', arg[2:].removeprefix('=')
+        if flag in ('--sandbox', '-s'):
+            if not equal:
+                index += 1
+                value = argv[index] if index < end else ''
+            sandboxes.append(value)
+        elif arg in ('--dangerously-bypass-approvals-and-sandbox', '--yolo'):
+            bypass = True
+        elif arg in ('--approve-for-me', '--not-so-yolo'):
+            automatic = True
+        elif flag in takes_value and not equal:
+            index += 1
+        index += 1
+    # Invalid/repeated switches still reach Codex unchanged for native validation.
+    return bypass or (automatic and not sandboxes) or (
+        len(sandboxes) == 1 and sandboxes[0] in ('workspace-write', 'danger-full-access'))
+
+
 def remote_arguments(argv, context):
     """Move roots, bootstrap and explicit resume grants from CLI flags to RPC."""
     end = argv.index('--') if '--' in argv else len(argv)

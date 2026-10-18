@@ -10,7 +10,7 @@ from collections.abc import Mapping
 
 from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
                      RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
-from .launch import launch_settings, tui_arguments
+from .launch import launch_settings, tui_arguments, plain_arguments
 from .protocol import (check_connection, send_message, get_delivery, stop_session, recovery_check,
                        RECOVERY_MAX_REQUESTS, continue_queued, CONTINUATION_MAX_REQUESTS)
 from ..types import BridgeUnavailable
@@ -66,8 +66,16 @@ class CodexAdapter(ConfiguredAdapter):
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = None
         if setting is not True:
-            additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
-            plain = replace(additions.apply(command),
+            argv, omitted = plain_arguments(command.argv, self.spec[context.mode], context.values)
+            notices = command.notices
+            if omitted:
+                name = json.dumps(context.values['name'])
+                directory = json.dumps(context.values['agent_dir'])
+                notices = (*notices, f'Codex: mv2 omitted its extra writable agent folder for {name} ({directory}); '
+                           'no writable sandbox flag was selected. To allow it, give the harness --sandbox workspace-write.')
+            plain_command = replace(command, argv=tuple(argv), notices=notices)
+            additions = prepare(context, plain_command, settings=getattr(self, 'settings', {}), harness_name=self.name)
+            plain = replace(additions.apply(plain_command),
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain

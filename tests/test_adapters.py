@@ -61,6 +61,9 @@ class AdapterContractTest(BaseTest):
                     actual, expected = getattr(adapter, mode)(*args), getattr(legacy, mode)(*args)
                     expected_argv = list(expected.argv)
                     if name == 'codex':
+                        root = expected_argv.index('--add-dir')
+                        del expected_argv[root:root + 2]  # Plain defaults keep native permissions.
+                        self.assertEqual(len(actual.notices), 1)
                         position = expected_argv.index('--')
                         expected_argv[position:position] = ['-c', 'check_for_update_on_startup=false']
                     self.assertEqual(actual.argv, tuple(expected_argv))

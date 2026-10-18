@@ -190,9 +190,12 @@ class CodexLaunchTest(unittest.TestCase):
             executor.rpc.assert_not_called()
         self.assertEqual(adapter.capabilities(session)['send_steer'].state, 'unavailable')
 
-    def test_plain_launch_unchanged(self):
+    def test_plain_default_omits_generated_root_and_reports_it(self):
         command = CodexAdapter.configured('codex', {'inbox_bridge': False}).spawn(self.context)
-        self.assertIn('--add-dir', command.argv)
+        self.assertNotIn('--add-dir', command.argv)
+        self.assertIn('omitted its extra writable agent folder', command.notices[0])
+        self.assertIn(self.values['agent_dir'], command.notices[0])
+        self.assertEqual(command.argv[-2:], ('--', self.values['task']))
         self.assertIsNone(command.rpc_proxy)
 
     def test_wake_waits_for_exact_tui_starting_turn_reply(self):
