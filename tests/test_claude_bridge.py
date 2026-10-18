@@ -370,6 +370,9 @@ class ClaudeBridgeTest(BaseTest):
         self.assertEqual(list((agent_dir / 'claude-asks').iterdir()), [])  # the answer is consumed
         nothing = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'nothing-to-fork'}))
         self.assertEqual(nothing.state, 'unavailable')
+        # Claude's fork needs a turn this process finished; a just-resumed agent has its conversation but none yet.
+        self.assertEqual(nothing.reason, "This launch hasn't finished a turn yet: Claude answers side questions only "
+                                         "after one, so ask again after the agent's next response")
         failed = adapter.ask(session, 'Anything yet?', self.answer_when_asked(agent_dir, {'answered': False, 'reason': 'api-error'}))
         self.assertEqual(failed.state, 'error')
         with patch('multiverse.harnesses.claude.ASK_TIMEOUT', 0.3):

@@ -841,7 +841,10 @@ class ClaudeAdapter(ConfiguredAdapter):
                 return NativeResult('ok', 'Answered over the session transcript; nothing was added to it',
                                     {'answer': record.get('text', ''), 'usage': record.get('usage')})
             if record.get('reason') == 'nothing-to-fork':
-                return NativeResult('unavailable', 'The session has no response to answer from yet')
+                # Claude forks the main thread's last request in this process; a new or resumed process has none
+                # until a turn ends, though the conversation it resumed is all there.
+                return NativeResult('unavailable', "This launch hasn't finished a turn yet: Claude answers side "
+                                    "questions only after one, so ask again after the agent's next response")
             return NativeResult('error', f'Claude did not answer: {record.get("reason", "unknown reason")}')
         return NativeResult('unknown', f'No answer within {ASK_TIMEOUT} s; the question may still be answered')
 

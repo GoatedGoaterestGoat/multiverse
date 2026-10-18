@@ -118,7 +118,7 @@ In Codex and launch-only sessions, ask the agent in words instead, such as "Plea
 mv2 ask worker --question 'Which file holds the parser?'
 ```
 
-`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. Only Claude Code with a live connection supports it. When there is no answer, `ask` prints why and exits 1.
+`ask` prints the answer. It answers from the agent's own conversation and adds nothing to it. Only Claude Code with a live connection supports it. When there is no answer, `ask` prints why and exits 1. Right after a start, a resume or `/clear`, Claude can't answer until the agent finishes its next turn.
 
 ## Scripts
 
