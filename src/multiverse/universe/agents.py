@@ -14,6 +14,21 @@ def record_paths(root):
         return []
 
 
+def orphaned(directory):
+    """Plugin leftovers have no claim only when every core path is proven absent.
+
+    Do not use exists(): permission and other inspection errors must propagate.
+    Even an empty surviving record or launches directory needs normal recovery.
+    """
+    for name in ('properties.json', 'runtime.json', 'sessions.jsonl', 'launches'):
+        try:
+            (directory / name).stat()
+        except FileNotFoundError:
+            continue
+        return False
+    return True
+
+
 class AgentNotFound(ValueError):
     """No saved agent matches a reference; no launch was attempted."""
 

@@ -102,6 +102,12 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 
 ## Damaged records
 
+An old agent folder containing only plugin leftovers, with no `properties.json`,
+`runtime.json`, `sessions.jsonl` or `launches` path, cannot reserve a native
+conversation. It does not block session claims or resumes elsewhere. Doctor
+still names it as an orphan folder to remove. Any surviving core record or
+launch directory, or an error inspecting one, keeps the usual recovery checks.
+
 While a launch is being prepared, both the text listing and `mv2 list --json`
 show its live state as `starting`.
 

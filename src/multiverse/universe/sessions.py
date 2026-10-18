@@ -134,7 +134,7 @@ def claim(root, directory, data, native_id, home=None):
     own_provider = provider(root, data)
     own_directory = directory.resolve()
     own_home = canonical_home(home) if home is not None else data.get('native_session_home')
-    from .agents import record_paths
+    from .agents import orphaned, record_paths
     for scope in tree(top(root)):
         for path in record_paths(scope):
             if path.parent.resolve() == own_directory:
@@ -145,6 +145,8 @@ def claim(root, directory, data, native_id, home=None):
                 owner = f'agent {path.parent.name}'
                 journal = path.parent / 'sessions.jsonl'
                 try:
+                    if orphaned(path.parent):
+                        continue  # Only plugin leftovers; no current or historical claim.
                     known = (error.data or {}).get('native_session_id')
                     mentioned = known == native_id or records.mentions(path, native_id)
                     try:

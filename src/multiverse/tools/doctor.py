@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ..runtime import lifecycle
 from .. import compaction, universe
-from ..universe import catalog
+from ..universe import agents, catalog
 from ..universe.mailbox import inbox_problem
 
 def configure(parser):
@@ -26,7 +26,14 @@ def check(root, notes=None):
             for item in lifecycle.listing(scope):
                 damage = item.get('damaged')
                 if damage:
-                    problem = f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}"
+                    directory = scope / 'state/agents' / item['id']
+                    try:
+                        orphan = agents.orphaned(directory)
+                    except OSError:
+                        orphan = False  # Keep the named unreadable-record diagnostic.
+                    problem = (f"{scope}: {item['name']}: orphan agent folder {directory}; no core records remain; "
+                               'remove this orphan folder' if orphan else
+                               f"{scope}: {item['name']}: {damage['file']}: {damage['reason']}")
                     found.append((problem, problem))
                     continue  # No inbox, compaction or process action on damaged records.
                 workdir = item.get('workspace')
