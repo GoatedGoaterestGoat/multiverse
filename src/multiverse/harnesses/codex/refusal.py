@@ -16,10 +16,10 @@ def supports_plain_refusal(version):
 
 
 def plain_started(evidence):
-    """End startup observation at the tested active, configured empty composer.
+    """End startup observation at the tested active, initialized empty composer.
 
     A placeholder also appears while loading/resuming, so require the cursor on
-    its exact row plus the configured status footer with no pending indicator.
+    its exact row plus initialized footer content with no pending indicator.
     This is UI evidence only, never a binding or native permission check.
     Unknown layouts retain the bounded observer.
     """
@@ -32,12 +32,35 @@ def plain_started(evidence):
             or type(x) is not int or type(y) is not int or x != 2 or y < 0):
         return False
     lines = text.rstrip().splitlines()
-    if (y >= len(lines) or lines[y] != '› Ask Codex to do anything'
+    placeholder = '› Ask Codex to do anything'
+    width = evidence.get('width')
+    if width is not None:
+        if type(width) is not int or not 24 <= width <= 4096:
+            return False
+        placeholder = placeholder[:width - 1]  # Native textarea reserves the rightmost column.
+    if (y >= len(lines) or lines[y] != placeholder
             or any(line.strip() in ('loading', 'Resuming session…', 'Forking session…') for line in lines[:y])):
         return False
     footer = [line for line in lines[y + 1:] if line.strip()]
-    return (0 < len(footer) <= 2 and all(line.startswith('  ') for line in footer)
-            and any(' · ' in line for line in footer))
+    if not 0 < len(footer) <= 2 or not all(line.startswith('  ') for line in footer):
+        return False
+    # The provisional StartupDraft has no status value and suppresses context
+    # percentage. The ready footer may contain one configured item (no separator)
+    # or the legacy percentage when the status line is disabled. Hints alone and
+    # the native deferred-submission override never establish startup success.
+    if any(line.strip().startswith(('Waiting for startup', 'esc cancel')) for line in footer):
+        return False
+    for line in footer:
+        content = line.strip()
+        if 'context left' in content:
+            return re.search(r'(?:^|\s)(?:100|[1-9]?\d)% context left$', content) is not None
+        # Shortcut labels are configurable even in StartupDraft: F1 or a chord
+        # can replace '?'. An agents hint may share that row with a separator.
+        hints = (' for shortcuts', ' for agents', ' again to quit', ' to queue',
+                 ' to queue message', ' to edit previous message', ' to edit last message')
+        if any(part.strip() and not part.strip().endswith(hints) for part in content.split(' · ')):
+            return True
+    return False
 
 
 def plain_refusal(evidence):

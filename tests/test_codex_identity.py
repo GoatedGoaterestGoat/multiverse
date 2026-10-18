@@ -140,6 +140,34 @@ class PlainStartupTest(unittest.TestCase):
                 self.assertTrue(self.adapter.launch_started(frame))
                 self.assertIsNone(self.adapter.launch_refusal(frame))
 
+    def test_real_custom_disabled_and_narrow_status_layouts_confirm_startup(self):
+        frames = self.capture('started-layouts-0.163.0.json')
+        self.assertEqual(len(frames), 12)
+        for frame in frames:
+            with self.subTest(footer=frame['footer'], width=frame['width']):
+                self.assertTrue(self.adapter.launch_started(frame))
+                self.assertIsNone(self.adapter.launch_refusal(frame))
+
+    def test_pending_or_hint_only_footers_never_confirm_a_clipped_composer(self):
+        for name in ('loading-0.163.0.json', 'resuming-0.163.0.json'):
+            for frame in self.capture(name):
+                clipped = {**frame, 'width': 24, 'text': frame['text'].replace(
+                    '› Ask Codex to do anything', '› Ask Codex to do anyth')}
+                for footer in ('  model', '  100% context left'):
+                    with self.subTest(fixture=name, footer=footer):
+                        self.assertFalse(self.adapter.launch_started({**clipped, 'text': clipped['text'] + footer + '\n'}))
+        frame = self.capture('started-layouts-0.163.0.json')[-1]
+        prefix = '\n'.join(frame['text'].splitlines()[:frame['cursor_y'] + 1]) + '\n\n'
+        for footer in ('  ? for shortcuts', '  Waiting for startup  esc cancel', '  esc cancel', '',
+                       '  ? for shortcuts  101% context left', '  -1% context left', '  1000% context left',
+                       '  F1 for shortcuts', '  ctrl+space for shortcuts', '  ← for agents',
+                       '  ← for agents · F1 for shortcuts', '  ⌃c again to quit', '  esc to edit last message'):
+            with self.subTest(footer=footer):
+                self.assertFalse(self.adapter.launch_started({**frame, 'text': prefix + footer + '\n'}))
+        for width in (None, '', False, 0, 16, 23, 25, 10000):
+            with self.subTest(width=width):
+                self.assertFalse(self.adapter.launch_started({**frame, 'width': width}))
+
     def test_loading_and_refused_native_composers_do_not_confirm_startup(self):
         for name in ('loading-0.163.0.json', 'resuming-0.163.0.json', 'refusal-0.163.0.json'):
             for frame in self.capture(name):
@@ -163,7 +191,6 @@ class PlainStartupTest(unittest.TestCase):
             {**frame, 'text': frame['text'].replace('› Ask', '> › Ask')},
             {**frame, 'text': frame['text'] + '\n› A different composer below\n'},
             {**frame, 'text': frame['text'].split('  fixture default')[0]},
-            {**frame, 'text': frame['text'].replace(' · ', ' unknown-footer ')},
             {**frame, 'text': frame['text'].split('  fixture default')[0] + '  ? for shortcuts\n'},
             {**frame, 'cursor_y': frame['cursor_y'] - 1}]
         for index, value in enumerate(variants):

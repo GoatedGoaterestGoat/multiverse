@@ -953,7 +953,11 @@ additional plain startup condition and ends observation. All process and livenes
 readiness checks still apply; screen evidence never establishes a binding,
 changes permissions or clears a refusal. If neither classifier settles the screen
 within the startup window, process readiness applies with a notice. For tested Codex 0.163.0, the active empty ordinary composer with its
-configured footer is startup evidence. The real loading composer is not. Later
+configured status content or legacy context-percentage footer is startup evidence;
+the status content need not contain a separator. The exact placeholder may be
+clipped using the owned pane's measured width (at least 24 columns). Startup's
+hint-only footer and deferred-submission hint are not success evidence. No Codex
+config file is read for this classification. The real loading composer is not. Later
 navigation after that success is no longer classified as a launch failure.
 Unknown layouts retain the bounded startup window and existing relay-loss exit.
 
