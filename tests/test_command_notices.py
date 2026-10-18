@@ -2,6 +2,8 @@
 from dataclasses import replace
 from contextlib import redirect_stdout
 import io
+import json
+from pathlib import Path
 import subprocess
 import unittest
 from unittest.mock import Mock, patch
@@ -15,33 +17,62 @@ from test_native_backends import NativeBackendTest
 
 class CommandNoticeTest(NativeBackendTest):
     def test_startup_retry_is_once_after_exit_and_before_any_readiness_or_delivery(self):
-        """A startup retry never repeats accepted work or escapes its generation; these races silently duplicate native turns."""
+        """A retry cannot repeat accepted work or mistake native errors for runner notices; shared-pane output and generation races otherwise lose retries or duplicate turns."""
         launch, proxy = self.fallback_fixture(False, False)
         original = read(launch / 'request.json')
         original['fallback']['startup_retry'] = {'argv': ['plain', '--retry'], 'notices': ['Retry selected.']}
         write(launch / 'request.json', original)
-        first, second = Mock(pid=123), Mock(pid=124)
-        self.backend.run.return_value = 'Exact native startup diagnostic'
-        for child in (first, second):
-            child.poll.return_value = child.wait.return_value = 1
-        calls = []
-        def start(argv, **kwargs):
-            calls.append(argv)
-            if len(calls) == 2:
-                self.assertEqual(read(launch / 'request.json')['notices'], ['Retry selected.'])
-                self.assertEqual(agents.runtime(self.directory)['launch_notices'], ['Retry selected.'])
-            return first if len(calls) == 1 else second
-        with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
-                patch.object(rpc, 'LaunchProxy', return_value=proxy), \
-                patch.object(runner, 'process_started', return_value=None), \
-                patch.object(runner.subprocess, 'Popen', side_effect=start), \
-                patch.object(self.adapter, 'startup_retryable', return_value=True, create=True), \
-                patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
-                patch.object(runner, 'launch_diagnostic', return_value={}):
-            self.assertEqual(runner.main(), 1)
-        self.assertEqual(calls, [['plain'], ['plain', '--retry']])
-        self.assertIsNone(read(launch / 'request.json')['startup_retry'])
-        self.assertEqual(agents.runtime(self.directory)['startup_retry']['exit_code'], 1)
+        from multiverse.harnesses.codex import CodexAdapter
+        diagnostic = json.loads((Path(__file__).parent / 'fixtures/codex/add-dir-readonly.json').read_text())[0]['text']
+        matcher = CodexAdapter.configured('codex', {'inbox_bridge': False}).startup_retryable
+        saved = 'Saved native storage retained.'
+        for label, notices, capture, starts in (
+                ('only native output', [], diagnostic, 2),
+                ('retained home notice', [saved], saved + '\n' + diagnostic, 2),
+                ('multiple printed notices', [saved, 'Plugin note.'], saved + '\nPlugin note.\n' + diagnostic, 2),
+                ('historical request workspace', [], diagnostic, 2),
+                ('wrapped notice', [saved], 'Saved native sto\nrage retained.\n' + diagnostic, 2),
+                ('native screen cleared the notice', [saved], diagnostic, 2),
+                ('unprinted discarded notice', [], 'Discarded bridge note.\n' + diagnostic, 1),
+                ('changed notice', [saved], 'Saved different storage retained.\n' + diagnostic, 1),
+                ('unrelated prefix', [saved], 'Other failure\n' + saved + '\n' + diagnostic, 1),
+                ('unrelated suffix', [saved], saved + '\n' + diagnostic + '\nOther failure', 1),
+                ('known prelude at end is still native output', [saved], saved + '\n' + diagnostic + '\n' + saved, 1),
+                ('known notice joined to native text', [saved], saved + diagnostic, 1)):
+            with self.subTest(output=label):
+                request = {**original, 'notices': ['Discarded bridge note.'], 'resume_notices': [],
+                           'fallback': {**original['fallback'], 'notices': notices}}
+                if label == 'historical request workspace':
+                    request.pop('workspace', None)
+                write(launch / 'request.json', request)
+                write(self.directory / 'runtime.json', self.facts)
+                write(self.directory / 'properties.json', self.properties)
+                first, second = Mock(pid=123), Mock(pid=124)
+                self.backend.run.return_value = capture
+                for child in (first, second):
+                    child.poll.return_value = child.wait.return_value = 1
+                calls = []
+                def start(argv, **kwargs):
+                    calls.append(argv)
+                    if len(calls) == 2:
+                        self.assertEqual(read(launch / 'request.json')['notices'], ['Retry selected.'])
+                        self.assertEqual(agents.runtime(self.directory)['launch_notices'], ['Retry selected.'])
+                    return first if len(calls) == 1 else second
+                def check(snapshot):
+                    self.assertEqual(snapshot['workspace'], self.properties['workspace'])
+                    return matcher(snapshot)
+                with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
+                        patch.object(rpc, 'LaunchProxy', return_value=proxy), \
+                        patch.object(runner, 'process_started', return_value=None), \
+                        patch.object(runner.subprocess, 'Popen', side_effect=start), \
+                        patch.object(self.adapter, 'startup_retryable', side_effect=check, create=True), \
+                        patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
+                        patch.object(runner, 'launch_diagnostic', return_value={}):
+                    self.assertEqual(runner.main(), 1)
+                self.assertEqual(calls, [['plain'], ['plain', '--retry']][:starts])
+                if starts == 2:
+                    self.assertIsNone(read(launch / 'request.json')['startup_retry'])
+                    self.assertEqual(agents.runtime(self.directory)['startup_retry']['exit_code'], 1)
 
         with self.subTest('adapter load failure cannot leave an observer pending or start its child'):
             from multiverse import harnesses

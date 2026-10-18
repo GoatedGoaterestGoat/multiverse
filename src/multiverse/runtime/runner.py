@@ -415,7 +415,25 @@ def launch_environment(request):
     return env
 
 
-def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_id):
+def startup_output(text, prelude):
+    """Remove only this runner's actually printed leading notices, once."""
+    text = bounded_output(text)
+    expected = ''.join(character for line in prelude for character in line if not character.isspace())
+    if not expected:
+        return text
+    position = 0
+    for character in expected:
+        while position < len(text) and text[position].isspace():
+            position += 1
+        if position == len(text) or text[position] != character:
+            return text  # Cleared, truncated or different prelude: do not guess.
+        position += 1
+    if position < len(text) and not text[position].isspace():
+        return text  # Printed notices ended with a newline, not a native word continuation.
+    return text[position:].lstrip()
+
+
+def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_id, prelude=()):
     """Select one argv-only retry while the exited child still owns this launch."""
     from multiverse.display import notice_lines
     from multiverse.runtime.native import adapter_hook
@@ -453,8 +471,9 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
             if properties.get('native_session_id') != native_id:
                 return None  # A newly bound conversation is already native startup evidence.
             backend, pane = owned(properties, facts, states=('alive', 'stopped'))
-            text = bounded_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane))
-            if hook({'text': text, 'exit_code': code, 'argv': request['argv'], 'elapsed': elapsed}) is not True:
+            text = startup_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane), prelude)
+            if hook({'text': text, 'exit_code': code, 'argv': request['argv'], 'elapsed': elapsed,
+                     'workspace': request.get('workspace', properties.get('workspace'))}) is not True:
                 return None
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
             return None  # Unknown output/ownership never authorizes another process.
@@ -556,6 +575,7 @@ def main():
     env = {}
     diagnostic = {}
     roles = {}
+    printed_prelude = ()
     from multiverse.runtime import attachments, refusal, registration
     runner_started = process_started(os.getpid())
     attachments.begin(launch, runner_started)
@@ -673,6 +693,7 @@ def main():
                 attachment = fallback.get('attachment') or {}
                 for notice in notices:
                     print(notice, flush=True)
+                printed_prelude = tuple(notices)
         # Load before publishing pending observation: a configuration error must
         # fail startup, not leave an observer that was never started pending.
         adapter = None
@@ -710,7 +731,7 @@ def main():
             survived_startup = wait_startup_candidate(agent_dir, launch.name, process, child_at)
             if not survived_startup:
                 selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
-                                         native_id=initial_native_id)
+                                         native_id=initial_native_id, prelude=printed_prelude)
                 if selected is not None:
                     request, process = selected
         from multiverse.universe.mailbox import finish_wake
