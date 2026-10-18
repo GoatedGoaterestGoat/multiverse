@@ -12,7 +12,7 @@ from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHan
 
 class PlainPermissionsTest(unittest.TestCase):
     def test_plain_retry_removes_only_the_generated_root_after_native_refusal(self):
-        """A read-only native exit retries only the generated root; fragile because trusting config guesses or removing a user's root silently changes permissions."""
+        """A read-only native exit retries only mv2's root; rendered diagnostics are easy to miss, while removing a user's root silently changes permissions."""
         values = {'workspace': '/workspace', 'agent_dir': '/outside/agent', 'name': 'worker',
                   'control_socket': '/tmp/private/relay.sock', 'bootstrap_json': json.dumps('bootstrap'),
                   'task': 'literal task', 'session_id': '0b9925e8-814b-474d-b813-2dc9478ba0c9'}
@@ -50,11 +50,31 @@ class PlainPermissionsTest(unittest.TestCase):
             self.assertEqual(plain.startup_retry.argv, plain.argv[:index] + plain.argv[index + 2:])
             self.assertIn('model_reasoning_effort="high"', plain.startup_retry.argv)
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
-        capture = json.loads((Path(__file__).parent / 'fixtures/codex/add-dir-readonly.json').read_text())[0]
-        evidence = {'text': capture['text'], 'exit_code': 1, 'argv': ['codex', '--add-dir', '/outside/agent']}
+        captures = json.loads((Path(__file__).parent / 'fixtures/codex/add-dir-readonly.json').read_text())
+        capture = captures[0]
+        evidence = {'text': capture['text'], 'exit_code': 1, 'agent_dir': capture['agent_dir'],
+                    'argv': ['codex', '--add-dir', capture['agent_dir']]}
         for changed, expected in (({}, True), ({'exit_code': 0}, False), ({'exit_code': None}, False),
                                   ({'exit_code': True}, False), ({'text': 'quota exceeded'}, False),
                                   ({'text': capture['text'].replace('Error adding directories:', 'Warning:')}, False),
-                                  ({'text': capture['text'] + '\nDifferent startup failure'}, False)):
+                                  ({'agent_dir': '/different/agent'}, False),
+                                  ({'agent_dir': capture['agent_dir'] + '-sibling'}, False),
+                                  ({'agent_dir': None}, False),
+                                  ({'text': capture['text'] + '\nDifferent startup failure'}, True)):
             with self.subTest(evidence=changed):
                 self.assertIs(adapter.startup_retryable({**evidence, **changed}), expected)
+        inline = next(row for row in captures if row['case'] == 'inline-readonly-spawn')
+        for text, directory, expected in (
+                (inline['text'], inline['agent_dir'], True),
+                (inline['text'].replace(inline['workspace'], '~/project'), inline['agent_dir'], True),
+                (inline['text'].replace(inline['workspace'], '/long/…/project'), inline['agent_dir'], True),
+                (''.join(char + '\n' for char in inline['text']), inline['agent_dir'], True),
+                ('Saved native storage retained.\n' + inline['text'], inline['agent_dir'], True),
+                (inline['text'], None, False),
+                (inline['text'], {'damaged': 'directory'}, False),
+                (inline['text'], '/different/agent', False),
+                (inline['text'] + '\x1b', inline['agent_dir'], False),
+                (inline['text'] + '\0', inline['agent_dir'], False)):
+            with self.subTest(inline_agent_dir=directory, text=text):
+                self.assertIs(adapter.startup_retryable(
+                    {**evidence, 'text': text, 'agent_dir': directory}), expected)

@@ -3,30 +3,39 @@
     "case": "untrusted-spawn",
     "trusted": false,
     "saved_sandbox": null,
-    "text": "Error adding directories: Ignoring --add-dir (/private/tmp/mv2-test-u_pike0m/.mu\nltiverse/state/agents/f49b9a12-59e6-45d7-b90e-1deb9872eff3) because the effectiv\ne permissions do not allow additional writable roots. Switch to workspace-write\nor danger-full-access to allow them."
+    "text": "Error adding directories: Ignoring --add-dir (/private/tmp/mv2-test-u_pike0m/.mu\nltiverse/state/agents/f49b9a12-59e6-45d7-b90e-1deb9872eff3) because the effectiv\ne permissions do not allow additional writable roots. Switch to workspace-write\nor danger-full-access to allow them.",
+    "agent_dir": "/private/tmp/mv2-test-u_pike0m/.multiverse/state/agents/f49b9a12-59e6-45d7-b90e-1deb9872eff3"
   },
   {
     "case": "trusted-spawn",
     "trusted": true,
     "saved_sandbox": null,
-    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u203a Ask Codex to do anything\n\n  fixture default \u00b7 /private/tmp/mv2-test-u_pike0m\n  ? for shortcuts"
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-test-u_pike0m\n  ? for shortcuts"
   },
   {
     "case": "trusted-read-only-resume",
     "trusted": true,
     "saved_sandbox": "read-only",
-    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u203a Ask Codex to do anything\n\n  fixture default \u00b7 /private/tmp/mv2-test-u_pike0m \u00b7 private permission fixture\n  ? for shortcuts"
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-test-u_pike0m · private permission fixture\n  ? for shortcuts"
   },
   {
     "case": "untrusted-read-only-resume",
     "trusted": false,
     "saved_sandbox": "read-only",
-    "text": "Error adding directories: Ignoring --add-dir (/private/tmp/mv2-test-u_pike0m/.mu\nltiverse/state/agents/30e82316-a3f2-423e-b404-30e89e115ab4) because the effectiv\ne permissions do not allow additional writable roots. Switch to workspace-write\nor danger-full-access to allow them."
+    "text": "Error adding directories: Ignoring --add-dir (/private/tmp/mv2-test-u_pike0m/.mu\nltiverse/state/agents/30e82316-a3f2-423e-b404-30e89e115ab4) because the effectiv\ne permissions do not allow additional writable roots. Switch to workspace-write\nor danger-full-access to allow them.",
+    "agent_dir": "/private/tmp/mv2-test-u_pike0m/.multiverse/state/agents/30e82316-a3f2-423e-b404-30e89e115ab4"
   },
   {
     "case": "trusted-writable-resume",
     "trusted": true,
     "saved_sandbox": "workspace-write",
-    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\u203a Ask Codex to do anything\n\n  fixture default \u00b7 /private/tmp/mv2-test-u_pike0m \u00b7 private permission fixture\n  ? for shortcuts"
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/mv2-test-u_pike0m\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n› Ask Codex to do anything\n\n  fixture default · /private/tmp/mv2-test-u_pike0m · private permission fixture\n  ? for shortcuts"
+  },
+  {
+    "case": "inline-readonly-spawn",
+    "source": "CODEX-R3-01, 4f3354e, real Codex 0.163.0 --no-alt-screen",
+    "workspace": "/private/tmp/qacxs-v2yx0tk3/other-worktree",
+    "text": "\n  >_ OpenAI Codex (v0.163.0)\n     /private/tmp/qacxs-v2yx0tk3/other-worktree\n\n\n› Error adding directories: Ignoring --add-dir (/private/tmp/qacxs-v2yx0tk3/work\n/.multiverse/subverses/outside/state/agents/36a45eba-8ff5-4fa5-88cf-db7ac2e326f4\n) because the effective permissions do not allow additional writable roots. Swit\nch to workspace-write or danger-full-access to allow them.\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n",
+    "agent_dir": "/private/tmp/qacxs-v2yx0tk3/work/.multiverse/subverses/outside/state/agents/36a45eba-8ff5-4fa5-88cf-db7ac2e326f4"
   }
 ]

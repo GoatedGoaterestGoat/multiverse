@@ -23,7 +23,7 @@ from test_multiverse import TerminalBase, until
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class NativePlainPermissionsTest(TerminalBase):
     def test_native_policy_keeps_writable_agent_roots_and_retries_only_readonly(self):
-        """Native trust and named permission defaults can silently remove an outside agent root; real tool writes and one-shot read-only retries must survive spawn and resume."""
+        """Native permissions and inline rendering can silently defeat an outside agent root or its one-shot retry; real tool writes must survive spawn and resume."""
         version = subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL, text=True).strip()
         if version != 'codex-cli 0.163.0':
             self.skipTest('native permission resolver evidence requires checked Codex 0.163.0')
@@ -72,6 +72,7 @@ class NativePlainPermissionsTest(TerminalBase):
                 ('recorded-untrusted', 'untrusted', False, [], True),
                 ('no-trust-decision-auto', None, True, [], False),
                 ('explicit-readonly', 'trusted', False, ['--sandbox', 'read-only'], False),
+                ('inline-readonly', 'trusted', False, ['--sandbox', 'read-only', '--no-alt-screen'], False),
                 ('named-writable', 'trusted', False, [], True)]
         for label, decision, auto, flags, writable in rows:
             with self.subTest(policy=label):
@@ -161,6 +162,8 @@ class NativePlainPermissionsTest(TerminalBase):
                         current = read(directory / 'launches' / facts['launch_id'] / 'request.json')
                         self.assertIsNone(current['startup_retry'], 'The retry is consumed before starting again')
                         self.assertNotIn('--add-dir', current['argv'])
+                        if '--no-alt-screen' in flags:
+                            self.assertIn('--no-alt-screen', current['argv'])
                         self.assertTrue(any('read-only' in note for note in lifecycle.launch_result(root, directory)['notices']))
                     print('Native extra-root evidence:', label, 'writable=', writable,
                           'retried=', bool(agents.runtime(directory).get('startup_retry')))

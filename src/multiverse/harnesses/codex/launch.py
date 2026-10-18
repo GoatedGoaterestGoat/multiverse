@@ -45,19 +45,21 @@ def plain_arguments(argv, recipe, values):
 
 def startup_retryable(snapshot):
     """The native TUI rejected add-dir before startup; a live warning is not a retry."""
-    import re
     if type(snapshot.get('exit_code')) is not int or snapshot['exit_code'] == 0:
         return False
     text = snapshot.get('text')
     if not isinstance(text, str) or len(text) > 32768 or '\x1b' in text or '\0' in text:
         return False
-    # tmux may wrap in the middle of native words and paths. Match the whole
-    # diagnostic after removing screen whitespace, never a quoted substring.
+    directory = snapshot.get('agent_dir')
+    if not isinstance(directory, str) or not directory or '\x1b' in directory or '\0' in directory:
+        return False
+    # The native error may sit inside an inline screen or wrap inside words and
+    # paths. Its complete diagnostic must name the exact core-owned agent root;
+    # banners, abbreviated working directories and composer markers are irrelevant.
     compact = ''.join(text.split())
-    return re.fullmatch(
-        r'Erroraddingdirectories:Ignoring--add-dir\(.+\)because'
-        r'theeffectivepermissionsdonotallowadditionalwritableroots\.'
-        r'Switchtoworkspace-writeordanger-full-accesstoallowthem\.', compact) is not None
+    diagnostic = ('Erroraddingdirectories:Ignoring--add-dir(' + ''.join(directory.split()) + ')because'
+                  'theeffectivepermissionsdonotallowadditionalwritableroots.')
+    return diagnostic in compact
 
 
 def remote_arguments(argv, context):
