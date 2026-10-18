@@ -152,22 +152,30 @@ class ClaudeStartupPromptEvidenceTest(BaseTest):
         return {'type': 'user', 'message': {'role': 'user', 'content': content}, 'timestamp': timestamp,
                 'sessionId': self.native, 'uuid': str(uuid4())}
 
-    def evidence(self, session=None, since=SINCE, prompt=PROMPT):
-        return self.adapter.startup_prompt_evidence(session or self.session(), prompt, since, self.environment)
+    def evidence(self, session=None, since=SINCE, prompt=PROMPT, environment=...):
+        environment = self.environment if environment is ... else environment
+        return self.adapter.startup_prompt_evidence(session or self.session(), prompt, since, environment)
+
+    def reason(self, session=None, since=SINCE, prompt=PROMPT):
+        return self.adapter.startup_prompt_evidence_reason(session or self.session(), prompt, since, self.environment)
 
     def test_startup_prompt_evidence_from_claudes_transcript(self):
         """Claude's transcript tells whether a woken launch that died recorded its prompt (True, False or None); fragile
-        because it parses Claude's private JSONL with partial and damaged lines, and a wrong False resends a message
-        while a wrong True strands it (7d4d043, CLAUDE-10)."""
+        because it parses Claude's private JSONL with partial and damaged lines, and reads the launch's own storage
+        (pinned in session.home), never the checker's: a wrong False resends a message while a wrong True strands it.
+        A None says what can't be read, for deliver --check's advice (7d4d043, CLAUDE-10, qa-claude's 9f0331f
+        retest)."""
         with self.subTest('a row this launch recorded'):
             self.native = str(uuid4())
             for blocks in (False, True):
                 with self.subTest(blocks=blocks):
                     self.transcript({'type': 'system', 'timestamp': '2026-10-18T10:00:01.000Z'}, self.row(self.PROMPT, blocks=blocks))
                     self.assertIs(self.evidence(), True)
+                    self.assertIsNone(self.reason())  # asked only after None; a definite answer has none
         with self.subTest('no transcript, or a complete one without the prompt'):
             self.native = str(uuid4())
             self.assertIs(self.evidence(), False)  # Claude exited before writing anything for this session
+            self.assertIsNone(self.reason())
             self.transcript(self.row('Message from lead:\nPlease rebase.', timestamp='2026-10-18T09:59:00.000Z'),  # an older launch
                             self.row('something else'), {'type': 'assistant', 'message': {'content': 'ok'}})
             self.assertIs(self.evidence(), False)
@@ -181,18 +189,40 @@ class ClaudeStartupPromptEvidenceTest(BaseTest):
             self.native = str(uuid4())
             self.transcript(self.row('something else'), raw='{"type": "user", "message": {"content": "Message from le')  # cut short
             self.assertIsNone(self.evidence())
-            self.transcript(self.row('something else'), raw='not json\n')  # damaged
+            damaged = self.transcript(self.row('something else'), raw='not json\n')  # damaged
             self.assertIsNone(self.evidence())
+            self.assertEqual(self.reason(), f"Claude's transcript {damaged} has a damaged or unfinished row: "
+                                            'if Claude is still writing it, wait')
             self.transcript(self.row('something else'))
             for since in (None, 'not a time', '2026-10-18'):  # missing, invalid, or without a time zone
                 with self.subTest(since=since):
                     self.assertIsNone(self.evidence(since=since))
             self.assertIsNone(self.evidence(session=replace(self.session(), native_id=None)))
             self.assertIsNone(self.evidence(prompt=''))
+            # Core's own facts are missing there; core says what, so Claude adds no reason.
+            self.assertIsNone(self.reason(since=None))
+            self.assertIsNone(self.reason(prompt=''))
             path = self.storage / 'projects' / '-w' / f'{self.native}.jsonl'
             path.unlink()
             path.mkdir()  # unreadable
             self.assertIsNone(self.evidence())
+            # A recheck reads the launch's storage, never this process's: where neither the session nor the snapshot
+            # says where it is, it can't tell, even though this process's own home has no such transcript.
+            checker = self.work / 'checker-home'
+            checker.mkdir()
+            with patch.dict(os.environ, {'HOME': str(checker)}):
+                os.environ.pop('CLAUDE_CONFIG_DIR', None)
+                for environment in (None, {}, {'PATH': '/usr/bin'}, {'CLAUDE_CONFIG_DIR': 'relative/claude'}):
+                    with self.subTest(environment=environment):
+                        self.assertIsNone(self.evidence(environment=environment))
+        with self.subTest('the storage the launch was pinned to'):
+            # session.home is pinned when the launch starts; a snapshot pointing elsewhere, or none, never redirects it.
+            self.native = str(uuid4())
+            self.transcript(self.row(self.PROMPT))
+            pinned = replace(self.session(), home=str(self.storage))
+            for environment in ({'CLAUDE_CONFIG_DIR': str(self.work / 'other-claude')}, {}, None):
+                with self.subTest(environment=environment):
+                    self.assertIs(self.evidence(session=pinned, environment=environment), True)
         with self.subTest('a damaged line beside the row'):
             self.native = str(uuid4())
             self.transcript(self.row(self.PROMPT), raw='not json\n')
@@ -251,6 +281,27 @@ class ClaudeUnreadableStorageTest(BaseTest):
             self.assertIsNone(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment))
             (self.storage / 'projects').chmod(0o700)
             self.assertIs(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment), False)  # all read: absent
+        with self.subTest('what the reason says, and a locked transcript read again'):
+            adapter = harnesses.load(self.root, 'claude')
+            self.saved()
+            session = SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native, state='failed')
+            ask = lambda method: getattr(adapter, method)(session, 'another prompt', self.SINCE, self.environment)
+            for locked in (self.project, self.storage / 'projects'):
+                with self.subTest(locked=locked.name):
+                    self.lock(locked)
+                    found = ask('startup_prompt_evidence'), ask('startup_prompt_evidence_reason')
+                    locked.chmod(0o700)
+                    self.assertEqual(found, (None, f"Claude's storage folder {locked} can't be read: "
+                                                   'restore read access to it'))
+            # qa-claude's retest: a stand-in transcript at chmod 000, then 700. Readable again, it shows the prompt
+            # never arrived, so the message becomes retryable.
+            transcript = self.project / f'{self.native}.jsonl'
+            self.lock(transcript)
+            found = ask('startup_prompt_evidence'), ask('startup_prompt_evidence_reason')
+            transcript.chmod(0o700)
+            self.assertEqual(found, (None, f"Claude's transcript {transcript} can't be read: restore read access to it"))
+            self.assertIs(ask('startup_prompt_evidence'), False)
+            self.assertIsNone(ask('startup_prompt_evidence_reason'))
         with self.subTest('resume'):
             self.saved()
             from multiverse.harnesses.claude import fresh_start

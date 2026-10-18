@@ -39,7 +39,13 @@ True when the session's transcript has a user row with that prompt from the
 launch's start on, False when the transcript is missing or complete without one
 (the message is then a definite failure that `--retry` resends), and None when it
 can't tell (unreadable or damaged rows, a storage folder it can't read, or no aware
-start time), which keeps the message uncertain. Every transcript lookup lists
+start time), which keeps the message uncertain. It reads the launch's own storage:
+`session.home`, pinned before the launch started, else the launch environment's
+absolute `CLAUDE_CONFIG_DIR` or `HOME`, and never the checking process's, which
+could find nothing and wrongly prove the prompt absent. After a None, core asks the
+optional `startup_prompt_evidence_reason` with the same arguments: one line naming
+the folder or transcript that can't be read, or the damaged row, and what to fix,
+without the command, which core adds. Every transcript lookup lists
 Claude's folders itself rather than with a glob, which skips unreadable folders
 silently: when part of the storage can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as

@@ -76,6 +76,10 @@ def claude_home(environment=None):
 class Unreadable(Exception):
     """A folder or file under Claude's storage that can't be read, so a lookup can't tell what is there."""
 
+    def __init__(self, path):
+        super().__init__(f"{path} can't be read")
+        self.path = str(path)
+
 
 def session_transcripts(native_id, environment=None):
     """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
@@ -89,7 +93,7 @@ def session_transcripts(native_id, environment=None):
     except FileNotFoundError:
         return []
     except OSError as error:
-        raise Unreadable(f"{projects} can't be read") from error
+        raise Unreadable(projects) from error
     found = []
     for entry in entries:
         candidate = Path(entry.path) / f'{native_id}.jsonl'
@@ -100,7 +104,7 @@ def session_transcripts(native_id, environment=None):
         except FileNotFoundError:
             continue
         except OSError as error:  # a project folder that can't be searched could hold it
-            raise Unreadable(f"{entry.path} can't be read") from error
+            raise Unreadable(entry.path) from error
     return [path for _, path in sorted(found)]
 
 
@@ -111,7 +115,7 @@ def subagent_transcripts(main):
 
     def unreadable(error):
         if not isinstance(error, FileNotFoundError):
-            raise Unreadable(f"{error.filename or folder} can't be read") from error
+            raise Unreadable(error.filename or folder) from error
 
     for directory, _, files in os.walk(folder, onerror=unreadable):
         found.extend(Path(directory) / name for name in files if name.endswith('.jsonl'))
@@ -465,30 +469,50 @@ def _typed_prompt(native_id, environment):
     return False
 
 
-def prompt_recorded(native_id, prompt, since, environment):
-    """Whether Claude recorded `prompt`, a launch's command-line first prompt, in session `native_id` from
-    `since` on: True for a user row with it, False when the transcript is missing or complete and has none,
-    None when that can't be told (unreadable or damaged rows, no session or prompt, `since` not an aware time)."""
+def launch_storage(session, environment):
+    """Where a launch's Claude keeps its transcripts, as an environment for claude_home, or None if unknown.
+
+    session.home is pinned before the launch starts; failing that, the launch's own environment. Never this
+    process's: a recheck run elsewhere, or after HOME changed, would read another storage, find nothing, and
+    take that as proof a prompt never arrived.
+    """
+    home = getattr(session, 'home', None)
+    if isinstance(home, str) and os.path.isabs(home):
+        return {'CLAUDE_CONFIG_DIR': home}
+    source = environment or {}
+    if source.get('CLAUDE_CONFIG_DIR'):  # Claude would resolve a relative one against a working directory we don't know
+        return {'CLAUDE_CONFIG_DIR': source['CLAUDE_CONFIG_DIR']} if os.path.isabs(source['CLAUDE_CONFIG_DIR']) else None
+    return {'HOME': source['HOME']} if source.get('HOME') and os.path.isabs(source['HOME']) else None
+
+
+def prompt_evidence(native_id, prompt, since, environment):
+    """(answer, why) for whether Claude recorded `prompt`, a launch's command-line first prompt, in session
+    `native_id` from `since` on, reading the storage `environment` names.
+
+    The answer is True for a user row with it, False when the transcript is missing or complete and has none,
+    and None when that can't be told. Then `why` says what can't be read and what to fix, or is None where
+    core's own facts are missing (no session, prompt, storage, or `since` not an aware time).
+    """
     start, text = moment(since), (prompt or '').strip()
-    if not native_id or not text or start is None or start.tzinfo is None:
-        return None
+    if not native_id or not text or start is None or start.tzinfo is None or not environment:
+        return None, None
     try:
         paths = session_transcripts(native_id, environment)
-    except Unreadable:
-        return None
-    unsure = False
+    except Unreadable as error:
+        return None, f"Claude's storage folder {error.path} can't be read: restore read access to it"
+    damaged = None
     for path in paths:
         try:
             lines = path.read_bytes().split(b'\n')
         except OSError:
-            return None
+            return None, f"Claude's transcript {path} can't be read: restore read access to it"
         for raw in lines:
             if not raw.strip():
                 continue
             try:
                 row = json.loads(raw)
             except ValueError:  # damaged, or the last row cut short while it was being written
-                unsure = True
+                damaged = damaged or path
                 continue
             message = row.get('message') if isinstance(row, dict) and row.get('type') == 'user' else None
             content = message.get('content') if isinstance(message, dict) else None
@@ -499,10 +523,17 @@ def prompt_recorded(native_id, prompt, since, environment):
             when = moment(row.get('timestamp'))
             try:
                 if when is None or when >= start:  # a matching row with no usable time still counts as evidence
-                    return True
+                    return True, None
             except TypeError:  # a time without a zone can't be compared
-                return True
-    return None if unsure else False
+                return True, None
+    if damaged:
+        return None, f"Claude's transcript {damaged} has a damaged or unfinished row: if Claude is still writing it, wait"
+    return False, None
+
+
+def prompt_recorded(native_id, prompt, since, environment):
+    """prompt_evidence's answer alone: True, False or None."""
+    return prompt_evidence(native_id, prompt, since, environment)[0]
 
 
 def launch_only_cause(launch):
@@ -598,7 +629,13 @@ class ClaudeAdapter(ConfiguredAdapter):
     def startup_prompt_evidence(self, session, prompt, since, environment):
         """For a launch that exited during startup with a wake prompt: whether its Claude recorded the prompt.
         Core makes the message a definite failure only on False; True or None keep it uncertain."""
-        return prompt_recorded(session.native_id, prompt, since, environment)
+        return prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment))[0]
+
+    def startup_prompt_evidence_reason(self, session, prompt, since, environment):
+        """Asked after startup_prompt_evidence said None: what can't be read and what to fix, in one line
+        without the command (core adds it), or None when Claude has nothing to add."""
+        answer, why = prompt_evidence(session.native_id, prompt, since, launch_storage(session, environment))
+        return why if answer is None else None
 
     def _snapshot_flag(self, command):
         """The resume command, with mv2's own `--system-prompt-snapshot off` only where it applies.
