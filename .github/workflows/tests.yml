@@ -61,7 +61,10 @@ jobs:
           modules=$(../.venv/bin/python run.py --list)  # the suite job's modules, as unittest discover finds them
           for module in $modules; do
             echo "::group::$module"
-            if ! timeout 1200 ../.venv/bin/python -m unittest "$module"; then
+            code=0
+            timeout 1200 ../.venv/bin/python -m unittest "$module" || code=$?  # the step runs under bash -e
+            # 5 is "no tests ran": a module that only holds fixtures for others, which the suite job runs as 0 tests
+            if [ $code -ne 0 ] && [ $code -ne 5 ]; then
               failed+=("$module")
               echo "::error::$module failed when run alone"
             fi
