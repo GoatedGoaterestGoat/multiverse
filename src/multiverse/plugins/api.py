@@ -789,7 +789,8 @@ class Agent:
         return self.universe.agent(self.id)
 
     def session(self):
-        """This agent's session as the harness side sees it: native ID, launch, state, native mode and plugins."""
+        """This agent's session as the harness side sees it: native ID, launch, state, native mode, plugins and
+        its recorded workspace."""
         family = ""
         try:
             family = self._plugin.harness_info(self.universe, self.harness).family
@@ -798,7 +799,8 @@ class Agent:
         runtime = self.record.get("runtime") or {}
         return SessionInfo(self.universe.path, self.id, self.harness or "", family,
                            self.record.get("native_session_id"), runtime.get("launch_id"),
-                           runtime.get("state", "unknown"), runtime.get("native_mode"), runtime.get("plugins"))
+                           runtime.get("state", "unknown"), runtime.get("native_mode"), runtime.get("plugins"),
+                           self.record.get("workspace") or None)
 
     def terminal(self, lines=30):
         """The last `lines` lines of the agent's terminal, or why there is none (needs agents.read)."""

@@ -13,7 +13,7 @@ mv2 plugins new my-plugin
 This creates `my-plugin/` with `plugin.json`, `plugin.py` and `tests/test_my_plugin.py`. The manifest lists each extension point the plugin uses in `extends`:
 
 ```json
-{"schema": 1, "name": "my-plugin", "version": "0.1.0", "description": "", "api": "1.10",
+{"schema": 1, "name": "my-plugin", "version": "0.1.0", "description": "", "api": "1.11",
  "module": "plugin", "extends": ["dashboard.column"], "permissions": []}
 ```
 
@@ -136,7 +136,7 @@ Harness code reaches mv2 through `"$MV2_CLI"` and helper actions, with `MV2_PYTH
 
 These need no permission:
 
-- `agent.session()`, the `SessionInfo` that capability and usage functions get.
+- `agent.session()`, the `SessionInfo` that capability and usage functions get. Its `workspace` (1.11) is the agent's current workspace as `properties.json` records it, the same value the harness adapters use, or `None` when none is recorded.
 - `mv.harness_info(universe, name)`, a harness's `family`, `executable`, `unset_env`, `bridge`, `settings` and `home`.
 - `mv.settings` ([settings](#settings)).
 - `mv.state_dir(universe=None)` and `mv.agent_state_dir(agent)`, which give `state/plugins/NAME/` and `state/agents/ID/NAME/`.

@@ -220,3 +220,24 @@ class LaunchPlanTest(PluginTestCase):
             with mock.patch("multiverse.plugins.harness.version_of") as probe:
                 self.spawn_pi()
                 probe.assert_not_called()  # nothing here asks about Pi: no probe
+
+
+class SessionWorkspaceTest(PluginTestCase):
+    def test_both_session_entry_points_give_the_recorded_workspace(self):
+        """SessionInfo.workspace is the agent's recorded workspace from both entry points (the core session handle
+        and Agent.session()); a break goes unnoticed, because only GOAT's transcript search reads it, and one that
+        is missing or another agent's makes that search fail closed or skip the wrong unreadable folder."""
+        from multiverse.harnesses.types import SessionHandle
+        from multiverse.plugins import api
+        self.write_plugin("reader", {"module": "plugin", "permissions": ["agents.read"]},
+                          {"plugin.py": "def register(mv):\n    pass\n"})
+        self.enable("reader")
+        directory = self.agent("worker")
+        properties, facts = read(directory / "properties.json"), read(directory / "runtime.json")
+        handle = SessionHandle.from_records(properties, facts, directory)
+        mv = api.Plugin(loader.load(self.entry("reader")))
+        for entry, info in (("core handle", harness.session_info(handle, "claude", facts)),
+                            ("Agent.session()", mv.universe(self.root).agent("worker").session())):
+            with self.subTest(entry):
+                self.assertEqual(info.workspace, properties["workspace"])
+                self.assertEqual(info.workspace, handle.workspace)

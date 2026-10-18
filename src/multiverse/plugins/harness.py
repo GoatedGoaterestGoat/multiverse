@@ -377,6 +377,9 @@ class SessionInfo:
     state: str = "unknown"
     native_mode: dict | None = None
     plugins: dict | None = None  # this launch's runtime.json `plugins` record
+    # The agent's current workspace as properties.json records it (saved on every launch; the core
+    # SessionHandle's), or None when none is recorded (1.11).
+    workspace: str | None = None
 
     @property
     def directory(self):
@@ -389,7 +392,7 @@ def session_info(session, family, runtime=None):
     return SessionInfo(directory.parent.parent.parent, session.agent_id, session.harness, family or "",
                        session.native_id, session.launch_id, session.state,
                        dict(session.native_mode) if session.native_mode else None,
-                       (runtime or {}).get("plugins"))
+                       (runtime or {}).get("plugins"), session.workspace or None)
 
 
 def capabilities(info, taken):
