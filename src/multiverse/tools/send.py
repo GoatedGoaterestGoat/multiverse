@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 import sys
-from .. import universe
+from .. import universe, display
 from ..runtime import native
 from ..store import read, lock
 from ..universe import agents
@@ -61,7 +61,7 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
             result, receipt = _send_one(root, directory, text, sender, delivery, queue_only)
             running = bool(_present and receipt.get('state') in ('error', 'unavailable') and _running(directory))
             line = (f"Saved to {name}'s inbox; it sees it at its next check." if result['delivery'] == 'inbox-only'
-                    else delivery_line(name, receipt, delivery=delivery, text=text, running=running))
+                    else display.with_notices(delivery_line(name, receipt, delivery=delivery, text=text, running=running), receipt))
         results.append({'agent': name, **result})
         present = _present_error if result.get('ok') is False and _present_error else _present
         if present:
@@ -112,7 +112,8 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
                 update_message(directory, message['id'], submission_state='failed',
                                attempts=[*tracking.get('attempts', []), receipt])
         return ({**result, "state": receipt['state'], "saved": True, "native_delivery": delivery_summary(receipt),
-                "ok": receipt['state'] not in ('error', 'unavailable', 'unknown')}, receipt)
+                "ok": receipt['state'] not in ('error', 'unavailable', 'unknown'),
+                **({"notices": receipt["notices"]} if receipt.get("notices") else {})}, receipt)
 
 
 def cli_run(root=None, *, json=False, **options):

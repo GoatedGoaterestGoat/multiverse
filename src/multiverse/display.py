@@ -59,11 +59,18 @@ def label(record):
 
 
 def outcome(record, verb, failure):
-    """One plain line for a finished launch; a failed wait raises with its reason."""
+    """A launch summary and optional explanations; a failed wait raises with its reason."""
     name = record["name"]
     if record.get("ok") is False:
         raise ValueError(f"{name} {failure}: {record.get('error') or 'the launch did not finish'}")
-    return f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
+    summary = f"{verb} {name} ({label(record)})" + (": ready." if record.get("ready") else ".")
+    return with_notices(summary, record)
+
+
+def with_notices(summary, record):
+    notices = record.get("notices")
+    lines = [clean(item).strip() for item in notices if isinstance(item, str) and item.strip()] if isinstance(notices, list) else []
+    return "\n".join([summary, *lines])
 
 
 def cause(error, name, failure):

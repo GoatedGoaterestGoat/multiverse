@@ -650,9 +650,11 @@ def send_or_wake(root, reference, message_id, retry=False):
         launched = lifecycle.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
         _, tracking = message_record(directory, message_id)
         if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
-            return tracking['attempts'][-1]
-        return {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
-                'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
+            receipt = tracking['attempts'][-1]
+        else:
+            receipt = {'state': 'pending', 'ok': True, 'reason': 'Resuming with this message as the interactive starting prompt',
+                       'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
+        return {**receipt, 'notices': launched['notices']} if launched.get('notices') else receipt
     except Exception as error:
         _, tracking = message_record(directory, message_id)
         receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}'}

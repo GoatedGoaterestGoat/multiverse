@@ -185,6 +185,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if properties.get('native_session_provider') not in (None, provider):
             raise ValueError('Native provider differs from the saved conversation')
         properties['native_session_provider'] = provider
+        notices = _resume_notices(adapter, session, ambient, context.environment) if resume else []
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
         if command.shared_service and command.shared_service.identity:
             identity = asdict(command.shared_service.identity)
@@ -337,6 +338,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {**_request(argv, env, command, endpoint, resume_message_id),
+                                           'notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,
@@ -375,9 +377,22 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                         else "The native session has not started; retry spawn with a unique name")
             raise RuntimeError(f"Agent {properties['name']!r} ({properties['id']}) launch failed: {error}. "
                                f"Failed record preserved. {recovery}.") from error
-    if wait:
-        return wait_ready(root, agent_dir, launch_id, adapter, wait_timeout)
-    return launch_result(root, agent_dir)
+    result = (wait_ready(root, agent_dir, launch_id, adapter, wait_timeout) if wait
+              else launch_result(root, agent_dir))
+    return {**result, 'notices': notices} if notices else result
+
+
+def _resume_notices(adapter, session, caller_environment, effective_environment):
+    """Optional presentation only; never changes the storage or launch decision."""
+    hook = native.adapter_hook(adapter, 'resume_notice')
+    if hook is None:
+        return []
+    try:
+        notice = hook(session, dict(caller_environment), dict(effective_environment))
+    except Exception:
+        return []
+    notice = display.clean(notice).strip() if isinstance(notice, str) else ''
+    return [notice] if notice else []
 
 
 

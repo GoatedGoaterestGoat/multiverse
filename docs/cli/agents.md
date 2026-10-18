@@ -55,7 +55,7 @@ mv2 resume worker
 mv2 resume worker --model opus --wait
 ```
 
-`kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`.
+`kill` (alias `stop`) cancels the agent's current work, ends its process and closes its pane. Its record, inbox and native conversation are kept, so `resume` continues the same conversation. You can resume an agent that is `stopped` or `dormant`. If a caller storage override is ignored to preserve the saved conversation, the resume summary explains it on a separate line (also with `--wait`); `--json` includes it in `notices`. A message that wakes the agent returns the same notice.
 
 `kill --attachment-only` closes mv2's terminal and connection without requesting native cancellation. Work owned by a separate native service, such as a Codex bridge conversation, keeps running. Work owned by the terminal process ends when that process closes; the flag does not preserve it. You can also close a refused Codex terminal this way before a new `mv2 resume`, leaving the other client's conversation alone.
 
