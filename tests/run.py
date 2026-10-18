@@ -659,6 +659,8 @@ def _terminated(signum, frame):
 def main(argv=None):
     for name in [name for name in os.environ if credential(name)]:
         del os.environ[name]  # before any module is imported or any process started: none of them sees one
+    # The mv2 under test is this checkout's, not the one the running agent's shell names.
+    os.environ.update(MV2_CLI=str(HERE.parent / "bin" / "mv2"), MV2_PYTHON=sys.executable)
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--inventory"]:
         print(json.dumps(inventory(argv[1])))

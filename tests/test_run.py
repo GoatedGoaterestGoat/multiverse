@@ -288,16 +288,18 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(f"{guarded / 'cache.json'} in test_writes.Writes.test_swallowed", result.stdout)
         self.assertFalse((guarded / "cache.json").exists())
 
-    def test_a_credential_in_the_environment_reaches_no_module_test_or_child_process(self):
-        """The runner drops every variable that may hold a credential (tokens, secrets, keys, passwords, auth sockets
-        and askpass helpers, GitHub ones) before it imports or starts anything, so no module import, test or process a
-        test starts sees one; otherwise a failing assertion that prints an environment puts the user's token in logs
-        and transcripts, as one once did, and nothing shows it."""
+    def test_no_credential_or_other_checkouts_mv2_reaches_a_module_test_or_child_process(self):
+        """Before it imports or starts anything, the runner drops every variable that may hold a credential (tokens,
+        secrets, keys, passwords, auth sockets, askpass helpers) and points MV2_CLI and MV2_PYTHON at the mv2 under
+        test, not the running agent's; otherwise a failing assertion that prints an environment leaks a token, and a
+        worktree's tests run the live checkout's mv2, and nothing shows either."""
         planted = {"FAKE_SERVICE_TOKEN": "planted-token-value", "GITHUB_PERSONAL_ACCESS_TOKEN": "planted-gh-value",
                    "DEPLOY_KEY": "planted-key", "NPM_AUTH": "planted-auth", "MYSQL_PWD": "planted-pwd",
                    "GIT_ASKPASS": "/planted/askpass", "VSCODE_GIT_ASKPASS_MAIN": "/planted/vscode-askpass",
                    "SSH_AUTH_SOCK": "/planted/agent.sock"}
         kept = {"GIT_AUTHOR_NAME": "not a credential"}  # git's identity, which tests need
+        elsewhere = {"MV2_CLI": "/another/checkout/bin/mv2", "MV2_PYTHON": "/another/checkout/.venv/bin/python"}
+        own = {"MV2_CLI": str(RUNNER.parents[1] / "bin" / "mv2"), "MV2_PYTHON": sys.executable}
         self.module("test_secrets", f"""
             import json, os, subprocess, sys, unittest
             NAMES = {sorted(planted) + sorted(kept)!r}
@@ -311,8 +313,13 @@ class RunnerTest(unittest.TestCase):
                              "child": json.loads(child.stdout)}}
                     self.assertEqual(seen, {{"import": {sorted(kept)!r}, "test": {sorted(kept)!r},
                                             "child": {sorted(kept)!r}}})
+                    mv2 = subprocess.run([sys.executable, "-c", "import json, os; print(json.dumps("
+                                          "[os.environ.get('MV2_CLI'), os.environ.get('MV2_PYTHON')]))"],
+                                         capture_output=True, text=True, check=True)
+                    self.assertEqual(json.loads(mv2.stdout), {[own["MV2_CLI"], own["MV2_PYTHON"]]!r})
             """)
-        result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted, **kept}, text=True,
+        result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted, **kept, **elsewhere},
+                                text=True,
                                 capture_output=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("Ran 1 tests", result.stdout)

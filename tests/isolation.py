@@ -16,6 +16,7 @@ so that tests/run.py ends it even if the test is stopped before its cleanups run
 import json
 import os
 from pathlib import Path
+import sys
 import tempfile
 from unittest import mock
 
@@ -24,22 +25,25 @@ import home_safety  # captures the real ~/.multiverse at import, before any test
 import tracking
 
 # What a test must not inherit from the shell or agent running the suite: the agent's identity, universe,
-# tmux server and messaging socket, and the harnesses' homes. MV2_CLI and MV2_PYTHON name this checkout's code.
-KEPT = ("MV2_CLI", "MV2_PYTHON")
+# tmux server and messaging socket, and the harnesses' homes, and any credential.
 INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
+# The mv2 under test, which a test or what it starts may call: this checkout's, never the running agent's.
+OWN = {"MV2_CLI": str(Path(__file__).resolve().parents[1] / "bin" / "mv2"), "MV2_PYTHON": sys.executable}
 INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CONFIG_DIR", "TMUX", "TMUX_PANE")
 STARTED_WITH = dict(os.environ)  # before any test changed it: a value a test set itself is the test's to keep
 TRACKED = os.environ.get("MV2_TEST_TRACKED")  # where tests/run.py reads what to end after this unit
 
 
 def _inherited(key, value):
-    return (key not in KEPT and (key.startswith(INHERITED_PREFIXES) or key in INHERITED or credential(key))
+    return ((key.startswith(INHERITED_PREFIXES) or key in INHERITED or credential(key))
             and STARTED_WITH.get(key) == value)
 
 
 def isolated_environment(home):
     """os.environ without what was inherited, and HOME `home` unless the test already gave itself one."""
     environment = {key: value for key, value in os.environ.items() if not _inherited(key, value)}
+    for key, value in OWN.items():
+        environment.setdefault(key, value)  # unless the test set its own
     if os.environ.get("HOME") == STARTED_WITH.get("HOME"):
         environment["HOME"] = str(home)
     return environment
