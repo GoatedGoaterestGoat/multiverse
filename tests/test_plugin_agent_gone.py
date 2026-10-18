@@ -59,15 +59,17 @@ class AgentGoneTest(PluginTestCase):
                 self.folder = self.agent("worker-" + how)
                 worker = self.mv.universe(self.root).agent("worker-" + how)
                 self.removed(how)
-                with self.assertRaises(api.AgentGone):
+                with self.assertRaises(api.AgentGone) as caught:
                     self.mv.agent_state_dir(worker)
+                self.assertIsInstance(caught.exception, OSError)  # what 1.9 raised here: its callers catch OSError
                 with self.assertRaises(api.AgentGone):
                     api.files.write_json(self.folder / "writer" / "x.json", {})
                 with self.assertRaises(api.AgentGone):
                     api.files.write_json(self.folder / "x.json", {})
-                with self.assertRaises(api.AgentGone):
+                with self.assertRaises(api.AgentGone) as caught:
                     with api.files.lock(self.folder / "writer" / ".x.lock"):
                         pass
+                self.assertIsInstance(caught.exception, OSError)  # as for agent_state_dir
                 with self.assertRaises(api.AgentGone):
                     api.files.ensure_dir(self.folder / "writer" / "a")
                 self.mv.statusline.write(worker, "note", "late")  # never raises

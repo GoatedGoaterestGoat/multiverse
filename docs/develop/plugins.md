@@ -140,9 +140,9 @@ These need no permission:
 - `mv.harness_info(universe, name)`, a harness's `family`, `executable`, `unset_env`, `bridge`, `settings` and `home`.
 - `mv.settings` ([settings](#settings)).
 - `mv.state_dir(universe=None)` and `mv.agent_state_dir(agent)`, which give `state/plugins/NAME/` and `state/agents/ID/NAME/`.
-- An agent's folder (`state/agents/ID/`) and a universe's root are core's. The plugin API never makes them, so a late write can't bring back an agent or a universe that was removed or moved: `mv.agent_state_dir`, `mv.state_dir`, `api.files.write_json`, `lock` and `ensure_dir` raise `api.AgentGone` or `api.UniverseGone` (both `api.Gone`) for one that is gone, and `mv.statusline.write` and `mv.log` write nothing. Make anything under an agent's folder or a plugin's state with these, never with a `mkdir` that creates parents. To keep writing for one exact universe, keep its `Universe` object (from `mv.universe`): a plain path is resolved at or above, so for a removed subverse it would find its parent.
+- (1.10) An agent's folder (`state/agents/ID/`) and a universe's root are core's. The plugin API never makes them, so a late write can't bring back an agent or a universe that was removed or moved: `mv.agent_state_dir`, `mv.state_dir`, `api.files.write_json`, `lock` and `ensure_dir` raise `api.AgentGone` or `api.UniverseGone` (both `api.Gone`, which is also an `OSError`, as these raised before 1.10) for one that is gone, and `mv.statusline.write` and `mv.log` write nothing. Make anything under an agent's folder or a plugin's state with these, never with a `mkdir` that creates parents. To keep writing for one exact universe, keep its `Universe` object (from `mv.universe`): a plain path is resolved at or above, so for a removed subverse it would find its parent.
 - `mv.log(text, universe=None)`, which writes a line in `state/plugins/NAME/plugin.log`.
-- `api.files` (`read_json`, atomic `write_json`, `lock`, `ensure_dir`, `now`) and `api.text` (`clean`, `tokens`).
+- `api.files` (`read_json`, atomic `write_json`, `lock`, `ensure_dir` (1.10), `now`) and `api.text` (`clean`, `tokens`).
 - `mv.name`, `mv.version`, `mv.directory` and `mv.can(permission)`.
 
 A call that can't be done raises `api.Error` with a readable message.

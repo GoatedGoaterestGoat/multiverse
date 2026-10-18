@@ -59,8 +59,9 @@ class UniverseGoneTest(PluginTestCase):
                 if raises is None:
                     call()
                 else:
-                    with self.assertRaises(raises):
+                    with self.assertRaises(raises) as caught:
                         call()
+                    self.assertIsInstance(caught.exception, OSError)  # state_dir and lock raised OSError in 1.9
                 self.assertFalse(self.sub.exists(), f"{name} brought the removed universe back")
 
     def test_a_removal_between_two_steps_still_wins(self):

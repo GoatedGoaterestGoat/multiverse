@@ -38,9 +38,10 @@ class Error(ValueError):
     """An operation a plugin asked for could not be done; the message says why."""
 
 
-class Gone(Error):
+class Gone(Error, OSError):
     """A write was for an agent or a universe that is gone (removed, or moved): nothing of it is made again, so a
-    late write never brings it back as an orphan. Stop working for it."""
+    late write never brings it back as an orphan. Stop working for it. Also an OSError, which is what
+    agent_state_dir, state_dir and files.lock raised before 1.10, so code that catches that still does."""
 
 
 class AgentGone(Gone):
