@@ -9,7 +9,7 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 "$MV2_PYTHON" tests/run.py test_refresh test_tui.DashboardTests
 ```
 
-`tests/run.py` runs the same tests as `unittest discover -s tests`. It runs each module, or a shard of a slow one, in its own process, as many at once as the machine has CPUs. The whole suite takes about two and a half minutes on 8 cores. Name modules, classes or tests for a focused run, and add `-v` to see each test.
+`tests/run.py` runs the same tests as `unittest discover -s tests`. It runs each module, or a shard of a slow one, in its own process, as many at once as the machine has CPUs. The whole suite takes about two and a half minutes on 8 cores. It finds the modules as discovery does, through package directories such as `tests/qa/`, and `--list` prints them. Name modules, packages (`qa`), classes or tests for a focused run, and add `-v` to see each test.
 
 - **Concurrent runs share the machine.** Runs started at the same time take turns for its CPU slots instead of overloading it. A waiting run says which runs hold the slots, and again every 30 seconds while it waits: each run's agent, or `not an agent`, with its PID and directory, as in `Waiting for a slot: held by plugins (4 slots, pid 85884, /tmp/…)`. Ask that agent rather than stopping its run.
 - **Stopping is clean.** A unit past `--timeout` (20 minutes), or a run stopped with Ctrl-C or SIGTERM, fails the running test and still runs its cleanups: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running. A unit still running 30 seconds after the stop is killed. If the runner itself dies, each unit's watchdog process stops the unit the same way, with the same 30 seconds. Either way, what the unit's tests named with `track` (below) is ended afterwards. Never stop a run by pattern-killing processes.
@@ -57,7 +57,7 @@ Live native tests use local scripted providers and isolated homes. They need no 
 `.github/workflows/tests.yml` runs on pull requests and on pushes to `main` and `ci/*` branches, on Ubuntu 24.04 with tmux 3.4 and Node 22. Codex, Claude and Pi aren't installed there, so their live tests skip.
 
 - **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, and on 3.13.
-- **each module alone** runs every module by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
+- **each module alone** runs every module `tests/run.py --list` prints by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
 
 The plugin submodules are private and aren't fetched, so CI doesn't run the GOAT and remote-control plugins' own tests. `test_plugin_checkouts` still runs its own tests.
 

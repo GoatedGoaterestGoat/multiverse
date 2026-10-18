@@ -58,8 +58,8 @@ jobs:
         working-directory: tests
         run: |
           failed=()
-          for path in test_*.py; do
-            module=${path%.py}
+          modules=$(../.venv/bin/python run.py --list)  # the suite job's modules, as unittest discover finds them
+          for module in $modules; do
             echo "::group::$module"
             if ! timeout 1200 ../.venv/bin/python -m unittest "$module"; then
               failed+=("$module")

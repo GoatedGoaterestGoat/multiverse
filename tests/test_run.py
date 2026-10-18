@@ -760,6 +760,75 @@ class RunnerTest(unittest.TestCase):
         Run.kill(unit)  # macOS refuses killpg here (EPERM): nothing is left to kill, and it reaps the unit
         self.assertEqual(unit.returncode, 0)
 
+    def package(self, name, init="", modules=()):
+        """A package directory under tests/, with its __init__.py and (name, text) modules."""
+        directory = self.tests.joinpath(*name.split("."))
+        directory.mkdir(parents=True)
+        (directory / "__init__.py").write_text(textwrap.dedent(init))
+        for module, text in modules:
+            self.module(module, text, directory)
+        return directory
+
+    def test_packages_are_found_as_unittest_discover_finds_them(self):
+        self.module("recording", RECORDING)
+        recorded = """
+            from recording import Recorded
+            class Case(Recorded):
+                def test_{0}(self): self.record()
+            """
+        self.module("test_top", recorded.format("top"))
+        self.package("pkg", modules=[("test_inner", recorded.format("inner")), ("helpers", "x = 1\n")])
+        self.package("pkg.deeper", modules=[("test_deep", recorded.format("deep"))])
+        # Its own tests, in its __init__.py, and its modules too: it has no load_tests.
+        self.package("withinit", init=recorded.format("init"), modules=[("test_mod", recorded.format("mod"))])
+        # A load_tests in __init__.py loads the package's tests itself: discovery goes no deeper.
+        self.package("loaded", init="""
+            def load_tests(loader, tests, pattern):
+                return loader.loadTestsFromName("loaded.test_one")
+            """, modules=[("test_one", recorded.format("one")),
+                          ("test_two", "import unittest\nclass Never(unittest.TestCase):\n"
+                                       "    def test_never(self): self.fail('discovery never loads this')\n")])
+        notpkg = self.tests / "notpkg"  # no __init__.py: not a package, so not searched
+        notpkg.mkdir()
+        self.module("test_ignored", "import unittest\nclass Never(unittest.TestCase):\n"
+                                    "    def test_never(self): self.fail('discovery never loads this')\n", notpkg)
+        discovered = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", str(self.tests)],
+                                    text=True, capture_output=True, timeout=60)
+        self.assertEqual(discovered.returncode, 0, discovered.stderr)
+        expected = self.recorded()
+        self.assertEqual(len(expected), 6, expected)
+        self.record.unlink()
+        result = self.run_tests()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded(), expected)
+        listed = subprocess.run(self.command("--list"), text=True, capture_output=True, timeout=60)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertEqual(listed.stdout.split(), ["loaded", "pkg.deeper.test_deep", "pkg.test_inner", "test_top",
+                                                 "withinit", "withinit.test_mod"])
+        # A package by name runs its modules; a module by its path inside a package runs that module.
+        self.record.unlink()
+        result = self.run_tests("pkg")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded(), ["pkg.deeper.test_deep.Case.test_deep", "pkg.test_inner.Case.test_inner"])
+        self.record.unlink()
+        result = self.run_tests(str(self.tests / "pkg" / "deeper" / "test_deep.py"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.recorded(), ["pkg.deeper.test_deep.Case.test_deep"])
+
+    def test_a_dotted_selection_in_a_package_counts_import_failures_as_discovery_does(self):
+        self.package("pkg_skip", modules=[("test_skip", """
+            import unittest
+            raise unittest.SkipTest("not on this machine")
+            """)])
+        self.package("pkg_broken", modules=[("test_broken", """
+            raise RuntimeError("not an ImportError")
+            """)])
+        result = self.run_tests("pkg_skip.test_skip.Some", "pkg_broken.test_broken.Missing.test_x")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("RuntimeError: not an ImportError", result.stdout)
+        self.assertNotIn("units without a result", result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], "FAILED (errors=1, skipped=1)")
+
     def kill_if_running(self, pid):
         """Kill `pid` if it is still one this test started (never a process that took the number since)."""
         command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True, capture_output=True).stdout

@@ -23,6 +23,8 @@ it is still there.
 import argparse
 import concurrent.futures
 import fcntl
+import fnmatch
+import importlib
 import json
 import os
 from pathlib import Path
@@ -43,6 +45,7 @@ SHARD_SECONDS = 20  # a module the record says takes longer is split into shards
 UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
 TIMEOUT = 1200
 GRACE = 30  # seconds a unit the runner stops gets to finish its test's cleanups before it is killed
+PATTERN = "test*.py"  # what unittest discover loads
 OBSERVE_SECONDS = 0.5  # how often a worker records who is in the process groups its tests tracked
 _monotonic = time.monotonic  # the real clock, whatever a test patches into the time module while it runs
 SLOTS = Path(f"/tmp/mv2-test-slots-{os.getuid()}")  # shared by every run of the suite on this machine
@@ -215,6 +218,40 @@ def _observe(tracked):
                 out.write("".join(lines))
 
 
+def inventory(start):
+    """The units unittest discover would load from `start`, in its order: every test*.py module, found through the
+    package directories (those with an __init__.py) that discovery searches, and every package whose __init__.py
+    has tests of its own or a load_tests that loads its tests itself, below which discovery goes no deeper. Imports
+    the packages, never a test module."""
+    sys.path[:0] = [str(start)] + ([str(HERE)] if Path(start) != HERE else [])
+    import home_safety
+    home_safety.install()
+    loader, units = unittest.TestLoader(), []
+
+    def search(directory, prefix):
+        for entry in sorted(os.listdir(directory)):
+            path = os.path.join(directory, entry)
+            if os.path.isfile(path):
+                if unittest.loader.VALID_MODULE_NAME.match(entry) and fnmatch.fnmatch(entry, PATTERN):
+                    units.append(prefix + entry[:-3])
+            elif os.path.isfile(os.path.join(path, "__init__.py")):
+                name = prefix + entry
+                try:
+                    package = importlib.import_module(name)
+                except Exception:
+                    units.append(name)  # its unit reports the skip or the failure, as discovery does
+                    continue
+                if getattr(package, "load_tests", None) is not None:
+                    units.append(name)
+                    continue
+                if loader.loadTestsFromModule(package).countTestCases():
+                    units.append(name)
+                search(path, name + ".")
+
+    search(str(start), "")
+    return units
+
+
 def worker(start, target, shard, shards, report, verbosity, watch, grace):
     tracked, worker_pid = os.environ.get("MV2_TEST_TRACKED"), os.getpid()
     worker_alive, alive = os.pipe()  # the watchdog reads EOF from `worker_alive` once this process is gone
@@ -231,16 +268,30 @@ def worker(start, target, shard, shards, report, verbosity, watch, grace):
     import home_safety
     home_safety.install()  # strict: before a test module or fixture moves HOME
     loader = unittest.TestLoader()
-    module = target.split(".", 1)[0]  # a module, or a class or test in one, by name
-    try:  # as discovery imports a module: a SkipTest skips it, anything else is a failing test
-        __import__(module)
-    except unittest.SkipTest as skip:
-        suite = unittest.loader._make_skipped_test(module, skip, unittest.TestSuite)
-    except BaseException:
-        suite, _ = unittest.loader._make_failed_import_test(module, unittest.TestSuite)
-    else:
-        suite = (loader.loadTestsFromName(target) if "." in target
-                 else loader.loadTestsFromModule(sys.modules[module], pattern="test*.py"))
+    # A module (qa.test_x), or a class or test in one, by name. Import the module part a package at a time, as
+    # discovery imports a module: a SkipTest skips it, anything else is a failing test named after it.
+    parts, module, suite = target.split("."), None, None
+    for end in range(1, len(parts) + 1):
+        name = ".".join(parts[:end])
+        if module is not None and not hasattr(sys.modules[module], "__path__"):
+            break  # a module, not a package: the rest is a class or test in it
+        try:
+            importlib.import_module(name)
+        except unittest.SkipTest as skip:
+            suite = unittest.loader._make_skipped_test(name, skip, unittest.TestSuite)
+            break
+        except ModuleNotFoundError as error:
+            if error.name == name and module is not None:
+                break  # no such module in the package: a class or test in its __init__.py
+            suite, _ = unittest.loader._make_failed_import_test(name, unittest.TestSuite)
+            break
+        except BaseException:
+            suite, _ = unittest.loader._make_failed_import_test(name, unittest.TestSuite)
+            break
+        module = name
+    if suite is None:
+        suite = (loader.loadTestsFromModule(sys.modules[module], pattern=PATTERN) if module == target
+                 else loader.loadTestsFromName(target))
     tests = [test for index, test in enumerate(_tests(suite)) if index % shards == shard]
     for test in tests:
         _mark_interruptible(test)
@@ -292,15 +343,39 @@ class Run:
         self.start, self.jobs, self.timeout, self.verbose = Path(start).resolve(), jobs, timeout, verbose
         self.grace = grace
         self.durations = self.start.parent / ".run" / "test-durations.json"
-        self.processes, self.lock, self.stopping = set(), threading.Lock(), threading.Event()
+        self.processes, self.lock, self.stopping, self.modules = set(), threading.Lock(), threading.Event(), []
         self.slots, self.budget, self.held = Path(slots), budget or os.cpu_count() or 4, 0
         self.holder, self.noticed = json.dumps(_holder()) + "\n", None  # who this run is; when it last said who waits
 
+    def inventory(self):
+        """The modules unittest discover finds under the start directory (inventory), found in a process of their own:
+        finding them imports the test packages."""
+        found = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--inventory", str(self.start)],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=300)
+        lines = found.stdout.strip().splitlines()
+        if found.returncode != 0 or not lines:
+            raise SystemExit(f"Cannot find the tests under {self.start}:\n{found.stdout}{found.stderr}")
+        return json.loads(lines[-1])  # the last line: a package may print as it is imported
+
+    def dotted(self, name):
+        """A module or package name for a path (tests/qa/test_x.py, tests/qa), else `name` as it is."""
+        if not (name.endswith(".py") or os.sep in name):
+            return name
+        path = Path(name).resolve()
+        try:
+            relative = path.relative_to(self.start)
+        except ValueError:
+            return path.stem
+        return ".".join((relative.with_suffix("") if path.suffix == ".py" else relative).parts)
+
     def targets(self, names):
-        if not names:
-            return sorted(path.stem for path in self.start.glob("test*.py") if path.stem.isidentifier())
-        return [name[:-3].replace(os.sep, ".").rpartition(".")[2] if name.endswith(".py") else name
-                for name in names]
+        """What to run: every module discovery finds, or what `names` choose: a module, a package's modules, or a
+        class or test by its dotted name."""
+        self.modules = self.inventory()
+        chosen = []
+        for name in map(self.dotted, names):
+            chosen += [module for module in self.modules if module == name or module.startswith(name + ".")] or [name]
+        return chosen if names else list(self.modules)
 
     def recorded(self):
         try:
@@ -312,7 +387,7 @@ class Run:
         """(target, shard, shards) for each unit, the longest expected first."""
         known, units = self.recorded(), []
         for target in targets:
-            expected = known.get(target, UNKNOWN_SECONDS) if "." not in target else 0
+            expected = known.get(target, UNKNOWN_SECONDS) if target in self.modules else 0
             shards = max(1, round(expected / SHARD_SECONDS)) if target in known else 1
             units += [(expected / shards, target, shard, shards) for shard in range(shards)]
         return [unit[1:] for unit in sorted(units, key=lambda unit: -unit[0])]
@@ -635,6 +710,9 @@ def _terminated(signum, frame):
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--inventory"]:
+        print(json.dumps(inventory(argv[1])))
+        return 0
     if argv[:1] == ["--worker"]:
         start, target, shard, shards, report, verbosity, grace, watch = argv[1:]
         return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch), float(grace))
@@ -646,6 +724,7 @@ def main(argv=None):
     parser.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4,
                         help="units at once (default: the CPU count)")
     parser.add_argument("-v", "--verbose", action="count", default=0, help="show each unit's tests as it ends")
+    parser.add_argument("--list", action="store_true", help="print the modules a run would run, one a line, and stop")
     parser.add_argument("--timeout", type=float, default=TIMEOUT,
                         help=f"seconds before a unit is killed (default: {TIMEOUT})")
     parser.add_argument("-s", "--start-directory", default=str(HERE), help=argparse.SUPPRESS)
@@ -653,6 +732,10 @@ def main(argv=None):
     parser.add_argument("--budget", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--grace", type=float, default=GRACE, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.list:
+        run = Run(args.start_directory, 1, args.timeout, False, args.slots_directory, args.budget, args.grace)
+        print("\n".join(run.targets(args.names)))
+        return 0
     return Run(args.start_directory, max(1, args.jobs), args.timeout, bool(args.verbose), args.slots_directory,
                args.budget, args.grace)(args.names)
 
