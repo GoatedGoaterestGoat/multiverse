@@ -113,6 +113,17 @@ class ClaudeLaunchOnlyTest(BaseTest):
                 self.assertIn('2.1.279 is older than 2.1.280', found[name]['reason'])
 
 
+    def test_usage_without_a_launch_matches_what_every_claude_launch_has(self):
+        # qa-claude CLAUDE-9: usage is measured from Claude's transcript, with or without the bridge.
+        for setting in (None, True, False):
+            for probe in (False, True):
+                with self.subTest(setting=setting, probe=probe):
+                    found, _ = self.harness(setting, probe=probe)
+                    self.assertEqual((found['get_usage']['state'], found['get_usage']['mechanism']),
+                                     ('supported', 'claude-transcript'))
+        old, _ = self.harness(None, version=(2, 1, 279), probe=True)  # plain, but its transcript still counts
+        self.assertEqual(old['get_usage']['state'], 'supported')
+
 class ClaudeFreshResumeNoticeTest(BaseTest):
     """Resume keeps the fresh start of a session Claude has no conversation for (PR #3), and now says so in the
     resume result: "stopped before its first message" unless mv2 or Claude has evidence that one existed."""

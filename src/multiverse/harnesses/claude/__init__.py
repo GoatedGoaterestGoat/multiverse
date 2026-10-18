@@ -693,9 +693,12 @@ class ClaudeAdapter(ConfiguredAdapter):
                                else f'Agents of this harness launch without the bridge: {problem}')
         mechanisms = {'send_steer': 'claude-peer-inbox', 'send_follow_up': 'claude-peer-inbox',
                       'ask': 'claude-model-fork', 'get_delivery': 'claude-mod-receipt'}
-        return {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
-                       else Capability('unavailable', why, required=name.startswith('send_')))
-                for name, mechanism in mechanisms.items()}
+        result = {name: (Capability('supported', found, mechanism, required=name.startswith('send_')) if found
+                         else Capability('unavailable', why, required=name.startswith('send_')))
+                  for name, mechanism in mechanisms.items()}
+        # Usage is measured from the session's transcript, so every launch has it, connected or not.
+        result['get_usage'] = Capability('supported', mechanism='claude-transcript')
+        return result
 
     def get_usage(self, session, executor=None):
         """Transcript totals, plus the mod's context/cost/rate limits while they belong to this launch."""
