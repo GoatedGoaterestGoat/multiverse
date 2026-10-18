@@ -938,8 +938,12 @@ limited to the actual active native refusal widget in an owned visible pane,
 with its controls and hidden cursor, at the tested version; quoted history is
 not a refusal. Same-server successful rejoin is never labelled in use.
 
-The plain startup observer runs only for a supported native layout and for at
-most the first 60 seconds of launch startup. It stops sooner after validated
+The plain startup observer runs only for a supported native layout, with a
+55-second observation window from the launch's start. The default 60-second
+readiness wait leaves a five-second margin beyond observation; explicit wait
+timeouts are unchanged. At the observation bound, an unrecognized screen
+(including an unanswered trust prompt) falls back to process readiness with a
+notice instead of blocking the launch. It stops sooner after validated
 bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
 perform no pane polling; later TUI navigation is outside this startup observer.
 

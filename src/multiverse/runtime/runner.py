@@ -21,7 +21,8 @@ from multiverse.runtime.process import process_started
 STARTUP_SECONDS = 2
 OUTPUT_LINES = 40
 OUTPUT_BYTES = 8192
-REFUSAL_STARTUP_SECONDS = 60
+# Finish five seconds before the default 60-second readiness wait.
+REFUSAL_STARTUP_SECONDS = 55
 
 
 def bounded_output(text):

@@ -1,6 +1,7 @@
 """A native refusal is primary and latched until a new mv2 launch."""
 from uuid import uuid4
 import json
+import inspect as python_inspect
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -214,9 +215,40 @@ class LaunchRefusalTest(BaseTest):
         with patch.object(runner.time, 'monotonic', side_effect=lambda: monitor.stopped.elapsed), \
                 patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
             monitor._run()
-        self.assertLessEqual(monitor.stopped.elapsed, 60)
+        self.assertLessEqual(monitor.stopped.elapsed, 55)
         self.assertLessEqual(monitor.describe.call_count, 240)
         self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'unverified')
+
+    def test_default_wait_outlasts_unknown_screen_observation_by_five_seconds(self):
+        class Clock:
+            elapsed = 0.
+            def is_set(self):
+                return self.elapsed >= 75
+            def wait(self, seconds):
+                self.elapsed += seconds
+        attachment = {'readiness': 'process'}
+        agents.update_runtime(self.directory, self.launch, state='running', pid=123,
+                              startup_checked=True, startup_delivery=None, attachment=attachment,
+                              native_versions={'cli': '0.163.0'},
+                              native_startup_observation={'state': 'pending'})
+        write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': attachment})
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
+        monitor.stopped = Clock()
+        monitor.describe = Mock(return_value=None)
+        monitor.started = Mock(return_value=False)
+        backend = Mock()
+        backend.run.side_effect = lambda command, *args: 'Trust this folder?' if command == 'capture-pane' else '0'
+        default_timeout = python_inspect.signature(lifecycle.start).parameters['wait_timeout'].default
+        with patch.object(runner.time, 'monotonic', side_effect=lambda: monitor.stopped.elapsed), \
+                patch.object(lifecycle.time, 'sleep', side_effect=lambda seconds: monitor._run()), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                patch('multiverse.terminal.tmux.owned', return_value=(backend, '%1')):
+            result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, default_timeout)
+        self.assertTrue(result['ready'], result)
+        self.assertIn('could not be confirmed', result['notices'][0])
+        self.assertEqual(monitor.stopped.elapsed, 55)
+        self.assertGreaterEqual(default_timeout - monitor.stopped.elapsed, 5)
 
     def test_definite_startup_queue_fails_but_a_registered_wake_prompt_stays_uncertain(self):
         queued = append_message(self.directory, 'not submitted', {}, delivery='steer', target_session=self.thread)
