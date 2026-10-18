@@ -73,9 +73,11 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_the_dashboard_offers_exactly_the_recovery_the_listing_hints(self):
         """On real folders, K kills a damaged row only when the listing's hint says kill can recover it (launch history
-        shows a terminal may run), a record-free folder can be deleted and one with launch history is not offered;
-        fragile because the listing's recover hint and the dashboard's gate must agree on one field across two modules,
-        and a break leaves a native agent running behind an ordinary row (b6c754f, 3dd29b3)."""
+        shows a terminal may run), a record-free folder can be deleted, and one is offered for deletion only when its
+        launch folders hold nothing but leftovers (bootstrap.md, task.md or nothing): any other file there, such as
+        request.json, is launch history and the folder is not offered; fragile because the listing's recover hint
+        and the dashboard's gate must agree on one field across two modules, and a break leaves a native agent
+        running behind an ordinary row (b6c754f, 3dd29b3, aefb8be)."""
         lost = self.agent("lost")  # no runtime.json, but a launch folder: a terminal may still be running
         (lost / "runtime.json").unlink()
         (lost / "launches" / "0e0e0e0e-0000-4000-8000-000000000001").mkdir(parents=True)
@@ -87,8 +89,13 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         orphan = agents / "5f5f5f5f-0000-4000-8000-0000000000aa"
         (orphan / "plugin-state").mkdir(parents=True)
         (orphan / "plugin-state" / "note.txt").write_text("leftover")
-        haunted = agents / "6a6a6a6a-0000-4000-8000-0000000000bb"
-        (haunted / "launches" / "7b7b7b7b-0000-4000-8000-0000000000cc").mkdir(parents=True)  # launch history: not an orphan
+        haunted = agents / "6a6a6a6a-0000-4000-8000-0000000000bb"  # launch history: its launch was requested
+        (haunted / "launches" / "7b7b7b7b-0000-4000-8000-0000000000cc").mkdir(parents=True)
+        (haunted / "launches" / "7b7b7b7b-0000-4000-8000-0000000000cc" / "request.json").write_text("{}")
+        abandoned = agents / "8c8c8c8c-0000-4000-8000-0000000000dd"  # launch folders with only leftovers: an orphan
+        (abandoned / "launches" / "9d9d9d9d-0000-4000-8000-0000000000ee").mkdir(parents=True)
+        (abandoned / "launches" / "9d9d9d9d-0000-4000-8000-0000000000ef").mkdir(parents=True)
+        (abandoned / "launches" / "9d9d9d9d-0000-4000-8000-0000000000ef" / "bootstrap.md").write_text("start")
         with mock.patch.object(LocalBackend, "kill", return_value={}) as kill, \
                 mock.patch.object(LocalBackend, "resume") as resume:
             async with self.dashboard(size=(130, 36)) as d:
@@ -121,11 +128,15 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                         self.assertIn("cannot be used", d.status, key)
                     self.assertEqual(kill.call_count, 1)
                     resume.assert_not_called()
-                with self.subTest("a folder with launch history is not offered for deletion"):
-                    d.select(haunted.name)
-                    self.assertNotIn("recover", d.app.selected["damaged"])
-                    await d.press("d")
-                    self.assertEqual(len(d.app.screen_stack), 1)
+                with self.subTest("a folder is offered for deletion only when its launches left nothing but leftovers"):
+                    for folder, offered in ((haunted, False), (abandoned, True)):
+                        d.select(folder.name)
+                        self.assertEqual(d.app.selected["damaged"].get("recover"), "remove" if offered else None, folder.name)
+                        await d.press("d")
+                        self.assertEqual(len(d.app.screen_stack), 2 if offered else 1, folder.name)
+                        if offered:
+                            await d.press("escape")  # only looked at: the next row below is deleted for real
+                    self.assertTrue(abandoned.exists())
                 with self.subTest("the row and the inspector say what resolves each kind of damaged row"):
                     await d.press("p")  # the inspector follows the selection from here on
 
