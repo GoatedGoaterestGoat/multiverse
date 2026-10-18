@@ -312,8 +312,9 @@ class CodexAdapter(ConfiguredAdapter):
                 for key, value in accepted_receipts.items())
                 or len(set(accepted_receipts.values())) != len(accepted_receipts)):
             return NativeResult('error', 'Accepted native queue receipts must have unique nonempty IDs')
-        if not accepted_receipts:
-            return NativeResult('ok', 'No accepted follow-ups to continue', {'continued': False})
+        from .queue_events import restart_claimed
+        if not restart_claimed(session):
+            return NativeResult('ok', 'No newly claimed message permits queue continuation', {'continued': False})
         if (not self._uses_bridge(session) or session.state != 'running' or not session.native_id
                 or not session.endpoint or session.endpoint.transport != 'unix-websocket'
                 or (session.native_relay and session.native_relay.get('state') == 'lost')):

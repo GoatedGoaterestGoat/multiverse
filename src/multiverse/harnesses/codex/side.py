@@ -209,6 +209,14 @@ class LaunchConnection:
                     setattr(self.root, key, getattr(self.primary, key))
         return native_id
 
+    def primary_event(self, direction, value):
+        if self.ended or not self.root.bound or self.owns_primary() is not True:
+            return None
+        from .queue_events import PrimaryEvents
+        if not hasattr(self.root, '_queue_events'):
+            self.root._queue_events = PrimaryEvents()
+        return self.root._queue_events.observe(direction, value, self.root.native_id)
+
     def after_bind(self, upstream_path):
         return self.primary.after_bind(upstream_path)
 

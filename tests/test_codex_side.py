@@ -172,3 +172,34 @@ class CodexSideTest(unittest.TestCase):
         self.assertIsNone(caught.exception.request_id)
         self.assertTrue(self.protocol.bound)
         self.assertEqual(self.primary_state(), before)
+
+    def test_primary_queue_events_preserve_interrupt_order_and_ignore_the_side(self):
+        """Primary interrupt ordering controls durable queue pause; a side or late old turn must not silently pause a newer primary turn."""
+        observe = getattr(self.view, 'primary_event', lambda direction, frame: None)
+        def incoming(kind, turn, status=None, native=None):
+            return {'method': 'turn/' + kind, 'params': {'threadId': native or self.main,
+                    'turn': {'id': turn, **({'status': status} if status else {})}}}
+        def event(kind, turn, **fields):
+            return {'kind': kind, 'native_session_id': self.main, 'turn_id': turn, **fields}
+        rows = [
+            ('incoming', incoming('started', 'one'), event('started', 'one')),
+            ('outgoing', {'id': 30, 'method': 'turn/interrupt',
+                'params': {'threadId': self.main, 'turnId': 'one'}}, event('interrupt', 'one')),
+            ('incoming', {'id': 30, 'result': {}}, None),
+            ('incoming', incoming('completed', 'one', 'interrupted'), event('completed', 'one', status='interrupted')),
+            ('incoming', incoming('started', 'two'), event('started', 'two')),
+            ('incoming', incoming('completed', 'one', 'interrupted'), None),
+            ('incoming', incoming('completed', 'two', 'completed'), event('completed', 'two', status='finished')),
+            ('incoming', incoming('started', 'side', native=self.side), None),
+            ('incoming', incoming('completed', 'side', 'interrupted', self.side), None),
+            ('outgoing', {'id': 31, 'method': 'turn/interrupt',
+                'params': {'threadId': self.main, 'turnId': ''}}, None),
+        ]
+        for direction, frame, expected in rows:
+            with self.subTest(direction=direction, frame=frame):
+                self.assertEqual(observe(direction, frame), expected)
+        self.owner = False
+        self.assertIsNone(observe('incoming', incoming('started', 'other-client')))
+        self.owner = True
+        self.view.closed()
+        self.assertIsNone(observe('incoming', incoming('started', 'late')))

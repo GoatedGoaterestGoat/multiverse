@@ -11,6 +11,8 @@ class CodexControlTest(unittest.TestCase):
     def setUp(self):
         self.ctx = SessionHandle('agent', 'codex', '/tmp', native_id=str(uuid4()))
         self.message = Message(str(uuid4()), 'literal `false` $(false)', framed='Message from reviewer:\nliteral `false` $(false)')
+        self.ctx = replace(self.ctx, queue_state={'native_session_id': self.ctx.native_id,
+            'restart': {'id': self.message.id, 'state': 'claimed'}})
         self.requests = []
 
     def run_plan(self, operation, *, state='active', overrides=None):
@@ -52,9 +54,8 @@ class CodexControlTest(unittest.TestCase):
                 ('steer', 'idle', None, idle_add, None),
                 ('steer', 'idle', {'data': [own]}, idle_add + ['thread/queue/start'], 'started'),
                 ('follow-up', 'idle', {'data': [own]}, idle_add + ['thread/queue/start'], 'started'),
-                ('follow-up', 'idle', {'data': [other]}, idle_add, 'other work'),
-                ('follow-up', 'idle', {'data': [own, other]}, idle_add, 'other work'),
-                ('follow-up', 'idle', {'data': [own], 'nextCursor': 'more'}, idle_add, 'other work')):
+                ('follow-up', 'idle', {'data': [other]}, idle_add + ['thread/queue/start'], 'started'),
+                ('follow-up', 'idle', {'data': [own], 'nextCursor': 'more'}, idle_add + ['thread/queue/start'], 'started')):
             with self.subTest(operation=operation, state=state, queue=queue):
                 self.requests.clear()
                 overrides = {'thread/queue/list': {'result': queue}} if queue else None
@@ -69,11 +70,19 @@ class CodexControlTest(unittest.TestCase):
                 if submitted.method == 'turn/steer':
                     self.assertEqual(submitted.params['expectedTurnId'], 'exact-turn')
                 if wake == 'started':
-                    self.assertEqual(result.value['turn_id'], 'queue-turn')
+                    self.assertEqual(result.value['queue_started_turn_id'], 'queue-turn')
                     self.assertEqual(self.requests[-1].params,
-                        {'threadId': self.ctx.native_id, 'queuedSubmissionId': 'queue-item'})
+                        {'threadId': self.ctx.native_id})
                 elif wake == 'other work':
                     self.assertIn('other queued work', result.reason)
+
+        for state in (None, {'native_session_id': self.ctx.native_id, 'restart': {'id': 'other', 'state': 'claimed'}},
+                      {'native_session_id': self.ctx.native_id, 'restart': {'id': self.message.id, 'state': 'pending'}}):
+            with self.subTest(no_fresh_claim=state):
+                self.ctx = replace(self.ctx, queue_state=state)
+                self.requests.clear()
+                self.assertEqual(self.run_plan('follow-up', state='idle').state, 'native_queued')
+                self.assertNotIn('thread/queue/start', [r.method for r in self.requests])
 
     def test_failure_after_acceptance_is_never_resent(self):
         """Every failure after Codex accepted a message is reported without a second submission; a break goes unnoticed
@@ -144,15 +153,17 @@ class CodexControlTest(unittest.TestCase):
         """A receipt is queued or transcript-confirmed only by clientUserMessageId in Codex's queue and turn history,
         and lookup never resends; fragile because it reads Codex's history item shape, and a wrong answer stays
         invisible until someone asks whether a message arrived."""
-        for queue, items, expected in (
-            ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False),
-            ([], [{'type': 'userMessage', 'clientId': self.message.id}], True),
-            ([], [{'type': 'userMessage', 'clientId': 'another-message'}], None),
+        for queue, items, expected, paused in (
+            ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, False),
+            ([{'id': 'receipt', 'clientUserMessageId': self.message.id}], [], False, True),
+            ([], [{'type': 'userMessage', 'clientId': self.message.id}], True, False),
+            ([], [{'type': 'userMessage', 'clientId': 'another-message'}], None, False),
         ):
             replies = {'initialize': {}, 'thread/read': {'thread': {'id': self.ctx.native_id,
                 'cwd': '/tmp', 'status': {'type': 'active'}}}, 'thread/queue/list': {'data': queue},
                 'thread/turns/list': {'data': [{'id': 'turn', 'items': items}]}}
-            generator = get_delivery(self.ctx, self.message.id)
+            session = replace(self.ctx, queue_state={'native_session_id': self.ctx.native_id, 'state': 'paused'}) if paused else self.ctx
+            generator = get_delivery(session, self.message.id)
             request = next(generator)
             while True:
                 self.assertNotIn(request.method, ('turn/steer', 'thread/queue/add'))
@@ -161,6 +172,8 @@ class CodexControlTest(unittest.TestCase):
                 except StopIteration as done:
                     result = done.value
                     break
+            if expected is False:
+                self.assertEqual(bool(result.value.get('paused')), paused)
             if expected is None:
                 self.assertEqual(result.state, 'unknown')
             else:

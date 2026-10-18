@@ -106,6 +106,8 @@ On launch-only spawn and resume, including automatic fallback, mv2 requests an e
 {"schema": 2, "adapter": "codex", "settings": {"args": ["--sandbox", "workspace-write"]}}
 ```
 
+**Interrupted queues.** After an interrupt (such as Esc), accepted follow-ups stay paused with Codex's own queue. The pause survives stop and resume. A new terminal prompt, or a new steer or follow-up submitted by mv2, starts the native FIFO head and continues the queue in order. Inbox-only messages, `deliver --check` and `deliver --retry` do not restart it. `deliver --check` shows queued messages as paused until a new turn starts; it never resends them.
+
 **Session binding.** With a live connection, mv2 records Codex's session ID automatically. A launch-only agent is asked to run `mv2 session-bind` at startup. If it never did, take the ID from Codex's `/status` and bind it with `mv2 session-bind --agent NAME --session-id UUID` before resuming.
 
 **Lost terminals.** If an agent's terminal loses its connection to the daemon, `STATUS` shows `disconnected`. New messages are then refused, but saved. If the session was idle, mv2 reconnects it in the same pane, at most twice in five minutes, and `mv2 list` notes `Reconnected automatically.` Unsent text in Codex's composer is lost. When mv2 doesn't reconnect it, kill and resume the agent, as [troubleshooting](troubleshooting.md#codex-shows-status-disconnected) describes.
