@@ -126,6 +126,22 @@ class NativeDeliveryTest(BaseTest):
             self.assertEqual(adapter.send(session, Message('id', 'text'), executor).state, 'unavailable')
             executor.rpc.assert_not_called()
             executor.command.assert_not_called()
+        # Shao, a8925af: a plain Pi got "kill, resume, deliver --retry" advice, which can never connect it.
+        for case, settings, flagged in (('plain Pi', {}, True), ('plain Pi, set to false', {'inbox_bridge': False}, True),
+                                        ('bridged Pi, not registered yet', {'inbox_bridge': True}, False)):
+            with self.subTest(case):
+                adapter = harnesses.PiAdapter.configured('pi', settings)
+                session = SessionHandle('agent', 'pi', str(self.work), native_id=str(uuid4()), state='running')
+                executor = Mock()
+                offered = adapter.capabilities(session)
+                for name in ('send_steer', 'send_follow_up'):
+                    self.assertEqual((offered[name].state, offered[name].mechanism),
+                                     ('unavailable', 'launch-only' if flagged else None))
+                    self.assertEqual(offered[name].reason.startswith('This agent is launch-only'), flagged)
+                result = adapter.send(session, Message('id', 'text', delivery='steer'), executor)
+                self.assertEqual((result.state, result.value),
+                                 ('unavailable', {'launch_only': True, 'final': True} if flagged else None))
+                executor.request.assert_not_called()
 
     def test_native_subprocess_scrubs_identity_and_preserves_literal_argv(self):
         """Native helper commands run without the caller's MV2_*, CODEX_THREAD_ID or CLAUDECODE and with literal argv;
