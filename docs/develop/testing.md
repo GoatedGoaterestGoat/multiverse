@@ -49,6 +49,8 @@ def test_runs_at_once_share_the_machines_slots(self):
 | `isolation.py`, `home_safety.py`, `credentials.py` | Each test's own HOME and environment, the guard on the real `~/.multiverse`, and which variables count as credentials (not test modules) |
 | `native_safety.py` | The Codex daemon guard (not a test module) |
 | `native_processes.py` | Ends the processes of a private Codex server before its test removes the home (not a test module) |
+| `native_cli.py` | An `mv2` launcher pinned to this checkout's source and interpreter, and a `python3` that fails if called, for native callback fixtures (not a test module) |
+| `fixtures/` | Data recorded from the real thing: Codex 0.163.0 screens, Claude session files and `/proc` lines, a delivery ledger written by main@52b9df4, and runtime records from older writers |
 | `mock-provider.ts`, `steering-provider.ts`, `pi_bridge_test.mjs` | Offline Pi providers and the Pi extension's tests |
 
 The Claude mod and typeahead keep their TypeScript tests next to them, in `src/multiverse/harnesses/claude/mod/tests/` and `src/multiverse/plugins/builtin/typeahead/claude/tests/`.
@@ -75,7 +77,7 @@ Live native tests use local scripted providers and isolated homes. They need no 
 - **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, and on 3.13, for pull requests and for pushes to `main` and `ci/*` branches. Each takes about three and a half minutes.
 - **each module alone** runs nightly, and on demand from the Actions tab: every module `tests/run.py --list` prints, by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
 
-The plugin submodules are private and aren't fetched, so CI doesn't run the GOAT and remote-control plugins' own tests. `test_plugin_checkouts` still runs its own tests.
+The plugin submodules are private and aren't fetched, so CI runs mv2's own tests only: not the GOAT and remote-control plugins' own tests, and not a submodule pin bump. Run `tests/run.py test_plugin_checkouts` locally, with the submodules checked out, before bumping a pin.
 
 To run the bridges' own tests directly, run these from the checkout root:
 
