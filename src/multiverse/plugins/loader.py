@@ -449,7 +449,13 @@ def _entries_uncached(root):
         # A pre-plugin settings file turns nothing on: its first-use conversion writes the switch into plugins.json.
         default = found.default if source == "bundled" else "off"
         on = settings.is_on(name, default)
-        result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        try:
+            result[name] = _entry(root, name, on, source, directory, found, shadowed.get(name, []), trusted.get(name))
+        except Exception as error:  # whatever happens with one plugin, every other one is still listed
+            text = str(error).strip().splitlines()
+            result[name] = Entry(name, "failed", on, source, directory, found, problem=(
+                f"{name} could not be read: {type(error).__name__}" + (f": {text[0]}" if text else "")),
+                shadowed=shadowed.get(name, []))
         result[name].set_aside = aside.get(name, [])
     for name, (source, directory, problem) in invalid.items():
         if name not in result:
@@ -494,7 +500,7 @@ def _entry(root, name, on, source, directory, found, shadowed, fingerprint=None)
     if isinstance(known, Failed) and known.files == _files(running):
         entry.state, entry.problem = "failed", known.problem
         return entry
-    if known is not None:
+    if isinstance(known, Loaded):  # a failure whose files changed since is tried again: the plugin is on, unloaded
         entry.state, entry.loaded = "loaded", known
     if root is not None and found.settings is not None:
         # Unusable settings: the plugin acts as off in this universe, with the reason, naming the plugin and
