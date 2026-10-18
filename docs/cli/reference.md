@@ -394,12 +394,13 @@ mv2 ask --question QUESTION [--json] agent
 Read measured usage for the exact native session.
 
 ```sh
-mv2 get-usage agent
+mv2 get-usage [--json] agent
 ```
 
 | Argument | Value | Description | Default |
 | --- | --- | --- | --- |
 | `agent` |  |  |  |
+| `--json` |  | Print the full result as JSON |  |
 
 ## tui
 

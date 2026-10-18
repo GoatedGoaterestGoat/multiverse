@@ -1,6 +1,7 @@
 """The commands that printed raw records (qa-lifecycle LC-4, LC-6; qa-claude CLAUDE-7) still carry their facts.
 
-kill and stop say what they could not confirm, `mv2 ask` fails (exit 1) when it has no answer, and --json and the
+kill and stop say what they could not confirm, `mv2 ask` and `mv2 get-usage` fail (exit 1) when they have no answer
+or no measurement, and --json and the
 Python `run` functions the dashboard and scripts call keep returning the records.
 """
 import contextlib
@@ -15,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 from multiverse import cli
 from multiverse.runtime import lifecycle, native
 from multiverse.store import write
-from multiverse.tools import ask, capabilities, init, kill, stop, trash
+from multiverse.tools import ask, capabilities, get_usage, init, kill, stop, trash
 from test_multiverse import BaseTest
 
 AGENT_ID = str(uuid4())
@@ -50,7 +51,7 @@ class RecordCommandsTest(BaseTest):
 
     def test_record_commands_report_their_facts_and_fail_honestly(self):
         """kill and stop say when cancellation is unconfirmed or startup messages were dropped, ask exits 1 without an
-        answer, capabilities --probe marks a harness with a missing executable unavailable, and --json and the Python
+        answer and get-usage without a measurement, capabilities --probe marks a harness with a missing executable unavailable, and --json and the Python
         functions keep returning records; kept for the qa findings these fixed, since agents act on this output and the
         exit code (LC-4, LC-6, CLAUDE-7, e2dafba)."""
         for name in ('kill', 'stop'):
@@ -90,6 +91,22 @@ class RecordCommandsTest(BaseTest):
                     self.assertIn(reason, err)
                     out, _, code = self.command('ask', 'worker', '--question', 'what?', '--json')
                 self.assertEqual((json.loads(out), code), ({**result, 'ok': False}, 1))
+        # qa-claude's 9f0331f retest: get-usage said "state: error" in JSON and exited 0.
+        measured = {'state': 'ok', 'reason': 'Reported by the multiverse mod',
+                    'value': {'context': {'tokens': 82000, 'window': 200000}, 'cost_usd': 1.234, 'total_tokens': 1200000}}
+        with self.subTest(usage='ok'), patch.object(native, 'operation', return_value=measured):
+            self.assertEqual(self.command('get-usage', 'worker'),
+                             ('worker: Context: 82k/200k (41%) · Cost: $1.23 · Total: 1.2m tokens', '', 0))
+            self.assertEqual(json.loads(self.command('get-usage', 'worker', '--json')[0]), {**measured, 'ok': True})
+        for state, reason in (('unavailable', 'Claude has not saved a transcript for this session yet'),
+                              ('error', "Can't read /home/u/.claude/projects: Permission denied")):
+            with self.subTest(usage=state):
+                result = {'state': state, 'reason': reason, 'value': None}
+                with patch.object(native, 'operation', return_value=result):
+                    self.assertEqual(self.command('get-usage', 'worker'),
+                                     ('', f'mv2: worker: usage unavailable: {reason}', 1))
+                    out, _, code = self.command('get-usage', 'worker', '--json')
+                self.assertEqual((json.loads(out), code), ({**result, 'ok': False}, 1))
         # qa-claude CLAUDE-7: with --probe, a harness whose executable spawn can't find can do nothing, as spawn says.
         self.harness('claude-missing', {'schema': 2, 'adapter': 'claude',
                                         'settings': {'executable': '/nonexistent/claude'}})
@@ -111,6 +128,8 @@ class RecordCommandsTest(BaseTest):
             with patch.object(native, 'operation', return_value={'state': 'unavailable', 'reason': 'x', 'value': None}):
                 self.assertEqual(ask.run(self.root, agent='worker', question='q'),
                                  {'state': 'unavailable', 'reason': 'x', 'value': None})
+                self.assertEqual(get_usage.run(self.root, agent='worker'),
+                                 {'state': 'unavailable', 'reason': 'x', 'value': None})
             with patch.object(native, 'capabilities', return_value={}):
                 self.assertEqual(capabilities.run(self.root, agent='worker'), {})
             self.assertIsInstance(trash.run(self.root), dict)
@@ -118,7 +137,7 @@ class RecordCommandsTest(BaseTest):
             target.mkdir()
             self.assertEqual(init.run(directory=str(target))['name'], 'py')
         for arguments in (['kill', 'x'], ['stop', 'x'], ['remove', 'x'], ['trash'], ['init'],
-                          ['ask', 'x', '--question', 'q'], ['subverse', 'x'], ['move', 'x', 'y'],
+                          ['ask', 'x', '--question', 'q'], ['get-usage', 'x'], ['subverse', 'x'], ['move', 'x', 'y'],
                           ['capabilities', '--agent', 'x'], ['session-bind', '--session-id', str(uuid4())]):
             with self.subTest(arguments=arguments):
                 self.assertTrue(hasattr(cli.tool(arguments[0]), 'cli_run'))
