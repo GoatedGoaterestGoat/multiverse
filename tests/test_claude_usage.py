@@ -64,8 +64,9 @@ class ClaudeUsageTest(BaseTest):
 
     def test_transcript_usage_counts_each_response_once(self):
         """Claude transcript usage counts each response once though it is stored once per content block, keeps
-        subagents out of context, waits on partial lines and never takes a zero-usage row as latest; a break goes
-        unnoticed because a double-counted number still looks plausible (bb0ec1a)."""
+        subagents out of context, waits on partial lines, never takes a zero-usage row as latest, and reads the launch's
+        own storage; a break goes unnoticed because a double-counted number, or another storage's, still looks plausible
+        (bb0ec1a, LC-26)."""
         with self.subTest('a response stored once per content block, and subagents'):
             adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
             native_id = str(uuid4())
@@ -98,6 +99,19 @@ class ClaudeUsageTest(BaseTest):
             self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work), native_id=str(uuid4()))).state,
                              'unavailable')
             self.assertEqual(adapter.get_usage(SessionHandle('agent', 'claude', str(self.work))).state, 'unavailable')
+        with self.subTest("the launch's own storage, not this process's"):
+            # LC-26: the dashboard or a CLI reading usage may run with another CLAUDE_CONFIG_DIR than the launch had;
+            # session.home is the launch's own, pinned before it started.
+            adapter = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+            native_id = str(uuid4())
+            launch_home = self.work / 'launch-claude'
+            project = launch_home / 'projects' / '-work-project'
+            project.mkdir(parents=True)
+            (project / f'{native_id}.jsonl').write_text(self.response_with('msg_9', 7, 3, 2))
+            session = SessionHandle('agent', 'claude', str(self.work), native_id=native_id, home=str(launch_home))
+            result = adapter.get_usage(session)  # this process's CLAUDE_CONFIG_DIR has no such transcript
+            self.assertEqual((result.state, result.value.get('total_tokens') if result.value else None,
+                              (result.value or {}).get('context', {}).get('tokens')), ('ok', 12 + 7, 12))
         with self.subTest('context is the last main-thread request'):
             agent, directory = self.agent()
             native_id = str(uuid4())

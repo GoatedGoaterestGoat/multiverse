@@ -310,13 +310,13 @@ def counted(usage, key):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
-def context_reading(native_id, workspaces=()):
+def context_reading(native_id, workspaces=(), environment=None):
     """(tokens, timestamp) of the latest main-thread request, or None.
 
     Tokens are input + cache written + cache read. Subagent transcripts are
     excluded: they have their own context windows.
     """
-    mains = session_transcripts(native_id, workspaces=workspaces)
+    mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     with _transcripts_lock:
@@ -342,10 +342,10 @@ def moment(text):
         return None
 
 
-def measured_usage(native_id, workspaces=()):
+def measured_usage(native_id, workspaces=(), environment=None):
     """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
     than total a scan that skipped part of the storage."""
-    mains = session_transcripts(native_id, workspaces=workspaces)
+    mains = session_transcripts(native_id, environment, workspaces)
     if not mains:
         return None
     paths = [mains[-1], *subagent_transcripts(mains[-1])]
@@ -894,8 +894,11 @@ class ClaudeAdapter(ConfiguredAdapter):
         except (OSError, ValueError, TypeError):
             pass
         try:
-            usage = measured_usage(session.native_id, (session.workspace,))
-            reading = context_reading(session.native_id, (session.workspace,))
+            # The launch's own storage (session.home, pinned before it started), not this process's: a dashboard
+            # or CLI with another CLAUDE_CONFIG_DIR would read another storage (LC-26).
+            storage = launch_storage(session, None)
+            usage = measured_usage(session.native_id, (session.workspace,), storage)
+            reading = context_reading(session.native_id, (session.workspace,), storage)
         except Unreadable as error:
             return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}

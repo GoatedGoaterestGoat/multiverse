@@ -42,7 +42,9 @@ can't tell (unreadable or damaged rows, a storage folder it can't read, or no aw
 start time), which keeps the message uncertain. It reads the launch's own storage:
 `session.home`, pinned before the launch started, else the launch environment's
 absolute `CLAUDE_CONFIG_DIR` or `HOME`, and never the checking process's, which
-could find nothing and wrongly prove the prompt absent. After a None, core asks the
+could find nothing and wrongly prove the prompt absent. Usage and the context
+reading use `session.home` the same way, so a dashboard or CLI running with
+another `CLAUDE_CONFIG_DIR` still reads the launch's own transcripts. After a None, core asks the
 optional `startup_prompt_evidence_reason` with the same arguments: one line naming
 the folder or transcript that can't be read, or the damaged row, and what to fix,
 without the command, which core adds. Missing reason hooks default to no additional
