@@ -15,17 +15,27 @@ def record_paths(root):
 
 
 def orphaned(directory):
-    """Plugin leftovers have no claim only when every core path is proven absent.
+    """Leftovers have no claim without agent records or native startup evidence.
 
     Do not use exists(): permission and other inspection errors must propagate.
-    Even an empty surviving record or launches directory needs normal recovery.
+    Main's lost-spawn race could leave only bootstrap/task files in launches.
     """
-    for name in ('properties.json', 'runtime.json', 'sessions.jsonl', 'launches'):
+    for name in ('properties.json', 'runtime.json', 'sessions.jsonl'):
         try:
             (directory / name).stat()
         except FileNotFoundError:
             continue
         return False
+    try:
+        launches = list((directory / 'launches').iterdir())
+    except FileNotFoundError:
+        return True
+    for launch in launches:
+        if not launch.is_dir():
+            return False
+        # Unknown evidence stays conservative, including registration and roles.
+        if any(path.name not in ('bootstrap.md', 'task.md') for path in launch.iterdir()):
+            return False
     return True
 
 

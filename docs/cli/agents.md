@@ -105,14 +105,17 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 ## Damaged records
 
 An old agent folder containing only plugin leftovers, with no `properties.json`,
-`runtime.json`, `sessions.jsonl` or `launches` path, cannot reserve a name or native
+`runtime.json` or `sessions.jsonl`, cannot reserve a name or native
 conversation. It does not block spawns, session claims or resumes elsewhere.
+This includes abandoned launch folders containing only bootstrap or task files,
+with no request, ready marker, registration, cleanup or connection records.
 List and doctor identify the leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
 checks that no terminal is tagged for that agent on the current servers before
 moving the folder and its plugin leftovers to trash; unreadable servers or new
 core records refuse the move. A refusal names any tagged pane that must be verified and closed first.
-Any surviving core record or
-launch directory, or an error inspecting one, keeps the usual recovery checks.
+Any surviving core record or native startup evidence, or an error inspecting it,
+keeps the usual recovery checks. A missing properties file does not block an
+unrelated session claim when the surviving readable records cannot hold its ID.
 
 While a launch is being prepared, both the text listing and `mv2 list --json`
 show its live state as `starting`, including the short interval while its
@@ -151,6 +154,8 @@ resume. Deleting a record does not stop a process.
 
 Kill can close a uniquely tagged terminal even when runtime.json is missing or
 its launch authority is damaged.
+Discovery skips an earlier launch whose request was never written; a malformed
+or unreadable request still refuses recovery with its path and repair advice.
 It never guesses a child PID or contacts a shared server from the conversation
 UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other

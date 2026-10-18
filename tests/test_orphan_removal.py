@@ -35,18 +35,23 @@ class OrphanRemovalTest(BaseTest):
                 self.assertNotIn('runtime.json', str(caught.exception))
             self.assertTrue(self.note.exists())
             self.assertFalse((self.root / 'trash').exists())
-        for name in ('runtime.json', 'sessions.jsonl', 'launches'):
+        for name in ('runtime.json', 'sessions.jsonl', 'launches/' + uid() + '/ready'):
             path = self.directory / name
             with self.subTest(evidence=name):
-                path.mkdir() if name == 'launches' else path.write_text('{}\n')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text('{}\n')
                 try:
                     row = lifecycle.listing(self.root)[0]
                     self.assertNotEqual(row['damaged'].get('recover'), 'remove')
                     with self.assertRaises(records.RecordError):
                         relocate.remove_agent(self.root, self.directory.name)
                 finally:
-                    path.rmdir() if name == 'launches' else path.unlink()
-        with self.subTest('no evidence'):
+                    path.unlink()
+        with self.subTest('main lost-spawn folders contain no startup or session evidence'):
+            launch = self.directory / 'launches' / uid()
+            launch.mkdir(parents=True)
+            (launch / 'bootstrap.md').write_text('old bootstrap')
+            (launch / 'task.md').write_text('old task')
             row = lifecycle.listing(self.root)[0]
             self.assertEqual(row['damaged'].get('recover'), 'remove')
             shown = list_agents.run(self.root, wide=True)

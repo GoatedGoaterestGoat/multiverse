@@ -63,9 +63,17 @@ class DiscoveryTest(BaseTest):
             with self.subTest(request=content), self.assertRaises(records.RecordError):
                 missing_runtime.discover(self.directory, self.properties)
         path.unlink()
-        with self.subTest(request='missing'), self.assertRaisesRegex(records.RecordError, 'request.json'):
-            missing_runtime.discover(self.directory, self.properties)
+        with self.subTest(request='missing before native startup'), \
+                patch.object(missing_runtime.Tmux, 'snapshot', return_value=({}, None)):
+            self.assertEqual(missing_runtime.discover(self.directory, self.properties), [])
         write(path, self.request)
+        with self.subTest('an abandoned older launch cannot hide the later tagged terminal'):
+            abandoned = self.directory / 'launches' / uid()
+            abandoned.mkdir()
+            (abandoned / 'task.md').write_text('never started')
+            with patch.object(missing_runtime.Tmux, 'snapshot', return_value=({'%2': self.pane}, None)):
+                found = missing_runtime.discover(self.directory, self.properties)
+            self.assertEqual([item[2] for item in found], [self.launch.name])
         runtime = self.directory / 'runtime.json'
         write(runtime, {'launch_id': None, 'state': 'running', 'pid': 12345})
         before = runtime.read_bytes()

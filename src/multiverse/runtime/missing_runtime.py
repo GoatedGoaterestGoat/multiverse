@@ -134,7 +134,16 @@ def discover(directory, properties, socket_path=None, *, facts=None, orphan=Fals
         if not _uuid(launch.name):
             raise _problem(directory, f'cannot inspect invalid launch folder {launch}')
         path = launch / 'request.json'
-        request = records.properties(path)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            continue  # Preparation can fail before publishing a native request.
+        except OSError as error:
+            raise _problem(directory, f'cannot inspect {path}: {error}') from error
+        try:
+            request = records.properties(path)
+        except records.RecordError as error:
+            raise _problem(directory, f'{path}: {error.reason}') from error
         requests[launch.name] = request
         env = request.get('env', {})
         if not isinstance(env, dict):
@@ -183,7 +192,7 @@ def require_stopped(directory, properties, socket_path=None, *, facts=None, oper
                        recommend_kill=operation != 'kill')
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
         raise _problem(directory, reason, recommend_kill=False)
-    for launch in launches(directory):
+    for launch in ([] if orphan else launches(directory)):
         if reason := attachments.problem(directory, {'launch_id': launch.name}):
             raise _problem(directory, reason, recommend_kill=False)
     if facts or (directory / 'runtime.json').exists():

@@ -170,17 +170,18 @@ class DamagedPeerClaimsTest(BaseTest):
         def claim():
             with sessions.namespace(child):
                 sessions.claim(child, target, data, native)
-        for name in ('runtime.json', 'sessions.jsonl', 'launches'):
+        for name in ('runtime.json', 'sessions.jsonl', 'launches/' + str(uuid4()) + '/request.json'):
             with self.subTest(orphan_with=name):
                 evidence = orphan / name
-                evidence.mkdir() if name == 'launches' else evidence.write_text('{}\n')
+                evidence.parent.mkdir(parents=True, exist_ok=True)
+                evidence.write_text('{"native_session_id": "' + native + '"}\n')
                 try:
                     with self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
                         claim()
                     with self.assertRaisesRegex(records.RecordError, orphan.name):
                         agents.check_available_name(self.root, 'unreserved')
                 finally:
-                    evidence.rmdir() if name == 'launches' else evidence.unlink()
+                    evidence.unlink()
         stat, runtime = Path.stat, orphan / 'runtime.json'
         for code in (errno.EACCES, errno.EIO, errno.ENOTDIR):
             def failed_stat(path, *args, **kwargs):
@@ -197,4 +198,13 @@ class DamagedPeerClaimsTest(BaseTest):
             bound = agents.bind_session(child, target.name, native)
             self.assertEqual(bound['native_session_id'], native)
             self.assertEqual(read(target / 'properties.json')['native_session_id'], native)
-            self.assertEqual(list(orphan.iterdir()), [orphan / 'compaction'])
+        with self.subTest('main lost-spawn launch folders reserve no name or session'):
+            launch = orphan / 'launches' / str(uuid4())
+            launch.mkdir(parents=True)
+            (launch / 'bootstrap.md').write_text('bootstrap')
+            (launch / 'task.md').write_text('task')
+            claim()
+            agents.check_available_name(self.root, 'unreserved')
+        with self.subTest('a missing properties file cannot claim an unrelated runtime-only session'):
+            write(orphan / 'runtime.json', {'state': 'failed', 'native_session_id': str(uuid4())})
+            claim()

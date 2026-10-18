@@ -129,6 +129,24 @@ def _journal_mentions(path, native_id):
     return records.mentions(path, native_id)
 
 
+def _damaged_mentions(directory, native_id):
+    """Missing files cannot claim an ID; surviving unreadable evidence still can."""
+    paths = [directory / name for name in ('properties.json', 'runtime.json', 'sessions.jsonl')]
+    try:
+        launches = list((directory / 'launches').iterdir())
+    except FileNotFoundError:
+        launches = []
+    for launch in launches:
+        paths.append(launch / 'request.json')
+    mentioned = False
+    for path in paths:
+        try:
+            mentioned = records.mentions(path, native_id) or mentioned
+        except FileNotFoundError:
+            continue
+    return mentioned
+
+
 def claim(root, directory, data, native_id, home=None):
     """Caller holds namespace. Earlier generations remain owned by their agent."""
     own_provider = provider(root, data)
@@ -148,13 +166,7 @@ def claim(root, directory, data, native_id, home=None):
                     if orphaned(path.parent):
                         continue  # Only plugin leftovers; no current or historical claim.
                     known = (error.data or {}).get('native_session_id')
-                    mentioned = known == native_id or records.mentions(path, native_id)
-                    try:
-                        journal.stat()
-                    except FileNotFoundError:
-                        pass  # No earlier generation exists for this peer.
-                    else:
-                        mentioned = records.mentions(journal, native_id) or mentioned
+                    mentioned = _damaged_mentions(path.parent, native_id) or known == native_id
                 except (OSError, ValueError) as unreadable:
                     raise SessionConflict(f'Cannot check {owner}: {path} or {journal} cannot be read safely '
                                           f'({unreadable}); fix permissions or repair the record before retrying') from error
