@@ -4,15 +4,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import unittest
-from unittest.mock import patch
 
 from native_processes import PrivateProcessGroup
 from native_safety import isolated_home
 from multiverse.runtime import lifecycle
 from multiverse.store import read, write
 from multiverse.universe import agents
-from test_multiverse import TerminalBase, until
+from test_multiverse import TerminalBase, ROOT, until
 
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
@@ -60,14 +60,25 @@ class DefaultPermissionsTest(TerminalBase):
                             state['group'].close()
                     state['closed'] = True
                 self.addCleanup(cleanup)
-                with patch.dict(os.environ, environment, clear=True):
-                    result = lifecycle.start(self.root, name if not sandbox else None, '', 'codex',
-                                             resume=identifier, socket_path=self.socket)
+                arguments = (['resume', identifier] if sandbox else
+                             ['spawn', '--name', name, '--harness', 'codex'])
+                launched = subprocess.run([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
+                    *arguments, '--json'], env={**environment, 'MV2_TMUX_SOCKET': self.socket},
+                    stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30, cwd=self.work)
+                self.assertEqual(launched.returncode, 0, launched.stderr)
+                result = json.loads(launched.stdout)
                 state['id'] = identifier = result['id']
                 directory = agents.directory(self.root, identifier)
                 pane = agents.runtime(directory)['tmux']['pane']
                 state['group'] = PrivateProcessGroup(int(self.backend.run('display-message', '-p', '-t', pane, '#{pane_pid}')))
                 try:
+                    self.assertEqual(len(result['notices']), 1)
+                    self.assertIn('omitted its extra writable agent folder', result['notices'][0])
+                    self.assertIn(json.dumps(name), result['notices'][0])
+                    self.assertIn(json.dumps(str(directory)), result['notices'][0])
+                    self.assertEqual(result['runtime']['launch_notices'], result['notices'])
+                    request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                    self.assertEqual(request['notices'], result['notices'])
                     def settled():
                         frame = self.backend.run('capture-pane', '-p', '-t', pane)
                         current = agents.runtime(directory)
