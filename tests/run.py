@@ -11,7 +11,8 @@ there.
 
 Runs started at once share the machine: a unit starts only when it holds one of the CPU count's slots in
 /tmp/mv2-test-slots-<uid> (a directory only this user may change), so two agents' full runs take turns instead of
-overloading it. A unit still running after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM),
+overloading it. Each run writes who it is into the slots it holds, so a run waiting for one says which agents' runs
+hold them. A unit still running after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM),
 is stopped: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running, so the test
 fails and its cleanups still stop the tmux servers and native daemons it started. A unit not done GRACE seconds
 later is killed. Should the runner itself die, each unit's watchdog process stops it the same way, with the same
@@ -45,6 +46,7 @@ GRACE = 30  # seconds a unit the runner stops gets to finish its test's cleanups
 OBSERVE_SECONDS = 0.5  # how often a worker records who is in the process groups its tests tracked
 _monotonic = time.monotonic  # the real clock, whatever a test patches into the time module while it runs
 SLOTS = Path(f"/tmp/mv2-test-slots-{os.getuid()}")  # shared by every run of the suite on this machine
+SLOT_NOTICE_SECONDS = 30  # how often a waiting run says again which runs hold the slots
 
 
 # --- a worker: one unit, in its own interpreter -------------------------------------------------------------
@@ -165,12 +167,18 @@ def _records(path):
     return records
 
 
+def _process():
+    """mv2's multiverse.runtime.process, from this checkout."""
+    if str(HERE.parent / "src") not in sys.path:
+        sys.path.insert(0, str(HERE.parent / "src"))
+    from multiverse.runtime import process
+    return process
+
+
 def _processes():
     """(pid, process group, state, start) of every process, the start in the form process_started gives; [] when
     ps cannot say."""
-    if str(HERE.parent / "src") not in sys.path:
-        sys.path.insert(0, str(HERE.parent / "src"))
-    from multiverse.runtime.process import START
+    START = _process().START
     try:
         output = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], capture_output=True, text=True,
                                 stdin=subprocess.DEVNULL, env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
@@ -257,13 +265,36 @@ def worker(start, target, shard, shards, report, verbosity, watch, grace):
 
 # --- the parent: plan the units, run them, report -----------------------------------------------------------
 
+def _holder():
+    """Who this run is, written into each slot it takes so that a run waiting for one can say: its pid and start
+    time, its directory, and the agent running it. MV2_AGENT_DIR names the agent even when MV2_AGENT_ID is unset, as
+    AGENTS.md runs the tests."""
+    agent_id, agent = os.environ.get("MV2_AGENT_ID") or None, None
+    if os.environ.get("MV2_AGENT_DIR"):
+        try:
+            properties = json.loads((Path(os.environ["MV2_AGENT_DIR"]) / "properties.json").read_text())
+        except (OSError, ValueError):
+            properties = None
+        if (isinstance(properties, dict) and isinstance(properties.get("id"), str)
+                and agent_id in (None, properties["id"])):  # the directory of the agent MV2_AGENT_ID names, if set
+            name = properties.get("name")
+            agent_id, agent = properties["id"], name if isinstance(name, str) else None
+    try:
+        directory = os.getcwd()
+    except OSError:
+        directory = "?"
+    return {"pid": os.getpid(), "started": _process().process_started(os.getpid()), "cwd": directory,
+            "agent_id": agent_id, "agent": agent}
+
+
 class Run:
     def __init__(self, start, jobs, timeout, verbose, slots=SLOTS, budget=None, grace=GRACE):
         self.start, self.jobs, self.timeout, self.verbose = Path(start).resolve(), jobs, timeout, verbose
         self.grace = grace
         self.durations = self.start.parent / ".run" / "test-durations.json"
         self.processes, self.lock, self.stopping = set(), threading.Lock(), threading.Event()
-        self.slots, self.budget, self.held, self.told = Path(slots), budget or os.cpu_count() or 4, 0, False
+        self.slots, self.budget, self.held = Path(slots), budget or os.cpu_count() or 4, 0
+        self.holder, self.noticed = json.dumps(_holder()) + "\n", None  # who this run is; when it last said who waits
 
     def targets(self, names):
         if not names:
@@ -300,16 +331,61 @@ class Run:
                 except BlockingIOError:
                     handle.close()
                     continue
+                try:
+                    handle.seek(0)
+                    handle.truncate()
+                    handle.write(self.holder)  # for a run that waits for it (holders)
+                    handle.flush()
+                except OSError:
+                    pass
                 with self.lock:
                     self.held += 1
                 return handle
-            with self.lock:  # all taken, some by other runs: say so once
-                tell, self.told = not self.told and self.held < self.budget, self.told or self.held < self.budget
+            with self.lock:  # all taken, some by other runs: say by which, again every SLOT_NOTICE_SECONDS
+                now = _monotonic()
+                tell = self.held < self.budget and (self.noticed is None or now - self.noticed >= SLOT_NOTICE_SECONDS)
+                if tell:
+                    self.noticed = now
             if tell:
-                print(f"Waiting for a slot: other runs of the suite are using some of this machine's {self.budget}.",
-                      flush=True)
+                print(f"Waiting for a slot: held by {self.holders()}.", flush=True)
             self.stopping.wait(0.2)
         return None
+
+    @staticmethod
+    def release(slot):
+        """Give a slot back, clearing what this run wrote into it (slot)."""
+        try:
+            slot.seek(0)
+            slot.truncate()
+            slot.flush()
+        except OSError:
+            pass
+        slot.close()
+
+    def holders(self):
+        """Which other runs hold this machine's slots, from what each wrote into its slot: the agent (or "not an
+        agent"), how many slots, its pid and directory. A record whose process has gone, or whose pid now belongs to
+        another process, is not theirs; a slot no record names is held by an older tests/run.py, which writes none."""
+        process_started, runs = _process().process_started, {}
+        for index in range(self.budget):
+            try:
+                record = json.loads((self.slots / f"slot-{index}").read_text())
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict) or type(record.get("pid")) is not int or record["pid"] == os.getpid():
+                continue
+            if not isinstance(record.get("started"), str) or process_started(record["pid"]) != record["started"]:
+                continue
+            runs.setdefault(record["pid"], [record, 0])[1] += 1
+        said, unnamed = [], self.budget - self.held
+        for pid, (record, count) in runs.items():
+            unnamed -= count
+            who = record.get("agent") or record.get("agent_id") or "not an agent"
+            said.append(f"{who} ({count} slot{'' if count == 1 else 's'}, pid {pid}, {record.get('cwd', '?')})")
+        if unnamed > 0:
+            said.append(f"1 slot of a run that doesn't say who it is (an older tests/run.py)" if unnamed == 1 else
+                        f"{unnamed} slots of runs that don't say who they are (an older tests/run.py)")
+        return ", ".join(said) or "other runs"
 
     def unit(self, target, shard, shards, scratch):
         """Run one unit in a new process once it has a slot: (exit code or why it has none, seconds, report or
@@ -320,7 +396,7 @@ class Run:
         try:
             return self._unit(target, shard, shards, scratch)
         finally:
-            slot.close()
+            self.release(slot)
             with self.lock:
                 self.held -= 1
 

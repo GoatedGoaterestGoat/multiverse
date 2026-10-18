@@ -450,30 +450,93 @@ class RunnerTest(unittest.TestCase):
         for (_, end), (start, _) in zip(intervals, intervals[1:]):
             self.assertLessEqual(end, start, intervals)
 
-    def test_a_run_waits_while_the_slots_are_taken_and_says_so(self):
+    def waiting_line(self, holder_environment):
+        """Hold the machine's only slot with a run started with `holder_environment`, start a second run, and return
+        the second run's first line about waiting, the holder's pid, and whether every slot file was left empty."""
+        started = self.work / "started"
+        self.module("test_holds", f"""
+            import os, time, unittest
+            from pathlib import Path
+            class Holds(unittest.TestCase):
+                def test_holds(self):
+                    Path({str(started)!r}).write_text(str(os.getpid()))
+                    while not Path({str(started)!r} + ".release").exists():
+                        time.sleep(0.05)
+            """)
         log = self.work / "times.log"
         self.timed_module("test_first", log)
-        self.slots.mkdir(mode=0o700)
-        held = (self.slots / "slot-0").open("a")  # another run holding the machine's only slot
-        fcntl.flock(held, fcntl.LOCK_EX)
-        run = subprocess.Popen(self.command("--budget", "1"), text=True, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT)
-        self.addCleanup(lambda: run.poll() is None and run.kill())
+        holder = subprocess.Popen(self.command("--budget", "1", "test_holds"), cwd=self.work, env=holder_environment,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: holder.poll() is None and holder.kill())
+        self.assertTrue(self.wait_for_pid(started))
+        waiter = subprocess.Popen(self.command("--budget", "1", "test_first"), text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: waiter.poll() is None and waiter.kill())
         lines = []
-        reader = threading.Thread(target=lambda: lines.extend(run.stdout), daemon=True)
+        reader = threading.Thread(target=lambda: lines.extend(waiter.stdout), daemon=True)
         reader.start()
-        waiting = "Waiting for a slot: other runs of the suite are using some of this machine's 1.\n"
         deadline = time.monotonic() + 30
-        while waiting not in lines and time.monotonic() < deadline:
+        while not any(line.startswith("Waiting for a slot") for line in lines) and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertIn(waiting, lines)
         self.assertFalse(log.exists())  # nothing has started while the slot is held
-        held.close()
-        run.wait(timeout=60)
+        Path(str(started) + ".release").write_text("")
+        self.assertEqual(holder.wait(timeout=60), 0)
+        self.assertEqual(waiter.wait(timeout=60), 0, "".join(lines))
         reader.join(timeout=30)
-        run.stdout.close()
-        self.assertEqual(run.returncode, 0, "".join(lines))
-        self.assertEqual(len(self.intervals(log)), 2)
+        waiter.stdout.close()
+        waiting = [line for line in lines if line.startswith("Waiting for a slot")]
+        self.assertEqual(len(waiting), 1, lines)  # said once, not again within half a minute
+        empty = all(path.read_text() == "" for path in self.slots.glob("slot-*"))
+        return waiting[0], holder.pid, empty
+
+    def wait_for_pid(self, path, seconds=60):
+        deadline = time.monotonic() + seconds
+        while not self.pid_in(path) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return self.pid_in(path)
+
+    def test_a_waiting_run_names_the_agent_whose_run_holds_the_slots(self):
+        agent = self.work / "agent"
+        agent.mkdir()
+        (agent / "properties.json").write_text(json.dumps({"id": "a1b2c3", "name": "holder-agent", "task": "x"}))
+        # As AGENTS.md runs the tests: MV2_AGENT_ID unset, the agent's directory still known.
+        line, pid, empty = self.waiting_line({**os.environ, "MV2_AGENT_DIR": str(agent)})
+        self.assertEqual(line, f"Waiting for a slot: held by holder-agent (1 slot, pid {pid}, {self.work}).\n")
+        self.assertTrue(empty)  # each run cleared what it wrote when it gave its slot back
+
+    def test_a_waiting_run_says_when_the_holder_is_not_an_agent(self):
+        line, pid, empty = self.waiting_line(dict(os.environ))
+        self.assertEqual(line, f"Waiting for a slot: held by not an agent (1 slot, pid {pid}, {self.work}).\n")
+        self.assertTrue(empty)
+
+    def test_a_record_of_a_run_that_is_gone_is_not_named(self):
+        from multiverse.runtime.process import process_started
+        log = self.work / "times.log"
+        self.timed_module("test_first", log)
+        gone = subprocess.Popen([sys.executable, "-c", "pass"])
+        record = {"pid": gone.pid, "started": process_started(gone.pid), "cwd": "/gone", "agent": "gone-agent"}
+        gone.wait()
+        self.slots.mkdir(mode=0o700)
+        held = (self.slots / "slot-0").open("a")  # a run that does not say who it is (an older tests/run.py)
+        fcntl.flock(held, fcntl.LOCK_EX)
+        held.write(json.dumps(record) + "\n")  # left by a run that was killed
+        held.flush()
+        waiter = subprocess.Popen(self.command("--budget", "1", "test_first"), text=True, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT)
+        self.addCleanup(lambda: waiter.poll() is None and waiter.kill())
+        lines = []
+        reader = threading.Thread(target=lambda: lines.extend(waiter.stdout), daemon=True)
+        reader.start()
+        deadline = time.monotonic() + 30
+        while not any(line.startswith("Waiting for a slot") for line in lines) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        held.close()
+        self.assertEqual(waiter.wait(timeout=60), 0, "".join(lines))
+        reader.join(timeout=30)
+        waiter.stdout.close()
+        self.assertIn("Waiting for a slot: held by 1 slot of a run that doesn't say who it is (an older tests/run.py)."
+                      "\n", lines)
+        self.assertNotIn("gone-agent", "".join(lines))
 
     def test_a_slots_directory_others_could_change_is_refused(self):
         self.module("test_fine", """
@@ -577,7 +640,8 @@ class RunnerTest(unittest.TestCase):
         leader.write_text(textwrap.dedent(f"""
             import subprocess, sys, time
             from pathlib import Path
-            spawn = lambda: subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", {str(helpers)!r}]).pid
+            spawn = lambda: subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)",
+                                              {str(helpers)!r}]).pid
             first = spawn()  # a helper before the group is tracked
             Path({str(ready)!r}).write_text(str(first))
             while not Path({str(ready)!r} + ".go").exists():
