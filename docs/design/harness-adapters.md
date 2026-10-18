@@ -832,7 +832,10 @@ profile/directory resume overrides are diagnosed, never silently removed. Whole-
 CLI overrides are rejected in bridge mode; individual keys remain supported.
 Codex 0.159.2 rejects `--add-dir` with `--remote` and drops the
 `developer_instructions` CLI override from remote thread requests. The adapter
-therefore returns an optional `RpcProxySpec` in its `CommandSpec`. Core serializes
+therefore returns an optional `RpcProxySpec` in its `CommandSpec`.
+A command candidate may also carry `notices`, a tuple of presentation strings.
+A plain fallback carries its own notices, independently of the bridge candidate;
+these strings never change permissions or launch selection. Core serializes
 it in the launch request, creates a private 0700 socket directory, and starts the
 relay in the runner before starting the TUI. The provider supplies pure request
 and reply interpretation; core owns WebSocket connections, backpressure, size

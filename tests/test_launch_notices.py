@@ -1,5 +1,6 @@
 """Provider resume explanations survive both immediate and waited launch results."""
 import os
+from dataclasses import asdict
 import json
 import io
 from contextlib import redirect_stdout
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from multiverse import display
+from multiverse.harnesses.types import CommandSpec
 from multiverse.runtime import lifecycle, native
 from multiverse.store import read, write
 from test_native_backends import NativeBackendTest
@@ -18,6 +20,13 @@ from multiverse.tools import send
 
 
 class LaunchNoticeTest(NativeBackendTest):
+    def test_plain_candidate_keeps_its_own_notices_in_fallback_serialization(self):
+        plain = CommandSpec(('plain',), notices=('Plain permissions note.',))
+        bridge = CommandSpec(('bridge',), fallback=plain)
+        record = asdict(bridge)
+        self.assertEqual(record['notices'], ())
+        self.assertEqual(record['fallback']['notices'], ('Plain permissions note.',))
+
     def test_notice_uses_caller_and_saved_environment_and_stays_one_line(self):
         seen = []
         notice = 'Kept saved fixture home;\nignored caller override.'

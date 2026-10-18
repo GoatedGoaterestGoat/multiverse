@@ -135,6 +135,8 @@ class CommandSpec:
     # (multiverse.plugins.harness.LaunchPlan.record()); lifecycle stores it as runtime.json `plugins`.
     plugins: Mapping[str, Any] | None = None
     agent_identity: AgentIdentitySpec | None = None
+    # Presentation for this selected candidate, including a late plain fallback.
+    notices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
