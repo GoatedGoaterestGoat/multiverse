@@ -71,7 +71,7 @@ The switch lives in the universe's `plugins.json`, which you can also edit by ha
 
 - A plugin that `plugins.json` doesn't name stays at its default. Every plugin is off by default, except typeahead.
 - Nothing is inherited. A subverse has its own `plugins.json`, so a plugin that is on in the root stays off in a subverse until you turn it on there.
-- Running agents keep the plugins they launched with. Restart an agent (`mv2 kill`, then `mv2 resume`) to give it a plugin you just turned on or off.
+- Running agents keep the plugins they launched with, so a plugin you turn on reaches an agent at its next launch (`mv2 kill`, then `mv2 resume`). A plugin can react sooner to being turned off: with compaction off, a running agent's next `/compact` is Claude's own.
 
 ## Change a plugin's settings
 
