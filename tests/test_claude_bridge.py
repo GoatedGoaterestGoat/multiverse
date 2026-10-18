@@ -81,8 +81,21 @@ class ClaudeBridgeTest(BaseTest):
         return command, probe
 
     def harness(self, setting, version=(2, 1, 302), probe=False):
-        """What capabilities --harness says with no agent, under this setting and installed version."""
+        """What capabilities --harness says with no agent, under this setting and installed version.
+
+        --probe looks the executable up as spawn does, so the harness points at a stand-in that never runs (the
+        version read is patched): the answer must not depend on a real claude on PATH, which CI doesn't have.
+        """
         self.configure(setting)
+        stand_in = self.work / 'stand-in' / 'claude'
+        if not stand_in.exists():
+            stand_in.parent.mkdir(parents=True)
+            stand_in.write_text('#!/bin/sh\nexit 1\n')
+            stand_in.chmod(0o755)
+        path = self.root / 'harnesses/claude/harness.json'
+        config = read(path)
+        config['settings']['executable'] = str(stand_in)
+        write(path, config)
         with patch('multiverse.harnesses.claude.claude_version', return_value=version) as asked:
             found = capabilities.run(self.root, harness='claude', probe=probe)
         return found, asked
