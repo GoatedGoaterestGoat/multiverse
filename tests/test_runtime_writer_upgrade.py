@@ -1,4 +1,5 @@
 """Actual old/current core writers remain valid across authority validation."""
+from contextlib import ExitStack
 import gzip
 import json
 import os
@@ -12,6 +13,7 @@ from unittest.mock import Mock, patch
 from multiverse import harnesses
 from multiverse.runtime import attachments, lifecycle, missing_runtime, native
 from multiverse.store import read, write
+from multiverse.universe import relocate
 from test_multiverse import BaseTest
 
 
@@ -150,3 +152,32 @@ class RuntimeWriterUpgradeTest(BaseTest):
                             lifecycle.start(self.root, resume=props['id'])
                     backend.create.assert_not_called()
                     self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+
+    def test_real_writer_records_keep_their_relocation_boundary(self):
+        checked = 0
+        filenames = ('main52.json.gz', 'current483.json.gz',
+                     'ending-main52.json.gz', 'ending-current483.json.gz')
+        for filename, data in self.fixtures(filenames):
+            for row in data['records']:
+                if filename.startswith('ending-') and row['label'] != 'ending':
+                    continue
+                with self.subTest(writer=filename, profile=row['profile'], stage=row['label']):
+                    directory = self.install(data, row)
+                    facts = row['runtime']
+                    ended = facts['state'] in ('stopped', 'dormant', 'failed')
+                    live = 'dormant' if ended else 'ending' if facts['state'] == 'ending' else 'alive'
+                    # Only the recorded process observation is substituted. A
+                    # historical healthy record must never need damaged-record
+                    # discovery or touch its captured terminal/PIDs.
+                    with patch.object(relocate, 'observe', return_value={'live': live, 'reason': ''}), \
+                         patch.object(attachments, 'problem', return_value=None), \
+                         patch.object(missing_runtime, 'require_stopped', side_effect=AssertionError('healthy authority')):
+                        with ExitStack() as stack:
+                            if ended:
+                                relocate._hold(stack, [directory])
+                            else:
+                                with self.assertRaisesRegex(ValueError, 'stop it first'):
+                                    relocate._hold(stack, [directory])
+                    self.assertEqual(read(directory / 'runtime.json'), facts)
+                    checked += 1
+        self.assertEqual(checked, 380)

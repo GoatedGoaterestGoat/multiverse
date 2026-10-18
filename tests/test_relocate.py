@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from multiverse.universe import agents
@@ -40,7 +41,7 @@ class RelocateTests(unittest.TestCase):
                                               "universe_id": read(scope / "universe.json")["id"],
                                               "workspace": str(self.work), "task": "", "phase": "done"})
         if launched:
-            write(agent_dir / "runtime.json", {"launch_id": "launch", "state": "stopped"})
+            write(agent_dir / "runtime.json", {"launch_id": str(uuid4()), "state": "stopped"})
         (agent_dir / "inbox.jsonl").write_text('{"text": "hello"}\n')
         return agent_dir
 

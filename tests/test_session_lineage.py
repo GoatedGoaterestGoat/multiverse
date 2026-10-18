@@ -178,6 +178,10 @@ class SessionLineageTest(BaseTest):
     def test_move_cannot_import_a_conflicting_earlier_generation(self):
         target = str(uuid4())
         self.change(target)
+        # Relocation needs a real stopped launch shape, beyond this module's
+        # session-only fixture. The earlier conversation stays in its journal.
+        write(self.agent / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'stopped',
+              'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
         destination = templates.create(self.work / 'elsewhere', 'elsewhere', workdir=self.work)
         self.make_agent('other', destination, native_id=self.old)
         with patch.object(relocate, 'observe', return_value={'live': 'dormant'}), \

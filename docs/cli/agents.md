@@ -81,6 +81,13 @@ mv2 trash --empty                          # delete it permanently
 
 Stop agents before you move or remove them. A subverse can move only when all its agents are stopped. A moved agent keeps its inbox and conversation. `move` prints `Moved NAME to UNIVERSE (PATH).` or `Moved subverse NAME to PATH.`, and `remove` prints `Moved NAME to the trash.`, and `trash` lists one entry per line, such as `agent worker, removed 2026-10-18 00:30 UTC`. All three take `--json` for the records.
 
+Move and remove use the same ownership checks when `runtime.json` is missing or
+its launch identity is damaged. A tagged terminal, a live or unverified recorded
+process, or incomplete terminal discovery refuses the operation and names the
+file to repair. Restore the record or use `mv2 kill NAME` to close its verified
+terminal first. A subverse operation checks every contained agent. Proven absence
+allows the move or removal without rewriting the damaged runtime record.
+
 A removed agent or subverse goes to `trash/` with a record of where it came from. Moving it back restores it. Top-level universes can't be moved or removed this way.
 
 ## What an agent gets

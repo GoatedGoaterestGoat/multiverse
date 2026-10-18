@@ -11,7 +11,7 @@ import os
 
 from . import exact, parent, trash, tree, workspace
 from .agents import directory, runtime, update_runtime, name_matches, record_paths
-from . import sessions
+from . import records, sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
 
@@ -19,14 +19,23 @@ from ..terminal.tmux import observe, owned
 
 def _stopped(agent_dir):
     """Require native exit and remove any retained, owned terminal wrapper."""
-    properties, facts = read(agent_dir / "properties.json"), runtime(agent_dir)
+    properties, previous = records.properties(agent_dir / "properties.json"), runtime(agent_dir)
+    from ..runtime import missing_runtime
     from .agents import interrupted_preparation
-    facts = interrupted_preparation(facts, agent_dir)  # _hold owns this agent's launch lock.
+    # _hold owns the launch lock. Broken terminal/generation identity cannot
+    # turn an unmatched pane into permission to rename its live records.
+    if missing_runtime.damage(agent_dir, previous) or not (agent_dir / 'runtime.json').exists():
+        missing_runtime.require_stopped(agent_dir, properties, facts=previous, operation='move or remove')
+        if runtime(agent_dir) != previous:
+            raise records.RecordError(agent_dir / 'runtime.json',
+                                      'changed during terminal discovery; retry with the current record')
+        return  # Absence was independently proved; never rewrite damaged facts.
+    facts = interrupted_preparation(previous, agent_dir)
+    if facts is not previous and facts.get('state') != 'failed':
+        raise records.RecordError(agent_dir / 'runtime.json',
+            'preparation record has native startup evidence; repair the runtime record before acting on this agent')
     if not facts.get("launch_id"):
-        if not (agent_dir / 'runtime.json').exists():
-            from ..runtime import missing_runtime
-            missing_runtime.require_stopped(agent_dir, properties)
-        return
+        return  # A genuinely never-launched record has nothing to stop.
     state = observe(properties, facts)
     if state["live"] not in ('stopped', 'dormant'):
         raise ValueError(f'Agent {properties["name"]} is {state["live"]}; stop it first'

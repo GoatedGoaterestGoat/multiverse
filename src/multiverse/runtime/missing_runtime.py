@@ -150,9 +150,10 @@ def discover(directory, properties, socket_path=None, *, facts=None):
     return found
 
 
-def require_stopped(directory, properties, socket_path=None, *, facts=None):
+def require_stopped(directory, properties, socket_path=None, *, facts=None, operation=None):
     if discover(directory, properties, socket_path, facts=facts):
-        raise _problem(directory, 'a running terminal is still tagged for this agent; refusing a duplicate launch')
+        refusal = f'refusing to {operation} this agent' if operation else 'refusing a duplicate launch'
+        raise _problem(directory, 'a running terminal is still tagged for this agent; ' + refusal)
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
         raise _problem(directory, reason)
     for launch in launches(directory):
