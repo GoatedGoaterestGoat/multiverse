@@ -4,6 +4,7 @@ from pathlib import Path
 
 from textual import work
 
+from ..display import clean
 from .plugin_service import in_daemon
 from .screens import Form
 
@@ -44,8 +45,17 @@ class AgentCommands:
             after(result)
         self.refresh_snapshot()
 
+    def damaged_selection(self):
+        """True, with the status line saying why, when the selected agent's record cannot be read: nothing can act on it."""
+        found = (self.selected or {}).get("damaged")
+        if not isinstance(found, dict):
+            return False
+        self.set_status(f"{clean(self.selected['name'])} cannot be used: {clean(found.get('file', ''))}: "
+                        f"{clean(found.get('reason', ''))}", error=True)
+        return True
+
     def action_message(self):
-        if self.ready() and self.selected:
+        if self.ready() and self.selected and not self.damaged_selection():
             agent = dict(self.selected)
             self.push_screen(Form(f'Message {agent["name"]}', [("text", "Message", "", True, True)]),
                              lambda values: self.submit_operation("Send message", self.backend.send, Path(agent["universe"]),
@@ -56,6 +66,8 @@ class AgentCommands:
         self.action_kill()
 
     def action_kill(self):
+        if self.ready() and self.selected and self.damaged_selection():
+            return
         if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant'):
             agent = dict(self.selected)
             description = ("Ctrl+Enter cancels native work only; no terminal remains to close."
@@ -68,11 +80,15 @@ class AgentCommands:
                              if values is not None else None)
 
     def action_resume(self):
+        if self.ready() and self.selected and self.damaged_selection():
+            return
         if self.ready() and self.selected and self.selected["live"] in ('stopped', 'dormant'):
             agent = dict(self.selected)
             self.submit_operation("Resume agent", self.backend.resume, Path(agent["universe"]), agent["id"])
 
     def action_attach(self):
+        if self.ready() and self.selected and self.damaged_selection():
+            return
         if self.ready() and self.selected and self.selected["live"] == "alive":
             self.operating = True
             self.attach_agent(dict(self.selected))

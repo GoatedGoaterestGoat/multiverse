@@ -60,6 +60,8 @@ class NameColumn(Column):
         label.append(clean(row["name"]))
         if not group and row.get("status") == "waiting":
             label.append(" ●", style=f"bold {theme.PEACH}")
+        if not group and row.get("damaged"):
+            label.append(" ⚠", style=f"bold {theme.RED}")
         return label
 
 

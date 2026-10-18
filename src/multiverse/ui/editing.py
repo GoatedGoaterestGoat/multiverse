@@ -106,6 +106,10 @@ class TreeEditing:
         if row["kind"] == "group" and Path(row["path"]) == self.root:
             return (f"Go back to the parent universe to {verb} {clean(row['name'])}." if self.history
                     else f"The top-level universe cannot be {verb}d here.")
+        if row["kind"] == "agent" and isinstance(row.get("damaged"), dict):
+            found = row["damaged"]
+            return (f"{clean(row['name'])} cannot be {verb}d while its record is damaged: "
+                    f"{clean(found.get('file', ''))}: {clean(found.get('reason', ''))}")
         running = row["alive"] if row["kind"] == "group" else int(row["live"] in ('alive', 'ending'))
         if running:
             what = f"{running} running agent{'s' if running != 1 else ''} inside" if row["kind"] == "group" else "it"

@@ -182,6 +182,15 @@ def identity(state, row):
     state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
 
 
+def damage(state, row):
+    """A row whose record cannot be read says which file and why; its other facts are unknown."""
+    found = row.get("damaged")
+    if isinstance(found, dict):
+        state.append("\nDamaged: " + clean(found.get("file", "")), style=f"bold {theme.RED}")
+        state.append("\n" + clean(found.get("reason", "")), style=theme.YELLOW)
+        state.append("\nFix or restore the file and refresh (F5). The other agents are not affected.", style=theme.SUBTEXT0)
+
+
 def progress(state, row):
     state.append("\nStatus: " + clean(row.get("status", "unknown")), style=theme.SUBTEXT0)
     state.append(" · Reported: " + clean(row.get("phase", "unknown")), style=theme.SUBTEXT0)
@@ -219,7 +228,7 @@ def versions(state, row):
                      + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
 
 
-AGENT_FACTS = (identity, progress, context, native_mode, launch_error, relay_loss, versions)
+AGENT_FACTS = (identity, damage, progress, context, native_mode, launch_error, relay_loss, versions)
 
 
 def agent_state(row):
