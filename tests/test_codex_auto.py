@@ -12,7 +12,7 @@ from multiverse.runtime import lifecycle
 from multiverse import harnesses
 from multiverse.runtime import native, runner
 from multiverse.harnesses.codex import CodexAdapter
-from multiverse.harnesses.types import CommandSpec, LaunchContext, NativeEndpoint, NativeResult, SessionHandle
+from multiverse.harnesses.types import CommandSpec, LaunchContext, Message, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.universe.mailbox import append_message, message_record, update_message
 from multiverse.store import read, write
 from multiverse.tools.capabilities import run as capabilities
@@ -33,6 +33,9 @@ class AutoTerminalTest(TerminalBase):
         self.executable.write_text(f'''#!{sys.executable}
 import json, os, pathlib, sys, time
 case = json.loads(pathlib.Path({str(self.case)!r}).read_text())
+if sys.argv[1:] == ['--version']:
+    print('codex-cli 0.162.1')  # This stand-in does not draw a supported startup screen.
+    sys.exit(0)
 with pathlib.Path({str(self.events)!r}).open('a') as out:
     out.write(json.dumps(sys.argv[1:]) + '\\n')
 if sys.argv[1:] == ['app-server', 'daemon', 'start']:
@@ -76,8 +79,8 @@ else:
     def test_mode_selection_falls_back_before_any_native_child(self):
         """Each inbox_bridge policy and Codex condition picks bridge or plain before any native child starts, starting
         the daemon at most once; fragile because it depends on Codex flags, daemon availability and config/read
-        support that change by version, and a wrong pick starts a second native child or silently drops mv2
-        delivery."""
+        support that change by version, and a wrong pick starts a second native child or silently makes a
+        temporary fallback's delivery refusal final."""
         with self.subTest('harness auto capability is undecided, not launch-only'):
             for setting, mechanism in (({}, None), ({'inbox_bridge': True}, None),
                                        ({'inbox_bridge': False}, 'launch-only')):
@@ -85,6 +88,20 @@ else:
                 found = capabilities(self.root, harness='codex')
                 for operation in ('send_steer', 'send_follow_up'):
                     self.assertEqual(found[operation]['mechanism'], mechanism)
+        for setting, selection, final in (
+                (False, {'policy': 'plain', 'mode': 'plain'}, True),
+                (None, {'policy': 'auto', 'mode': 'plain'}, False),
+                (True, {'policy': 'plain', 'mode': 'plain'}, False),
+                (None, {'policy': 'plain', 'mode': 'plain'}, False)):
+            with self.subTest('plain refusal follows current policy', setting=setting, selection=selection):
+                adapter = CodexAdapter.configured('codex', {} if setting is None else {'inbox_bridge': setting})
+                session = SessionHandle('agent', 'codex', str(self.work), launch_id='launch',
+                                        native_id=str(uuid4()), state='running', native_mode=selection)
+                for operation in ('send_steer', 'send_follow_up'):
+                    self.assertEqual(adapter.capabilities(session)[operation].mechanism,
+                                     'launch-only' if final else None)
+                result = adapter.send(session, Message(str(uuid4()), 'saved follow-up', delivery='follow-up'), Mock())
+                self.assertEqual(result.value, {'launch_only': True, 'final': final})
         start = ['app-server', 'daemon', 'start']
         plain = []  # launches checked once all have started, so their readiness waits overlap
         def launch(name, rpc=None, **settings):

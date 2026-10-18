@@ -96,7 +96,7 @@ The live connection runs through Codex's shared app-server daemon. There is one 
 - `args` contain `--remote` or `--no-daemon`.
 - On resume, `args` contain `--profile`, `--add-dir` or `--approve-for-me`.
 
-`mv2 inspect NAME` shows the reason.
+`mv2 inspect NAME` shows the reason. A refusal from an automatic fallback stays saved for retry after a connected resume. Explicit `inbox_bridge: false` declares launch-only delivery; changing that setting to enable the bridge makes a saved refusal retryable too.
 
 **Permissions.** Put sandbox and approval flags that must hold on resume in `args`, not `spawn_args`. On a connected resume, mv2 applies `--sandbox`, `--ask-for-approval` and `--dangerously-bypass-approvals-and-sandbox` to the saved conversation. It then checks that Codex accepted them.
 

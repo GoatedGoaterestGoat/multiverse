@@ -279,9 +279,7 @@ class CodexAdapter(ConfiguredAdapter):
         if session.native_relay and session.native_relay.get('state') == 'lost':
             result['send_steer'] = result['send_follow_up'] = Capability(
                 'unavailable', session.native_relay['reason'], required=True)
-        plain = (selection.get('mode') == 'plain' if selection else
-                 not session.launch_id and not session.endpoint and self.settings.get('inbox_bridge') is False)
-        if plain:
+        if self._plain_delivery(session) and self.settings.get('inbox_bridge') is False:
             result['send_steer'] = result['send_follow_up'] = replace(result['send_steer'], mechanism='launch-only')
         if self._uses_bridge(session) and session.native_id and session.session_file:
             result['get_usage'] = Capability('supported', mechanism='codex-app-server-context')
@@ -305,6 +303,11 @@ class CodexAdapter(ConfiguredAdapter):
         # authoritative; a configured-only strict profile still declares support.
         return bool((session.endpoint and session.endpoint.transport == 'unix-websocket') or
                     (not session.launch_id and self.settings.get('inbox_bridge') is True))
+
+    def _plain_delivery(self, session):
+        if session.native_mode:
+            return session.native_mode.get('mode') == 'plain'
+        return not session.endpoint and self.settings.get('inbox_bridge') is False
 
     def get_delivery(self, session, message_id, executor):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
@@ -334,7 +337,9 @@ class CodexAdapter(ConfiguredAdapter):
         if mode not in ('steer', 'follow-up'):
             return NativeResult('unavailable', f'Unknown delivery mode: {mode}')
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
-            return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID')
+            value = ({'launch_only': True, 'final': self.settings.get('inbox_bridge') is False}
+                     if self._plain_delivery(session) else None)
+            return NativeResult('unavailable', 'Native delivery requires a Codex app-server launch and bound session ID', value)
         if session.state != 'running':
             return NativeResult('unavailable', 'Native launch is still binding; retry after validation completes, or inspect runtime.json for a launch error')
         return executor.rpc(RpcSpec(session.endpoint.address, partial(send_message, session, message, mode)))
