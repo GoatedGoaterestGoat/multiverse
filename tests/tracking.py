@@ -37,8 +37,11 @@ def records(path):
 
 
 def processes():
-    """(pid, process group, state, start) of every process, the start in the form process_started gives; [] when
-    ps cannot say."""
+    """(pid, process group, state, start) of every process, the start in the form process_started gives (on Linux
+    linux:<boot id>:<start ticks>, elsewhere ps's lstart), so that it can be compared with what track() recorded;
+    [] when the system cannot say."""
+    if sys.platform.startswith("linux"):
+        return _linux_processes()
     start = process_module().START
     try:
         output = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], capture_output=True, text=True,
@@ -51,6 +54,28 @@ def processes():
         fields = line.split()
         if len(fields) == 8 and fields[0].isdigit() and fields[1].isdigit() and start.fullmatch(" ".join(fields[3:])):
             found.append((int(fields[0]), int(fields[1]), fields[2], " ".join(fields[3:])))
+    return found
+
+
+def _linux_processes():
+    """processes() from /proc: each process's state, group and start ticks from one read of its stat, with the boot
+    id process_started puts in front of them, so a process that took a recorded PID after a reboot never matches."""
+    try:
+        boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            text = Path("/proc", name, "stat").read_text()
+        except OSError:
+            continue  # it has exited since the listing
+        fields = text[text.rfind(")") + 2:].split() if ")" in text else []
+        if len(fields) > 19 and fields[2].isdigit() and fields[19].isdigit():
+            found.append((int(name), int(fields[2]), fields[0], f"linux:{boot}:{fields[19]}"))
     return found
 
 
