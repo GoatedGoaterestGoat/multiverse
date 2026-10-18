@@ -24,7 +24,7 @@ In a narrow terminal, the optional columns are hidden first. The whole tree fits
 | Column | Shows |
 | --- | --- |
 | `name` | The agent's name (always shown) |
-| `live` | `alive`, `ending`, `stopped`, `dormant` or `unknown` |
+| `live` | `alive`, `ending`, `stopped`, `dormant`, `starting` (a new agent still being prepared) or `unknown` |
 | `status` | `working`, `waiting`, `idle` or `disconnected`, from the harness over a live connection |
 | `context` | The latest request's size against the model's window, such as `82k/200k`. It turns yellow at 70% and red at 90% |
 | `cost` | The session's cost so far (off by default) |

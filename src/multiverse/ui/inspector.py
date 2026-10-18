@@ -8,7 +8,7 @@ from textual import work
 from textual.containers import Vertical, VerticalScroll
 from textual.widgets import Static
 
-from ..display import clean
+from ..display import clean, live_label
 from . import theme
 from .plugin_service import in_daemon
 from .tree import within
@@ -178,8 +178,8 @@ def identity(state, row):
     state.append(clean(row.get("harness", "unknown")))
     if row.get("model"):
         state.append(" / " + clean(row["model"]))
-    live = row.get("live", "unknown")
-    state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.YELLOW)
+    live = live_label(row) if "live" in row else "unknown"
+    state.append(f" · {live}", style=theme.GREEN if live == "alive" else theme.BLUE if live == "starting" else theme.YELLOW)
 
 
 def damage(state, row):
