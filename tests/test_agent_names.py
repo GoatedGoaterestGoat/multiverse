@@ -11,6 +11,8 @@ from uuid import uuid4
 from test_multiverse import BaseTest
 from multiverse import cli
 from multiverse.universe import agents
+from multiverse.universe import relocate
+from multiverse.terminal.tmux import Tmux
 from multiverse.runtime import lifecycle
 from multiverse import harnesses
 from multiverse.store import read, write
@@ -117,15 +119,30 @@ class AgentNamesTest(BaseTest):
                     elif leftover:
                         write(orphan / leftover, {'leftover': True})
                     before = {p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}
-                    launched = lifecycle.start(self.root, orphan.name if index == 0 else f'new-{index}', harness='fake')
+                    launched = lifecycle.start(self.root, f'new-{index}', harness='fake')
                     self.assertNotEqual(launched['id'], orphan.name)
                     self.assertEqual(read(self.root / 'state/agents' / launched['id'] / 'properties.json')['id'], launched['id'])
                     self.assertEqual({p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}, before)
                 finally:
                     shutil.rmtree(orphan)  # Each row proves its own shape, even when an earlier row fails.
 
+    def test_uuid_names_cannot_hide_an_agent_or_orphan(self):
+        """UUID-shaped names must fail before publication, or a harmless-looking spawn hides another agent or an orphan from ID-based recovery."""
+        saved = self.record('worker')
+        orphan = self.root / 'state/agents' / str(uuid4())
+        write(orphan / 'compaction/note.json', {'leftover': True})
+        for name in (saved.name, orphan.name, str(uuid4()).upper(), uuid4().hex,
+                     '00000000-0000-0000-0000-000000000000'):
+            with self.subTest(name=name):
+                before = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                with self.assertRaisesRegex(ValueError, "names can't look like an agent ID"):
+                    lifecycle.start(self.root, name, harness='fake')
+                after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
+                self.assertEqual(after, before)
+        self.backend.create.assert_not_called()
+
     def test_addressing_precedence(self):
-        """An exact name beats another agent's uuid prefix but never its full uuid, an ambiguous reference is refused
+        """An exact UUID beats a legacy colliding name, an exact name beats a UUID prefix, and an ambiguous prefix is refused
         naming each match without saving anything, and old duplicate names still resolve by prefix; fragile because
         the precedence is subtle, and a break silently sends to, kills or resumes the wrong agent (abac381,
         14bc474)."""
@@ -137,9 +154,21 @@ class AgentNamesTest(BaseTest):
             self.assertEqual(agents.directory(self.root, prefix.name), prefix)
         with self.subTest('an exact name cannot retarget another agent\'s full uuid'):
             first = self.record('first', identifier='44444444-0000-4000-8000-000000000005')
-            self.record(first.name, identifier='55555555-0000-4000-8000-000000000006')
-            with self.assertRaises(agents.AmbiguousAgent):
-                agents.directory(self.root, first.name)
+            legacy = self.record(first.name, identifier='55555555-0000-4000-8000-000000000006')
+            self.assertEqual(agents.directory(self.root, first.name), first)
+            self.assertEqual(agents.directory(self.root, legacy.name), legacy)
+            self.assertEqual(lifecycle.start(self.root, resume=legacy.name)['id'], legacy.name)
+        with self.subTest('an orphan is removable despite a legacy UUID-shaped name'):
+            orphan = self.root / 'state/agents' / str(uuid4())
+            write(orphan / 'compaction/note.json', {'leftover': True})
+            legacy = self.record(orphan.name)
+            with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
+                    patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
+                removed = relocate.remove_agent(self.root, orphan.name)
+            self.assertEqual(removed['id'], orphan.name)
+            self.assertFalse(orphan.exists())
+            self.assertTrue(legacy.exists())
+            self.assertEqual(agents.directory(self.root, legacy.name), legacy)
         with self.subTest('old duplicate names still resolve and resume by uuid prefix'):
             first = self.record('old-name', identifier='11111111-0000-4000-8000-000000000001', state='dormant')
             second = self.record('old-name', identifier='22222222-0000-4000-8000-000000000002', state='failed')

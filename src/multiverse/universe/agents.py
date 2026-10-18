@@ -55,9 +55,11 @@ def directory(root, reference, *, allow_damaged=False):
                 or path.parent.name.startswith(reference)):
             matches.append(path.parent)
             names[path.parent] = name if isinstance(name, str) and name else path.parent.name
-    if exact_names:
-        # Names win over prefixes, never over another agent's exact identity.
-        matches = list(dict.fromkeys([*exact_names, *exact_ids]))
+    if exact_ids:
+        # Legacy UUID-shaped names must not hide an agent's recovery address.
+        matches = exact_ids
+    elif exact_names:
+        matches = exact_names
     if not matches:
         detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
         raise AgentNotFound(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
@@ -94,6 +96,12 @@ def name_matches(path, name):
 
 
 def check_available_name(root, name, *, locked=False, exclude=None):
+    try:
+        normalize_session_id(name)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("Agent names can't look like an agent ID; choose a name instead of a UUID")
     # The initial check is read-only. Publication repeats it under the
     # namespace/name locks before the atomic rename reserves the identity.
     for path in record_paths(root):

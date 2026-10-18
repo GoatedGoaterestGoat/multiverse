@@ -11,7 +11,7 @@ mv2 spawn --name tester --harness claude --model sonnet --task-file brief.md --w
 
 | Option | Meaning |
 | --- | --- |
-| `--name` | Must be unique in the universe, counting stopped and failed agents |
+| `--name` | Must be unique in the universe, counting stopped and failed agents, and cannot look like a UUID |
 | `--harness` | A harness configured in this universe. The default is `codex` |
 | `--task` / `--prompt`, `--task-file` | The first prompt. Leave it out to start the agent idle |
 | `--model` | Override the harness's default model for this agent |
@@ -35,7 +35,7 @@ mv2 list --wide        # full summaries and errors
 
 Each line shows the agent's name, state, reported phase and summary. Agents waiting for you come first.
 
-Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact name wins over another agent's ID prefix. A name that matches another agent's full ID is ambiguous, as are duplicate names: the command refuses and lists the matching agents.
+Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Duplicate names and ambiguous prefixes are refused with the matching agents listed.
 
 ## Watch an agent
 
