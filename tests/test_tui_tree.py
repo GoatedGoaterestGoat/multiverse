@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import DataTable, Static
@@ -34,7 +35,7 @@ class TreeEditingTests(unittest.IsolatedAsyncioTestCase):
             write(scope / "state/agents" / agent_id / "properties.json",
                   {"id": agent_id, "name": name, "harness": "claude", "universe_id": read(scope / "universe.json")["id"],
                    "workspace": str(self.work), "task": "", "phase": "done", "summary": ""})
-            write(scope / "state/agents" / agent_id / "runtime.json", {"launch_id": "launch", "state": "stopped"})
+            write(scope / "state/agents" / agent_id / "runtime.json", {"launch_id": str(uuid4()), "state": "stopped"})
         # Only "busy" has a live terminal; the listing and relocate agree on that.
         observed = lambda properties, *_args: {"live": "alive" if properties["name"] == "busy" else "stopped",
                                                "reason": ""}

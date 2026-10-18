@@ -22,9 +22,11 @@ class InboxDeliveryTest(BaseTest):
         self.agent = str(uuid4())
         self.directory = self.root / 'state/agents' / self.agent
         self.native_id = str(uuid4())
+        self.launch = str(uuid4())
+        self.terminal = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
         write(self.directory / 'properties.json', {'id': self.agent, 'name': 'recipient', 'harness': 'claude',
             'workspace': str(self.work), 'native_session_id': self.native_id})
-        write(self.directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
+        write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'tmux': self.terminal})
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []
@@ -110,11 +112,12 @@ class InboxDeliveryTest(BaseTest):
         with self.assertRaisesRegex(ValueError, 'recipient inbox'):
             message_record(self.directory, str(uuid4()))
         write(self.directory / 'properties.json', props)
-        write(self.directory / 'runtime.json', {'launch_id': 'resumed', 'state': 'running'})
+        resumed = str(uuid4())
+        write(self.directory / 'runtime.json', {'launch_id': resumed, 'state': 'running', 'tmux': self.terminal})
         self.behavior = NativeResult('native_queued')
         result = native.deliver(self.root, self.agent, message['id'], retry=True)
         self.assertEqual(result['native_session_id'], self.native_id)
-        self.assertEqual(result['launch_id'], 'resumed')
+        self.assertEqual(result['launch_id'], resumed)
 
     def test_reconciliation_confirms_without_resubmitting(self):
         self.behavior = TimeoutError('lost response')

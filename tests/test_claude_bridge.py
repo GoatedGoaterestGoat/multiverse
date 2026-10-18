@@ -250,12 +250,14 @@ class ClaudeBridgeTest(BaseTest):
         directory = self.root / 'state/agents' / recipient
         write(directory / 'properties.json', {'id': recipient, 'name': 'worker', 'harness': 'claude',
                                               'workspace': str(self.work), 'native_session_id': native_id})
-        write(directory / 'runtime.json', {'launch_id': 'current', 'state': 'running',
+        write(directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running',
                                            'native_bridge': 'claude-mod-v1',
-                                           'control_endpoint': {'transport': 'unix-lines', 'address': self.socket}})
+                                           'control_endpoint': {'transport': 'unix-lines', 'address': self.socket},
+                                           'tmux': {'socket': str(self.work / 'tmux-worker.sock'), 'session': '$1', 'pane': '%1'}})
         write(self.root / 'state/agents' / sender / 'properties.json', {'id': sender, 'name': 'reviewer'})
         inbox = Inbox(self.socket)
-        with patch.object(native, 'owned'):
+        # A running agent on its recorded terminal; the test's tmux socket doesn't exist, so say it is alive.
+        with patch.object(native, 'owned'), patch.object(native, 'observe', return_value={'live': 'alive'}):
             result = send.run(self.root, agent=recipient, text='Please rebase',
                               sender={'agent_id': sender, 'universe': str(self.root), 'name': 'agent'})
         inbox.close()

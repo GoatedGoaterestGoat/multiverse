@@ -74,10 +74,7 @@ def listing(root, recursive=False, only=None):
             try:
                 facts = records.runtime(path.parent / "runtime.json")
                 facts = agents.preparation_snapshot(path.parent, facts)
-                if not (path.parent / 'runtime.json').exists() and missing_runtime.launches(path.parent):
-                    error = records.RecordError(path.parent / 'runtime.json',
-                        'is missing; terminal ownership must be checked before another launch')
-                    error.recover = 'kill'
+                if error := missing_runtime.damage(path.parent, facts):
                     raise error
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
@@ -96,7 +93,8 @@ def listing(root, recursive=False, only=None):
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
                 try:
-                    delivery_problem = mailbox.delivery_problem(path.parent, properties['name'])
+                    delivery_problem = mailbox.delivery_problem(path.parent, properties['name'],
+                        is_final=native.launch_only_filter(scope, path.parent, properties, facts, observation['live']))
                 except (OSError, ValueError, TypeError, KeyError):
                     delivery_problem = None  # Doctor reports ledger damage separately.
                 rows.append(text_defaults({**properties, "usage": measured, "tokens": display.usage_total(measured),
@@ -174,7 +172,8 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     properties["workspace"] = str(workdir)
     if resume:
         previous = runtime(agent_dir)
-        if previous and observe(properties, previous)['live'] in ('stopped', 'dormant'):
+        if (previous and missing_runtime.damage(agent_dir, previous) is None
+                and observe(properties, previous)['live'] in ('stopped', 'dormant')):
             attachments.wait(agent_dir, previous.get('launch_id'), TEARDOWN_TIMEOUT)
     proposed_launch = uid() if not resume else None
     if not resume:
@@ -184,23 +183,33 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
     else:
         launch_lock = lambda path: lock(path, create_parent=False)
     with launch_lock(agent_dir / ".launch.lock"):
+        missing_notices = []
         if resume:
             # _record's snapshot predates this lock; a /clear report may have
             # rebound the conversation while we waited for it.
             properties = agents.session_properties(root, agent_dir, launch_locked=True)
             properties.setdefault('workspace', str(workdir))
-            properties, _ = native.session_snapshot(root, agent_dir, properties, runtime(agent_dir),
-                                                     adapter=adapter, launch_locked=True)
+            previous = runtime(agent_dir)
+            if error := missing_runtime.damage(agent_dir, previous):
+                if _recovery:
+                    raise error  # Automatic recovery cannot replace lost authority.
+                missing_notices = missing_runtime.require_stopped(agent_dir, properties, socket_path, facts=previous)
+                if runtime(agent_dir) != previous:
+                    raise records.RecordError(agent_dir / 'runtime.json',
+                                              'changed during terminal discovery; retry with the current record')
+                previous = {}  # Discard damaged authority only after independent absence proof.
+            else:
+                properties, previous = native.session_snapshot(root, agent_dir, properties, previous,
+                                                                adapter=adapter, launch_locked=True)
             workdir = Path(properties['workspace']).resolve()
             if not workdir.is_dir():
                 raise ValueError(f'Workspace does not exist: {workdir}')
-        previous = runtime(agent_dir)
+        else:
+            previous = runtime(agent_dir)
         if not resume and agents.preparing(previous) and previous['launch_id'] == proposed_launch:
             previous = {}  # This call published the minimal record while holding this lock.
         else:
             previous = agents.interrupted_preparation(previous, agent_dir)
-        missing_notices = (missing_runtime.require_stopped(agent_dir, properties, socket_path)
-                           if resume and not (agent_dir / 'runtime.json').exists() else [])
         if _recovery:
             _check_recovery(previous, properties, _recovery)
         if previous and observe(properties, previous)["live"] not in ('stopped', 'dormant'):
@@ -750,7 +759,7 @@ def terminal_action(root, reference, action):
 def kill(root, reference, *, attachment_only=False):
     """End native work, await its process exit, then remove the owned wrapper."""
     agent_dir = directory(root, reference)
-    if not (agent_dir / 'runtime.json').exists():
+    if not (agent_dir / 'runtime.json').exists() or missing_runtime.damage(agent_dir, runtime(agent_dir)):
         recovered = missing_runtime.kill(root, agent_dir, attachment_only=attachment_only)
         if recovered is not None:
             return recovered

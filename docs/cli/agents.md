@@ -35,7 +35,7 @@ mv2 list --wide        # full summaries and errors
 
 Each line shows the agent's name, state, reported phase and summary. Agents waiting for you come first.
 
-Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. If a name matches more than one agent, the command fails and lists their IDs.
+Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact name wins over another agent's ID prefix. A name that matches another agent's full ID is ambiguous, as are duplicate names: the command refuses and lists the matching agents.
 
 ## Watch an agent
 
@@ -102,15 +102,19 @@ when its name cannot be recovered. An existing agent folder still reserves its
 UUID when properties.json is missing. Commands that would act on damaged
 identity refuse until it is repaired; listing does not rewrite or reset it.
 
-A missing runtime.json is reported even though the agent's name and harness
-remain readable. Before resume or wake, mv2 checks the launch's recorded and
+A missing runtime.json, or damaged launch authority inside it (such as an invalid
+launch UUID or terminal socket, pane or session identity), is reported even though
+the agent's name and harness remain readable. Before resume or wake, mv2 checks the launch's recorded and
 current tmux servers for its exact universe, agent and launch tags, and checks
 recorded process identities. A surviving terminal or process prevents a second
 launch. An unreachable server names the discovery problem instead of guessing
 that the agent stopped. If neither a terminal nor a process remains, resume
-starts a new launch and says that runtime.json was missing.
+starts a new launch with a note naming the missing or damaged runtime record.
+Unknown process identity is not proof of exit, and refusal leaves the damaged
+record unchanged.
 
-Kill can close a uniquely tagged terminal even when runtime.json is missing.
+Kill can close a uniquely tagged terminal even when runtime.json is missing or
+its launch authority is damaged.
 It never guesses a child PID or contacts a shared server from the conversation
 UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other
@@ -118,7 +122,9 @@ clients and their server are not closed. A failed preparation keeps a named,
 failed record that doctor reports and mv2 remove can clear. New agent folders
 are published with complete minimal properties and a starting runtime record,
 including during concurrent spawns. While the publishing process holds its launch
-lock, list shows `starting`; it is not a damaged record. If preparation is
+lock, list shows `starting`; it is not a damaged record. Doctor also accepts the
+full starting record while that same launch is still preparing its terminal
+under the lock. Once the lock is released, unexplained unknown state is reported. If preparation is
 interrupted before any native startup, doctor reports the failed preparation and
 the record can be resumed or removed. Unknown child evidence still requires
 repair of the runtime record rather than assuming the process stopped.
@@ -130,8 +136,9 @@ so a damaged file may reserve a name mentioned elsewhere in that file too.
 Unreadable peer evidence can block new names or conversation claims; it does not
 prevent inspecting, stopping or messaging a healthy agent. Doctor also names an
 agent whose recorded workspace folder has disappeared.
-Doctor names each damaged harness definition and continues checking the other
-definitions and agents. Restore or remove a missing peer properties file before
+Doctor names each damaged harness definition, including unsupported schema
+versions, and continues checking the other definitions and agents. Catalog and
+command lookup skip damaged definitions with a named warning on stderr. Restore or remove a missing peer properties file before
 claiming a name that mv2 cannot safely rule out.
 
 ## When a launch fails

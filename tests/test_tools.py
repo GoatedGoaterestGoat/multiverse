@@ -32,7 +32,7 @@ class ToolsTest(unittest.TestCase):
         self.directory = self.root / "state/agents" / self.agent
         write(self.directory / "properties.json", {"id": self.agent, "name": "worker",
               "universe_id": read(self.root / "universe.json")["id"]})
-        write(self.directory / "runtime.json", {"launch_id": "current", "state": "stopped"})
+        write(self.directory / "runtime.json", {"launch_id": str(uuid4()), "state": "stopped"})
 
     def invoke(self, action, *args, standalone=True, env=None, code=0, text=None):
         entry = ["-m", "multiverse.tools." + ("list_agents" if action == "list" else action.replace("-", "_"))]

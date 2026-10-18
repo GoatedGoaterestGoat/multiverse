@@ -114,6 +114,9 @@ class CodexPluginsTest(PluginTestCase):
         from multiverse import harnesses
         from multiverse.runtime import lifecycle
         from multiverse.store import write
+        # The pure adapter tests use an empty, non-record target placeholder.
+        # Here lifecycle publishes the real child record with its own UUID.
+        self.agent.rmdir()
         # A pre-update agent has launch proof and a saved terminal, but no
         # agent-stable policy. Its child must still reach target preparation.
         parent, properties, _, _ = lifecycle._record(self.root, 'sender', '', 'codex', None, None)

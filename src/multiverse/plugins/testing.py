@@ -335,7 +335,12 @@ class PluginTestCase(unittest.TestCase):
         return Dashboard(self, size=size, root=root)
 
     def agent(self, name, harness="claude", root=None, native_id=None, runtime=None, **properties):
-        """Write an agent's records (properties.json, runtime.json) and return its directory. No process starts."""
+        """Write an agent's records and return its directory; nothing is started.
+
+        They describe a well-formed running launch on a private tmux socket that
+        does not exist. Looking it up asks only that socket (a tmux client finds
+        no server). Explicit runtime values override every default.
+        """
         from uuid import uuid4
         from ..store import read, write
         root = Path(root or self.root)
@@ -345,8 +350,9 @@ class PluginTestCase(unittest.TestCase):
             "id": identity, "name": name, "harness": harness, "task": "", "phase": "working", "summary": "",
             "universe_id": read(root / "universe.json")["id"], "workspace": str(self.work / "project"),
             **({"native_session_id": native_id} if native_id else {}), **properties})
-        write(directory / "runtime.json", {"launch_id": "launch-1", "state": "running", "status": "idle",
-                                           **(runtime or {})})
+        write(directory / "runtime.json", {"launch_id": str(uuid4()), "state": "running", "status": "idle",
+            "tmux": {"socket": str(self.work / ("tmux-" + identity[:8] + ".sock")), "session": "$1", "pane": "%1"},
+            **(runtime or {})})
         return directory
 
     def claude_transcript(self, native_id, records, project="project"):

@@ -370,8 +370,9 @@ class ApiOneThreeTest(PluginTestCase):
         agent = mv.agent_at(directory)
         self.assertEqual(agent.name, "worker")
         session = agent.session()
+        launch_id = json.loads((directory / "runtime.json").read_text())["launch_id"]
         self.assertEqual((session.family, session.native_id, session.launch_id, session.native_mode),
-                         ("claude", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", "launch-1", {"mode": "bridge"}))
+                         ("claude", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", launch_id, {"mode": "bridge"}))
         with mock.patch.dict(os.environ, {"MV2_AGENT_DIR": str(directory)}):
             self.assertEqual(mv.current_agent().id, agent.id)
         info = mv.harness_info(self.root, "claude")

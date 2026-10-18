@@ -24,7 +24,7 @@ class SessionDeliveryTest(InboxDeliveryTest):
     def clear(self):
         previous = read(self.directory / 'properties.json')['native_session_id']
         target = str(uuid4())
-        agents.rebind_session(self.root, self.agent, previous, target, 'clear', 'launch', home=str(self.work))
+        agents.rebind_session(self.root, self.agent, previous, target, 'clear', self.launch, home=str(self.work))
         return target
 
     def test_accepted_receipt_is_checked_in_its_original_owned_conversation(self):
@@ -45,11 +45,11 @@ class SessionDeliveryTest(InboxDeliveryTest):
 
     def test_pending_startup_message_is_sent_once_to_the_current_conversation(self):
         message = append_message(self.directory, 'saved before clear', {}, delivery='steer', target_session=self.native_id)
-        update_message(self.directory, message['id'], submission_state='pending', deferred_launch_id='launch')
-        write(self.directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running', 'startup_delivery': 'waiting'})
+        update_message(self.directory, message['id'], submission_state='pending', deferred_launch_id=self.launch)
+        write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'startup_delivery': 'waiting', 'tmux': self.terminal})
         current = self.clear()
-        native.flush_startup(self.root, self.directory, 'launch')
-        native.flush_startup(self.root, self.directory, 'launch')
+        native.flush_startup(self.root, self.directory, self.launch)
+        native.flush_startup(self.root, self.directory, self.launch)
         self.assertEqual([(s.native_id, m.id) for s, m, _ in self.calls], [(current, message['id'])])
         tracking = message_record(self.directory, message['id'])[1]
         self.assertEqual(tracking['target_session'], current)

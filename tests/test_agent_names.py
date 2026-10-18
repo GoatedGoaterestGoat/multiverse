@@ -51,20 +51,14 @@ class AgentNamesTest(BaseTest):
         self.backend.create.assert_not_called()
 
     def test_parallel_spawns_cannot_publish_two_agents_with_the_same_name(self):
-        adapter = harnesses.load(self.root, 'fake')
-        original = adapter.spawn
-        prepared = threading.Barrier(2)
-        def spawn(context):
-            command = original(context)
-            prepared.wait(timeout=3)  # Both spawns passed the initial name lookup.
-            return command
-        adapter.spawn = spawn
+        ready = threading.Barrier(2)
         def start():
+            ready.wait(timeout=3)  # Concurrent contenders; only the winner prepares.
             try:
                 return lifecycle.start(self.root, 'shared-name', harness='fake')
             except ValueError as error:
                 return error
-        with patch.object(harnesses, 'load', return_value=adapter), ThreadPoolExecutor(max_workers=2) as pool:
+        with ThreadPoolExecutor(max_workers=2) as pool:
             results = list(pool.map(lambda _: start(), range(2)))
         self.assertEqual(sum(isinstance(value, dict) for value in results), 1, results)
         self.assertEqual(sum(isinstance(value, ValueError) for value in results), 1, results)
@@ -95,6 +89,19 @@ class AgentNamesTest(BaseTest):
         self.assertEqual(agents.directory(self.root, second.name), second)
         self.assertEqual(lifecycle.start(self.root, resume=first.name[:8])['id'], first.name)
         self.assertEqual(lifecycle.start(self.root, resume=second.name[:8])['id'], second.name)
+
+    def test_exact_name_wins_over_another_agents_uuid_prefix(self):
+        named = self.record('a', identifier='11111111-0000-4000-8000-000000000001')
+        prefix = self.record('b', identifier='ab2ea794-0000-4000-8000-000000000002')
+        self.assertEqual(agents.directory(self.root, 'a'), named)
+        self.assertEqual(agents.directory(self.root, 'ab2'), prefix)
+        self.assertEqual(agents.directory(self.root, prefix.name), prefix)
+
+    def test_exact_name_cannot_retarget_another_agents_full_uuid(self):
+        first = self.record('first', identifier='11111111-0000-4000-8000-000000000001')
+        self.record(first.name, identifier='22222222-0000-4000-8000-000000000002')
+        with self.assertRaises(agents.AmbiguousAgent):
+            agents.directory(self.root, first.name)
 
     def test_unknown_agent_error_is_plain_in_core_and_cli(self):
         expected = "No agent named missing here. Run mv2 list to see this universe's agents."

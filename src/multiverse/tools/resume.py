@@ -1,6 +1,7 @@
 """Resume an agent using its recorded native session."""
 from ..runtime import lifecycle
 from .. import universe
+from ..universe import agents
 from ._common import add_wait
 from ..display import cause, outcome
 
@@ -18,6 +19,11 @@ def run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False
 def cli_run(root=None, *, agent, model=None, wait=False, wait_timeout=60, json=False):
     try:
         record = run(root, agent=agent, model=model, wait=wait, wait_timeout=wait_timeout)
+    except agents.AgentNotFound as error:
+        if not json:
+            raise
+        from ._launch import failure_record
+        return failure_record(root, agent, error)
     except (RuntimeError, ValueError) as error:
         if json:
             from ._launch import failure_record

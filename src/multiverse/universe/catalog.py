@@ -13,8 +13,12 @@ def _own(root, on_error=None):
         for path in sorted((root / kind).glob(f"*/{filename}")):
             try:
                 meta = records.runtime(path)
-            except records.RecordError as error:
-                problem = ValueError(f'{error.file}: {error.reason}')
+                if kind == 'harnesses':
+                    from .. import harnesses
+                    harnesses._configured(path.parent.name, meta)
+            except (ValueError, TypeError) as error:
+                detail = error.reason if isinstance(error, records.RecordError) else str(error)
+                problem = ValueError(f'{path}: {detail}')
                 if on_error is None:
                     raise problem from error
                 on_error(problem)
@@ -40,13 +44,13 @@ def catalog(root, *, on_error=None):
     return result + [entry for entry in _plugin_entries(root) if (entry["kind"], entry["name"]) not in taken]
 
 
-def command(root, query, arguments=""):
+def command(root, query, arguments="", *, on_error=None):
     reference, qualified, plugin = query.partition("@")
     if qualified:
         # `name@plugin` or `kind/name@plugin` names a plugin's entry, even one the universe shadows.
         entries = [e for e in _plugin_entries(root) if e["plugin"] == plugin]
     else:
-        entries = catalog(root)
+        entries = catalog(root, on_error=on_error)
     candidates = [e for e in entries if e["kind"] in ("commands", "workflows", "skills")
                   and reference in (e["name"], f'{e["kind"]}/{e["name"]}')]
     if len(candidates) != 1:

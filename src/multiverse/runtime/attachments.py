@@ -209,6 +209,27 @@ def _blocked(label, path, pid, started, observations):
             'the record only after verifying the old process has exited')
 
 
+def recorded_process_problem(directory, facts):
+    """A damaged generation cannot erase the runner/child evidence it retains.
+
+    Observation only: PID reuse and zombies use the same proof as teardown;
+    malformed or unavailable identity never authorizes a signal or a restart.
+    """
+    observations = {}
+    boundary = facts.get('stopped_at') or (facts.get('observed_at')
+                                         if type(facts.get('exit_code')) is int else None)
+    for key, started_key, label in (('runner_pid', 'runner_started', 'recorded runner'),
+                                     ('pid', 'pid_started', 'recorded child process')):
+        if key not in facts:
+            continue
+        pid, started = facts[key], facts.get(started_key)
+        if type(pid) is not int or pid <= 0:
+            return f'Cannot prove the {label} has exited: {key} is invalid in {directory / "runtime.json"}'
+        if not _gone(pid, started, recorded_at=boundary, observations=observations):
+            return _blocked(label, directory / 'runtime.json', pid, started, observations)
+    return None
+
+
 def problem(directory, facts):
     launch_id = facts.get('launch_id')
     if not launch_id:

@@ -113,7 +113,9 @@ def sentence(text):
 
 def cause(error, name, failure):
     """The reason behind a failed launch, without the record ID and recovery advice around it."""
-    return ValueError(f"{name} {failure}: {error.__cause__ or error}")
+    from .universe.records import RecordError
+    reason = f'{error.file}: {error.reason}' if isinstance(error, RecordError) else error.__cause__ or error
+    return ValueError(f"{name} {failure}: {reason}")
 
 
 # Measured usage: a NativeResult dict whose value holds cumulative counters,

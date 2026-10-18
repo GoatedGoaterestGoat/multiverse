@@ -23,7 +23,9 @@ class SessionObservationTest(BaseTest):
                            'native_session_id': self.old, 'native_session_home': str(self.work),
                            'native_session_provider': 'fixture', 'universe_id': read(self.root / 'universe.json')['id'],
                            'task': ''}
-        self.facts = {'launch_id': 'launch', 'state': 'running', 'pid': 123}
+        self.launch = str(uuid4())
+        self.facts = {'launch_id': self.launch, 'state': 'running', 'pid': 123,
+                      'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}}
         write(self.directory / 'properties.json', self.properties)
         write(self.directory / 'runtime.json', self.facts)
 
@@ -118,7 +120,7 @@ class SessionObservationTest(BaseTest):
     def test_resume_rereads_binding_after_acquiring_launch_lock(self):
         target = str(uuid4())
         stale = dict(self.properties)
-        agents.rebind_session(self.root, self.identity, self.old, target, 'clear', 'launch', home=str(self.work))
+        agents.rebind_session(self.root, self.identity, self.old, target, 'clear', self.launch, home=str(self.work))
         seen = []
         def resume(session, context):
             seen.append(session.native_id)

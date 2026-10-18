@@ -532,33 +532,67 @@ def _launch_only_delivery(adapter, session, delivery):
     return capability if capability and capability.mechanism == 'launch-only' else None
 
 
-def finalize_launch_only(root, directory, message_id):
-    """An already-failed, unsubmitted message needs no retry into a missing path.
+def launch_only_receipt(adapter, session, message, tracking, live):
+    """Classify final refusal without writes, inference, or native operations."""
+    state = tracking.get('submission_state', 'pending')
+    if state != 'failed' and not (state == 'pending' and not tracking.get('attempts')):
+        return None  # Never reclassify accepted or uncertain input.
+    previous = (tracking.get('attempts') or [{}])[-1]
+    value = previous.get('value')
+    if (tracking.get('delivery_method') == 'resume_prompt' or tracking.get('wake_launch_id')
+            or isinstance(value, dict) and value.get('wake_refused') is True):
+        return None
+    capability = _launch_only_delivery(adapter, session, message.get('delivery'))
+    if capability is None or live not in ('alive', 'stopped', 'dormant'):
+        return None
+    wake = adapter.capabilities(session).get('wake')
+    if live in ('stopped', 'dormant') and wake is not None and wake.state == 'supported':
+        return None
+    return {'state': 'unavailable', 'ok': False, 'reason': capability.reason,
+            'value': {'launch_only': True}}
 
-    Used after ledger repair too. Recheck durable state under the normal delivery
-    locks; never change accepted/uncertain input or invoke an adapter send/RPC.
+
+def launch_only_filter(root, directory, properties, facts, live):
+    """Lazy read-only classifier for counting old failures in an observed row."""
+    loaded = []
+    def final(message, tracking):
+        if not loaded:
+            try:
+                loaded.append((harnesses.load(root, properties['harness']),
+                               SessionHandle.from_records(properties, facts, directory)))
+            except (OSError, ValueError, TypeError, KeyError):
+                loaded.append(None)
+        if loaded[0] is None:
+            return False
+        adapter, session = loaded[0]
+        try:
+            return launch_only_receipt(adapter, session, message, tracking, live) is not None
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+    return final
+
+
+def finalize_launch_only(root, directory, message_id):
+    """Persist a final refusal under delivery locks; never invoke send or RPC.
+
+    A reset ledger leaves old messages pending without evidence. When this
+    harness has no delivery path, keep them as final manual-reading history.
+    Accepted/uncertain input and supported failed wakes keep their prior rules.
     """
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
-        if tracking.get('submission_state') != 'failed':
-            return None
+        state = tracking.get('submission_state', 'pending')
         previous = (tracking.get('attempts') or [{}])[-1]
         value = previous.get('value')
-        if (tracking.get('delivery_method') == 'resume_prompt' or tracking.get('wake_launch_id')
+        if ((state != 'failed' and not (state == 'pending' and not tracking.get('attempts')))
+                or tracking.get('delivery_method') == 'resume_prompt' or tracking.get('wake_launch_id')
                 or isinstance(value, dict) and value.get('wake_refused') is True):
-            return None  # A supported wake can succeed after its startup cause is fixed.
+            return None
         _, adapter, session, executor = context(root, directory.name, reconcile=False)
-        capability = _launch_only_delivery(adapter, session, message.get('delivery'))
-        if capability is None:
+        receipt = launch_only_receipt(adapter, session, message, tracking,
+                                      observe(executor.properties, executor.facts)['live'])
+        if receipt is None:
             return None
-        live = observe(executor.properties, executor.facts)['live']
-        if live not in ('alive', 'stopped', 'dormant'):
-            return None
-        wake = adapter.capabilities(session).get('wake')
-        if live in ('stopped', 'dormant') and wake is not None and wake.state == 'supported':
-            return None
-        receipt = {'state': 'unavailable', 'ok': False, 'reason': capability.reason,
-                   'value': {'launch_only': True}}
         update_message(directory, message_id, submission_state='launch-only', final_reason='launch-only',
                        last_receipt=receipt)
         return receipt
@@ -686,12 +720,27 @@ def send_or_wake(root, reference, message_id, retry=False):
     """Caller holds .send.lock. Release .launch.lock before start takes it."""
     # Waking a stopped agent launches it, and launching uses this module: the one
     # import that has to wait until the call.
-    from . import lifecycle
+    from . import lifecycle, missing_runtime
     directory = agents.directory(root, reference)
     with lock(directory / '.launch.lock'):
         message, tracking = message_record(directory, message_id)
-        _, adapter, session, executor = context(root, reference, reconcile=True)
-        live = observe(executor.properties, executor.facts)['live']
+        facts = agents.runtime(directory)
+        if damage := missing_runtime.damage(directory, facts):
+            if (tracking.get('submission_state', 'pending') not in ('pending', 'failed')
+                    or tracking.get('submission_state') == 'failed' and not retry):
+                return _wake_failure(directory, message_id, damage)
+            properties = records.properties(directory / 'properties.json')
+            try:
+                missing_runtime.require_stopped(directory, properties, facts=facts)
+            except (OSError, ValueError, RuntimeError) as error:
+                return _wake_failure(directory, message_id, error)
+            adapter = harnesses.load(root, properties['harness'])
+            session = SessionHandle.from_records(properties, {}, directory)
+            executor = None
+            live = 'dormant'  # Independent discovery, never the damaged record, proved this.
+        else:
+            _, adapter, session, executor = context(root, reference, reconcile=True)
+            live = observe(executor.properties, executor.facts)['live']
         state = tracking.get('submission_state', 'pending')
         eligible = state == 'pending' or (retry and state == 'failed')
         wake = eligible and live in ('stopped', 'dormant') and message.get('delivery') in ('steer', 'follow-up')
@@ -707,7 +756,7 @@ def send_or_wake(root, reference, message_id, retry=False):
     if not wake:
         return deliver(root, reference, message_id, retry=retry)
     try:
-        previous_socket = (executor.facts.get('tmux') or {}).get('socket')
+        previous_socket = (executor.facts.get('tmux') or {}).get('socket') if executor else None
         launched = lifecycle.start(root, resume=reference, resume_message_id=message_id, socket_path=previous_socket)
         _, tracking = message_record(directory, message_id)
         if tracking.get('submission_state') in ('accepted', 'failed', 'unknown'):
@@ -717,12 +766,16 @@ def send_or_wake(root, reference, message_id, retry=False):
                        'value': {'launch_id': launched['runtime']['launch_id'], 'transcript_confirmed': None}}
         return {**receipt, 'notices': launched['notices']} if launched.get('notices') else receipt
     except Exception as error:
-        _, tracking = message_record(directory, message_id)
-        receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
-                   'value': {'wake_refused': True, **({'repair_runtime': str(error.file)}
-                       if isinstance(error, records.RecordError) and error.file.name == 'runtime.json' else {})}}
-        # If startup was registered, uncertainty belongs to the runner. Never
-        # turn a possibly submitted command-line prompt into a retryable failure.
-        if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
-            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
-        return receipt
+        return _wake_failure(directory, message_id, error)
+
+
+def _wake_failure(directory, message_id, error):
+    _, tracking = message_record(directory, message_id)
+    receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
+               'value': {'wake_refused': True, **({'repair_runtime': str(error.file)}
+                   if isinstance(error, records.RecordError) and error.file.name == 'runtime.json' else {})}}
+    # If startup was registered, uncertainty belongs to the runner. Never
+    # turn a possibly submitted command-line prompt into a retryable failure.
+    if tracking.get('submission_state', 'pending') in ('pending', 'failed'):
+        update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
+    return receipt

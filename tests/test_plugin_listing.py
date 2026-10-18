@@ -1,6 +1,7 @@
 """lifecycle.listing(only=...): one agent's row, built by the listing's own code, for api.Universe.agent."""
 from pathlib import Path
 import sys
+import shutil
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -43,12 +44,20 @@ class OneAgentListingTest(PluginTestCase):
 
     def test_absent_removed_and_malformed_targets(self):
         self.assertEqual(lifecycle.listing(self.root, only="0" * 8 + "-0000-0000-0000-" + "0" * 12), [])
-        (self.third / "properties.json").unlink()
+        shutil.rmtree(self.third)
         self.assertEqual(lifecycle.listing(self.root, only=self.third.name), [])
         (self.first / "properties.json").write_text("{not json")
         full = {row["id"]: row for row in lifecycle.listing(self.root)}
         self.assertEqual(lifecycle.listing(self.root, only=self.first.name), [full[self.first.name]])
         self.assertEqual(full[self.first.name]["live"], "unknown")  # today's error row
+
+    def test_missing_properties_in_an_existing_folder_is_damaged_not_removed(self):
+        (self.third / 'properties.json').unlink()
+        [row] = lifecycle.listing(self.root, only=self.third.name)
+        self.assertEqual(row['id'], self.third.name)
+        self.assertIn('properties.json', row['damaged']['file'])
+        self.assertIn('No such file', row['damaged']['reason'])
+        self.assertIn(row, lifecycle.listing(self.root))
 
     def test_only_is_one_directory_name(self):
         for value in ("", ".", "..", "../x", "a/b", "/abs", "a\\b", 3):

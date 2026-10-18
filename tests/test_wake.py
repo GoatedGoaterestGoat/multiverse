@@ -20,10 +20,11 @@ class WakeTest(BaseTest):
     def setUp(self):
         super().setUp()
         self.agent, self.native_id = str(uuid4()), str(uuid4())
+        self.old_launch, self.new_launch, self.replacement_launch = (str(uuid4()) for _ in range(3))
         self.directory = self.root / 'state/agents' / self.agent
         write(self.directory / 'properties.json', {'id': self.agent, 'name': 'wake', 'task': 'original',
             'harness': 'codex', 'workspace': str(self.work), 'native_session_id': self.native_id})
-        write(self.directory / 'runtime.json', {'launch_id': 'old', 'state': 'dormant'})
+        write(self.directory / 'runtime.json', {'launch_id': self.old_launch, 'state': 'dormant'})
         self.adapter = Mock()
         self.adapter.capabilities.return_value = {'wake': Capability('supported')}
         self.adapter.send.return_value = NativeResult('native_queued')
@@ -40,9 +41,10 @@ class WakeTest(BaseTest):
             message, tracking = message_record(self.directory, resume_message_id)
             self.assertEqual(message['target_session'], self.native_id)
             self.assertEqual(resume, self.agent)
-            write(self.directory / 'runtime.json', {'launch_id': 'new', 'state': 'starting', 'startup_delivery': 'waiting'})
+            write(self.directory / 'runtime.json', {'launch_id': self.new_launch, 'state': 'starting', 'startup_delivery': 'waiting',
+                'tmux': {'socket': None, 'session': '$1', 'pane': '%1'}})
             update_message(self.directory, resume_message_id, submission_state='submitting',
-                delivery_method='resume_prompt', wake_launch_id='new',
+                delivery_method='resume_prompt', wake_launch_id=self.new_launch,
                 attempts=[*tracking.get('attempts', []), {'state': 'unknown'}])
         return {'runtime': agents.runtime(self.directory)}
 
@@ -59,17 +61,17 @@ class WakeTest(BaseTest):
         first = messages[0]
         self.assertEqual(first['tracking']['submission_state'], 'submitting')
         self.assertTrue(all(m['tracking']['submission_state'] == 'pending' for m in messages[1:]))
-        mailbox.finish_wake(self.directory, 'new', first['id'], True)
+        mailbox.finish_wake(self.directory, self.new_launch, first['id'], True)
         self.assertEqual(self.messages()[0]['tracking']['submission_state'], 'accepted')
         self.assertIsNone(self.messages()[0]['tracking']['native_receipt']['transcript_confirmed'])
         # Pre-binding recovery checks must not attempt a native call.
         checked = deliver.run(self.root, agent=self.agent, check=True)
         self.assertEqual(len(checked['messages']), 15)
         self.adapter.get_delivery.assert_not_called()
-        agents.update_runtime(self.directory, 'new', state='running')
-        native.flush_startup(self.root, self.directory, 'new')
+        agents.update_runtime(self.directory, self.new_launch, state='running')
+        native.flush_startup(self.root, self.directory, self.new_launch)
         self.assertEqual([call.args[1].id for call in self.adapter.send.call_args_list], [m['id'] for m in messages[1:]])
-        native.flush_startup(self.root, self.directory, 'new')
+        native.flush_startup(self.root, self.directory, self.new_launch)
         self.assertEqual(self.adapter.send.call_count, 15)
         self.assertEqual(native.deliver(self.root, self.agent, first['id'], retry=True)['state'], 'ok')
         self.assertEqual(native.deliver(self.root, self.agent, first['id'], check=True)['state'], 'unknown')
@@ -98,10 +100,10 @@ class WakeTest(BaseTest):
         self.assertNotIn('resume it', lines[0])
 
     def test_stopped_wrapper_can_wake_and_uncertain_prompt_never_replays(self):
-        agents.update_runtime(self.directory, 'old', state='stopped')
+        agents.update_runtime(self.directory, self.old_launch, state='stopped')
         send.run(self.root, agent=self.agent, text='wake')
         message = self.messages()[0]
-        agents.update_runtime(self.directory, 'new', state='dormant')
+        agents.update_runtime(self.directory, self.new_launch, state='dormant')
         self.assertEqual(native.deliver(self.root, self.agent, message['id'], retry=True)['state'], 'unknown')
         self.assertEqual(deliver.run(self.root, agent=self.agent, retry=True)['messages'], [])
         self.start.assert_called_once()
@@ -110,9 +112,9 @@ class WakeTest(BaseTest):
     def test_failed_process_start_can_be_retried_and_is_not_native_acceptance(self):
         send.run(self.root, agent=self.agent, text='wake')
         message = self.messages()[0]
-        mailbox.finish_wake(self.directory, 'new', message['id'], False, 'Executable failed before startup')
+        mailbox.finish_wake(self.directory, self.new_launch, message['id'], False, 'Executable failed before startup')
         self.assertEqual(self.messages()[0]['tracking']['submission_state'], 'failed')
-        agents.update_runtime(self.directory, 'new', state='dormant')
+        agents.update_runtime(self.directory, self.new_launch, state='dormant')
         self.assertTrue(deliver.run(self.root, agent=self.agent, retry=True)['ok'])
         self.assertEqual(self.start.call_count, 2)
         self.adapter.send.assert_not_called()
@@ -120,12 +122,12 @@ class WakeTest(BaseTest):
     def test_startup_failure_preserves_never_submitted_input_for_explicit_retry(self):
         send.run(self.root, agent=self.agent, text='wake')
         send.run(self.root, agent=self.agent, text='queued')
-        native.flush_startup(self.root, self.directory, 'new', 'Permissions rejected')
+        native.flush_startup(self.root, self.directory, self.new_launch, 'Permissions rejected')
         queued = self.messages()[-1]
         self.assertEqual(queued['tracking']['submission_state'], 'failed')
         self.assertIn('Permissions rejected', queued['tracking']['attempts'][-1]['reason'])
         self.adapter.send.assert_not_called()
-        agents.update_runtime(self.directory, 'new', state='running', startup_delivery='ready')
+        agents.update_runtime(self.directory, self.new_launch, state='running', startup_delivery='ready')
         self.assertTrue(deliver.run(self.root, agent=self.agent, retry=True)['ok'])
         self.assertEqual(self.adapter.send.call_args.args[1].text, 'queued')
 
@@ -135,15 +137,15 @@ class WakeTest(BaseTest):
         stopped = native.stop(self.root, self.agent)
         self.assertEqual(stopped.value['cancelled_startup_messages'], 1)
         self.assertEqual(self.messages()[-1]['tracking']['submission_state'], 'cancelled')
-        write(self.directory / 'runtime.json', {'launch_id': 'replacement', 'state': 'running'})
-        native.flush_startup(self.root, self.directory, 'new')
+        write(self.directory / 'runtime.json', {'launch_id': self.replacement_launch, 'state': 'running'})
+        native.flush_startup(self.root, self.directory, self.new_launch)
         self.adapter.send.assert_not_called()
-        self.assertEqual(agents.runtime(self.directory)['launch_id'], 'replacement')
+        self.assertEqual(agents.runtime(self.directory)['launch_id'], self.replacement_launch)
 
     def test_check_recovers_queue_after_a_runner_died_before_flushing(self):
         send.run(self.root, agent=self.agent, text='wake')
         send.run(self.root, agent=self.agent, text='unsubmitted')
-        write(self.directory / 'runtime.json', {'launch_id': 'replacement', 'state': 'running'})
+        write(self.directory / 'runtime.json', {'launch_id': self.replacement_launch, 'state': 'running'})
         deliver.run(self.root, agent=self.agent, check=True)
         self.assertEqual(self.messages()[-1]['tracking']['submission_state'], 'failed')
         self.adapter.get_delivery.assert_not_called()

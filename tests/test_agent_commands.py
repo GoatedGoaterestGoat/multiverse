@@ -176,7 +176,7 @@ class DoctorTest(BaseTest):
         directory = self.root / 'state/agents' / str(uuid4())
         write(directory / 'properties.json', {'id': directory.name, 'name': 'worker', 'harness': 'codex', 'phase': 'done',
                                               'summary': '', 'workspace': str(self.work)})
-        write(directory / 'runtime.json', {'launch_id': 'l', 'state': 'failed', 'error': 'Cannot start:\nno such file'})
+        write(directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'failed', 'error': 'Cannot start:\nno such file'})
 
     def test_sentences_for_none_one_and_several_problems(self):
         self.assertEqual(doctor.sentences([]), 'No problems.')

@@ -20,9 +20,11 @@ class RelayHealthTest(BaseTest):
         self.directory = self.root / 'state/agents' / str(uuid4())
         self.launch = str(uuid4())
         write(self.directory / 'properties.json', {'id': self.directory.name, 'name': 'relay', 'harness': 'codex',
-            'workspace': str(self.work), 'native_session_id': str(uuid4())})
+            'workspace': str(self.work), 'native_session_id': str(uuid4()),
+            'universe_id': read(self.root / 'universe.json')['id']})
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running', 'status': 'working',
             'pid': 123, 'startup_delivery': 'waiting',
+            'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'},
             'control_endpoint': {'transport': 'unix-websocket', 'address': '/fake/native.sock'}})
         write(self.directory / 'launches' / self.launch / 'request.json', {'rpc_proxy': {'settings': {}}})
         self.publish = RelayPublisher(self.directory, self.launch)

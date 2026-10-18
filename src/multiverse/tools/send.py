@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import sys
 from .. import universe, display
-from ..runtime import native
+from ..runtime import native, missing_runtime
 from ..store import read, lock
 from ..universe import agents, records, mailbox
 from ..universe.mailbox import append_message, message_record, update_message
@@ -99,8 +99,12 @@ def _send_one(root, directory, text, sender, delivery, queue_only):
             properties = read(directory / 'properties.json')
             if delivery != 'inbox-only':
                 try:
-                    properties, _ = native.session_snapshot(root, directory, properties, agents.runtime(directory),
-                                                            launch_locked=True)
+                    facts = agents.runtime(directory)
+                    # Preserve the saved target while send_or_wake independently
+                    # discovers terminal ownership; damaged facts cannot reconcile.
+                    if missing_runtime.damage(directory, facts) is None:
+                        properties, _ = native.session_snapshot(root, directory, properties, facts,
+                                                                launch_locked=True)
                 except Exception as error:
                     binding_error = str(error)
             target = properties.get('native_session_id')

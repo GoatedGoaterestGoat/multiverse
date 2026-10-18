@@ -14,12 +14,16 @@ def record_paths(root):
         return []
 
 
+class AgentNotFound(ValueError):
+    """No saved agent matches a reference; no launch was attempted."""
+
+
 class AmbiguousAgent(ValueError):
     """A reference names several agents; retain names and full IDs for selection."""
 
 
 def directory(root, reference, *, allow_damaged=False):
-    matches, damaged, names = [], [], {}
+    matches, exact_names, exact_ids, damaged, names = [], [], [], [], {}
     for path in record_paths(root):
         try:
             data = records.properties(path)
@@ -28,13 +32,20 @@ def directory(root, reference, *, allow_damaged=False):
             data = error.data or {}
         identity = data.get('id') if isinstance(data.get('id'), str) else path.parent.name
         name = data.get('name')
+        if reference == name:
+            exact_names.append(path.parent)
+        if reference in (identity, path.parent.name):
+            exact_ids.append(path.parent)
         if (reference in (identity, name, path.parent.name) or identity.startswith(reference)
                 or path.parent.name.startswith(reference)):
             matches.append(path.parent)
             names[path.parent] = name if isinstance(name, str) and name else path.parent.name
+    if exact_names:
+        # Names win over prefixes, never over another agent's exact identity.
+        matches = list(dict.fromkeys([*exact_names, *exact_ids]))
     if not matches:
         detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
-        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
+        raise AgentNotFound(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
     if len(matches) != 1:
         detail = ", ".join(f"{names[path]} ({path.name})" for path in sorted(matches))
         raise AmbiguousAgent(f"Expected one agent matching {reference!r}; found {len(matches)}: {detail}. Use a full UUID")
@@ -66,9 +77,8 @@ def name_matches(path, name):
 
 
 def check_available_name(root, name, *, locked=False, exclude=None):
-    if not locked:
-        with lock(root / 'state' / '.agents.lock'):
-            return check_available_name(root, name, locked=True, exclude=exclude)
+    # The initial check is read-only. Publication repeats it under the
+    # namespace/name locks before the atomic rename reserves the identity.
     for path in record_paths(root):
         if path.parent == exclude:
             continue
@@ -107,10 +117,35 @@ def interrupted_preparation(facts, agent_dir):
     return {**facts, 'preparing': False, 'state': 'failed', 'error': reason, 'reason': reason}
 
 
+def launch_in_progress(agent_dir, facts):
+    """The full pre-terminal record is expected while its publisher owns the lock."""
+    if facts.get('state') != 'starting' or facts.get('tmux') is not None:
+        return False
+    try:
+        identifier = normalize_session_id(facts.get('launch_id'))
+    except ValueError:
+        return False
+    if identifier != facts.get('launch_id') or not (agent_dir / 'launches' / identifier).is_dir():
+        return False
+    try:
+        with (agent_dir / '.launch.lock').open('r+') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                current = runtime(agent_dir)
+                return (current.get('launch_id') == identifier and current.get('state') == 'starting'
+                        and current.get('tmux') is None)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    return False
+
+
 def preparation_snapshot(agent_dir, facts):
     """Check only a rare minimal stage, without creating files or querying PIDs."""
     if not preparing(facts):
-        return {**facts, 'preparing': False} if facts.get('preparing') is True else facts
+        active = launch_in_progress(agent_dir, facts)
+        return {**facts, 'preparing': active} if active or facts.get('preparing') is True else facts
     if _child_evidence(agent_dir, facts):
         raise records.RecordError(agent_dir / 'runtime.json',
             'preparation record has native startup evidence; repair the runtime record before acting on this agent')

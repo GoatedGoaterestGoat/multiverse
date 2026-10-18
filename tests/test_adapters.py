@@ -423,7 +423,8 @@ class NativeDeliveryTest(BaseTest):
         self.native_id = str(uuid4())
         write(self.directory / 'properties.json', {'id': self.agent, 'name': 'worker', 'harness': 'codex',
                'native_session_id': self.native_id, 'workspace': str(self.work)})
-        write(self.directory / 'runtime.json', {'launch_id': 'current', 'state': 'running'})
+        write(self.directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running',
+            'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
 
     def test_unsupported_steering_never_falls_back_to_queue_or_terminal_input(self):
         message = append_message(self.directory, 'steer me', {}, delivery='steer')

@@ -24,6 +24,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
     name = store.read(directory / 'properties.json')['name']
     launch_id = agents.runtime(directory).get('launch_id')
     results = []
+    finalized = 0
     for message in mailbox.inbox(directory, limit=None, all_messages=True)['messages']:
         if message.get('schema') != 2 or message.get('delivery') not in ('steer', 'follow-up'):
             continue
@@ -42,8 +43,9 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown')):
             continue
         try:
-            final = native.finalize_launch_only(root, directory, message['id']) if state == 'failed' else None
+            final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') else None
             if final is not None and retry:
+                finalized += 1
                 continue
             if final is not None:
                 receipt = final
@@ -73,9 +75,13 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
             present = _present_error if summary.get('ok') is False and _present_error else _present
             present(display.with_notices(delivery_line(name, receipt, delivery=message['delivery'], check=check, accepted=accepted,
                                   wake=current.get('delivery_method') == 'resume_prompt', text=message['text']), receipt))
-    if _present and not results:
+    if _present and finalized:
+        _present(f'{name}: {finalized} earlier {"refusal is" if finalized == 1 else "refusals are"} final' +
+                 ('; nothing to retry.' if not results else '.'))
+    elif _present and not results:
         _present(f'{name}: no messages to {"retry" if retry else "check"}.')
-    return {'messages': results, 'ok': all(result.get('ok', True) for result in results)}
+    return {'messages': results, 'ok': all(result.get('ok', True) for result in results),
+            **({'finalized': finalized} if finalized else {})}
 
 
 def cli_run(root=None, *, json=False, **options):

@@ -3,6 +3,7 @@ import asyncio
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
 from websockets.asyncio.client import unix_connect
@@ -143,8 +144,12 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
         self.server = await unix_serve(upstream, self.spec['upstream_path'])
         self.protocol = Protocol()
         self.bound, self.errors, self.losses, self.usage, self.refusals = [], [], [], [], []
+        self.loss_recorded = threading.Event()
+        def record_loss(reason):
+            self.losses.append(reason)
+            self.loss_recorded.set()
         self.proxy = rpc.LaunchProxy(self.spec, self.protocol, self.bound.append, self.errors.append,
-                                    self.usage.append, self.losses.append, self.refusals.append)
+                                    self.usage.append, record_loss, self.refusals.append)
         await asyncio.to_thread(self.proxy.start)
         self.clients = []
 
@@ -216,14 +221,23 @@ class RelayConnectionTest(unittest.IsolatedAsyncioTestCase):
         await self.request(client, 1, 'bind')
         await client.send(json.dumps({'id': 2, 'method': 'bad-primary'}))
         await asyncio.wait_for(client.wait_closed(), 2)
+        await self.wait_for_loss()
         self.assertTrue(any('ordinary primary' in error for error in self.errors))
         self.assertTrue(self.losses)
+
+    async def wait_for_loss(self):
+        # The peer sees the close handshake before the relay's handler finally
+        # runs. Wait for its last callback without stopping the proxy, which
+        # would intentionally suppress connection-loss reporting.
+        self.assertTrue(await asyncio.to_thread(self.loss_recorded.wait, 2),
+                        'relay loss callback did not finish')
 
     async def test_connect_failure_still_closes_view(self):
         self.server.close()
         await self.server.wait_closed()
         client = await self.connect()
         await asyncio.wait_for(client.wait_closed(), 2)
+        await self.wait_for_loss()
         self.assertEqual(len(self.protocol.views), 1)
         self.assertEqual(self.protocol.views[0].closed_count, 1)
         self.assertTrue(self.errors)

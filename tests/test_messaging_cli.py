@@ -26,7 +26,8 @@ class MessagingCliTest(BaseTest):
             self.directories[name] = directory
             store.write(directory / 'properties.json', {'id': directory.name, 'name': name,
                 'harness': 'claude', 'workspace': str(self.work), 'native_session_id': str(uuid4())})
-            store.write(directory / 'runtime.json', {'launch_id': 'launch', 'state': 'running'})
+            store.write(directory / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running',
+                'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.behavior = NativeResult('native_queued', 'Native safe-boundary steering accepted; consumption unconfirmed',

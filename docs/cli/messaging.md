@@ -77,6 +77,13 @@ mv2 deliver worker --retry    # resend messages that definitely failed
 message failed. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.
 
+Older definite refusals receive the same classification when list, inspect and
+doctor count failures; reading does not rewrite the ledger. If `deliver --retry`
+finalizes earlier refusals, it says how many and does not resend them. After an
+explicit ledger reset, `--check` gives the manual-reading advice for untracked
+messages on a running launch-only agent, without repeatedly asking an unsupported
+receipt API. Accepted or uncertain tracking is never changed into retryable input.
+
 A refused live delivery to a launch-only agent is final. It stays in inbox
 history as `launch-only`, but is not counted as a failure to retry and does not
 make doctor report a problem. Resend with `--delivery inbox-only` for manual

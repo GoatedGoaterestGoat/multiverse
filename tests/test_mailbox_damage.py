@@ -15,7 +15,8 @@ class MailboxDamageTest(BaseTest):
         self.directory = self.root / 'state' / 'agents' / uid()
         write(self.directory / 'properties.json', {'id': self.directory.name, 'name': 'recipient',
             'harness': 'claude', 'workspace': str(self.work), 'native_session_id': uid()})
-        write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'running'})
+        write(self.directory / 'runtime.json', {'launch_id': uid(), 'state': 'running',
+            'tmux': {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}})
         self.enterContext(patch.object(native, 'owned'))
         self.enterContext(patch.object(native, 'observe', return_value={'live': 'alive'}))
         self.calls = []

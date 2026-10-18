@@ -123,7 +123,7 @@ def _states(agent_dir):
     return states
 
 
-def delivery_problem(agent_dir, name):
+def delivery_problem(agent_dir, name, *, is_final=None):
     """Count definite failures in real inbox messages, without native queries.
 
     Healthy empty ledgers need no history scan. Damage stays an inbox diagnostic,
@@ -139,7 +139,9 @@ def delivery_problem(agent_dir, name):
             return None
         _, _, messages = _messages(agent_dir)
         count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
-                    and message.get('id') in failed for _, message in messages)
+                    and message.get('id') in failed
+                    and not (is_final and is_final(message, states[message['id']]))
+                    for _, message in messages)
     return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry' if count else None
 
 

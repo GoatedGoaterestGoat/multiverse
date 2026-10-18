@@ -302,7 +302,8 @@ class ClaudeRelaunchTest(BaseTest):
                                           'native_session_home': os.path.realpath(self.config)})
         write(agent / 'runtime.json', {'launch_id': str(uuid4()), 'state': 'running', 'pid': os.getpid(),
                                        'pid_started': self.started, 'native_bridge': 'claude-mod-v1',
-                                       'control_endpoint': {'transport': 'unix-lines', 'address': self.ours}})
+                                       'control_endpoint': {'transport': 'unix-lines', 'address': self.ours},
+                                       'tmux': {'socket': str(self.work / 'tmux-healed.sock'), 'session': '$1', 'pane': '%1'}})
         self.listening(self.theirs)
         self.key(self.theirs)
         self.claude_file('sessions-darwin.json', procStart=self.claude_start, messagingSocketPath=self.theirs)
