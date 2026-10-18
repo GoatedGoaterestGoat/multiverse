@@ -14,8 +14,10 @@ Runs started at once share the machine: a unit starts only when it holds one of 
 overloading it. A unit still running after --timeout seconds, or when the run is interrupted (Ctrl-C or SIGTERM),
 is stopped: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running, so the test
 fails and its cleanups still stop the tmux servers and native daemons it started. A unit not done GRACE seconds
-later is killed, and a unit whose runner is killed outright stops the same way; after any unit, the runner ends
-what its tests named with isolation.track and left running.
+later is killed. Should the runner itself die, each unit's watchdog process stops it the same way, with the same
+grace. Either way, what the unit's tests named with isolation.track and left running is ended afterwards: a tmux
+server by its socket, a process only while its start time matches, a group a daemon leads while a process seen in
+it is still there.
 """
 import argparse
 import concurrent.futures
@@ -24,6 +26,7 @@ import json
 import os
 from pathlib import Path
 import random
+import select
 import signal
 import stat
 import subprocess
@@ -39,6 +42,7 @@ SHARD_SECONDS = 20  # a module the record says takes longer is split into shards
 UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
 TIMEOUT = 1200
 GRACE = 30  # seconds a unit the runner stops gets to finish its test's cleanups before it is killed
+OBSERVE_SECONDS = 0.5  # how often a worker records who is in the process groups its tests tracked
 SLOTS = Path(f"/tmp/mv2-test-slots-{os.getuid()}")  # shared by every run of the suite on this machine
 
 
@@ -115,36 +119,123 @@ def _stop(signum, frame):
         raise Stopped("stopped by tests/run.py")
 
 
-def _watch(fd):
-    """Stop this unit once the runner that started it is gone, however it ended: nothing is ever written to the pipe,
-    so a read returns only when the runner's end of it closes."""
-    while os.read(fd, 1):
+def _watchdog(runner, worker_alive, worker, grace, tracked):
+    """A unit's watchdog, a process of its own beside the worker: should the runner go, however it ended, do what it
+    would have. Stop the worker (_stop), give it `grace` seconds to finish, then end what its tests tracked
+    (Run.end_tracked) and kill what is left of its process group. A process, not a thread in the worker, so that a
+    test that ignores SIGTERM or a cleanup that never returns cannot hold it up; it ends once the worker has.
+
+    Nothing is ever written to either pipe: one becomes readable only when the runner's end of it closes, the other
+    when the worker's does."""
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, signal.SIG_IGN)  # it ends by itself, once the worker has
+    if worker_alive in select.select([runner, worker_alive], [], [])[0]:
+        if select.select([runner], [], [], 0)[0]:  # the worker ended, and the runner is gone too: nobody else will
+            Run.end_tracked(tracked)
+        return
+    try:
+        os.kill(worker, signal.SIGTERM)
+    except ProcessLookupError:
         pass
-    os.kill(os.getpid(), signal.SIGTERM)
+    select.select([worker_alive], [], [], grace)
+    Run.end_tracked(tracked)
+    try:
+        os.killpg(worker, signal.SIGKILL)  # the worker leads its own session: it and its tests' processes
+    except OSError:
+        pass  # none left (macOS also refuses a group of only zombies)
 
 
-def worker(start, target, shard, shards, report, verbosity, watch):
+def _records(path):
+    """What a unit's tests tracked (isolation.track) and its worker saw in their groups (_observe), one JSON object
+    a line; a line cut short when the unit was killed is skipped."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except (OSError, TypeError):
+        return []
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
+def _processes():
+    """(pid, process group, state, start) of every process, the start in the form process_started gives; [] when
+    ps cannot say."""
+    if str(HERE.parent / "src") not in sys.path:
+        sys.path.insert(0, str(HERE.parent / "src"))
+    from multiverse.runtime.process import START
+    try:
+        output = subprocess.run(["ps", "-A", "-o", "pid=,pgid=,stat=,lstart="], capture_output=True, text=True,
+                                stdin=subprocess.DEVNULL, env={**os.environ, "TZ": "UTC", "LC_ALL": "C"},
+                                timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    found = []
+    for line in output.splitlines():
+        fields = line.split()
+        if len(fields) == 8 and fields[0].isdigit() and fields[1].isdigit() and START.fullmatch(" ".join(fields[3:])):
+            found.append((int(fields[0]), int(fields[1]), fields[2], " ".join(fields[3:])))
+    return found
+
+
+def _observe(tracked):
+    """Record, with its start time, every process seen in a process group a test tracked, for as long as the group
+    lasts: its leader can exit first and leave helpers behind, and Run.end_tracked ends the group only while a
+    process recorded here is still in it. A group seen empty is not watched again, since its number may later
+    belong to another group."""
+    recorded, gone = set(), set()
+    while True:
+        time.sleep(OBSERVE_SECONDS)
+        groups = {record["group"] for record in _records(tracked) if type(record.get("group")) is int} - gone
+        if not groups:
+            continue
+        found = [(pid, group, started) for pid, group, state, started in _processes() if group in groups]
+        gone |= groups - {group for _, group, _ in found}
+        lines = [json.dumps({"member_of": group, "pid": pid, "started": started}) + "\n"
+                 for pid, group, started in found if (pid, started) not in recorded]
+        if lines:
+            recorded.update((pid, started) for pid, _, started in found)
+            with open(tracked, "a") as out:
+                out.write("".join(lines))
+
+
+def worker(start, target, shard, shards, report, verbosity, watch, grace):
+    tracked, worker_pid = os.environ.get("MV2_TEST_TRACKED"), os.getpid()
+    worker_alive, alive = os.pipe()  # the watchdog reads EOF from `worker_alive` once this process is gone
+    if os.fork() == 0:  # before anything starts a thread
+        os.close(alive)
+        try:
+            os.setpgid(0, 0)  # out of the unit's group, so never a zombie in it when the runner kills that group
+            _watchdog(watch, worker_alive, worker_pid, grace, tracked)
+        finally:
+            os._exit(0)
+    os.close(worker_alive)
+    os.close(watch)  # the watchdog has it; the processes this unit's tests start never do
     sys.path[:0] = [str(start)] + ([str(HERE)] if Path(start) != HERE else [])
     import home_safety
     home_safety.install()  # strict: before a test module or fixture moves HOME
     loader = unittest.TestLoader()
-    if "." in target:  # one class or test, by name
-        suite = loader.loadTestsFromName(target)
+    module = target.split(".", 1)[0]  # a module, or a class or test in one, by name
+    try:  # as discovery imports a module: a SkipTest skips it, anything else is a failing test
+        __import__(module)
+    except unittest.SkipTest as skip:
+        suite = unittest.loader._make_skipped_test(module, skip, unittest.TestSuite)
+    except BaseException:
+        suite, _ = unittest.loader._make_failed_import_test(module, unittest.TestSuite)
     else:
-        try:  # as discovery imports a module: a SkipTest skips it, anything else is a failing test
-            __import__(target)
-        except unittest.SkipTest as skip:
-            suite = unittest.loader._make_skipped_test(target, skip, unittest.TestSuite)
-        except BaseException:
-            suite, _ = unittest.loader._make_failed_import_test(target, unittest.TestSuite)
-        else:
-            suite = loader.loadTestsFromModule(sys.modules[target], pattern="test*.py")
+        suite = (loader.loadTestsFromName(target) if "." in target
+                 else loader.loadTestsFromModule(sys.modules[module], pattern="test*.py"))
     tests = [test for index, test in enumerate(_tests(suite)) if index % shards == shard]
     for test in tests:
         _mark_interruptible(test)
     signal.signal(signal.SIGTERM, _stop)
-    os.set_inheritable(watch, False)  # the processes its tests start do not keep the runner's pipe
-    threading.Thread(target=_watch, args=(watch,), daemon=True).start()
+    if tracked:
+        threading.Thread(target=_observe, args=(tracked,), daemon=True).start()
     result = unittest.TextTestRunner(resultclass=_Result, verbosity=verbosity, stream=sys.stderr).run(
         unittest.TestSuite(tests))
     errors = [[test.id(), text] for test, text in result.errors]
@@ -234,7 +325,7 @@ class Run:
         report, output = Path(scratch) / f"{target}.{shard}.json", Path(scratch) / f"{target}.{shard}.log"
         tracked = Path(scratch) / f"{target}.{shard}.tracked"  # what its tests started outside it (isolation.track)
         command = [sys.executable, str(Path(__file__).resolve()), "--worker", str(self.start), target, str(shard),
-                   str(shards), str(report), "2" if self.verbose else "1"]
+                   str(shards), str(report), "2" if self.verbose else "1", f"{self.grace:g}"]
         began, code = time.monotonic(), "not started"
         try:
             with output.open("wb") as out:
@@ -278,42 +369,45 @@ class Run:
     @staticmethod
     def end_tracked(path):
         """End what a unit's tests started outside its process group and named with isolation.track (a tmux server,
-        a daemon) that is still running, however the unit ended; return what had to be ended. A process is ended
-        only while its start time is the one recorded, never a later process that took its number."""
-        records = []
-        try:
-            lines = Path(path).read_text().splitlines()
-        except OSError:
-            return []
-        for line in lines:
+        a daemon) that is still running, however the unit ended; return what had to be ended.
+
+        A process is ended only while its start time is the one recorded, never a later process that took its
+        number. A tracked group leader's whole group is ended while any process recorded in it (the leader, or a
+        member its worker saw, _observe) is still there, even after the leader itself has gone: a group's number
+        cannot be reused while a process is in it, so a later group with the same number holds none of those."""
+        records, ended = _records(path), []
+        for socket in dict.fromkeys(record["tmux_socket"] for record in records
+                                    if isinstance(record.get("tmux_socket"), str)):
+            if not os.path.exists(socket):
+                continue
             try:
-                records.append(json.loads(line))
-            except ValueError:
-                pass  # a line the unit was killed while writing
-        if str(HERE.parent / "src") not in sys.path:
-            sys.path.insert(0, str(HERE.parent / "src"))
-        from multiverse.runtime.process import process_snapshot
-        ended = []
-        for record in records:
-            socket = record.get("tmux_socket")
-            if socket and os.path.exists(socket):
+                stopped = subprocess.run(["tmux", "-S", socket, "kill-server"], capture_output=True,
+                                         stdin=subprocess.DEVNULL, timeout=10)
+            except (OSError, subprocess.SubprocessError):
+                stopped = None
+            if stopped is not None and stopped.returncode == 0:
+                ended.append(f"the tmux server on {socket}")
+        identities = {(record["pid"], record["started"]) for record in records
+                      if type(record.get("pid")) is int and isinstance(record.get("started"), str)}
+        groups = {record[key] for record in records for key in ("group", "member_of") if type(record.get(key)) is int}
+        if not identities:
+            return ended
+        live = {(pid, started): group for pid, group, state, started in _processes()
+                if (pid, started) in identities and not state.startswith("Z")}
+        killed = set()
+        for group in sorted(group for group in groups if group in live.values()):
+            try:
+                os.killpg(group, signal.SIGKILL)
+                killed.add(group)
+                ended.append(f"process group {group}")
+            except (ProcessLookupError, PermissionError):
+                pass  # then its recorded members one by one, below
+        for (pid, _), group in sorted(live.items()):
+            if group not in killed:
                 try:
-                    stopped = subprocess.run(["tmux", "-S", socket, "kill-server"], capture_output=True,
-                                             stdin=subprocess.DEVNULL, timeout=10)
-                except (OSError, subprocess.SubprocessError):
-                    stopped = None
-                if stopped is not None and stopped.returncode == 0:
-                    ended.append(f"the tmux server on {socket}")
-            pid, started = record.get("pid"), record.get("started")
-            snapshot = process_snapshot(pid) if isinstance(pid, int) and started else None
-            if snapshot is not None and snapshot[0] == started and not snapshot[1].startswith("Z"):
-                try:
-                    if os.getpgid(pid) == pid:
-                        os.killpg(pid, signal.SIGKILL)  # a daemon leading its own session: its children too
-                    else:
-                        os.kill(pid, signal.SIGKILL)
+                    os.kill(pid, signal.SIGKILL)
                     ended.append(f"process {pid}")
-                except ProcessLookupError:
+                except (ProcessLookupError, PermissionError):
                     pass
         return ended
 
@@ -333,8 +427,8 @@ class Run:
     def kill(process):
         try:
             os.killpg(process.pid, signal.SIGKILL)  # the unit's own session: its tests' children too
-        except ProcessLookupError:
-            pass
+        except (ProcessLookupError, PermissionError):
+            pass  # none left (macOS refuses to signal a group whose remaining members are zombies)
         process.wait()
 
     def stop(self):
@@ -463,8 +557,8 @@ def _terminated(signum, frame):
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--worker"]:
-        start, target, shard, shards, report, verbosity, watch = argv[1:]
-        return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch))
+        start, target, shard, shards, report, verbosity, grace, watch = argv[1:]
+        return worker(start, target, int(shard), int(shards), report, int(verbosity), int(watch), float(grace))
     signal.signal(signal.SIGINT, signal.default_int_handler)  # even when started with it ignored, as `cmd &` is
     signal.signal(signal.SIGTERM, _terminated)
     parser = argparse.ArgumentParser(prog="tests/run.py", description=__doc__.split("\n\n")[0])

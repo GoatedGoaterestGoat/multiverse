@@ -508,6 +508,8 @@ class RunnerTest(unittest.TestCase):
         lines = [json.dumps({"pid": survivor.pid, "started": "Thu Jan  1 00:00:00 1970"}),  # the PID taken since
                  json.dumps({"pid": zombie.pid, "started": process_started(zombie.pid)}),
                  json.dumps({"tmux_socket": str(self.work / "no-server.sock")}),  # its server is gone already
+                 json.dumps({"group": [1], "member_of": {"a": 1}, "tmux_socket": [2], "pid": [3], "started": 4}),
+                 "[]",
                  '{"pid": 1, "start']  # cut short when its unit was killed
         (self.work / "no-server.sock").write_text("")
         tracked.write_text("\n".join(lines))
@@ -523,6 +525,124 @@ class RunnerTest(unittest.TestCase):
         from multiverse.runtime.process import process_snapshot
         snapshot = process_snapshot(pid)
         return snapshot is not None and snapshot[1].startswith("Z")
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux required")
+    def test_a_tracked_group_whose_leader_exited_first_still_loses_its_helpers(self):
+        ready, helpers, leader = self.work / "ready", self.work / "helpers", self.work / "leader.py"
+        leader.write_text(textwrap.dedent(f"""
+            import subprocess, sys, time
+            from pathlib import Path
+            spawn = lambda: subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", {str(helpers)!r}]).pid
+            first = spawn()  # a helper before the group is tracked
+            Path({str(ready)!r}).write_text(str(first))
+            while not Path({str(ready)!r} + ".go").exists():
+                time.sleep(0.02)
+            second = spawn()  # and one after, as a daemon's late git or registry helper
+            Path({str(helpers)!r}).write_text(f"{{first}} {{second}}")
+            """))  # then the leader exits first, leaving both helpers in its group
+        self.module("test_group", f"""
+            import signal, subprocess, sys, time, unittest
+            from pathlib import Path
+            from isolation import track
+            class Group(unittest.TestCase):
+                def test_daemon_group(self):
+                    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # so no cleanup of its own runs
+                    leader = subprocess.Popen([sys.executable, {str(leader)!r}], start_new_session=True)
+                    while not Path({str(ready)!r}).exists():
+                        time.sleep(0.02)
+                    track(pid=leader.pid)
+                    Path({str(ready)!r} + ".go").write_text("")
+                    leader.wait()  # exited and reaped
+                    time.sleep(1.5)  # long enough for the worker's next look at its group
+                    Path({str(ready)!r} + ".done").write_text("")
+                    time.sleep(600)
+            """)
+        code, output = self.stopped_once(self.work / "ready.done", "--grace", "1")
+        first, second = (int(pid) for pid in helpers.read_text().split())
+        for pid in (first, second):
+            self.addCleanup(self.kill_if_running, pid)
+        self.assertEqual(code, 130, output)
+        self.assertTrue(self.gone_soon(first), "the helper started before the group was tracked")
+        self.assertTrue(self.gone_soon(second), "the helper started after it")
+
+    def orphaned(self, body, cleanup):
+        """Start a run whose test tracks a detached helper, registers `cleanup` and runs `body`, and kill the runner
+        outright once the test writes MARKER; return the worker's and the helper's PIDs."""
+        marker, helper_file = self.work / "marker", self.work / "helper"
+        cleanup = textwrap.indent(textwrap.dedent(cleanup).strip(), " " * 24)
+        body = textwrap.indent(textwrap.dedent(body).strip(), " " * 20)
+        self.module("test_orphan", f"""
+            import os, signal, subprocess, sys, time, unittest
+            from pathlib import Path
+            from isolation import track
+            MARKER = {str(marker)!r}
+            class Orphan(unittest.TestCase):
+                def test_orphaned(self):
+                    helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)", MARKER],
+                                              start_new_session=True)
+                    track(pid=helper.pid)
+                    Path({str(helper_file)!r}).write_text(f"{{os.getpid()}} {{helper.pid}}")
+                    def cleanup():
+{cleanup}
+                    self.addCleanup(cleanup)
+{body}
+            """)
+        runner = subprocess.Popen(self.command("--grace", "1"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: runner.poll() is None and runner.kill())
+        self.assertTrue(self.wait_for(marker))
+        worker, helper = (int(pid) for pid in helper_file.read_text().split())
+        for pid in (worker, helper):
+            self.addCleanup(self.kill_if_running, pid)
+        runner.kill()
+        runner.wait()
+        return worker, helper
+
+    def gone_soon(self, *pids, seconds=15):
+        deadline = time.monotonic() + seconds
+        while any(self.alive(pid) for pid in pids) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        return not any(self.alive(pid) for pid in pids)
+
+    def test_a_worker_whose_runner_died_during_a_stuck_cleanup_ends_within_its_grace(self):
+        worker, helper = self.orphaned(body="pass", cleanup="""
+            Path(MARKER).write_text("cleaning")
+            time.sleep(600)
+            """)
+        self.assertTrue(self.gone_soon(worker, helper), "the worker or its tracked helper outlived the grace")
+
+    def test_a_worker_whose_runner_died_while_its_test_ignores_sigterm_ends_within_its_grace(self):
+        worker, helper = self.orphaned(body="""
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            Path(MARKER).write_text("ignoring")
+            time.sleep(600)
+            """, cleanup="pass")
+        self.assertTrue(self.gone_soon(worker, helper), "the worker or its tracked helper outlived the grace")
+
+    def test_a_dotted_selection_counts_import_failures_as_discovery_does(self):
+        self.module("test_skipped_module", """
+            import unittest
+            raise unittest.SkipTest("not on this machine")
+            """)
+        self.module("test_broken_module", """
+            raise RuntimeError("not an ImportError")
+            """)
+        result = self.run_tests("test_skipped_module.Some", "test_broken_module.Missing.test_x")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("RuntimeError: not an ImportError", result.stdout)
+        self.assertNotIn("units without a result", result.stdout)
+        self.assertEqual(result.stdout.splitlines()[-1], "FAILED (errors=1, skipped=1)")
+
+    def test_killing_a_unit_whose_group_holds_only_a_zombie_is_not_an_error(self):
+        sys.path.insert(0, str(RUNNER.parent))
+        self.addCleanup(sys.path.remove, str(RUNNER.parent))
+        from run import Run
+        unit = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+        deadline = time.monotonic() + 10
+        while not self.zombie(unit.pid) and time.monotonic() < deadline:  # exited, alone in its group, unreaped
+            time.sleep(0.05)
+        self.assertTrue(self.zombie(unit.pid))
+        Run.kill(unit)  # macOS refuses killpg here (EPERM): nothing is left to kill, and it reaps the unit
+        self.assertEqual(unit.returncode, 0)
 
     def kill_if_running(self, pid):
         """Kill `pid` if it is still one this test started (never a process that took the number since)."""

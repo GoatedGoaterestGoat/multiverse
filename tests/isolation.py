@@ -58,7 +58,8 @@ def isolate(test):
 def track(*, tmux_socket=None, pid=None):
     """Tell tests/run.py about a tmux server (by its socket) or a process (by PID) this test started outside its own
     process group, where the runner's kill cannot reach. The runner ends it after the unit, even if the test was
-    stopped or killed before its cleanups ran. Does nothing when the tests run some other way."""
+    stopped or killed before its cleanups ran; for a process that leads its own group (a daemon), the whole group,
+    helpers included, even once the leader has exited. Does nothing when the tests run some other way."""
     if not TRACKED:
         return
     from multiverse.runtime.process import process_started  # home_safety put this checkout's src on the path
@@ -67,6 +68,11 @@ def track(*, tmux_socket=None, pid=None):
         record["tmux_socket"] = str(tmux_socket)
     if pid is not None and (started := process_started(pid)):
         record.update(pid=pid, started=started)  # its start time, so that a later process with its PID is spared
+        try:
+            if os.getpgid(pid) == pid:
+                record["group"] = pid  # it leads its group: tests/run.py records who joins it, and ends them all
+        except OSError:
+            pass
     if record:
         with open(TRACKED, "a") as out:
             out.write(json.dumps(record) + "\n")
