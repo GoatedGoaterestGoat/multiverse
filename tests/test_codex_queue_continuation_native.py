@@ -8,12 +8,15 @@ import subprocess
 import threading
 import time
 import unittest
+from uuid import uuid4
 from unittest.mock import patch
 
 from native_safety import install, isolated_home
 from native_processes import PrivateDaemonGroups
-from multiverse.runtime import lifecycle, native
+from multiverse.runtime import lifecycle, native, rpc
 from multiverse.store import read, write
+from multiverse.harnesses.types import RpcRequest, RpcNotification, RpcSpec, NativeResult
+from multiverse.harnesses.codex.protocol import result as native_result
 from multiverse.terminal.tmux import owned
 from multiverse.tools import deliver, send
 from multiverse.universe import agents
@@ -25,10 +28,8 @@ install()
 
 @unittest.skipUnless(shutil.which('codex') and shutil.which('tmux'), 'Codex and tmux required')
 class NativeQueueContinuationTest(TerminalBase):
-    def test_native_escape_continues_owned_accepted_follow_up_without_resending(self):
-        """On live Codex an accepted follow-up still runs after a native Escape in the launch's own pane and stays
-        checkable until confirmed; fragile because it relies on Codex pausing queue draining after an interrupt, which
-        is undocumented, and a break strands messages with no error (60c3cbf, 1dbe82c)."""
+    def test_native_interrupt_pauses_across_resume_until_new_input_then_drains_fifo(self):
+        """Native interrupt pause must survive attachment resume and restart FIFO exactly once for typed or mv2 input; queue-state races otherwise lose or reorder accepted messages silently."""
         if subprocess.check_output(['codex', '--version'], stdin=subprocess.DEVNULL,
                                    text=True).strip() != 'codex-cli 0.163.0':
             self.skipTest('native queue continuation evidence pinned to 0.163.0')
@@ -55,16 +56,21 @@ class NativeQueueContinuationTest(TerminalBase):
                 index = len(requests)
                 item = {'type': 'message', 'role': 'assistant', 'id': 'msg-' + str(index),
                         'content': [{'type': 'output_text', 'text': '{"title":"Private queue test"}' if title else 'Done.'}]}
-                if not title and index == 1:
-                    item = {'type': 'function_call', 'call_id': 'initial-tool', 'name': 'exec_command',
-                            'arguments': json.dumps({'cmd': 'touch initial-tool-started; sleep 30',
-                                                     'yield_time_ms': 30000, 'max_output_tokens': 200})}
-                elif not title and 'FOLLOW_UP_AFTER_NATIVE_ESCAPE' in json.dumps(body):
-                    # A function result in later requests means the marker already exists.
-                    if not (work / 'follow-up-ran').exists():
-                        item = {'type': 'function_call', 'call_id': 'follow-up-tool', 'name': 'exec_command',
-                                'arguments': json.dumps({'cmd': 'touch follow-up-ran',
-                                                         'yield_time_ms': 1000, 'max_output_tokens': 200})}
+                inputs = body.get('input', [])
+                latest = next((json.dumps(value) for value in reversed(inputs) if value.get('role') == 'user'), '')
+                pending_tool = not inputs or inputs[-1].get('type') != 'function_call_output'
+                if not title and pending_tool:
+                    if index == 1:
+                        command = 'touch initial-tool-started; sleep 30'
+                    elif 'HOLD_AGAIN' in latest:
+                        command = 'touch second-tool-started; sleep 30'
+                    else:
+                        label = next((key for key in ('QUEUED_FOREIGN', 'FOLLOW_UP_AFTER_NATIVE_ESCAPE',
+                                     'NEW_INPUT_RESUMES_FIFO', 'TYPED_RESTART', 'AFTER_TYPED') if key in latest), None)
+                        command = f'echo {label} >> order.log; touch {label}' if label else None
+                    if command:
+                        item = {'type': 'function_call', 'call_id': 'tool-' + str(index), 'name': 'exec_command',
+                                'arguments': json.dumps({'cmd': command, 'yield_time_ms': 30000, 'max_output_tokens': 200})}
                 events = [{'type': 'response.created', 'response': {'id': 'resp-' + str(index)}},
                           {'type': 'response.output_item.done', 'item': item},
                           {'type': 'response.completed', 'response': {'id': 'resp-' + str(index),
@@ -118,30 +124,90 @@ class NativeQueueContinuationTest(TerminalBase):
         self.assertTrue(result['ready'], result)
         directory = agents.directory(self.root, result['id'])
         until(lambda: (work / 'initial-tool-started').exists(), seconds=30)
+        primary = read(directory / 'properties.json')['native_session_id']
+        # One native-owned older item must not make a new mv2 message skip it.
+        def native_queue():
+            response = native_result((yield RpcRequest('initialize', {
+                'clientInfo': {'name': 'private-queue-proof', 'version': '1'},
+                'capabilities': {'experimentalApi': True}},
+                on_success=(RpcNotification('initialized', {}),))))
+            self.assertIsInstance(response, dict)
+            response = native_result((yield RpcRequest('thread/queue/add', {
+                'threadId': primary, 'clientUserMessageId': str(uuid4()),
+                'input': [{'type': 'text', 'text': 'QUEUED_FOREIGN', 'text_elements': []}]})))
+            self.assertIsInstance(response, dict)
+            return NativeResult('ok', value=response)
+        endpoint = native.context(self.root, result['id'])[2].endpoint.address
+        self.assertEqual(rpc.execute(RpcSpec(endpoint, native_queue)).state, 'ok')
         queued = send.run(self.root, agent=result['id'], text='FOLLOW_UP_AFTER_NATIVE_ESCAPE', delivery='follow-up')
         self.assertEqual(queued['state'], 'native_queued', queued)
-        message_id = next(message['id'] for message in inbox(directory, all_messages=True)['messages']
-                          if message['text'] == 'FOLLOW_UP_AFTER_NATIVE_ESCAPE')
-        waiting = deliver.run(self.root, agent=result['id'], check=True)
-        self.assertEqual(len(waiting['messages']), 1,
-                         'Accepted queue input must remain visible to --check while the turn is active')
-        observed = native.deliver(self.root, result['id'], message_id, check=True)
-        self.assertIs(observed['value']['transcript_confirmed'], False)
+        def message_id(text):
+            return next(message['id'] for message in inbox(directory, all_messages=True)['messages']
+                        if message['text'] == text)
+        waiting_id = message_id('FOLLOW_UP_AFTER_NATIVE_ESCAPE')
+        def interrupt():
+            facts = agents.runtime(directory)
+            backend, pane = owned(read(directory / 'properties.json'), facts)
+            backend.run('send-keys', '-t', pane, 'Escape')
+            until(lambda: (agents.runtime(directory).get('queue_state') or {}).get('state') == 'paused', seconds=10)
+            until(lambda: agents.runtime(directory).get('status') == 'idle', seconds=10)
+        def paused():
+            checked = deliver.run(self.root, agent=result['id'], check=True)
+            receipt = native.deliver(self.root, result['id'], waiting_id, check=True)
+            self.assertTrue(receipt['value'].get('paused'), (checked, receipt))
+            self.assertFalse((work / 'FOLLOW_UP_AFTER_NATIVE_ESCAPE').exists())
+        interrupt()
+        paused()
+        # Read-only checks, retries and inbox-only must never restart native work.
+        send.run(self.root, agent=result['id'], text='INBOX_ONLY_DOES_NOT_RESTART', delivery='inbox-only')
+        deliver.run(self.root, agent=result['id'], retry=True)
+        time.sleep(.5)
+        paused()
+        lifecycle.kill(self.root, result['id'], attachment_only=True)
+        with patch.dict(os.environ, test_env):
+            result = lifecycle.start(self.root, resume=result['id'], socket_path=self.socket,
+                                     wait=True, wait_timeout=30)
+        self.assertTrue(result['ready'], result)
+        self.assertEqual(read(directory / 'properties.json')['native_session_id'], primary)
+        paused()
+        # A stopped paused bridge must queue its wake text after binding,
+        # rather than submit a CLI prompt ahead of older accepted native input.
+        lifecycle.kill(self.root, result['id'], attachment_only=True)
+        with patch.dict(os.environ, test_env):
+            resumed = send.run(self.root, agent=result['id'], text='NEW_INPUT_RESUMES_FIFO', delivery='follow-up')
+        self.assertIn(resumed['state'], ('pending', 'native_queued'), resumed)
+        until(lambda: (work / 'NEW_INPUT_RESUMES_FIFO').exists(), seconds=25)
+        facts = agents.runtime(directory)
+        wake_request = read(directory / 'launches' / facts['launch_id'] / 'request.json')
+        self.assertNotIn('NEW_INPUT_RESUMES_FIFO', json.dumps(wake_request['argv']))
+        self.assertEqual(read(directory / 'properties.json')['native_session_id'], primary)
+        self.assertEqual((work / 'order.log').read_text().splitlines(),
+                         ['QUEUED_FOREIGN', 'FOLLOW_UP_AFTER_NATIVE_ESCAPE', 'NEW_INPUT_RESUMES_FIFO'])
+        for text in ('FOLLOW_UP_AFTER_NATIVE_ESCAPE', 'NEW_INPUT_RESUMES_FIFO'):
+            until(lambda: (native.deliver(self.root, result['id'], message_id(text), check=True).get('value') or {})
+                  .get('transcript_confirmed') is True, seconds=10)
+        # A terminal prompt starts its own turn, then lets the paused queue drain.
+        until(lambda: agents.runtime(directory).get('status') == 'idle', seconds=10)
         facts = agents.runtime(directory)
         backend, pane = owned(read(directory / 'properties.json'), facts)
-        self.assertEqual(facts['launch_id'], result['runtime']['launch_id'])
-        backend.run('send-keys', '-t', pane, 'Escape')
-        marker = work / 'follow-up-ran'
-        deadline = time.monotonic() + 12
-        while not marker.exists() and time.monotonic() < deadline:
-            time.sleep(.05)
-        checked = deliver.run(self.root, agent=result['id'], check=True)
-        receipt = native.deliver(self.root, result['id'], message_id, check=True)
-        print('Native Escape queue evidence:', json.dumps({'marker': marker.exists(),
-            'native_status': agents.runtime(directory).get('status'),
-            'checked_messages': len(checked['messages']), 'receipt': receipt.get('value'),
-            'model_requests': len(requests)}))
-        with self.subTest(behavior='continuation'):
-            self.assertTrue(marker.exists(), 'Accepted follow-up stayed in the idle native queue after Escape')
-        with self.subTest(behavior='check'):
-            self.assertEqual(len(checked['messages']), 1, 'Accepted input remains checkable until transcript confirmation')
+        backend.run('send-keys', '-t', pane, '-l', 'HOLD_AGAIN')
+        until(lambda: 'HOLD_AGAIN' in backend.run('capture-pane', '-p', '-t', pane), seconds=5)
+        backend.run('send-keys', '-t', pane, 'Enter')
+        until(lambda: (work / 'second-tool-started').exists(), seconds=15)
+        accepted = send.run(self.root, agent=result['id'], text='AFTER_TYPED', delivery='follow-up')
+        self.assertEqual(accepted['state'], 'native_queued', accepted)
+        interrupt()
+        self.assertFalse((work / 'AFTER_TYPED').exists())
+        backend.run('send-keys', '-t', pane, '-l', 'TYPED_RESTART')
+        until(lambda: 'TYPED_RESTART' in backend.run('capture-pane', '-p', '-t', pane), seconds=5)
+        backend.run('send-keys', '-t', pane, 'Enter')
+        until(lambda: (work / 'AFTER_TYPED').exists(), seconds=20)
+        self.assertEqual((work / 'order.log').read_text().splitlines()[-2:], ['TYPED_RESTART', 'AFTER_TYPED'])
+        until(lambda: (native.deliver(self.root, result['id'], message_id('AFTER_TYPED'), check=True).get('value') or {})
+              .get('transcript_confirmed') is True, seconds=10)
+        self.assertEqual(deliver.run(self.root, agent=result['id'], check=True)['messages'], [])
+        for message in inbox(directory, all_messages=True)['messages']:
+            if message['text'] in ('FOLLOW_UP_AFTER_NATIVE_ESCAPE', 'NEW_INPUT_RESUMES_FIFO', 'AFTER_TYPED'):
+                self.assertEqual(len(message['tracking']['attempts']), 1)
+        self.assertEqual(read(directory / 'properties.json')['native_session_id'], primary)
+        print('Native queue proof: pause across attachment resume; mixed FIFO; inbox/check/retry inert; typed restart; one attempt.')
