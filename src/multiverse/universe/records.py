@@ -11,8 +11,10 @@ import json
 
 MAX_BYTES = 8 * 1024 * 1024  # a record is a few kilobytes; a file this large is not one
 
-# Fields the dashboard and listings show as text. When one is present it is a string (or null).
-TEXT_FIELDS = ("id", "name", "harness", "phase", "summary", "task")
+# Fields the dashboard and listings show as text. When one is present it is a string. The first three identify
+# the agent, so they are never null; the others may be, and a listing shows a null as empty text.
+IDENTITY_FIELDS = ("id", "name", "harness")
+TEXT_FIELDS = (*IDENTITY_FIELDS, "phase", "summary", "task")
 
 
 class RecordError(ValueError):
@@ -58,7 +60,7 @@ def properties(path):
     """An agent's `properties.json` as a dict; RecordError when it cannot be used."""
     data = _object(path)
     for key in TEXT_FIELDS:
-        if data.get(key) is not None and not isinstance(data[key], str):
+        if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
             raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
     return data
 

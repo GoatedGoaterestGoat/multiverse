@@ -40,6 +40,14 @@ def damaged_row(scope, error, properties=None):
             "summary": f"damaged: {label}: {error.reason}", "damaged": {"file": shown, "reason": error.reason}}
 
 
+def text_defaults(row):
+    """A reported field that is present but null shows as empty text, so every reader can format it."""
+    for key in records.TEXT_FIELDS:
+        if key in row and row[key] is None:
+            row[key] = ""
+    return row
+
+
 def listing(root, recursive=False, only=None):
     """Every agent's row; with `only` (an agent's ID, already resolved), just that agent's, or none.
 
@@ -78,7 +86,7 @@ def listing(root, recursive=False, only=None):
                 relay = facts.get('native_relay') or {}
                 recovery = facts.get('auto_recovery') or {}
                 launch_error = facts.get('reason') or (facts.get('error') if facts.get('state') == 'failed' else None)
-                rows.append({**properties, "usage": measured, "tokens": display.usage_total(measured),
+                rows.append(text_defaults({**properties, "usage": measured, "tokens": display.usage_total(measured),
                              "usage_detail": display.usage_details(measured), "universe": str(scope), **observation,
                              "reason": launch_error or observation.get('reason', ''), "launch_error": launch_error,
                              "status": ('disconnected' if relay.get('state') == 'lost' else facts.get("status", "unknown"))
@@ -88,7 +96,7 @@ def listing(root, recursive=False, only=None):
                                  or facts.get('binding_conflict') or identity_problem
                                  or (native.connection_problem(scope, properties, facts) if observation['live'] == 'alive' else None),
                              "recovery_note": recovery.get('reason') if recovery.get('state') == 'reconnected' else None,
-                             "runtime": facts})
+                             "runtime": facts}))
             except records.RecordError as error:
                 rows.append(damaged_row(scope, error, properties))
             except Exception as error:  # content no reader expected: this agent's row says so, the others still list

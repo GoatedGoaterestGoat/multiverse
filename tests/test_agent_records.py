@@ -53,8 +53,14 @@ class RecordsTests(unittest.TestCase):
                     error = self.damaged()
                     self.assertIn(f"{key} must be a string", error.reason)
                     self.assertEqual(error.data[key], value)
-        self.path.write_text(json.dumps({"name": None, "summary": None}))
-        records.properties(self.path)  # null is "not set"
+        self.path.write_text(json.dumps({"phase": None, "summary": None, "task": None}))
+        records.properties(self.path)  # a reported field that is null is "not set"
+        for key in records.IDENTITY_FIELDS:  # the fields that identify the agent are never null
+            with self.subTest(null=key):
+                self.path.write_text(json.dumps({"name": "ok", key: None}))
+                error = self.damaged()
+                self.assertIn(f"{key} must be a string, not null", error.reason)
+                self.assertIn(key, error.data)
 
     def test_binary_garbage_a_deep_nest_a_huge_file_and_a_directory_are_damage_not_crashes(self):
         self.path.write_bytes(b"\xff\xfe\x00\x01")
@@ -173,6 +179,26 @@ class DamagedListingTests(PluginTestCase):
                     continue  # those are properties fields
                 with self.subTest(file=file, form=form):
                     self.check(file, form)
+
+    def test_null_reported_fields_list_as_empty_text_and_null_identity_is_damage(self):
+        from multiverse.tools import list_agents
+        data = json.loads(self.originals["properties.json"])
+        (self.victim / "properties.json").write_text(json.dumps({**data, "phase": None, "summary": None, "task": None}))
+        row = self.rows()[self.victim.name]
+        self.assertNotIn("damaged", row)
+        self.assertEqual((row["phase"], row["summary"], row["task"]), ("", "", ""))
+        self.assertIn("victim", list_agents.run(self.root))  # the text listing formats every row
+        self.assertEqual(len(list_agents.run(self.root, json=True)), 3)
+        for key in ("id", "name", "harness"):
+            with self.subTest(null=key):
+                (self.victim / "properties.json").write_text(json.dumps({**data, key: None}))
+                rows = self.rows()
+                self.assertEqual(len(rows), 3)
+                damaged = rows[self.victim.name]
+                self.assertEqual(damaged["damaged"]["reason"], f"{key} must be a string, not null")
+                self.assertIsInstance(damaged["name"], str)
+                self.assertIn("damaged: properties.json", list_agents.run(self.root))
+        self.restore()
 
     def test_a_wrong_type_inside_a_runtime_that_parses_never_stops_the_listing(self):
         for field in ({"tmux": []}, {"tmux": {"socket": 3, "pane": 4}}, {"tmux": "text"}, {"native_relay": []}, {"state": ["x"]}):
