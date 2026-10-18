@@ -5,12 +5,13 @@ are mixins of MultiverseApp. Their key actions stay app actions, so bindings and
 check_action see them; Textual @on handlers must stay on this class.
 """
 import asyncio
+import functools
 from pathlib import Path
 import sys
 import weakref
 
 from rich.text import Text
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.command import DiscoveryHit, Hit, Provider
@@ -525,7 +526,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         """Close the failing plugin's screens, and only its, leaving every other screen and its unsaved input alone,
         wherever it is in the stack. Textual closes only the top screen: the failing plugin's screens on top close now;
         one under another screen (a plugin's opened from the palette over it, or one it opened itself) stops running
-        at once and closes as soon as it is on top again, so it is never shown in the meantime. Then take the plugin's
+        at once, its own handlers (the one for being shown again, say) no longer running, and closes as soon as it is
+        on top again, so it is never shown in the meantime. Then take the plugin's
         widgets out of every screen that stays.
 
         A widget whose message loop ended with the failure is left attached by Textual with nobody to process its
@@ -541,10 +543,12 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 pass
 
     async def _close_plugin_screens(self, package, message):
+        def inside(module):
+            return module == package or module.startswith(package + ".")
+
         def theirs(node):
-            module = type(node).__module__
-            return module == package or module.startswith(package + ".") \
-                or getattr(node, "mv_plugin_package", None) == package
+            return inside(type(node).__module__) or getattr(node, "mv_plugin_package", None) == package
+
 
         while len(self.screen_stack) > 1 and theirs(self.screen):
             await self.pop_screen()
@@ -555,6 +559,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     for timer in list(getattr(node, "_timers", ())):
                         timer.stop()
                     self.workers.cancel_node(node)
+                    self.silence(node, inside)
         views = []
         for screen in self.screen_stack:
             for widget in list(screen.walk_children(with_self=False)):
@@ -575,6 +580,32 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     await widget.remove()
         for view in views:
             await view.mount(Static(message, markup=False, classes="view-error"))
+
+    @staticmethod
+    def silence(node, inside):
+        """Stop the failed plugin's own code running on `node`: its handlers, such as the one for the screen being
+        shown again, which may open screens or start work, and the callbacks it queued. `inside(module)` says whether
+        a module is the plugin's. Textual's own handlers and callbacks stay, so the node still answers Textual's waits
+        and is removed as usual; taking every message away would leave it never removed."""
+        handlers, dispatch = node._get_dispatch_methods, node._dispatch_message
+
+        def not_theirs(method_name, message):
+            for owner, handler in handlers(method_name, message):
+                if not inside(owner.__module__):
+                    yield owner, handler
+
+        async def without_their_callbacks(message):
+            if isinstance(message, events.Callback):
+                callback = message.callback
+                while isinstance(callback, functools.partial):
+                    callback = callback.func
+                owner = getattr(callback, "__self__", None)
+                if inside(type(owner).__module__ if owner is not None else getattr(callback, "__module__", None) or ""):
+                    return
+            await dispatch(message)
+
+        node._get_dispatch_methods = not_theirs
+        node._dispatch_message = without_their_callbacks
 
     def pop_screen(self):
         """Close the top screen, and then any failed plugin's screen that this leaves on top (close_plugin_screens)."""

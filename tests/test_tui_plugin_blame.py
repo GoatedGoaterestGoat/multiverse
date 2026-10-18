@@ -37,7 +37,11 @@ from textual.screen import ModalScreen
 
 from textual.message import Message
 
-BOARD_ARMED, BOARD_TICKS, BOARD_IN_HANDLER = [], [], []
+BOARD_ARMED, BOARD_TICKS, BOARD_IN_HANDLER, BOARD_RESUMED = [], [], [], []
+
+class Probe(ModalScreen):
+    def compose(self):
+        yield Static("probe", id="probe")
 
 class Blast(Message):
     pass
@@ -58,6 +62,10 @@ class Board(ModalScreen):
             raise RuntimeError("board exploded")
     def on_blast(self, message):
         raise RuntimeError("board's handler exploded")
+    def on_screen_resume(self):
+        if BOARD_ARMED:  # a failed board that still acts when it is shown again
+            BOARD_RESUMED.append(1)
+            self.app.push_screen(Probe())
 
 class Ticker:
     def parse(self, widget, title):
@@ -151,7 +159,10 @@ class BlameTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.3)
         self.assertEqual(len(module.BOARD_TICKS), ticks, "the failed board's timer still runs under the notes")
         await d.close_screen()  # the person closes the notes: the failed board goes with them, not shown again
-        await d.until(lambda: len(d.app.screen_stack) == 1, "the failed board to close once it was on top")
+        await d.until(lambda: len(d.app.screen_stack) == 1 or module.BOARD_RESUMED, "the failed board to close once it was on top")
+        await d.settle()
+        self.assertEqual(module.BOARD_RESUMED, [], "the failed board still ran its handler when it was shown again")
+        self.assertEqual(len(d.app.screen_stack), 1, "the failed board did not close")
         self.assertNotIn(board, d.app.screen_stack)
         self.assertTrue(d.app.is_running)
 
