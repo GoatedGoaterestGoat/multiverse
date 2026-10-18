@@ -14,6 +14,7 @@ This page explains how to run mv2's tests, what each kind needs, and which fixtu
 - **Concurrent runs share the machine.** Runs started at the same time take turns for its CPU slots instead of overloading it. A waiting run says which runs hold the slots, and again every 30 seconds while it waits: each run's agent, or `not an agent`, with its PID and directory, as in `Waiting for a slot: held by plugins (4 slots, pid 85884, /tmp/…)`. Ask that agent rather than stopping its run.
 - **Stopping is clean.** A unit past `--timeout` (20 minutes), or a run stopped with Ctrl-C or SIGTERM, fails the running test and still runs its cleanups: the stop interrupts setUp or the test itself, never a tearDown or cleanup already running. A unit still running 30 seconds after the stop is killed. If the runner itself dies, each unit's watchdog process stops the unit the same way, with the same 30 seconds. Either way, what the unit's tests named with `track` (below) is ended afterwards. Never stop a run by pattern-killing processes.
 - **The real home is guarded.** A test that writes the real `~/.multiverse` fails the run.
+- **No credentials reach the tests.** Before it imports or starts anything, the runner drops every variable that looks like a credential: tokens, secrets, passwords, API keys, `GH_*`, `GITHUB_*`, `AWS_*`, `ANTHROPIC_*`, `OPENAI_*`. No module, test or process a test starts sees one, so no failing assertion can print one.
 - **Use `$MV2_PYTHON`**, the checkout's `.venv/bin/python` (`scripts/dev-env.sh` sets it). System Python lacks Textual, and the environment has no pytest.
 - **Pin `PYTHONPATH` in a worktree.** `uv sync` installs mv2 into `.venv` in editable mode, pointing at the checkout that created it. Run `PYTHONPATH="$(git rev-parse --show-toplevel)/src" "$MV2_PYTHON" tests/run.py` so the tests, and the runners and helpers they start, import your worktree's code.
 
@@ -45,7 +46,7 @@ def test_runs_at_once_share_the_machines_slots(self):
 | `test_compaction.py` | Tree compaction, independent of any harness |
 | `test_docs.py` | Relative links in the docs, and the generated CLI reference |
 | `run.py`, `tracking.py`, `test_run.py` | The parallel runner, and what it records to end after a unit (not test modules); the runner's tests |
-| `isolation.py`, `home_safety.py` | Each test's own HOME and environment, and the guard on the real `~/.multiverse` (not test modules) |
+| `isolation.py`, `home_safety.py`, `credentials.py` | Each test's own HOME and environment, the guard on the real `~/.multiverse`, and which variables count as credentials (not test modules) |
 | `native_safety.py` | The Codex daemon guard (not a test module) |
 | `native_processes.py` | Ends the processes of a private Codex server before its test removes the home (not a test module) |
 | `mock-provider.ts`, `steering-provider.ts`, `pi_bridge_test.mjs` | Offline Pi providers and the Pi extension's tests |
@@ -88,7 +89,7 @@ node --experimental-strip-types tests/pi_bridge_test.mjs
 
 | Fixture | Where | Gives you |
 | --- | --- | --- |
-| `isolate(self)` | `isolation.py` | Call it first in `setUp`: the test gets its own HOME, which the processes it starts inherit, and loses the agent's environment (`MV2_*` but `MV2_CLI` and `MV2_PYTHON`, `CODEX_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX`) and every variable that looks like a credential (tokens, secrets, passwords, API keys, `GH_*`, `GITHUB_*`). A value the test set itself before calling it stays |
+| `isolate(self)` | `isolation.py` | Call it first in `setUp`: the test gets its own HOME, which the processes it starts inherit, and loses the agent's environment (`MV2_*` but `MV2_CLI` and `MV2_PYTHON`, `CODEX_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX`) and every variable that looks like a credential, which matters when a module is run directly with `unittest`, since `tests/run.py` has dropped them already. A value the test set itself before calling it stays |
 | `track(tmux_socket=…, pid=…)` | `isolation.py` | Names a tmux server or process the test started outside its own process group, so `tests/run.py` ends it even if the test is stopped before its cleanups run. A PID is ended only while its start time matches. For a process that leads its own group, such as a daemon, the whole group is ended, helpers included, while any process seen in it is still there, even after the leader has exited |
 | `home_safety` | `home_safety.py` | The real-home guard: a refused write under `~/.multiverse` fails the test that made it. `isolate` and `PluginTestCase` turn it on, as does every `tests/run.py` worker |
 | `BaseTest` | `test_multiverse.py` | `isolate(self)`, then a temporary directory with a fresh `base` universe in `self.root` |

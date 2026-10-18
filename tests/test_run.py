@@ -286,32 +286,29 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(f"{guarded / 'cache.json'} in test_writes.Writes.test_swallowed", result.stdout)
         self.assertFalse((guarded / "cache.json").exists())
 
-    def test_a_credential_in_the_environment_never_reaches_a_test_or_the_processes_it_starts(self):
-        """isolate() drops every variable that may hold a credential (tokens, secrets, API keys, GitHub ones) for the
-        test and the processes it starts, and gives them back after it; otherwise a failing assertion that prints an
-        environment puts the user's token in logs and transcripts, as one once did, and nothing shows it."""
+    def test_a_credential_in_the_environment_reaches_no_module_test_or_child_process(self):
+        """The runner drops every variable that may hold a credential (tokens, secrets, API keys, GitHub ones) before
+        it imports or starts anything, so no module import, test or process a test starts sees one; otherwise a
+        failing assertion that prints an environment puts the user's token in logs and transcripts, as one once did,
+        and nothing shows it."""
         planted = {"FAKE_SERVICE_TOKEN": "planted-token-value", "GITHUB_PERSONAL_ACCESS_TOKEN": "planted-gh-value"}
         self.module("test_secrets", f"""
             import json, os, subprocess, sys, unittest
-            from isolation import isolate
             PLANTED = {sorted(planted)!r}
-            class Isolated(unittest.TestCase):
-                def setUp(self):
-                    isolate(self)
-                def test_a_test_and_its_child_see_none(self):
-                    self.assertEqual([name for name in PLANTED if name in os.environ], [])
+            SEEN_AT_IMPORT = [name for name in PLANTED if name in os.environ]
+            class Plain(unittest.TestCase):
+                def test_nothing_sees_a_planted_credential(self):
                     child = subprocess.run([sys.executable, "-c", "import json, os, sys; "
                                             "print(json.dumps([name for name in sys.argv[1:] if name in os.environ]))",
                                             *PLANTED], capture_output=True, text=True, check=True)
-                    self.assertEqual(json.loads(child.stdout), [])
-            class Restored(unittest.TestCase):
-                def test_after_an_isolated_test_they_are_back(self):
-                    self.assertEqual(sorted(name for name in PLANTED if name in os.environ), PLANTED)
+                    seen = {{"import": SEEN_AT_IMPORT, "test": [name for name in PLANTED if name in os.environ],
+                             "child": json.loads(child.stdout)}}
+                    self.assertEqual(seen, {{"import": [], "test": [], "child": []}})
             """)
         result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted}, text=True,
                                 capture_output=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("Ran 2 tests", result.stdout)
+        self.assertIn("Ran 1 tests", result.stdout)
         for value in planted.values():
             self.assertNotIn(value, result.stdout + result.stderr)
 

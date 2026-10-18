@@ -42,7 +42,8 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))  # for tracking, beside this file: started by runpy, this is not on sys.path
+    sys.path.insert(0, str(HERE))  # for modules beside this file: started by runpy, this is not on sys.path
+from credentials import credential  # noqa: E402
 import tracking  # noqa: E402
 SHARD_SECONDS = 20  # a module the record says takes longer is split into shards of about this
 UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
@@ -656,6 +657,8 @@ def _terminated(signum, frame):
 
 
 def main(argv=None):
+    for name in [name for name in os.environ if credential(name)]:
+        del os.environ[name]  # before any module is imported or any process started: none of them sees one
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--inventory"]:
         print(json.dumps(inventory(argv[1])))
