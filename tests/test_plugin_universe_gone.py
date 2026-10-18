@@ -39,15 +39,20 @@ class UniverseGoneTest(PluginTestCase):
             "files.ensure_dir": (lambda: api.files.ensure_dir(state / "a"), api.UniverseGone),
             "files.lock": (locked, api.Gone),
             "log": (lambda: self.mv.log("note", self.universe), None),
-            "record": (lambda: loader.record(self.loaded_writer, "call", RuntimeError("x"), self.sub), None),
+            # A call site of its own per phase: errors.log writes one per call site a minute, so a shared one
+            # would make the removed phase return before it reached the log.
+            "record": (lambda: loader.record(self.loaded_writer, f"call {phase}", RuntimeError("x"), self.sub), None),
             "events log": (lambda: events._log(self.sub, "note"), None),
             "host log": (lambda: host._log(self.sub, "note"), None),
         }
+        phase = "present"
         for name, (call, _) in writes.items():  # the healthy control: while it is there, each writes
             with self.subTest("present", writer=name):
                 call()
         self.assertIn("note", (state / "plugin.log").read_text())
+        self.assertIn("call present", (state / "errors.log").read_text())
         self.removed()
+        phase = "removed"
         for name, (call, raises) in writes.items():
             with self.subTest("removed", writer=name):
                 if raises is None:
