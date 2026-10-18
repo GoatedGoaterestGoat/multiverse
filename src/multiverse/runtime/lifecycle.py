@@ -299,14 +299,21 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         agent_environment = agent_identity.environment(target, policy_spec, properties.get('agent_environment'))
         saved = properties.get("native_environment", {}) if resume else {}
         ambient = {key: value for key, value in os.environ.items() if not key.startswith("MV2_")}
-        context = LaunchContext(mode, values, model, {**ambient, **saved, **target}, resume_prompt=resume_prompt,
+        environment = {**ambient, **saved, **target}
+        storage = _storage_environment(adapter, properties, environment, ambient, resume)
+        environment = {key: value for key, value in environment.items() if key not in storage}
+        environment.update({key: value for key, value in storage.items() if value is not None})
+        context = LaunchContext(mode, values, model, environment, resume_prompt=resume_prompt,
                                 agent_environment=agent_environment)
         home_hook = native.adapter_hook(adapter, 'session_home')
         home = home_hook(context.environment) if home_hook else None
         if home is not None:
             home = agents.sessions.canonical_home(home)
             if properties.get('native_session_home') not in (None, home):
-                raise ValueError('Native session storage differs from the saved conversation')
+                raise ValueError(f'Native session storage differs from the saved conversation: '
+                                 f'saved {properties["native_session_home"]!r}; requested {home!r}. '
+                                 'Restore the original storage at its saved path (undo a rename or symlink change), '
+                                 'or spawn a new agent for the requested storage')
             properties['native_session_home'] = home
             if session is not None:
                 session = replace(session, home=home)
@@ -318,6 +325,11 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices,
                     _resume_notices(adapter, session, ambient, context.environment) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
+        # An adapter may select canonical storage for both its service and frontend.
+        for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
+            storage.update({key: selected[key] for key in storage if key in selected})
+        command = _storage_command(command, storage)
+        properties['native_storage_environment'] = storage
         if _queue_wake:
             command = replace(command, fallback=None)
         if command.shared_service and command.shared_service.identity:
@@ -342,6 +354,9 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         env = {key: value for key, value in target.items() if key != "PATH"}
         if resume:
             env.update(saved)
+        env = {key: value for key, value in env.items() if key not in storage}
+        env.update({key: value for key, value in storage.items() if value is not None})
+        env["HOME"] = context.environment.get("HOME") or str(Path.home())
         # Persist adapter-selected storage so resume cannot accidentally switch
         # accounts/history when launched by a different monitor environment.
         if command.shared_service:
@@ -352,7 +367,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             with agents.sessions.namespace(root), lock(agent_dir / '.properties.lock'):
                 current = read(agent_dir / 'properties.json')
                 current.update({key: properties[key] for key in ('model', 'workspace', 'native_environment',
-                               'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
+                               'native_storage_environment', 'native_service_identity', 'native_session_home', 'native_session_provider', 'updated_at')
                                 if key in properties})
                 properties = current
                 write(agent_dir / "properties.json", properties)
@@ -422,7 +437,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                     agent_environment=agent_environment)
             if command.shared_service:
                 try:
-                    command = adapter.resume(session, context) if resume else adapter.spawn(context)
+                    command = _storage_command(adapter.resume(session, context) if resume else adapter.spawn(context), storage)
                     if _recovery:
                         native.validate_recovery_command(command, session)
                         command = replace(command, fallback=None)
@@ -666,6 +681,33 @@ def _initial_runtime(launch_id, command, adapter, session, previous, resume, rec
             # this launch reports again, without treating it as fresh usage.
             runtime_record['last_usage'] = measured
     return runtime_record
+
+
+def _storage_environment(adapter, properties, environment, ambient, resume):
+    """Replay storage values and explicit absence before the adapter computes home."""
+    keys = getattr(adapter, 'storage_env', ())
+    saved = properties.get('native_storage_environment') if resume else None
+    scope = (properties.get('native_service_identity') or {}).get('scope', {}) if resume else {}
+    for key in keys:
+        if scope and key not in scope and ambient.get(key):
+            raise ValueError(f'Cannot add {key}={ambient[key]!r} to this saved native storage scope; '
+                             f'unset {key} to resume, or spawn a new agent for that storage')
+    if saved is None:
+        return {key: environment.get(key) for key in keys}
+    if (not isinstance(saved, dict) or any(value is not None and (not isinstance(value, str) or '\0' in value)
+                                          for value in saved.values())):
+        raise ValueError('Invalid native_storage_environment in properties.json; restore the launch storage values')
+    return {key: saved.get(key) for key in keys}
+
+
+def _storage_command(command, storage):
+    """The runner must not inherit a different home from its tmux server."""
+    environment = {key: value for key, value in command.environment.items() if key not in storage}
+    environment.update({key: value for key, value in storage.items() if value is not None})
+    unset = tuple(key for key in command.unset_env if key not in storage)
+    unset += tuple(key for key, value in storage.items() if value is None)
+    return replace(command, environment=environment, unset_env=unset,
+                   fallback=_storage_command(command.fallback, storage) if command.fallback else None)
 
 
 def _request(argv, env, command, endpoint, resume_message_id):

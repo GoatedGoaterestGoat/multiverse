@@ -62,3 +62,13 @@ To pass `NO_COLOR` to a harness anyway, set it in that harness's `env`, or repla
 | `CLAUDE_CODE_SSE_PORT`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN` | Always removes them when inherited: an agent spawned from inside Claude would get the parent's IDE port, and its inbox and secret. A harness's `env` can still set them. |
 | `CLAUDE_CODE_ENABLE_FUNCTION_HOOKS` | Sets it to `1` for Claude bridge launches, because the multiverse mod needs it. |
 | `TMUX`, `TMUX_PANE` | `mv2 attach` reads them to return to the dashboard pane it was started from. |
+
+The launch records the harness's storage environment and replays it on resume.
+Claude preserves both the exact `CLAUDE_CONFIG_DIR` value and whether it was
+unset; setting it to a default-looking path can change where Claude reads its
+login and global settings. Codex selects canonical storage paths for its
+frontend, service and tools. The native child receives the launching command's
+`HOME`, and storage variables absent from the selected environment are explicitly
+removed, so an older tmux server cannot supply a different home. A resume that
+would change the saved conversation's storage is refused with both paths; restore
+the original storage at the saved path, or spawn a new agent for the new storage.

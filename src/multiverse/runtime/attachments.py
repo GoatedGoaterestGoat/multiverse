@@ -309,13 +309,13 @@ def problem(directory, facts):
         if not complete and 'child_pid' in record and not gone(child, record.get('child_at')):
             return _blocked('child process', path, child['pid'], child.get('pid_started'), observations)
         if not complete and facts.get('pid') and not gone(facts, exit_at):
-            return _blocked('child process', path, facts['pid'], facts.get('pid_started'), observations)
+            return _blocked('child process', directory / 'runtime.json', facts['pid'], facts.get('pid_started'), observations)
     else:
         runner = {'pid': facts.get('runner_pid'), 'pid_started': facts.get('runner_started')}
         if runner['pid'] and not gone(runner, exit_at):
-            return _blocked('older runner (no cleanup record)', path, runner['pid'], runner['pid_started'], observations)
+            return _blocked('older runner (no cleanup record)', directory / 'runtime.json', runner['pid'], runner['pid_started'], observations)
         if runner['pid'] and facts.get('pid') and not gone(facts, exit_at):
-            return _blocked('older child (no cleanup record)', path, facts['pid'], facts.get('pid_started'), observations)
+            return _blocked('older child (no cleanup record)', directory / 'runtime.json', facts['pid'], facts.get('pid_started'), observations)
     try:
         with _connections_lock(launch):
             for path in (launch / 'roles').glob('*.json'):

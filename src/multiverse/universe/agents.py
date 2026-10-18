@@ -257,7 +257,7 @@ def _bind_session_locked(root, agent_dir, session_id, launch_id):
         session_id = normalize_session_id(session_id)
         if data.get("native_session_id") not in (None, session_id):
             raise ValueError("This agent is already bound to a different native session")
-        sessions.claim(root, agent_dir, data, session_id)
+        sessions.claim(root, agent_dir, data, session_id, operation="bind")
         data.update(native_session_id=session_id, updated_at=now())
         if data.get('agent_identity'):
             data['agent_identity'] = {**data['agent_identity'], 'native_id': session_id}

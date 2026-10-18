@@ -240,7 +240,7 @@ Each agent has one directory, named by its UUID. mv2 writes everything in it.
 
 | Path | Meaning |
 | --- | --- |
-| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. |
+| `properties.json` | Identity and reported work: `id`, `universe_id`, `name`, `harness`, `model`, `task`, `phase`, `summary`, `workspace`, `native_session_id`, timestamps. `native_storage_environment` retains selected storage variable values; `null` means explicitly unset on future launches. |
 | `runtime.json` | The current launch: `launch_id`, `state`, `status`, `host`, `tmux` (socket, session, pane), `native_mode`, `native_versions`, `plugins` (what each plugin added to this launch, or why it was left out, and the launch's plugin `problems`, which `mv2 inspect` shows), and the last `reason` or `error`. |
 | `inbox.jsonl` | Every message, one JSON object per line: `id`, `at`, `from`, `text`, `delivery` (`steer`, `follow-up` or `inbox-only`). The file is append-only. |
 | `inbox.cursor` | Byte offset up to which `mv2 inbox` has read inbox-only messages. |

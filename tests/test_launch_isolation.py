@@ -64,6 +64,60 @@ class LaunchIsolationTest(unittest.TestCase):
                 code = error.code or 0
         return code, out.getvalue(), err.getvalue()
 
+    def test_launch_storage_presence_survives_tmux_and_resume(self):
+        """Storage values and absence must survive tmux and resume; inherited server variables otherwise silently split the recorded home from the child's transcripts."""
+        for family, selected in (
+                ('claude', {'CLAUDE_CONFIG_DIR': None}),
+                ('claude', {'CLAUDE_CONFIG_DIR': ''}),
+                ('claude', {'CLAUDE_CONFIG_DIR': str(self.work / 'claude-storage')}),
+                ('codex', {'CODEX_HOME': None, 'CODEX_SQLITE_HOME': None}),
+                ('codex', {'CODEX_HOME': str(self.work / 'codex-storage'),
+                           'CODEX_SQLITE_HOME': str(self.work / 'database')})):
+            with self.subTest(family=family, selected=selected):
+                executable = self.work / (family + '-version-only')
+                version = '2.1.303 (Claude Code)' if family == 'claude' else 'codex-cli 0.163.0'
+                executable.write_text(f'#!{sys.executable}\nprint({version!r})\n')
+                executable.chmod(0o755)
+                manifest = self.root / 'harnesses' / family / 'harness.json'
+                definition = read(manifest)
+                definition['settings'].update(inbox_bridge=False, executable=str(executable))
+                write(manifest, definition)
+                backend = Mock()
+                backend.create.return_value = {'socket': str(self.work / 'absent.sock'), 'session': '$1', 'pane': '%1'}
+                caller = {key: value for key, value in os.environ.items() if key not in selected}
+                caller.update({key: value for key, value in selected.items() if value is not None})
+                expected = dict(selected)
+                if family == 'codex':
+                    expected['CODEX_HOME'] = str(Path(selected['CODEX_HOME'] or (Path(caller['HOME']) / '.codex')).resolve())
+                with patch.object(lifecycle, 'Tmux', return_value=backend), \
+                        patch.object(lifecycle, 'observe', return_value={'live': 'dormant'}), \
+                        patch.dict(os.environ, caller, clear=True):
+                    result = lifecycle.start(self.root, name='storage-' + str(uuid4()), harness=family)
+                    directory = self.root / 'state/agents' / result['id']
+                    if family == 'codex':
+                        agents.bind_session(self.root, result['id'], str(uuid4()))
+                    for mode in ('spawn', 'resume'):
+                        if mode == 'resume':
+                            for key in selected:
+                                os.environ[key] = str(self.work / ('caller-changed-' + key))
+                            result = lifecycle.start(self.root, resume=result['id'])
+                        request = read(directory / 'launches' / result['runtime']['launch_id'] / 'request.json')
+                        with patch.dict(os.environ, {**{key: str(self.work / ('server-' + key)) for key in selected},
+                                                     'HOME': str(self.work / 'server-home')}):
+                            environment = runner.launch_environment(request)
+                        self.assertEqual({key: environment.get(key) for key in selected}, expected, mode)
+                        self.assertEqual(environment['HOME'], caller['HOME'], mode)
+                        self.assertEqual(read(directory / 'properties.json')['native_storage_environment'], expected)
+                    if family == 'codex' and selected['CODEX_SQLITE_HOME'] is None:
+                        properties = read(directory / 'properties.json')
+                        properties['native_service_identity'] = {'provider': 'codex', 'scope': {
+                            'CODEX_HOME': expected['CODEX_HOME']}}
+                        write(directory / 'properties.json', properties)
+                        before = (directory / 'runtime.json').read_bytes()
+                        with self.assertRaisesRegex(ValueError, 'Cannot add CODEX_SQLITE_HOME'):
+                            lifecycle.start(self.root, resume=result['id'])
+                        self.assertEqual((directory / 'runtime.json').read_bytes(), before)
+
     def test_inbox_checkpoints_never_skip_or_repeat(self):
         """Inbox cursor checkpoints never skip or repeat a message, through an empty first read, a limited read,
         pages and a partial tail; fragile because of byte-offset arithmetic, and a break silently loses or

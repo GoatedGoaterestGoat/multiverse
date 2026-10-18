@@ -157,7 +157,7 @@ def _damaged_mentions(directory, native_id):
     return mentioned
 
 
-def claim(root, directory, data, native_id, home=None):
+def claim(root, directory, data, native_id, home=None, *, operation=None):
     """Caller holds namespace. Earlier generations remain owned by their agent."""
     own_provider = provider(root, data)
     own_directory = directory.resolve()
@@ -217,6 +217,10 @@ def claim(root, directory, data, native_id, home=None):
             homes = {other.get('native_session_home'), *(row['home'] for row in rows)}
             if all(_different_homes(own_home, other_home) for other_home in homes):
                 continue
+            if operation == 'bind':
+                raise SessionConflict(f'Cannot bind session {native_id}: it belongs to another agent '
+                                      f'({other.get("name", path.parent.name)}). Use that agent, or bind an '
+                                      'unclaimed session ID to this one')
             raise SessionConflict(f'This terminal switched to another agent\'s session ({other.get("name", "another agent")}); '
                                   'return to this agent\'s own conversation before sending messages')
 
