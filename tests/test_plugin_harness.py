@@ -105,9 +105,10 @@ class LaunchPlanTest(PluginTestCase):
             self.assertEqual(plan.plugins["thief"]["reason"], "it may not set the environment variable 'MV2_AGENT_ID'")
 
     def test_malformed_contributions_leave_only_that_plugin_out(self):
-        """In one launch plan a plugin whose import fails, whose contributor raises or whose fields are malformed
-        loses only itself, and one that failed to load is tried again once its files change; a break goes unnoticed
-        because tests use healthy plugins, and it blocks every launch."""
+        """In one launch plan a plugin whose import fails, whose contributor raises, whose fields are malformed or
+        whose settings its own check refuses loses only itself, saying why, and one that failed to load is tried again
+        once its files change; a break goes unnoticed because tests use healthy plugins, and it blocks every launch
+        or launches a plugin with settings it refuses."""
         with self.subTest("a contributor that raises or returns malformed fields"):
             cases = {"noenv": "environment=None", "badsettings": "claude_settings=[]",
                      "object": "claude_settings={'x': object()}", "blank": "problem='  '", "number": "mode=3"}
@@ -142,6 +143,24 @@ class LaunchPlanTest(PluginTestCase):
             plan = harness.launch_plan(self.info())
             self.assertEqual(plan.plugins["brittle"]["state"], "loaded")
             self.assertIn("brittle", [item["name"] for item in plan.status_items])
+        with self.subTest("settings its own check refuses, in a fresh process: left out of Claude launches"):
+            self.write_plugin("picky", {
+                "module": "plugin", "extends": ["launch"], "permissions": ["harness.claude"],
+                "harnesses": {"claude": [{"dir": "claude"}]}, "settings": {"version": 1}}, {"plugin.py": (
+                    "def register(mv):\n"
+                    "    def check(settings):\n"
+                    "        if settings.get('level') not in (None, 1, 2):\n"
+                    "            raise ValueError('level must be 1 or 2')\n"
+                    "    mv.settings.check(check)\n")})
+            self.enable("picky")
+            (self.root / "plugin-settings").mkdir(exist_ok=True)
+            (self.root / "plugin-settings" / "picky.json").write_text('{"schema": 1, "level": 9}')
+            loader.reset()  # its check runs only once its code is loaded, as the launch loads it
+            plan = harness.launch_plan(self.info())
+            self.assertNotIn(str((self.plugins_dir / "picky" / "claude").resolve()), plan.claude_plugin_dirs)
+            self.assertEqual(plan.plugins["picky"]["state"], "skipped")
+            self.assertTrue(any(problem.startswith("plugin picky was left out: its settings cannot be used")
+                                and "level must be 1 or 2" in problem for problem in plan.problems), plan.problems)
 
     def test_usage_adjusters_never_change_what_they_were_given(self):
         """Plugin usage adjusters get a copy, adjust only ok results, and mutation or exceptions never corrupt

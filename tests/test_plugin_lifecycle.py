@@ -27,8 +27,12 @@ class PluginLaunchTest(NativeBackendTest):
         plugins.mkdir(parents=True)
         (plugins / "plugin.json").write_text(json.dumps({
             "schema": 1, "name": "watcher", "version": "0.1.0", "api": "1.1", "module": "plugin",
-            "extends": ["events"], "events": ["agent.*"]}))
-        (plugins / "plugin.py").write_text("def register(mv):\n    pass\n")
+            "extends": ["events", "capabilities"], "events": ["agent.*"]}))
+        (plugins / "plugin.py").write_text(  # one capability of its own, and one that claims a core name
+            "from multiverse.plugins import api\n"
+            "def register(mv):\n"
+            "    mv.capabilities.add('watching', lambda info: api.Capability('supported', mechanism='watch'))\n"
+            "    mv.capabilities.add('spawn', lambda info: api.Capability('unavailable', 'a plugin may not answer'))\n")
         environment = {key: value for key, value in os.environ.items() if key != "MV2_PLUGINS"}
         environment.update(HOME=home.name, MV2_PLUGIN_PATH=str(plugins.parent))
         self.enterContext(patch.dict(os.environ, environment, clear=True))
@@ -108,6 +112,15 @@ class PluginLaunchTest(NativeBackendTest):
             for key, value in self.expected(result).items():
                 self.assertEqual(only.environment[key], value, key)
             self.assertNotIn("MV2_TMUX_SOCKET", only.environment)
+
+    def test_core_capability_keys_win_over_a_plugins(self):
+        """A plugin adds capabilities of its own, but one that claims a core name (spawn) never replaces core's
+        answer; a break goes unnoticed: a plugin then quietly tells agents and the dashboard that mv2 can't spawn."""
+        from multiverse.runtime import native
+        found = native.capabilities(self.root, self.result["id"])
+        self.assertEqual(found["watching"]["state"], "supported")
+        self.assertEqual(found["watching"]["mechanism"], "watch")
+        self.assertEqual(found["spawn"]["state"], "supported")  # core's, not the plugin's "unavailable"
 
     def test_each_launch_records_one_exit(self):
         """Each launch records exactly one agent.exited with the right state however the runner ends; a break goes

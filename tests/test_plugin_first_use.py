@@ -251,15 +251,24 @@ class FirstUseTest(PluginTestCase):
             self.assertIn("converted compaction.json", " ".join(plugins.migrate_on_first_use(root)))
 
     def test_an_untrusted_universe_plugin_is_never_converted_or_imported(self):
-        """First-use conversion, which runs on every command, never imports an untrusted universe plugin, and doctor
-        says to trust it before its old file can be converted; a break goes unnoticed because conversion just works
-        while untrusted code runs on any mv2 call."""
+        """First-use conversion, which runs on every command, never imports an untrusted universe plugin, nor any
+        plugin under MV2_PLUGINS=off, and doctor says to trust it before its old file can be converted; a break goes
+        unnoticed because conversion just works while untrusted code, or a plugin safe mode should keep out, runs on
+        any mv2 call."""
         self.write_plugin("local", {"module": "plugin", "settings": {"version": 2, "legacy": "local.json"}},
                           {"plugin.py": "raise SystemExit('imported')\n"}, where=self.root / "plugins")
         (self.root / "local.json").write_text("{}")
         self.assertEqual(plugins.migrate_on_first_use(self.root), [])
         self.assertTrue((self.root / "local.json").exists())
         self.assertFalse((self.root / "state" / "plugins" / plugins.MIGRATE_LOCK).exists())
+        with self.subTest("MV2_PLUGINS=off: no plugin's migrate() runs, nothing is converted"):
+            self.legacy({"colour": "teal"})
+            loader.reset()
+            with mock.patch.dict(os.environ, {"MV2_PLUGINS": "off"}):
+                self.assertEqual(plugins.migrate_on_first_use(self.root), [])
+            self.assertTrue((self.root / "notes.json").exists())
+            self.assertIsNone(self.converted())
+            self.assertEqual(loader._loaded, {})  # notes' code (and its migrate()) never imported
         with self.subTest("doctor says to trust it first"):
             directory = self.write_plugin("forked", {"settings": {"version": 2, "legacy": "forked.json"}},
                                           where=self.root / "plugins")
