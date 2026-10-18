@@ -88,7 +88,7 @@ node --experimental-strip-types tests/pi_bridge_test.mjs
 
 | Fixture | Where | Gives you |
 | --- | --- | --- |
-| `isolate(self)` | `isolation.py` | Call it first in `setUp`: the test gets its own HOME, which the processes it starts inherit, and loses the agent's environment (`MV2_*` but `MV2_CLI` and `MV2_PYTHON`, `CODEX_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX`). A value the test set itself before calling it stays |
+| `isolate(self)` | `isolation.py` | Call it first in `setUp`: the test gets its own HOME, which the processes it starts inherit, and loses the agent's environment (`MV2_*` but `MV2_CLI` and `MV2_PYTHON`, `CODEX_*`, `CLAUDE_CODE_*`, `CLAUDE_CONFIG_DIR`, `TMUX`) and every variable that looks like a credential (tokens, secrets, passwords, API keys, `GH_*`, `GITHUB_*`). A value the test set itself before calling it stays |
 | `track(tmux_socket=…, pid=…)` | `isolation.py` | Names a tmux server or process the test started outside its own process group, so `tests/run.py` ends it even if the test is stopped before its cleanups run. A PID is ended only while its start time matches. For a process that leads its own group, such as a daemon, the whole group is ended, helpers included, while any process seen in it is still there, even after the leader has exited |
 | `home_safety` | `home_safety.py` | The real-home guard: a refused write under `~/.multiverse` fails the test that made it. `isolate` and `PluginTestCase` turn it on, as does every `tests/run.py` worker |
 | `BaseTest` | `test_multiverse.py` | `isolate(self)`, then a temporary directory with a fresh `base` universe in `self.root` |

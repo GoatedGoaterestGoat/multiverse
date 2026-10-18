@@ -1,4 +1,5 @@
-"""One test's environment: its own HOME, and nothing the shell or agent running the suite would pass on.
+"""One test's environment: its own HOME, and nothing the shell or agent running the suite would pass on: no agent
+identity, and no variable that looks like a credential.
 
     from isolation import isolate
 
@@ -26,12 +27,20 @@ import tracking
 KEPT = ("MV2_CLI", "MV2_PYTHON")
 INHERITED_PREFIXES = ("MV2_", "CODEX_", "CLAUDE_CODE_")
 INHERITED = ("CLAUDECODE", "CLAUDE_PID", "CLAUDE_EFFORT", "CLAUDE_CONFIG_DIR", "TMUX", "TMUX_PANE")
+# What may hold a credential: no test needs one, and a failing assertion that prints an environment would show it.
+SECRET_WORDS = ("TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "ACCESS_KEY", "PRIVATE_KEY", "CREDENTIAL")
+SECRET_PREFIXES = ("GH_", "GITHUB_", "AWS_", "ANTHROPIC_", "OPENAI_")
 STARTED_WITH = dict(os.environ)  # before any test changed it: a value a test set itself is the test's to keep
 TRACKED = os.environ.get("MV2_TEST_TRACKED")  # where tests/run.py reads what to end after this unit
 
 
+def _secret(key):
+    name = key.upper()
+    return name.startswith(SECRET_PREFIXES) or any(word in name for word in SECRET_WORDS)
+
+
 def _inherited(key, value):
-    return (key not in KEPT and (key.startswith(INHERITED_PREFIXES) or key in INHERITED)
+    return (key not in KEPT and (key.startswith(INHERITED_PREFIXES) or key in INHERITED or _secret(key))
             and STARTED_WITH.get(key) == value)
 
 
