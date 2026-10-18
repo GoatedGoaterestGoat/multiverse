@@ -108,6 +108,45 @@ class ReappearedOldFileTest(CliCase):
         self.assertIn(note, doctor.stdout)
 
 
+class WaitingOldFileTest(CliCase):
+    """While an old settings file waits to be converted, the plugin is off here (its defaults never stand in for
+    the real settings), and mv2 plugins, plugins info and plugins settings say so, as doctor does (COMPACTION-7)."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(loader.reset)
+        self.write_plugin("veteran", {"module": "plugin", "settings": {**SETTINGS, "legacy": "veteran.json"}}, {
+            "plugin.py": "def register(mv):\n    pass\n", "settings.schema.json": json.dumps(SCHEMA),
+            "defaults/settings.json": json.dumps({"schema": 1, "level": 1})})
+        self.enable("veteran")
+        (self.root / "veteran.json").write_text('{"level": tru')  # cannot be converted as it is
+
+    def test_every_view_says_it_is_off_until_converted(self):
+        for when in ("before its conversion is tried", "after it failed"):
+            with self.subTest(when):
+                self.assertEqual(self.state("veteran"), "unusable")
+                info = self.mv2("plugins", "info", "veteran").stdout
+                self.assertIn("unusable", info)
+                self.assertIn("off until veteran.json is converted: run mv2 plugins migrate --apply", info)
+                shown = self.mv2("plugins", "settings", "veteran").stdout
+                self.assertIn("Cannot be used", shown)
+                self.assertIn("veteran.json is not converted yet: run mv2 plugins migrate --apply", shown)
+                self.assertFalse(settings_files.path(self.root, "veteran").exists())  # no defaults written
+                doctor = self.mv2("doctor")
+                self.assertEqual(doctor.returncode, 1)
+                self.assertEqual(doctor.stdout.count("veteran.json"), 1, doctor.stdout)  # said once
+        self.assertTrue((self.root / "veteran.json").is_file())
+
+    def test_once_converted_it_is_on(self):
+        (self.root / "veteran.json").write_text(json.dumps({"level": 2}))
+        loader.reset()
+        self.write_plugin("veteran", {"module": "plugin", "settings": {**SETTINGS, "legacy": "veteran.json"}}, {
+            "plugin.py": ("def register(mv):\n    @mv.settings.migrate\n    def migrate(data, source):\n"
+                          "        return {'schema': 1, 'level': data['level']}\n")})
+        self.assertEqual(self.mv2("plugins", "migrate", "--apply").returncode, 0)
+        self.assertEqual(self.state("veteran"), "on")
+
+
 @unittest.skipUnless((PROJECT / "plugins" / "compaction" / "plugin.json").is_file(),
                      "needs plugins/compaction: mv2 plugins install compaction")
 class CompactionSettingsTest(CliCase):
@@ -131,6 +170,16 @@ class CompactionSettingsTest(CliCase):
                 self.file.write_text(before)
                 self.assertNotEqual(result.returncode, 0, f"accepted {edit}: {result.stdout}{result.stderr}")
                 self.assertEqual(written, before, f"{edit} was written")
+
+    def test_an_unconverted_compaction_json_reads_unusable_not_on(self):
+        self.file.unlink(missing_ok=True)
+        (self.root / "compaction.json").write_text('{"schema": 1, "enabled": tru')
+        self.assertEqual(self.mv2("list").returncode, 0)  # the conversion runs and fails, leaving the file
+        self.assertTrue((self.root / "compaction.json").is_file())
+        self.assertIn("compaction.json", self.mv2("doctor").stdout)
+        self.assertEqual(self.state("compaction"), "unusable")
+        shown = self.mv2("plugins", "settings", "compaction")
+        self.assertIn("compaction.json", shown.stdout + shown.stderr)
 
     def test_plugins_says_unusable_whenever_doctor_says_the_settings_cannot_be_used(self):
         self.file.write_text('{"schema": 2, "default": {')

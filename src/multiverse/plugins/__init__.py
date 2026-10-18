@@ -284,12 +284,17 @@ def listing(root, wait=loader.REFRESH_WAIT):
     for found in current:
         manifest = found.manifest
         state = "loading" if found.usable and found.loaded is None and loader.loading(found) else found.state
+        problem, waiting = found.problem, _waiting_old_file(root, found)
+        if waiting and found.on and state in ("on", "loaded", "loading"):
+            # The plugin's real settings wait in its old file: it is off here until that is converted (compaction
+            # fails closed), and its defaults are never shown as its settings.
+            state, problem = "unusable", f"{found.name}: off until {waiting} is converted: run mv2 plugins migrate --apply"
         item = {"name": found.name, "on": found.on, "state": state, "source": found.source,
                 "directory": str(found.directory) if found.directory else None,
                 "version": manifest.version if manifest else None,
                 "description": manifest.description if manifest else "",
                 "default": manifest.default if manifest and found.source == "bundled" else "off",
-                "problem": found.problem, "errors": recent.get(found.name, []) + (
+                "problem": problem, "errors": recent.get(found.name, []) + (
                     host.gave_up(root, found.name) if manifest is not None and manifest.events else []) + (
                     [_left_stopped(found.name, stopped[found.name])] if found.name in stopped else []),
                 "permissions": manifest.permission_texts() if manifest else [],
@@ -308,8 +313,9 @@ def listing(root, wait=loader.REFRESH_WAIT):
             except ValueError as error:
                 schema, schema_problem = None, str(error)
             item["settings"] = {"path": str(current.path), "source": current.source,
-                                "problem": current.problem or schema_problem, "schema": schema,
-                                "values": current.values,
+                                "problem": (_waiting_problem(waiting) if waiting else None) or current.problem
+                                or schema_problem, "schema": schema,
+                                "values": {} if waiting else current.values,
                                 "screen": _settings_screen(found),
                                 "fields": ([asdict(item) for item in found.loaded.registrations.settings_fields]
                                            if found.loaded and found.loaded.registrations.settings_fields else None)}
@@ -929,7 +935,24 @@ def settings_of(root, name):
     if found.manifest is None:
         raise PluginError(found.problem or f"{name} cannot be read")
     current = settings_files.read(root, found.manifest, check)
+    waiting = _waiting_old_file(root, found)
+    if waiting:  # its real settings are in the old file: the defaults never stand in for them
+        return {}, _waiting_problem(waiting), current.path
     return current.values, current.problem, current.path
+
+
+def _waiting_old_file(root, found):
+    """The pre-plugin settings file of `found` that waits here to be converted, or None."""
+    legacy = (found.manifest.settings.legacy if found.manifest is not None and found.manifest.settings is not None
+              else None)
+    if root is not None and legacy and (Path(root) / legacy).is_file() \
+            and not settings_files.path(root, found.name).exists():
+        return legacy
+    return None
+
+
+def _waiting_problem(legacy):
+    return f"{legacy} is not converted yet: run mv2 plugins migrate --apply"
 
 
 def edit_settings(root, name, changes):

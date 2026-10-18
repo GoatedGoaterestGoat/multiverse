@@ -94,7 +94,9 @@ class MigrateTest(PluginTestCase):
     def test_legacy_settings_move_to_the_plugin_and_turn_it_on(self):
         from multiverse.tools import plugins as tool
         (self.root / "tree.json").write_text(json.dumps({"enabled": True, "budget": 5}))
-        self.assertEqual(plugins.settings_of(self.root, "tree")[0], {"schema": 2})  # never read: defaults until converted
+        # Never read, and the defaults never stand in for it: no settings until it is converted.
+        self.assertEqual(plugins.settings_of(self.root, "tree")[:2],
+                         ({}, "tree.json is not converted yet: run mv2 plugins migrate --apply"))
         plan = tool.run(self.root, plugin_action="migrate")
         self.assertEqual([item["kind"] for item in plan["planned"]], ["legacy"])
         self.assertIn("Would migrate tree", tool.text("migrate", plan))
