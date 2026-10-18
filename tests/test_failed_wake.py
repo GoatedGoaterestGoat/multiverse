@@ -23,29 +23,27 @@ class FailedWakeTest(BaseTest):
         mailbox.update_message(self.directory, self.message['id'], submission_state='submitting',
             wake_launch_id=self.launch.name, delivery_method='resume_prompt', attempts=[{'state': 'pending'}])
 
-    def test_only_false_after_process_exit_allows_retry(self):
-        for evidence, expected in ((True, 'unknown'), (None, 'unknown'), (False, 'failed'), (0, 'unknown')):
-            with self.subTest(evidence=evidence):
+    def test_a_failed_wake_is_retryable_only_on_exact_negative_evidence(self):
+        """A failed wake becomes retryable only when the process has exited and its harness says False (not None, 0,
+        a live process or a raising hook); fragile because it relies on each harness's startup_prompt_evidence hook,
+        and a break silently replays a prompt the agent already took (14bc474)."""
+        exited, live = Mock(poll=Mock(return_value=3)), Mock(poll=Mock(return_value=None))
+        cases = [(True, exited, 'unknown'), (None, exited, 'unknown'), (False, exited, 'failed'),
+                 (0, exited, 'unknown'), (False, live, 'unknown'), (RuntimeError('unreadable'), exited, 'unknown')]
+        for evidence, process, expected in cases:
+            with self.subTest(evidence=evidence, live=process is live):
                 self.reset()
-                adapter = Mock(startup_prompt_evidence=Mock(return_value=evidence))
-                with patch.object(runner.__import__('multiverse.harnesses'), 'load') if False else                         patch('multiverse.harnesses.load', return_value=adapter):
+                hook = Mock(side_effect=evidence) if isinstance(evidence, Exception) else Mock(return_value=evidence)
+                with patch('multiverse.harnesses.load', return_value=Mock(startup_prompt_evidence=hook)):
                     runner.finish_failed_wake(self.launch, {'resume_message_id': self.message['id']},
-                                              self.env, Mock(poll=Mock(return_value=3)), 'unknown option')
+                                              self.env, process, 'unknown option')
                 _, tracking = mailbox.message_record(self.directory, self.message['id'])
                 self.assertEqual(tracking['submission_state'], expected)
                 self.assertIn('unknown option', tracking['attempts'][-1]['reason'])
-                session, prompt, since, env = adapter.startup_prompt_evidence.call_args.args
+                if process is live:
+                    hook.assert_not_called()
+                    continue
+                session, prompt, since, env = hook.call_args.args
                 self.assertEqual(prompt, 'exact wake prompt')
                 self.assertEqual(env, self.env)
                 self.assertEqual(session.launch_id, self.launch.name)
-
-    def test_live_process_or_bad_hook_cannot_establish_nonconsumption(self):
-        for live, outcome in ((True, False), (False, RuntimeError('unreadable evidence'))):
-            self.reset()
-            hook = Mock(return_value=outcome) if not isinstance(outcome, Exception) else Mock(side_effect=outcome)
-            with patch('multiverse.harnesses.load', return_value=Mock(startup_prompt_evidence=hook)):
-                runner.finish_failed_wake(self.launch, {'resume_message_id': self.message['id']},
-                                          self.env, Mock(poll=Mock(return_value=None if live else 3)), 'startup failed')
-            self.assertEqual(mailbox.message_record(self.directory, self.message['id'])[1]['submission_state'], 'unknown')
-            if live:
-                hook.assert_not_called()

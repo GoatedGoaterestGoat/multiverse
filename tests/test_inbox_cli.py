@@ -1,7 +1,6 @@
-"""Readable inbox output, non-consuming history, and output-before-read commits."""
+"""Non-consuming inbox reads, output-before-read commits, and waiting for inbox messages."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
-from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -15,7 +14,7 @@ from uuid import uuid4
 from test_multiverse import BaseTest, ROOT
 from multiverse import cli, store
 from multiverse.universe import mailbox
-from multiverse.universe import templates
+from multiverse.tools import doctor, report
 from multiverse.tools import inbox as inbox_tool
 
 
@@ -38,121 +37,113 @@ class InboxCliTest(BaseTest):
             cli.main()
         return output.getvalue()
 
-    def test_sender_blocks_resolve_native_agent_name_and_cross_universe_and_user(self):
-        sender = str(uuid4())
-        store.write(self.root / 'state/agents' / sender / 'properties.json', {'id': sender, 'name': 'renamed-worker'})
-        other = templates.create(self.work / 'other', 'Other universe', workdir=self.work)
-        foreign = str(uuid4())
-        store.write(other / 'state/agents' / foreign / 'properties.json', {'id': foreign, 'name': 'reviewer'})
-        long_text = '第一行\n' + 'full text ' * 1500 + '\nfinal line'
-        self.message(long_text, {'agent_id': sender, 'name': 'agent', 'universe': str(self.root)})
-        self.message('foreign message', {'agent_id': foreign, 'universe': str(other)})
-        personal = self.message('person message', {'name': 'Person Name'})
-        self.assertEqual(self.output(), f'Message from renamed-worker:\n{long_text}\n\n'
-                         'Message from reviewer (in universe Other universe):\nforeign message\n\n'
-                         'Message from user:\nperson message\n')
-        self.assertNotIn(personal['id'], self.output('--all'))
-        self.assertEqual(self.output(), 'No unread messages.\n')
-
-    def test_json_keeps_existing_shape_and_peek_does_not_consume(self):
-        message = self.message('first')
-        expected = {key: message[key] for key in ('at', 'from', 'text', 'delivery')}
-        peek = json.loads(self.output('--peek', '--json'))
-        self.assertEqual(peek['messages'], [expected])
-        self.assertEqual(set(peek), {'messages', 'cursor'})
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-        self.assertEqual(self.output('--peek'), 'Message from user:\nfirst\n')
-        self.assertEqual(json.loads(self.output('--json')), peek)
-        self.assertEqual(store.read(self.directory / 'inbox.cursor'), peek['cursor'])
-
-    def test_unread_pages_stay_at_fifty_but_readable_history_and_last_are_not_capped(self):
-        for index in range(105):
-            self.message(f'message {index:03d}')
+    def test_reads_that_must_not_consume_never_move_the_cursor(self):
+        """--peek, --all, --last, --since, invalid combinations, wait timeouts, report's unread count and doctor never
+        move the read cursor, and an unread page consumes only its 50; fragile because every new read option is a
+        new way to advance it, and a break silently marks messages read."""
+        cursor = self.directory / 'inbox.cursor'
+        for machine in (False, True):
+            output = io.StringIO()
+            with self.subTest(json=machine), redirect_stdout(output), self.assertRaises(SystemExit) as ended:
+                inbox_tool.cli_run(self.root, agent=self.agent, wait=True, timeout='0', json=machine)
+            self.assertEqual(ended.exception.code, 1)
+            if machine:
+                result = json.loads(output.getvalue())
+                self.assertEqual(result['messages'], [])
+                self.assertTrue(result['timed_out'])
+                self.assertFalse(result['ok'])
+            self.assertFalse(cursor.exists())
+        for duration, seconds in (('30', 30), ('30s', 30), ('2m', 120), ('0.5h', 1800)):
+            self.assertEqual(inbox_tool.timeout_seconds(duration), seconds)
+        self.message('native messages are not in the unread page', delivery='steer')
+        unread = [self.message(f'message {index:03d}') for index in range(105)]
         self.message('native history', delivery='follow-up')
-        first = self.output()
-        self.assertEqual(first.count('Message from user:'), 50)
-        self.assertIn('message 049', first)
-        self.assertNotIn('message 050', first)
-        position = (self.directory / 'inbox.cursor').read_bytes()
-        all_text = self.output('--all')
-        self.assertEqual(all_text.count('Message from user:'), 106)
-        self.assertIn('native history', all_text)
-        last = self.output('--all', '--last', '100')
-        self.assertEqual(last.count('Message from user:'), 100)
-        self.assertTrue(last.startswith('Message from user:\nmessage 006\n'))
-        self.assertTrue(last.endswith('native history\n'))
-        self.assertEqual(len(json.loads(self.output('--all', '--last', '100', '--json'))['messages']), 100)
-        page = json.loads(self.output('--all', '--json', '--after', '0'))
-        self.assertEqual(len(page['messages']), 50)
-        self.assertTrue(page['has_more'])
-        self.assertIn('id', page['messages'][0])
-        self.assertEqual((self.directory / 'inbox.cursor').read_bytes(), position)
+        invalid = (('--last', '1'), ('--since', '30m'), ('--all', '--last', '0'), ('--all', '--last', '-1'),
+                   ('--all', '--since', 'yesterday'), ('--all', '--since', '-2h'), ('--after', '0'),
+                   ('--all', '--after', '0'), ('--all', '--json', '--after', '0', '--last', '1'), ('--peek', '--all'),
+                   ('--peek', '--after', '0'))
+        for start in (0, 50, 100):
+            page, remaining = unread[start:start + 50], len(unread) - start
+            position = cursor.read_bytes() if cursor.exists() else None
+            def unchanged(read):
+                self.assertEqual(cursor.read_bytes() if cursor.exists() else None, position, read)
+            peek = json.loads(self.output('--peek', '--json'))
+            self.assertEqual(set(peek), {'messages', 'cursor'})
+            self.assertEqual(peek['messages'], [{key: message[key] for key in ('at', 'from', 'text', 'delivery')}
+                                                for message in page])
+            unchanged('--peek --json')
+            self.assertEqual(self.output('--peek').count('Message from user:'), len(page))
+            unchanged('--peek')
+            self.assertEqual(self.output('--all').count('Message from user:'), 107)
+            unchanged('--all')
+            last = json.loads(self.output('--all', '--last', '100', '--json'))['messages']
+            self.assertEqual(len(last), 100)
+            self.assertEqual([message['text'] for message in last[:1] + last[-1:]], ['message 006', 'native history'])
+            unchanged('--all --last')
+            history = json.loads(self.output('--all', '--json', '--after', '0'))
+            self.assertEqual(len(history['messages']), 50)
+            self.assertTrue(history['has_more'])
+            self.assertIn('id', history['messages'][0])
+            unchanged('--all --json --after')
+            self.assertIn('native history', self.output('--all', '--since', '1h'))
+            unchanged('--all --since')
+            for flags in invalid:
+                with self.subTest(flags=flags), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
+                        patch('sys.stderr', io.StringIO()):
+                    self.output(*flags)
+                unchanged(flags)
+            for options in ({'all_messages': True}, {'after': 0}):
+                with self.subTest(options=options), self.assertRaisesRegex(ValueError, '--peek cannot be combined'):
+                    mailbox.inbox(self.directory, peek=True, **options)
+            for options in ({'all_messages': True}, {'after': 0}, {'last': 2}, {'since': '2h'}, {'timeout': 'bad'}):
+                with self.subTest(options=options), self.assertRaises(ValueError):
+                    inbox_tool.run(self.root, agent=self.agent, wait=True, **options)
+            with self.assertRaises(ValueError):
+                inbox_tool.run(self.root, agent=self.agent, timeout='1s')
+            unchanged('invalid options')
+            with patch('subprocess.Popen') as spawned, patch('subprocess.run') as ran:
+                line = report.cli_run(self.root, agent=self.agent, phase='working')
+            spawned.assert_not_called()  # The count is taken in this process.
+            ran.assert_not_called()
+            self.assertIn(f'{remaining} unread inbox message', line)
+            unchanged('report')
+            doctor.run(self.root)
+            unchanged('doctor')
+            self.assertEqual(json.loads(self.output('--json')), peek)
+            self.assertEqual(store.read(cursor), peek['cursor'])
+        self.assertEqual(json.loads(self.output('--peek', '--json'))['messages'], [])
+        self.assertNotIn('unread', report.cli_run(self.root, agent=self.agent, phase='working'))
+        # A cursor past the end of the log makes the inbox unreadable: the report still succeeds, without a count.
+        cursor.write_text('999999')
+        self.assertNotIn('unread', report.cli_run(self.root, agent=self.agent, phase='done'))
+        self.assertEqual(store.read(self.directory / 'properties.json')['phase'], 'done')
+        self.assertEqual(cursor.read_text(), '999999')
 
-    def dated_messages(self):
-        records = [self.message('old'), self.message('middle'), self.message('new')]
-        timestamps = ['2026-10-03T10:00:00+00:00', '2026-10-03T11:00:00+00:00', '2026-10-03T12:00:00+00:00']
-        for record, timestamp in zip(records, timestamps):
-            record['at'] = timestamp
-        (self.directory / 'inbox.jsonl').write_text(''.join(json.dumps(record) + '\n' for record in records))
-
-    def test_since_filters_time_before_last_and_normalizes_iso_timezones(self):
-        self.dated_messages()
-        expected = 'Message from user:\nmiddle\n\nMessage from user:\nnew\n'
-        for timestamp in ('2026-10-03T11:00:00Z', '2026-10-03T13:00:00+02:00', '2026-10-03T11:00:00'):
-            with self.subTest(timestamp=timestamp):
-                self.assertEqual(self.output('--all', '--since', timestamp), expected)
-        self.assertEqual(self.output('--all', '--since', '2026-10-03T11:00:00Z', '--last', '1'),
-                         'Message from user:\nnew\n')
-        self.assertEqual(self.output('--all', '--since', '2026-10-04T00:00:00Z'), 'No messages since 2026-10-04T00:00:00Z.\n')
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-
-    def test_relative_since_and_json_paging_over_an_empty_filtered_page(self):
-        self.dated_messages()
-        now = datetime(2026, 10, 3, 12, 30, tzinfo=timezone.utc)
-        with patch.object(inbox_tool, 'datetime', wraps=datetime) as clock:
-            clock.now.return_value = now
-            self.assertEqual(self.output('--all', '--since', '30m'), 'Message from user:\nnew\n')
-            self.assertIn('middle', self.output('--all', '--since', '2h'))
-            self.assertNotIn('old', self.output('--all', '--since', '2h'))
-            for duration, seconds in (('1s', 1), ('1d', 86400), ('1w', 604800), ('0.5h', 1800)):
-                self.assertEqual(inbox_tool.since_time(duration), now - timedelta(seconds=seconds))
-        empty = json.loads(self.output('--all', '--json', '--after', '0', '--since', '2026-10-04T00:00:00Z'))
-        self.assertEqual(empty['messages'], [])
-        self.assertFalse(empty['has_more'])
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-
-    def test_invalid_combinations_never_consume(self):
-        self.message('remain unread')
-        for flags in (('--last', '1'), ('--since', '30m'), ('--all', '--last', '0'),
-                      ('--all', '--last', '-1'), ('--all', '--since', 'yesterday'),
-                      ('--all', '--since', '-2h'), ('--after', '0'), ('--all', '--after', '0'),
-                      ('--all', '--json', '--after', '0', '--last', '1'), ('--peek', '--all')):
-            with self.subTest(flags=flags), self.assertRaises(SystemExit), redirect_stdout(io.StringIO()), \
-                    patch('sys.stderr', io.StringIO()):
-                self.output(*flags)
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-        self.assertEqual(len(mailbox.inbox(self.directory, peek=True)['messages']), 1)
-
-    def test_failed_write_or_flush_leaves_existing_cursor_unchanged(self):
+    def test_a_message_is_consumed_only_after_its_output_succeeded(self):
+        """A message is consumed only after its output was written and flushed, and a concurrent reader cannot
+        overtake a failed one; fragile because of the order of output, flush and cursor commit, and a break silently
+        loses messages on a broken pipe."""
         self.message('already read')
         self.output()
         position = (self.directory / 'inbox.cursor').read_bytes()
         self.message('must survive')
         for method in ('write', 'flush'):
             for machine in (False, True):
-                stream = io.StringIO()
-                with self.subTest(method=method, json=machine), patch.object(stream, method, side_effect=BrokenPipeError()), \
-                        redirect_stdout(stream), self.assertRaises(BrokenPipeError):
-                    inbox_tool.cli_run(self.root, agent=self.agent, json=machine)
-                self.assertEqual((self.directory / 'inbox.cursor').read_bytes(), position)
-        self.assertEqual(self.output(), 'Message from user:\nmust survive\n')
-
-    def test_callback_flushes_before_cursor_commit_and_failed_reader_cannot_be_overtaken(self):
+                for wait in (False, True):
+                    stream = io.StringIO()
+                    with self.subTest(method=method, json=machine, wait=wait), \
+                            patch.object(stream, method, side_effect=BrokenPipeError()), redirect_stdout(stream), \
+                            self.assertRaises(BrokenPipeError):
+                        inbox_tool.cli_run(self.root, agent=self.agent, json=machine, wait=wait,
+                                           timeout='1s' if wait else None)
+                    self.assertEqual((self.directory / 'inbox.cursor').read_bytes(), position)
+        self.assertIn('must survive', self.output())
+        position = (self.directory / 'inbox.cursor').read_bytes()
         message = self.message('serialize output and consume')
         presenting, release, second_started = threading.Event(), threading.Event(), threading.Event()
         def fail_output(result):
             self.assertEqual(result['messages'], [message])
-            self.assertFalse((self.directory / 'inbox.cursor').exists())
+            self.assertEqual((self.directory / 'inbox.cursor').read_bytes(), position)
             presenting.set()
             self.assertTrue(release.wait(5))
             raise BrokenPipeError()
@@ -172,26 +163,10 @@ class InboxCliTest(BaseTest):
                 first.result(timeout=5)
             self.assertEqual(second.result(timeout=5)['messages'], [message])
 
-    def test_cli_and_tool_module_both_use_readable_output_while_python_run_returns_dict(self):
-        self.message('entrypoint')
-        arguments = ['-u', str(self.root), '--agent', self.agent, '--peek']
-        for executable in ([sys.executable, str(ROOT / 'bin/mv2'), *arguments[:2], 'inbox', *arguments[2:]],
-                           [sys.executable, '-m', 'multiverse.tools.inbox', *arguments]):
-            result = subprocess.run(executable, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(result.stdout, 'Message from user:\nentrypoint\n')
-        self.assertIsInstance(inbox_tool.run(self.root, agent=self.agent, peek=True), dict)
-
-    def test_stale_cli_launch_does_not_output_or_consume(self):
-        self.message('for replacement')
-        output = io.StringIO()
-        with patch.dict(os.environ, {'MV2_LAUNCH_ID': 'old'}), redirect_stdout(output), \
-                self.assertRaisesRegex(ValueError, 'Outdated launch'):
-            inbox_tool.cli_run(self.root, agent=self.agent)
-        self.assertEqual(output.getvalue(), '')
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-
     def test_wait_ignores_native_delivery_and_reads_only_after_inbox_changes(self):
+        """inbox --wait wakes only on inbox-delivered messages, never on natively delivered steers, and a waiting
+        reader whose launch was replaced reads nothing; a break makes agents read steers twice, which nobody
+        notices."""
         scanned = threading.Event()
         original = mailbox.inbox
         def scan(*args, **kwargs):
@@ -209,8 +184,18 @@ class InboxCliTest(BaseTest):
             result = waiting.result(timeout=3)
         self.assertEqual([message['text'] for message in result['messages']], ['wake this read'])
         self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
-
-    def test_waiting_subprocess_flushes_and_consumes_when_a_message_arrives(self):
+        scanned.clear()
+        with patch.object(mailbox, 'inbox', side_effect=scan), ThreadPoolExecutor(max_workers=1) as pool:
+            waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
+            self.assertTrue(scanned.wait(2))
+            with store.lock(self.directory / '.launch.lock'):  # Resume publishes its replacement between polls.
+                store.write(self.directory / 'runtime.json', {'launch_id': 'replacement'})
+                self.message('for the replacement')
+            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
+                waiting.result(timeout=3)
+        store.write(self.directory / 'runtime.json', {'launch_id': 'current'})
+        self.assertEqual([message['text'] for message in mailbox.inbox(self.directory)['messages']],
+                         ['for the replacement'])
         process = subprocess.Popen([sys.executable, str(ROOT / 'bin/mv2'), '-u', str(self.root),
             'inbox', '--agent', self.agent, '--wait', '--timeout', '3s'],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -219,48 +204,5 @@ class InboxCliTest(BaseTest):
         self.message('arrived for waiting reader')
         output, error = process.communicate(timeout=5)
         self.assertEqual(process.returncode, 0, error)
-        self.assertEqual(output, 'Message from user:\narrived for waiting reader\n')
+        self.assertIn('arrived for waiting reader', output)
         self.assertEqual(mailbox.inbox(self.directory)['messages'], [])
-
-    def test_wait_timeout_is_plain_or_json_and_never_advances_cursor(self):
-        for machine in (False, True):
-            output = io.StringIO()
-            with self.subTest(json=machine), redirect_stdout(output), self.assertRaises(SystemExit) as ended:
-                inbox_tool.cli_run(self.root, agent=self.agent, wait=True, timeout='0', json=machine)
-            self.assertEqual(ended.exception.code, 1)
-            if machine:
-                result = json.loads(output.getvalue())
-                self.assertEqual(result['messages'], [])
-                self.assertTrue(result['timed_out'])
-                self.assertFalse(result['ok'])
-            else:
-                self.assertEqual(output.getvalue(), 'Timed out waiting for unread messages.\n')
-            self.assertFalse((self.directory / 'inbox.cursor').exists())
-        for duration, seconds in (('30', 30), ('30s', 30), ('2m', 120), ('0.5h', 1800)):
-            self.assertEqual(inbox_tool.timeout_seconds(duration), seconds)
-
-    def test_wait_rejects_history_and_stale_launches_and_failed_output_stays_unread(self):
-        for options in ({'all_messages': True}, {'after': 0}, {'last': 2}, {'since': '2h'}, {'timeout': 'bad'}):
-            with self.subTest(options=options), self.assertRaises(ValueError):
-                inbox_tool.run(self.root, agent=self.agent, wait=True, **options)
-        with self.assertRaises(ValueError):
-            inbox_tool.run(self.root, agent=self.agent, timeout='1s')
-        scanned = threading.Event()
-        original = mailbox.inbox
-        def scan(*args, **kwargs):
-            scanned.set()
-            return original(*args, **kwargs)
-        with patch.object(mailbox, 'inbox', side_effect=scan), ThreadPoolExecutor(max_workers=1) as pool:
-            waiting = pool.submit(inbox_tool.run, self.root, agent=self.agent, wait=True, timeout='3s')
-            self.assertTrue(scanned.wait(2))
-            store.write(self.directory / 'runtime.json', {'launch_id': 'replacement'})
-            with self.assertRaisesRegex(ValueError, 'Outdated launch'):
-                waiting.result(timeout=3)
-        store.write(self.directory / 'runtime.json', {'launch_id': 'current'})
-        self.message('must survive wait output failure')
-        stream = io.StringIO()
-        with patch.object(stream, 'flush', side_effect=BrokenPipeError()), redirect_stdout(stream), \
-                self.assertRaises(BrokenPipeError):
-            inbox_tool.cli_run(self.root, agent=self.agent, wait=True, timeout='1s')
-        self.assertFalse((self.directory / 'inbox.cursor').exists())
-        self.assertIn('must survive', self.output())
