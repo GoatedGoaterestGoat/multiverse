@@ -1,5 +1,6 @@
 """Harness contracts and real tmux launches, without accounts or model calls."""
 import os
+import shlex
 from pathlib import Path
 import sys
 import time
@@ -33,7 +34,9 @@ class HarnessLaunchTest(TerminalBase):
             "import json, os, subprocess, sys, time, uuid\nfrom pathlib import Path\n"
             "args = sys.argv[1:]\n"
             f"if {harness == 'codex' and report!r} and 'resume' not in args:\n"
-            "    subprocess.run([os.environ['MV2_CLI'], 'session-bind', '--session-id', str(uuid.uuid4())], check=True)\n"
+            "    native = str(uuid.uuid4())\n"
+            "    for _ in range(2):\n"
+            "        subprocess.run([os.environ['MV2_CLI'], 'session-bind', '--session-id', native], check=True)\n"
             "Path(os.environ['MV2_AGENT_DIR'], 'seen.json').write_text(json.dumps({'argv': args, "
             "'parent_markers': [key for key in ('CODEX_THREAD_ID', 'CLAUDECODE') if key in os.environ]}))\n"
             "print('HARNESS READY', flush=True)\nwhile True: time.sleep(1)\n")
@@ -48,38 +51,53 @@ class HarnessLaunchTest(TerminalBase):
         lifecycle.terminal_action(self.root, agent["id"], "stop")
         time.sleep(0.1)
 
+    def deny_callback_namespace(self):
+        launcher = Path(mv2_launcher(self.work))
+        source = str(Path(__file__).resolve().parents[1] / 'src')
+        code = (
+            f"import sys; sys.path.insert(0, {source!r})\n"
+            "from multiverse.universe import sessions\n"
+            "def denied(root):\n"
+            "    raise PermissionError(1, 'sandbox denies universe write', str(sessions.top(root) / 'state/.sessions.lock'))\n"
+            "sessions.namespace = denied\n"
+            "from multiverse.cli import main\nmain()\n")
+        launcher.write_text('#!/bin/sh\nexec ' + shlex.join([sys.executable, '-c', code]) + ' "$@"\n')
+
     def test_codex_session_bind_from_inside_a_real_pane_and_exact_resume(self):
         """A plain Codex stand-in calls the real mv2 session-bind from inside its tmux pane, with a forbidden python
         first on PATH, and resume then uses exactly that id; a break goes unnoticed because every other binding test
-        mocks the runner, and the agent works today but cannot be resumed later."""
-        with self.subTest("a bound session"):
-            self.fake_cli("codex")
-            prompt = '--pretend-flag "quoted"\n$(touch MUST_NOT_EXIST) `echo no` {literal}'
-            with patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-session"}):
-                first = lifecycle.start(self.root, "codex", prompt, "codex", "chosen-model", socket_path=self.socket)
-            directory = agents.directory(self.root, first["id"])
-            seen = directory / "seen.json"
-            until(lambda: seen.exists())
-            received = read(seen)
-            argv = received["argv"]
-            self.assertNotIn("CODEX_THREAD_ID", received["parent_markers"])
-            self.assertEqual(argv[-1], prompt)
-            self.assertLess(argv.index("--model"), argv.index("--"))
-            self.assertEqual(argv[argv.index("--model") + 1], "chosen-model")
-            self.assertFalse((self.work / "MUST_NOT_EXIST").exists())
-            settings = tomllib.loads(argv[argv.index("-c") + 1])
-            self.assertIn("session-bind", settings["developer_instructions"])
-            self.assertIn("You work in a Multiverse universe", settings["developer_instructions"])
-            native = read(directory / "properties.json")["native_session_id"]
-            self.stop_agent(first)
-            seen.unlink()
-            lifecycle.start(self.root, resume=first["id"], socket_path=self.socket)
-            until(lambda: seen.exists())
-            resumed = read(seen)["argv"]
-            self.assertIn(native, resumed)
-            self.assertNotIn(prompt, resumed)
-            self.assertNotIn("--last", resumed)
-            self.stop_agent(first)
+        mocks the runner, and denial of the universe lock can silently leave a working sandboxed agent unresumable."""
+        for denied in (False, True):
+            with self.subTest(namespace_denied=denied):
+                if denied:
+                    self.deny_callback_namespace()
+                self.fake_cli("codex")
+                prompt = '--pretend-flag "quoted"\n$(touch MUST_NOT_EXIST) `echo no` {literal}'
+                with patch.dict(os.environ, {"CODEX_THREAD_ID": "parent-session"}):
+                    first = lifecycle.start(self.root, "codex-denied" if denied else "codex", prompt, "codex", "chosen-model", socket_path=self.socket)
+                directory = agents.directory(self.root, first["id"])
+                seen = directory / "seen.json"
+                until(lambda: seen.exists())
+                received = read(seen)
+                argv = received["argv"]
+                self.assertNotIn("CODEX_THREAD_ID", received["parent_markers"])
+                self.assertEqual(argv[-1], prompt)
+                self.assertLess(argv.index("--model"), argv.index("--"))
+                self.assertEqual(argv[argv.index("--model") + 1], "chosen-model")
+                self.assertFalse((self.work / "MUST_NOT_EXIST").exists())
+                settings = tomllib.loads(argv[argv.index("-c") + 1])
+                self.assertIn("session-bind", settings["developer_instructions"])
+                self.assertIn("You work in a Multiverse universe", settings["developer_instructions"])
+                native = read(directory / "properties.json")["native_session_id"]
+                self.stop_agent(first)
+                seen.unlink()
+                lifecycle.start(self.root, resume=first["id"], socket_path=self.socket)
+                until(lambda: seen.exists())
+                resumed = read(seen)["argv"]
+                self.assertIn(native, resumed)
+                self.assertNotIn(prompt, resumed)
+                self.assertNotIn("--last", resumed)
+                self.stop_agent(first)
         with self.subTest("a session that never bound"):
             self.fake_cli("codex", report=False)
             first = lifecycle.start(self.root, "unregistered", "test", socket_path=self.socket)

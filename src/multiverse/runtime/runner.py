@@ -548,6 +548,7 @@ def main():
     startup = None
     recovery_monitor = None
     refusal_monitor = None
+    binding_requests = None
     startup_checked = False
     exited = False  # agent.exited recorded: once per launch, whichever way the runner ends
     remove_wrapper = False
@@ -694,6 +695,12 @@ def main():
         child_at = time.monotonic()
         initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
         spawn(request)
+        if initial_native_id is None and not request.get('control_endpoint') and not request.get('rpc_proxy'):
+            from multiverse.runtime.binding_requests import BindingRequests
+            binding_requests = BindingRequests(Path(env['MV2_UNIVERSE']), launch,
+                lambda facts: process is not None and process.poll() is None and facts.get('pid') == process.pid)
+            roles['session binding'] = attachments.Role(launch, 'session binding', started=runner_started)
+            binding_requests.start()
         if request.get('observe_refusal'):
             refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
             roles['refusal observer'] = attachments.Role(launch, 'refusal observer', started=runner_started)
@@ -785,6 +792,7 @@ def main():
                               diagnostic.get('reason') or 'Runner ended before bridge readiness; use deliver AGENT --retry')
             except Exception as error:
                 cleanup_errors.append('startup bookkeeping: ' + str(error))
+        close_role('session binding', binding_requests)
         close_role('refusal observer', refusal_monitor)
         close_role('relay', proxy)
         close_role('status observer', watcher)

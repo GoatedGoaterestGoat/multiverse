@@ -29,7 +29,13 @@ def run(root=None, *, agent=None, session_id, json=False):  # `json`: presentati
                 raise ValueError('Agent identity can only verify its existing session binding; the runner owns binding changes')
             return data  # Cached bridge bootstrap: exact-existing verification, no writes.
     root, directory, launch_id = callback(root, agent)
-    return agents.bind_session(root, agent, session_id, launch_id)
+    try:
+        return agents.bind_session(root, agent, session_id, launch_id)
+    except PermissionError as error:
+        from ..runtime.binding_requests import namespace_denied, request_binding
+        if not launch_id or not namespace_denied(root, error):
+            raise
+        return request_binding(root, directory, launch_id, session_id)
 
 
 if __name__ == "__main__":

@@ -244,7 +244,13 @@ def _event(agent_dir, kind, launch=None, data=None, properties=None):
 def bind_session(root, reference, session_id, launch_id=None):
     """Record a harness-reported session without guessing from global history."""
     agent_dir = directory(root, reference)
-    with lock(agent_dir / ".launch.lock"), sessions.namespace(root), lock(agent_dir / ".properties.lock"):
+    with lock(agent_dir / ".launch.lock"):
+        return _bind_session_locked(root, agent_dir, session_id, launch_id)
+
+
+def _bind_session_locked(root, agent_dir, session_id, launch_id):
+    """Caller holds the existing launch lock; claims retain the universe lock."""
+    with sessions.namespace(root), lock(agent_dir / ".properties.lock"):
         if launch_id and runtime(agent_dir).get("launch_id") != launch_id:
             raise ValueError("Outdated launch")
         data, _ = sessions.recover(agent_dir, read(agent_dir / "properties.json"))
