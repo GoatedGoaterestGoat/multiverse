@@ -294,3 +294,30 @@ class BoundsTest(PluginTestCase):
             catalog.command(self.root, "workflows/review@")
         with self.assertRaisesRegex(ValueError, "Expected one exact match for '@'"):
             catalog.command(self.root, "@")
+
+
+class FailedCommandTest(PluginTestCase):
+    """A plugin's command says which plugin failed, as `mv2: plugin NAME: …` (PLUGINS-1; qa-plugins's black-box
+    test, 1e71a7f, run on this checkout's mv2)."""
+
+    def mv2(self, *args):
+        environment = {**os.environ, "PYTHONPATH": str(PROJECT / "src")}
+        return subprocess.run([sys.executable, str(PROJECT / "bin" / "mv2"), "-u", str(self.root), *args],
+                              env=environment, text=True, capture_output=True, timeout=60, cwd=self.work)
+
+    def test_a_command_whose_plugin_failed_to_load(self):
+        self.write_plugin("broken", {"module": "plugin", "extends": ["cli"], "commands": {"broken": "QA broken"}},
+                          {"plugin.py": "raise RuntimeError('QA load failure')\n"})
+        self.enable("broken")
+        failed = self.mv2("broken")
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(failed.stderr.strip(), "mv2: plugin broken: failed to load: RuntimeError: QA load failure")
+        self.assertEqual(self.mv2("list", "--json").returncode, 0)
+
+    def test_a_command_its_plugin_declares_but_never_registered(self):
+        self.write_plugin("ghost", {"module": "plugin", "extends": ["cli"], "commands": {"ghost": "Not there"}},
+                          {"plugin.py": "def register(mv):\n    pass\n"})
+        self.enable("ghost")
+        failed = self.mv2("ghost")
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(failed.stderr.strip(), "mv2: plugin ghost: it declares mv2 ghost but did not register it")

@@ -54,13 +54,17 @@ def command(root, name, reserved=(), guarded=False):
     owner = commands(root, reserved).get(name)
     if owner is None:
         raise PluginError(f"No plugin here provides mv2 {name}")
-    loaded = loader.load(entry(root, owner[0]))
+    try:
+        loaded = loader.load(entry(root, owner[0]))
+    except PluginError as error:
+        raise PluginError(_about(owner[0], error)) from error
     now = entry(root, owner[0])
-    if now.state == "unusable":
-        print(f"mv2: {now.problem}", file=sys.stderr)  # it still runs: its command may show or fix the settings
+    if now.state == "unusable" and (root, owner[0]) not in _warned:
+        _warned.add((root, owner[0]))  # once a process: one mv2 command looks its command up more than once
+        print(f"mv2: {_about(owner[0], now.problem)}", file=sys.stderr)  # it still runs: it may show or fix them
     found = loaded.registrations.commands.get(name)
     if found is None:
-        raise PluginError(f"{loaded.name} declares mv2 {name} but did not register it")
+        raise PluginError(f"plugin {loaded.name}: it declares mv2 {name} but did not register it")
     if not guarded:
         return found
 
@@ -77,6 +81,20 @@ def command(root, name, reserved=(), guarded=False):
     expected = (OSError, ValueError, KeyError, RuntimeError)
     return loader.Command(name, guard(found.configure, "options", ()), guard(found.run, "failed", expected),
                           guard(found.cli_run, "failed", expected) if found.cli_run else None)
+
+
+_warned = set()  # (universe, plugin) whose unusable settings this process has already said
+
+
+def _about(name, problem):
+    """`plugin NAME: …` for a problem of plugin NAME, as its command reports it ("NAME failed to load: X" becomes
+    "plugin NAME: failed to load: X")."""
+    text = str(problem)
+    for prefix in (f"{name}: ", f"{name} "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return f"plugin {name}: {text}"
 
 
 def catalog_entries(root):

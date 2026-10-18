@@ -64,7 +64,7 @@ class UnusableSettingsTest(PluginTestCase):
         result = subprocess.run([sys.executable, "-m", "multiverse.cli", "-u", str(self.root), "picky"],
                                 env=environment, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("picky: its settings cannot be used: level must be 1 or 2", result.stderr)
+        self.assertEqual(result.stderr.strip(), "mv2: plugin picky: its settings cannot be used: level must be 1 or 2")
 
 
 class ReservedNameTest(PluginTestCase):
