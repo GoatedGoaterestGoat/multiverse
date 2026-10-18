@@ -1,12 +1,17 @@
 """Plugin-supplied text is shown literally: a plugin's "[/x]" is text, never Rich markup, in every slot it can reach."""
+import json
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.command import CommandPalette
+from multiverse.plugins import loader
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.store import write
+from multiverse.tools import tui
+from multiverse.ui import theme
 
 BAD = "[/x]"
 PLUGIN = '''
@@ -28,6 +33,7 @@ def register(mv):
     def note(context):
         return [api.Markdown("md [/x]"), api.Table(("c [/x]",), (("cell [/x]",),))]
 '''
+THEME = "def register(mv):\n    mv.dashboard.theme({'BLUE': '#12', 'RED': 'not a color', 'GREEN': '#102030'})\n"
 SCREENS = '''
 from multiverse.plugins.ui import FieldScreen
 from textual.widgets import Static
@@ -54,8 +60,10 @@ class PluginTextTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_plugin_text_is_never_parsed_as_markup(self):
         """[/x] in plugin column titles and cells, palette entries and search, the Plugins screen, settings, the
-        inspector, panels and the status line stays literal; fragile because every new UI slot must opt out of markup,
-        and a plugin showing a path like [/tmp] raises MarkupError and ends the dashboard."""
+        inspector, panels and the status line stays literal, and a theme colour that is not #rrggbb is refused and
+        recorded instead of reaching Textual's stylesheet; fragile because every new UI slot must opt out of markup,
+        a plugin showing a path like [/tmp] raises MarkupError and ends the dashboard, and a malformed colour is
+        parsed only when the dashboard opens, which no plugin test does."""
         async with self.dashboard() as d:
             with self.subTest("the table, the palette, the Plugins screen and its settings"):
                 headers, rows = d.table()
@@ -101,6 +109,20 @@ class PluginTextTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertIn("md [/x]", texts)
                 self.assertIn("Title [/x] · texty", [text for text in texts if "Title" in text] or [""])
                 self.assertTrue(d.app.is_running)
+        with self.subTest("a theme colour that is not #rrggbb"):
+            self.write_plugin("dusk", {"module": "plugin", "extends": ["dashboard.theme"]}, {"plugin.py": THEME})
+            self.enable("dusk")
+            config = json.loads((self.root / "plugins.json").read_text())
+            (self.root / "plugins.json").write_text(json.dumps({**config, "theme": "dusk"}))
+            self.enterContext(mock.patch.dict(vars(theme)))  # the palette is the process's: put it back afterwards
+            blue = theme.BLUE
+            tui._theme(self.root)
+            self.assertEqual(theme.BLUE, blue)  # "#12" is refused, not applied
+            self.assertEqual(theme.GREEN, "#102030")  # a valid color beside it is
+            self.assertIn("dusk", loader.errors())  # and the refusal is recorded against the plugin
+            async with self.dashboard() as d:
+                self.assertTrue(d.app.is_running)
+                self.assertTrue(d.table()[1], "the dashboard opened without its rows")
 
 if __name__ == "__main__":
     unittest.main()
