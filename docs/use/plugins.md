@@ -81,11 +81,11 @@ mv2 plugins settings notifier --set quiet_seconds=60   # VALUE is JSON, or else 
 mv2 plugins settings notifier --set notify.done=false --unset max_age_seconds
 ```
 
-Each plugin keeps its settings for a universe in `plugin-settings/NAME.json`. If the plugin's schema refuses an edit, nothing is written. In the dashboard, press `P`, select the plugin and press `Enter` (Configure). This opens the plugin's own settings screen, or fields built from its schema.
+Each plugin keeps its settings for a universe in `plugin-settings/NAME.json`. If the plugin's schema or its own settings check refuses an edit, nothing is written and the command exits 1 with the reason. A plugin whose code can't run here (untrusted, failed to load, safe mode) has only its schema checked, and `mv2 plugins settings` says so. In the dashboard, press `P`, select the plugin and press `Enter` (Configure). This opens the plugin's own settings screen, or fields built from its schema.
 
-Settings that can't be used never stop a launch. Instead, the plugin acts as off in that universe until they're fixed, and `mv2 doctor` says why.
+Settings that can't be used never stop a launch. Instead, the plugin acts as off in that universe until they're fixed: `mv2 plugins` lists it as `unusable`, and `mv2 plugins settings NAME` and `mv2 doctor` say why.
 
-Some plugins used a settings file before they became plugins, such as `compaction.json`. The next `mv2` command that runs in the universe converts that file to `plugin-settings/`. `mv2 plugins migrate` shows what it would convert, and `--apply` converts it now.
+Some plugins used a settings file before they became plugins, such as `compaction.json`. The next `mv2` command that runs in the universe converts that file to `plugin-settings/`. `mv2 plugins migrate` shows what it would convert, and `--apply` converts it now. Once converted, an old file found again (brought back by an old branch, say) is ignored, and `mv2 doctor` says so: remove it.
 
 ## Trust a universe's own plugins
 

@@ -334,8 +334,8 @@ class ListingTest(PluginTestCase):
         self.enable("hello")
         [item] = plugins.listing(self.root)
         self.assertEqual({key: item[key] for key in ("name", "on", "state", "source", "version", "description")},
-                         {"name": "hello", "on": True, "state": "on", "source": "path", "version": "0.1.0",
-                          "description": "Greets"})
+                         {"name": "hello", "on": True, "state": "loaded", "source": "path", "version": "0.1.0",
+                          "description": "Greets"})  # loaded: a plugin with settings is, so its own check runs
         self.assertEqual(item["permissions"], ["send messages to any agent in this universe, as this plugin"])
         self.assertEqual(item["settings"]["values"], {"schema": 1})
         plugins.set_enabled(self.root, "hello", False)
