@@ -170,6 +170,27 @@ class RunnerTest(unittest.TestCase):
         self.assertNotIn("FAILED", fine[0])
         self.assertEqual(result.stdout.splitlines()[-1], "FAILED (failures=1, errors=2)")
 
+    def test_a_failure_or_error_shows_the_tests_own_lines(self):
+        self.module("test_shown", """
+            import unittest
+            class Shown(unittest.TestCase):
+                def test_failing(self):
+                    self.assertEqual(1, 2, "the planted failure")
+                def test_erring(self):
+                    {}["the planted error"]
+                def setUp(self):
+                    if self._testMethodName == "test_never":
+                        raise ValueError("the planted setUp error")
+                def test_never(self): pass
+            """)
+        result = self.run_tests("test_shown")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        shown = str(self.tests / "test_shown.py")
+        self.assertIn(f'File "{shown}", line 5, in test_failing', result.stdout)
+        self.assertIn(f'File "{shown}", line 7, in test_erring', result.stdout)
+        self.assertIn(f'File "{shown}", line 10, in setUp', result.stdout)
+        self.assertNotIn("in marked", result.stdout)  # the runner's own frames are not the test's
+
     def test_a_unit_that_does_not_end_within_its_grace_is_killed(self):
         self.module("test_stubborn", """
             import os, signal, time, unittest

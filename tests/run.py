@@ -63,6 +63,7 @@ class Stopped(BaseException):
 
 
 _interruptible = False  # while a test's setUp or body runs: the only time a stop may raise (never in its cleanups)
+__unittest = True  # unittest leaves this module's frames, such as _mark_interruptible's, out of a test's traceback
 
 
 def _mark_interruptible(test):
