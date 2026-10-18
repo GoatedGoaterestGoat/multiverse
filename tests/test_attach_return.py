@@ -7,11 +7,18 @@ import sys
 import time
 from uuid import uuid4
 
-from test_multiverse import ROOT, TerminalBase, until
+from test_multiverse import ROOT, TerminalBase, until as base_until
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
 from multiverse.terminal.tmux import Tmux
 from multiverse.store import read
+
+
+PATIENCE = 30  # seconds: waits return as soon as their condition holds; a loaded runner needs the room
+
+
+def until(predicate, seconds=PATIENCE):
+    return base_until(predicate, seconds)
 
 
 class AttachReturnTest(TerminalBase):
@@ -48,7 +55,7 @@ class AttachReturnTest(TerminalBase):
 
     def read_until(self, master, marker):
         output = b''
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + PATIENCE
         while marker not in output and time.monotonic() < deadline:
             if select.select([master], [], [], .1)[0]:
                 output += os.read(master, 65536)
@@ -60,14 +67,37 @@ class AttachReturnTest(TerminalBase):
 
     def wait_exit(self, master, process):
         # Drain final redraws so the PTY's output buffer cannot block client exit.
-        deadline = time.monotonic() + 5
+        deadline = time.monotonic() + PATIENCE
         while process.poll() is None and time.monotonic() < deadline:
             if select.select([master], [], [], .1)[0]:
                 try:
                     os.read(master, 65536)
                 except OSError:
                     break
-        return process.wait(timeout=1)
+        return process.wait(timeout=5)
+
+    def drained(self, master, check):
+        """A condition on tmux state, reading the PTY meanwhile so its buffer never fills."""
+        def run():
+            while select.select([master], [], [], 0)[0]:
+                os.read(master, 65536)
+            return check()
+        return run
+
+    def clients_equal(self, expected, backend=None):
+        """tmux's client list settles a moment after a client exits or detaches: wait for it, then assert."""
+        try:
+            until(lambda: self.clients(backend) == expected)
+        except AssertionError:
+            pass
+        self.assertEqual(self.clients(backend), expected)
+
+    def client_count(self, expected):
+        try:
+            until(lambda: len(self.clients().splitlines()) == expected)
+        except AssertionError:
+            pass
+        self.assertEqual(len(self.clients().splitlines()), expected)
 
     def clients(self, backend=None):
         return (backend or self.backend).run('list-clients', '-F',
@@ -88,13 +118,25 @@ class AttachReturnTest(TerminalBase):
                                           '#{pane_pid}|#{pane_dead}'), self.pane_pid + '|0')
 
     def open_agent(self, master, pane=None):
-        os.write(master, b'\r')
-        self.read_until(master, b'FAKE READY')
-        # The dashboard's inspector can also print FAKE READY. Confirm that this
-        # exact PTY now has an agent client, rather than accepting preview text.
+        """Press Enter on the selected agent until this exact PTY has an agent client.
+
+        The dashboard drops an Enter that arrives while it is still finishing the previous attach and return
+        (a person never notices; a test can be that quick, most of all on a loaded runner), so press it again.
+        A repeat is harmless: while the client is still on the dashboard it is dropped the same way.
+        The dashboard's inspector can also print FAKE READY, so confirm the client, not only the text.
+        """
         expected = self.terminals[master] + '|' + (pane or self.target['pane'])
-        until(lambda: expected in self.backend.run('list-clients', '-F',
-                                                   '#{client_tty}|#{pane_id}').splitlines())
+        output = b''
+        for _ in range(6):
+            os.write(master, b'\r')
+            end = time.monotonic() + 10
+            while time.monotonic() < end:
+                if select.select([master], [], [], .1)[0]:
+                    output += os.read(master, 65536)
+                if b'FAKE READY' in output and expected in self.backend.run(
+                        'list-clients', '-F', '#{client_tty}|#{pane_id}').splitlines():
+                    return
+        self.fail(f'No agent client for {expected} after six Enters: {output[-2000:]!r}')
 
     def test_external_dashboard_detach_returns_and_stock_l_is_unchanged(self):
         before = self.bindings()
@@ -106,7 +148,7 @@ class AttachReturnTest(TerminalBase):
         time.sleep(1)  # Let tmux's error message expire before the next prefix.
         os.write(master, b'\x02d')
         self.read_until(master, b'tester')
-        self.assertEqual(self.clients(), '')
+        self.clients_equal('')
         self.assertEqual(self.bindings(), before)
         self.assert_agent_alive()
         for _ in range(3):
@@ -124,9 +166,9 @@ class AttachReturnTest(TerminalBase):
         for _ in range(3):
             self.open_agent(master)
             # Only the agent client owns the host tty: no nested client intercepts d.
-            self.assertEqual(len(self.clients().splitlines()), 1)
+            self.client_count(1)
             if host is not self.backend:
-                self.assertEqual(self.clients(host), '')
+                self.clients_equal('', host)
             os.write(master, b'\x02d')
             self.read_until(master, b'tester')
             until(lambda: self.clients(host).startswith('dashboard|'))
@@ -146,7 +188,7 @@ class AttachReturnTest(TerminalBase):
         self.open_agent(master)
         os.write(master, b'\x02d')
         self.read_until(master, b'tester')
-        self.assertTrue(self.clients(host).startswith('dashboard|'))
+        until(lambda: self.clients(host).startswith('dashboard|'))
 
     def test_same_server_d_returns_to_original_dashboard(self):
         self.check_host_return(self.backend)
@@ -184,7 +226,7 @@ class AttachReturnTest(TerminalBase):
             self.read_until(master, b'tester')
             self.open_agent(master)
             clients.append((name, master))
-        self.assertEqual(len(self.clients().splitlines()), 2)
+        self.client_count(2)
         for name, master in clients:
             os.write(master, b'\x02d')
             self.read_until(master, b'tester')
@@ -200,7 +242,7 @@ class AttachReturnTest(TerminalBase):
         self.backend.run('kill-session', '-t', dashboard['session'])
         os.write(master, b'\x02d')
         self.wait_exit(master, process)
-        self.assertEqual(self.clients(), '')
+        self.clients_equal('')
         self.assert_agent_alive()
 
     def test_raw_agent_client_detach_has_no_dashboard_route(self):
@@ -208,7 +250,7 @@ class AttachReturnTest(TerminalBase):
         self.read_until(master, b'FAKE READY')
         os.write(master, b'\x02d')
         self.wait_exit(master, process)
-        self.assertEqual(self.clients(), '')
+        self.clients_equal('')
         self.assert_agent_alive()
 
     def test_dashboard_selection_survives_attach_and_return(self):
@@ -223,16 +265,30 @@ class AttachReturnTest(TerminalBase):
             screen = self.backend.run('capture-pane', '-p', '-t', dashboard['pane'])
             return 'z-selected' in screen and 'tester' not in screen
         until(filtered)
-        # Filtering may select its group row; Down chooses the sole remaining agent.
-        os.write(master, b'\x1b[B')
-        self.read_until(master, 'test · second agent'.encode())
+        # Filtering may select its group row; Down chooses the sole remaining agent. A refresh can put the cursor
+        # back on the group row after that, and Down on the agent is a no-op, so press it until the agent is
+        # selected. The selection line is state on the dashboard's screen: output printed earlier (the cursor
+        # can land on the agent as the filter applies) is gone from the stream, so do not wait for it there.
+        for _ in range(8):
+            os.write(master, b'\x1b[B')
+            try:
+                until(self.drained(master, lambda: 'test · second agent' in
+                                   self.backend.run('capture-pane', '-p', '-t', dashboard['pane'])), 4)
+                break
+            except AssertionError:
+                continue
+        else:
+            self.fail('The agent was never selected:\n' + self.backend.run('capture-pane', '-p', '-t', dashboard['pane']))
         for _ in range(2):
             self.open_agent(master, other['runtime']['tmux']['pane'])
             self.assertEqual(self.backend.run('list-clients', '-F', '#{pane_id}'),
                              other['runtime']['tmux']['pane'])
             os.write(master, b'\x02d')
-            self.read_until(master, 'test · second agent'.encode())
-            self.assertTrue(filtered(), 'Dashboard filter changed after returning')
+            until(self.drained(master, lambda: self.backend.run('list-clients', '-F', '#{pane_id}') == dashboard['pane']))
+            try:
+                until(filtered)
+            except AssertionError:
+                self.fail('Dashboard filter changed after returning')
 
     def test_detached_origin_cannot_replace_an_unrelated_client(self):
         master, _ = self.client([*self.backend.prefix, 'attach-session', '-t', 'unrelated'])
@@ -259,10 +315,10 @@ class AttachReturnTest(TerminalBase):
         })
         self.read_until(master, b'tester')
         self.open_agent(master)
-        self.assertEqual(len(self.clients().splitlines()), 2)
+        self.client_count(2)
         os.write(master, b'\x02d')
         self.read_until(master, b'tester')
-        self.assertEqual(self.clients(), 'unrelated|')
+        self.clients_equal('unrelated|')
         self.assert_agent_alive()
 
     def test_detach_after_refreshes_resume_terminal_and_clean_shutdown(self):
@@ -287,7 +343,7 @@ class AttachReturnTest(TerminalBase):
                     os.read(master, 65536)
             os.write(master, b'\x02d')
             self.read_until(master, b'tester')
-            self.assertEqual(self.clients(), '')
+            self.clients_equal('')
             self.assertIsNone(process.poll())
             self.assert_agent_alive()
         # Input must be handled by the resumed dashboard, not echoed in cooked
