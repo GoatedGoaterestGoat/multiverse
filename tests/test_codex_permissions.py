@@ -19,6 +19,7 @@ from multiverse.store import read, write
 from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
 from native_safety import isolated_home
+from native_cli import forbidden_python, mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
@@ -27,6 +28,8 @@ from test_multiverse import TerminalBase, until
 class CodexPermissionTest(TerminalBase):
     def test_plain_full_access_survives_repeated_explicit_bridge_resume(self):
         completed, requests = set(), []
+        bad_python = forbidden_python(self.work)
+        self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -55,7 +58,8 @@ class CodexPermissionTest(TerminalBase):
                             'sock.close(); pathlib.Path("permission-probe.sock").unlink(); '
                             f'pathlib.Path("permission-{stage}.json").write_text(json.dumps('
                             '{"native_id":os.environ["CODEX_THREAD_ID"],"cwd":os.getcwd()}))')
-                    command = ('"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; '
+                    command = ('PATH=' + shlex.quote(str(bad_python)) + ':"$PATH" '
+                               '"$MV2_CLI" session-bind --session-id "$CODEX_THREAD_ID"; '
                                + shlex.quote(sys.executable) + ' -c ' + shlex.quote(code))
                     item = {'type': 'function_call', 'call_id': f'call-{index}', 'name': 'exec_command',
                             'arguments': json.dumps({'cmd': command, 'yield_time_ms': 10000, 'max_output_tokens': 200})}

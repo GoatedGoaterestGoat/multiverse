@@ -9,11 +9,13 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 import unittest
 from unittest.mock import Mock
 from uuid import uuid4
 
 from native_safety import install, isolated_home
+from native_cli import forbidden_python, mv2_launcher
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, ServiceIdentity, SessionHandle
@@ -38,7 +40,8 @@ class NativeSharedIdentityTest(PluginTestCase):
         agent_id = str(uuid4())
         directory = self.root / 'state' / 'agents' / agent_id
         directory.mkdir(parents=True)
-        cli = str(Path(__file__).resolve().parents[1] / 'bin' / 'mv2')
+        cli = mv2_launcher(self.work)
+        bad_python = forbidden_python(self.work)
         stable = {'MV2_IDENTITY_MODE': 'codex-agent-v1', 'MV2_UNIVERSE': str(self.root),
                   'MV2_AGENT_ID': agent_id, 'MV2_AGENT_DIR': str(directory),
                   'MV2_CLI': cli, 'MV2_PYTHON': sys.executable, 'PATH': os.environ['PATH']}
@@ -90,11 +93,15 @@ class NativeSharedIdentityTest(PluginTestCase):
         async def shell(client, label):
             # This is fixture-only native execution, never a launch/readiness probe.
             output = self.work / (label + '.json')
-            script = '''import json,os,pathlib,subprocess
+            script = 'import os; os.environ["PATH"]=' + repr(str(bad_python)) + '+os.pathsep+os.environ["PATH"]\n' + '''import json,os,pathlib,subprocess,time
+started=time.monotonic()
+def progress(label,code):
+ pathlib.Path(PROGRESS).write_text(json.dumps({'label':label,'exit':code,'elapsed':time.monotonic()-started}))
 result={'identity':{key:value for key,value in os.environ.items() if key.startswith('MV2_')}}
 for name,args in [('report',['report','--phase','working','--summary','native identity fixture']),('inbox',['inbox','--peek'])]:
  p=subprocess.run([os.environ['MV2_CLI'],*args],capture_output=True,text=True)
  result[name]={'exit':p.returncode,'stdout':p.stdout,'stderr':p.stderr}
+ progress(name,p.returncode)
 result['invalid_proofs']={}
 for name,key,value in [('missing-mode','MV2_IDENTITY_MODE',None),('missing-marker','CODEX_THREAD_ID',None),('wrong-marker','CODEX_THREAD_ID','00000000-0000-0000-0000-000000000000'),('wrong-dir','MV2_AGENT_DIR','/not-the-agent'),('wrong-storage','CODEX_HOME',os.environ['CODEX_HOME']+'/wrong'),('old-perlaunch','MV2_IDENTITY_MODE',None)]:
  env=dict(os.environ)
@@ -105,14 +112,23 @@ for name,key,value in [('missing-mode','MV2_IDENTITY_MODE',None),('missing-marke
  for operation,args in [('report',['report','--phase','blocked']),('inbox',['inbox','--peek'])]:
   p=subprocess.run([os.environ['MV2_CLI'],*args],env=env,capture_output=True,text=True)
   result['invalid_proofs'][name][operation]={'exit':p.returncode,'stderr':p.stderr}
+  progress(name+'/'+operation,p.returncode)
 pathlib.Path(OUTPUT).write_text(json.dumps(result))
-'''.replace('OUTPUT', repr(str(output)))
-            await rpc(client, 'thread/shellCommand', {'threadId': native_id,
-                'command': shlex.join([sys.executable, '-c', script]), 'timeoutMs': 10000})
-            for _ in range(200):
+'''.replace('OUTPUT', repr(str(output))).replace('PROGRESS', repr(str(output.with_suffix('.progress.json'))))
+            # Fourteen real CLI imports need more than the old ten seconds on a
+            # busy machine. Native execution and output polling are both bounded.
+            response = await rpc(client, 'thread/shellCommand', {'threadId': native_id,
+                'command': shlex.join([sys.executable, '-c', script]), 'timeoutMs': 30000})
+            deadline = time.monotonic() + 35
+            while time.monotonic() < deadline:
                 if output.exists():
                     break
                 await asyncio.sleep(.05)
+            if not output.exists():
+                progress = output.with_suffix('.progress.json')
+                observed = progress.read_text() if progress.exists() else 'no callback completed'
+                self.fail(f'Native callback did not finish ({label}): response={response}; progress={observed}')
+            print('Native callback completed:', label, output.with_suffix('.progress.json').read_text())
             result = json.loads(output.read_text())
             self.assertEqual(result['report']['exit'], 0, result)
             self.assertEqual(result['inbox']['exit'], 0, result)
