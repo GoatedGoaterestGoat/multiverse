@@ -321,3 +321,45 @@ class FailedCommandTest(PluginTestCase):
         failed = self.mv2("ghost")
         self.assertEqual(failed.returncode, 1)
         self.assertEqual(failed.stderr.strip(), "mv2: plugin ghost: it declares mv2 ghost but did not register it")
+
+
+class CommandErrorMatrixTest(PluginTestCase):
+    """How a plugin command's own exceptions read, from its run and its cli_run: the errors a command gives on
+    purpose print "mv2: MESSAGE", anything else names the plugin (qa-plugins's matrix, 2a377eb, run on this
+    checkout's mv2)."""
+
+    def mv2(self, *args):
+        environment = {**os.environ, "PYTHONPATH": str(PROJECT / "src")}
+        return subprocess.run([sys.executable, str(PROJECT / "bin" / "mv2"), "-u", str(self.root), *args],
+                              env=environment, text=True, capture_output=True, timeout=60, cwd=self.work)
+
+    def command(self, name, exception, cli_callback):
+        source = ("def register(mv):\n"
+                  "    def fail(root=None):\n"
+                  f"        raise {exception}('QA callback failure')\n"
+                  f"    mv.cli.command({name!r}, lambda parser: None, fail" + (", fail" if cli_callback else "") + ")\n")
+        self.write_plugin(name, {"module": "plugin", "extends": ["cli"], "commands": {name: "QA callback failure"}},
+                          {"plugin.py": source})
+        self.assertEqual(self.mv2("plugins", "enable", name).returncode, 0)
+        return self.mv2(name)
+
+    def test_errors_a_command_gives_on_purpose_read_as_built_in_ones(self):
+        for cli_callback in (False, True):
+            for exception in ("ValueError", "OSError", "KeyError", "RuntimeError"):
+                with self.subTest(cli_callback=cli_callback, exception=exception):
+                    name = ("cli-" if cli_callback else "primary-") + exception.lower()
+                    result = self.command(name, exception, cli_callback)
+                    message = "'QA callback failure'" if exception == "KeyError" else "QA callback failure"
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stderr.strip(), "mv2: " + message)
+                    self.assertEqual(self.mv2("list", "--json").returncode, 0)
+
+    def test_unexpected_errors_name_the_plugin(self):
+        for cli_callback in (False, True):
+            for exception in ("TypeError", "ZeroDivisionError"):
+                with self.subTest(cli_callback=cli_callback, exception=exception):
+                    name = ("cli-" if cli_callback else "primary-") + exception.lower()
+                    result = self.command(name, exception, cli_callback)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertTrue(result.stderr.startswith(f"mv2: plugin {name}:"), result.stderr)
+                    self.assertEqual(self.mv2("list", "--json").returncode, 0)
