@@ -1,0 +1,73 @@
+# mv2's unittest suite on Linux, without the Codex, Claude and Pi CLIs: their live tests skip.
+# The plugin submodules (plugins/compaction, plugins/remote) are private and not fetched, so their own tests, which
+# test_plugin_checkouts adds when they are there, don't run.
+name: tests
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: suite (Python ${{ matrix.python }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]  # the oldest requires-python allows, and the one mv2 is developed on
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22  # test_pi_bridge
+      - uses: astral-sh/setup-uv@v10.0.1  # it publishes no floating major tag
+      - name: Install mv2
+        run: uv sync --frozen --python ${{ matrix.python }}
+      - name: Run the tests
+        run: .venv/bin/python tests/run.py -v  # -v: each test by name, skipped ones with their reason
+
+  alone:
+    # Each module in a process of its own, one at a time, with plain unittest: a module can pass beside others in
+    # the suite and fail alone, when nothing else loads the machine or reaps for it.
+    name: each module alone (Python 3.13)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v10.0.1  # it publishes no floating major tag
+      - name: Install mv2
+        run: uv sync --frozen --python 3.13
+      - name: Run each module alone
+        working-directory: tests
+        run: |
+          failed=()
+          for path in test_*.py; do
+            module=${path%.py}
+            echo "::group::$module"
+            if ! timeout 1200 ../.venv/bin/python -m unittest "$module"; then
+              failed+=("$module")
+              echo "::error::$module failed when run alone"
+            fi
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "Failed alone: ${failed[*]}"
+            exit 1
+          fi
