@@ -801,8 +801,16 @@ entry. It never resubmits the text, skips older work or restarts a thread. Nativ
 queue start rejects active/pending turns. If auto-draining already took the
 entry, no start is needed. A rejected explicit start preserves acceptance and
 reports a diagnostic for `deliver AGENT --check`, rather than making it retryable.
-If other queued work exists, mv2 preserves it and reports that an interrupted
-queue may need native continuation. Receipt checks never start or replay work.
+Codex 0.163.0 also pauses automatic draining when the person presses Escape in
+the native terminal. A connected idle launch checks its durable accepted
+follow-ups and can continue the existing native queue head. It inventories up
+to eight pages of 100 entries; every entry must match a follow-up accepted by
+this launch. It then rechecks the exact thread and native head before starting
+that existing ID. Mixed, malformed, oversized or changed queues are left alone.
+No text is resubmitted, no entry is reordered and no thread is resumed. Native
+changes can race the final check: a rejected start preserves acceptance and
+never makes an uncertain message retryable. Empty or unchanged local state
+does not cause repeated native checks. Receipt checks never start or replay work.
 Approvals remain unanswered by the delivery client. Core bounds transport
 requests, frames and deadlines. Explicit sandbox/approval flags in `args` or
 `resume_args` are applied and verified on bridge resume as described above;

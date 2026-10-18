@@ -6,11 +6,13 @@ import tomllib
 from ..base import ConfiguredAdapter
 from functools import partial
 from dataclasses import replace
+from collections.abc import Mapping
 
 from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
                      RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
 from .launch import launch_settings, tui_arguments
-from .protocol import check_connection, send_message, get_delivery, stop_session, recovery_check, RECOVERY_MAX_REQUESTS
+from .protocol import (check_connection, send_message, get_delivery, stop_session, recovery_check,
+                       RECOVERY_MAX_REQUESTS, continue_queued, CONTINUATION_MAX_REQUESTS)
 from ..types import BridgeUnavailable
 
 
@@ -285,6 +287,21 @@ class CodexAdapter(ConfiguredAdapter):
         if not session.native_id or not session.endpoint or session.endpoint.transport != 'unix-websocket':
             return NativeResult('unavailable', 'No Codex app-server endpoint')
         return executor.rpc(RpcSpec(session.endpoint.address, partial(get_delivery, session, message_id)))
+
+    def continue_queued(self, session, accepted_receipts, executor):
+        if (not isinstance(accepted_receipts, Mapping) or any(
+                not isinstance(key, str) or not key or not isinstance(value, str) or not value
+                for key, value in accepted_receipts.items())
+                or len(set(accepted_receipts.values())) != len(accepted_receipts)):
+            return NativeResult('error', 'Accepted native queue receipts must have unique nonempty IDs')
+        if not accepted_receipts:
+            return NativeResult('ok', 'No accepted follow-ups to continue', {'continued': False})
+        if (not self._uses_bridge(session) or session.state != 'running' or not session.native_id
+                or not session.endpoint or session.endpoint.transport != 'unix-websocket'
+                or (session.native_relay and session.native_relay.get('state') == 'lost')):
+            return NativeResult('unavailable', 'No running bound Codex bridge for queue continuation')
+        return executor.rpc(RpcSpec(session.endpoint.address,
+            partial(continue_queued, session, dict(accepted_receipts)), max_requests=CONTINUATION_MAX_REQUESTS), timeout=5)
 
     def send(self, session: SessionHandle, message: Message, executor: Executor) -> NativeResult:
         if session.native_relay and session.native_relay.get('state') == 'lost':
