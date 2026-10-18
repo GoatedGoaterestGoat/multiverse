@@ -641,7 +641,7 @@ through `/resume` requests `thread/resume` on the existing transport. This follo
 the 0.163.0 [slash-command dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/chatwidget/slash_dispatch.rs),
 [event dispatch](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/event_dispatch.rs)
 and [session lifecycle](https://github.com/openai/codex/blob/rust-v0.163.0/codex-rs/tui/src/app/session_lifecycle.rs).
-The bridge refuses a second start, a fork or a resume with a different native ID;
+The bridge refuses a second start, a persistent fork or a resume with a different native ID;
 it never adopts that conversation. An offline relay regression checks that these
 requests cannot reach the daemon, cannot replace the stored binding, and leave
 the original connection usable. An isolated 0.163.0 TUI probe also exercised
@@ -877,7 +877,7 @@ the frame's ID and direction before replying; a missing ID means drop, and an
 uncorrelated frame or notification gets no fabricated response. Ordinary primary
 validation and transport failures keep their existing diagnostics and loss rules.
 
-The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
+The relay adds the bootstrap to the TUI's initial `thread/start` or exact `thread/resume`
 requests, preserving existing developer instructions. Initial writable roots from
 mv2, user arguments and native configuration are combined in the thread request,
 so external state directories remain supported without the rejected CLI flag.
@@ -893,10 +893,22 @@ two requests and three seconds). This also reapplies the name on resume. Naming
 errors or timeouts are recorded in `runtime.json` without failing the terminal
 launch; unrelated TUI requests, native notifications and approvals retain their
 own connection. Existing saved launch requests without a name remain usable.
-Switching or forking into a different thread requires a separate
+Switching or persistently forking into a different thread requires a separate
 Multiverse launch. The relay closes with the launch and never restarts the shared
 daemon. Relay loss stays sticky for that launch; the qualified idle-recovery worker described below can create a fresh launch. Plain launches have no relay. The development
 template, like base and testing, uses auto; existing unset profiles also try the bridge on their next launch.
+
+Codex 0.163.0's native `/btw` is a narrow exception. Only the bound terminal's
+connection may fork its exact primary into one ephemeral side conversation.
+The view keeps the pending fork, side ID and bounded request correlation in
+memory until unsubscribe or connection close. It never publishes a side binding,
+name, usage, refusal, status, inbox or delivery record. Returning to the exact
+primary does not repeat the startup grants, bootstrap or naming. Side input and
+host requests retain Codex's normal tools and permissions; there is no execution
+isolation, and the side can run mv2 commands as the user. Primary send, receipt and
+queue-continuation RPCs still address only the saved primary ID. A native side
+error is forwarded locally without failing the primary. Unknown native versions,
+side resume and persistent forks remain unavailable. This does not add Codex ask.
 
 The runner records `native_relay.state=ready` after binding. Loss of the bound
 TUI's relay connection (or an upstream connection failure before binding) records

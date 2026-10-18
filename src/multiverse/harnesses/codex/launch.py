@@ -195,6 +195,10 @@ class LaunchProtocol:
         self.prompt_submitted = False
         self.prompt_error = None
 
+    def for_connection(self, connection_id, owns_primary):
+        from .side import LaunchConnection
+        return LaunchConnection(self, connection_id, owns_primary)
+
     def outgoing(self, value):
         method = value.get('method')
         if method in ('turn/start', 'turn/steer', 'thread/queue/add', 'thread/queue/start'):

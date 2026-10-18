@@ -8,6 +8,8 @@ Use `"$MV2_CLI" capabilities --agent NAME` to check message support. Connected l
 
 The saved native conversation belongs to this agent. Start another mv2 agent for a separate conversation. Native `/new`, `/clear` and navigation to another conversation are refused on a connected launch.
 
+Native `/btw` opens an unmanaged side chat; mv2 messages still go to the main conversation. The side inherits your tools and permissions and can run mv2 as you. It is not isolated or tracked as another agent.
+
 A shared conversation keeps its current Codex permissions. If a requested permission differs, inspect the launch error and use supported Codex controls to change it deliberately. mv2 does not detach other clients or restart the shared Codex server to change permissions.
 
 Use `"$MV2_CLI" inspect NAME` for connection or startup errors. A refused launch stays refused even if a retry inside Codex succeeds. Resume the agent through mv2 to validate a fresh attachment.
