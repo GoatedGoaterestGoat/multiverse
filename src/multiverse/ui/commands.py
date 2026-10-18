@@ -4,25 +4,30 @@ from pathlib import Path
 
 from textual import work
 
+from .plugin_service import in_daemon
 from .screens import Form
 
 
 class AgentCommands:
     """MultiverseApp's actions on the selected agent, and the operation runner they share."""
-    def submit_operation(self, label, callback, *args, after=None, describe=None):
+    def submit_operation(self, label, callback, *args, after=None, describe=None, plugin=False):
         """Run a backend call off the event loop. `describe(result)` may give the
-        status line as (message, error); otherwise it says the label completed."""
+        status line as (message, error); otherwise it says the label completed.
+
+        `plugin` marks a call into plugin code. It runs in a daemon thread, and q does not wait for it: one
+        that never returns is left behind, where the dashboard's own operations make q wait until they finish."""
         if self.operating:
             return
         self.operating = True
+        self.operating_plugin = plugin
         self.set_status(label + "…")
-        self.execute_operation(label, callback, args, after, describe)
+        self.execute_operation(label, callback, args, after, describe, plugin)
 
     @work(group="operation", exit_on_error=False)
-    async def execute_operation(self, label, callback, args, after, describe):
+    async def execute_operation(self, label, callback, args, after, describe, plugin=False):
         succeeded, result = False, None
         try:
-            result = await asyncio.to_thread(callback, *args)
+            result = await (in_daemon(callback, *args) if plugin else asyncio.to_thread(callback, *args))
             message, error = (describe(result) if describe else None) or (label + " complete.", False)
             self.set_status(message, error=error)
             succeeded = True
@@ -30,7 +35,7 @@ class AgentCommands:
             self.set_status(f"{label} failed: {error}", error=True)
             self.notify(str(error), title=label, severity="error", markup=False)
         finally:
-            self.operating = False
+            self.operating = self.operating_plugin = False
         # A scan started before the action may contain old state. Finish it, then
         # read again so a completed mutation cannot be hidden until the next timer.
         if self.scanning:

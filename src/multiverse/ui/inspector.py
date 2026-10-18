@@ -10,6 +10,7 @@ from textual.widgets import Static
 
 from ..display import clean
 from . import theme
+from .plugin_service import in_daemon
 from .tree import within
 
 
@@ -114,7 +115,7 @@ class Inspector(Vertical):
     async def read_plugin_facts(self, row, generation):
         try:
             lines = await asyncio.wait_for(
-                asyncio.to_thread(self.app.plugin_service.facts, Path(row["universe"]), row), PLUGIN_FACTS_TIMEOUT)
+                in_daemon(self.app.plugin_service.facts, Path(row["universe"]), row), PLUGIN_FACTS_TIMEOUT)
         except Exception:  # a hung or failing plugin never reaches the inspector
             lines = [("plugins", "unavailable")]
         finally:

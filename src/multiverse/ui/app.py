@@ -30,7 +30,7 @@ from .editing import TreeEditing
 from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
-from .plugin_service import PluginService, error_text, plugin_of, universe_name
+from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
 from .tree import group_key, rate_limits
@@ -119,7 +119,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.visible_rows = {}
         self.visible_agents = {}
         self.collapsed = set()
-        self.scanning = self.operating = False
+        self.scanning = self.operating = self.operating_plugin = False
         self.inspector_timer = None
         self.inspector = None
         self.draft = None
@@ -447,7 +447,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         scope, row = self.target_scope(), self.visible_rows.get(self.selected_key)
         row = dict(row) if row else None
         self.submit_operation(f"{entry[0]}: {entry[1]}", self.plugin_service.run_action, scope, entry, row,
-                              after=lambda text: self.set_status(text) if text else None)
+                              after=lambda text: self.set_status(text) if text else None, plugin=True)
 
     async def run_action(self, action, default_namespace=None, namespaces=None):
         """Run an action (a key binding, a button). One a plugin's screen or widget raises is that plugin's
@@ -620,7 +620,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             return
         root = self.target_scope()
         try:
-            screen = await asyncio.to_thread(self.plugin_service.screen_class, loaded, reference)
+            screen = await in_daemon(self.plugin_service.screen_class, loaded, reference)  # imports the plugin's module
             if plugin not in await asyncio.to_thread(self.plugin_service.on_here, root):
                 self.set_status(f"{plugin} is off in {universe_name(root)}: turn it on from the Plugins screen (P)", error=True)
                 return
@@ -688,8 +688,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             self.cancel_draft()
         elif self.moving and not self.operating:
             self.cancel_move()
-        elif not self.operating:
-            self.exit()
+        elif not self.operating or self.operating_plugin:
+            self.exit()  # a plugin's action that has not returned is left behind in its daemon thread
         else:
             self.set_status("An action is still running. You can quit when it finishes.")
 
