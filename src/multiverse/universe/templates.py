@@ -131,7 +131,13 @@ def refresh_plan(root, template=None, take=()):
     name = template or (manifest or {}).get("template") or meta.get("template")
     if not name:
         raise ValueError(f"{root} records no template; pass --template")
-    base = template_source(name)
+    try:
+        base = template_source(name)
+    except ValueError as error:
+        if template:
+            raise
+        raise ValueError(f"This universe was made from template {name}, which can't be found ({error}). "
+                         "Compare it with another one: mv2 refresh --template NAME_OR_PATH") from None
     source = base / ((manifest or {}).get("source") or "") if not template else base
     if not (source / "universe.json").is_file():
         raise ValueError(f"Template {name} has no universe at {source}")

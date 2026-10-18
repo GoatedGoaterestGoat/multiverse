@@ -35,7 +35,7 @@ mv2 send worker --delivery inbox-only --text 'FYI: CI is red on main.'
 | `follow-up` | The next thing to do | After the current turn ends |
 | `inbox-only` | Information the agent can read when it's ready | Only when the agent runs `mv2 inbox` |
 
-Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it, with the message as its first prompt. An `inbox-only` message never wakes an agent.
+Every message is saved to the recipient's inbox before mv2 tries to deliver it, so nothing is lost when delivery fails. A `steer` or `follow-up` message to a stopped or dormant agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
 A running agent without a live connection can't receive `steer` or `follow-up` messages, so send it `inbox-only` messages instead. See [live connection and launch-only](../concepts.md#live-connection-and-launch-only).
 

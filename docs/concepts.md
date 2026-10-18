@@ -46,7 +46,7 @@ Every message is saved to the recipient's inbox first, and then delivered. You c
 | `follow-up` | When the current turn ends |
 | `inbox-only` | Not delivered. The agent reads it with `mv2 inbox` at its next check |
 
-A `steer` or `follow-up` message to a stopped agent resumes it, with the message as its first prompt. A saved or delivered message has not necessarily been read or answered. Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
+A `steer` or `follow-up` message to a stopped agent resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. A saved or delivered message has not necessarily been read or answered. Agents send messages with mv2's commands, described in [messaging](cli/messaging.md).
 
 ## Agent state
 

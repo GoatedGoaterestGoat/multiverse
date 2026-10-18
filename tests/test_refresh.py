@@ -153,6 +153,14 @@ class RefreshTest(unittest.TestCase):
                          {"plugins.json": "local", "plugin-settings/compaction.json": "local"})
         self.assertEqual(self.actions(take=["plugins.json"])["plugins.json"], "update")  # take still overrides
 
+    def test_a_missing_template_says_which_and_how_to_compare(self):
+        import shutil
+        shutil.rmtree(self.template)
+        with self.assertRaisesRegex(ValueError, "was made from template .*template, which can't be found.*--template"):
+            self.plan()
+        with self.assertRaisesRegex(ValueError, "Unknown template: elsewhere"):
+            self.plan(template="elsewhere")
+
     def test_take_rejects_paths_outside_the_template(self):
         with self.assertRaises(ValueError):
             self.plan(take=["universe.json"])
