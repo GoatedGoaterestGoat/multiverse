@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from textual.widgets import Static
+from multiverse.plugins.dashboard_testing import quiet
 from multiverse.plugins.testing import PluginTestCase
 from multiverse.ui.app import MultiverseApp
 from multiverse.ui.backend import LocalBackend
@@ -91,13 +92,13 @@ class StaleDashboardTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
 
     @contextlib.asynccontextmanager
     async def running(self, app):
-        """The app, with its workers finished before the test ends. A worker's thread that outlived the test would
-        write under the real ~/.multiverse once the cleanups put HOME back, and the runner's home guard fails the
-        unit."""
+        """The app, with nothing left running when the test ends: an action ends by starting a scan, and that scan's
+        thread, still running once the cleanups put HOME back, writes under the real ~/.multiverse, which the
+        runner's home guard fails the unit for."""
         async with app.run_test(size=(120, 30)):
             await self.wait(lambda: app.snapshot is not None and not app.scanning, "the first refresh")
             yield
-            await app.workers.wait_for_complete()
+            await quiet(app)
 
     def status(self, app):
         return str(app.query_one("#status", Static).render())
