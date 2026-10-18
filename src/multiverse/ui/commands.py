@@ -45,10 +45,15 @@ class AgentCommands:
             after(result)
         self.refresh_snapshot()
 
-    def damaged_selection(self):
-        """True, with the status line saying why, when the selected agent's record cannot be read: nothing can act on it."""
+    def damaged_selection(self, recoverable=None):
+        """True, with the status line saying why, when the selected agent's record cannot be read: nothing can act on it.
+
+        `recoverable` is an action the backend can still take on such a record (the row's damaged.recover says so):
+        for that one the answer is False and the action goes on."""
         found = (self.selected or {}).get("damaged")
         if not isinstance(found, dict):
+            return False
+        if recoverable is not None and found.get("recover") == recoverable:
             return False
         self.set_status(f"{clean(self.selected['name'])} cannot be used: {clean(found.get('file', ''))}: "
                         f"{clean(found.get('reason', ''))}", error=True)
@@ -66,11 +71,15 @@ class AgentCommands:
         self.action_kill()
 
     def action_kill(self):
-        if self.ready() and self.selected and self.damaged_selection():
+        if self.ready() and self.selected and self.damaged_selection("kill"):
             return
-        if self.ready() and self.selected and self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant'):
+        # A record whose runtime file is missing is not "alive" to the dashboard, but kill can find its terminal.
+        recovers = isinstance(self.selected, dict) and (self.selected.get("damaged") or {}).get("recover") == "kill"
+        if self.ready() and self.selected and (recovers or self.selected["live"] in ('alive', 'ending', 'stopped', 'dormant')):
             agent = dict(self.selected)
-            description = ("Ctrl+Enter cancels native work only; no terminal remains to close."
+            description = ("Ctrl+Enter finds this agent's tagged terminal (its runtime record is missing) and stops it."
+                           if recovers else
+                           "Ctrl+Enter cancels native work only; no terminal remains to close."
                            if agent['live'] == 'dormant' else
                            "Ctrl+Enter ends running work and removes its tmux wrapper.")
             self.push_screen(Form(f'Kill {agent["name"]}?', description=description +

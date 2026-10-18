@@ -76,7 +76,8 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             _, rows = self.rows(d)
             damaged = next(name for name, row in rows.items() if "⚠" in row[0])
             d.select(damaged)
-            for key in ("m", "K", "r", "enter"):
+            for key in ("m", "K", "s", "r", "enter"):
+                d.app.set_status("")  # each key must say it itself, not leave the last key's message standing
                 await d.press(key)
                 self.assertEqual(len(d.app.screen_stack), 1, f"{key} opened a screen on a damaged row")
                 self.assertIn("cannot be used", d.status, key)
@@ -87,6 +88,38 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertIn(f"cannot be {verb[:-1]}d while its record is damaged", d.status, key)
                 self.assertIsNone(d.app.moving)
                 self.assertEqual(len(d.app.screen_stack), 1)
+
+    async def test_kill_goes_through_on_a_damaged_row_only_when_the_listing_says_kill_can_recover_it(self):
+        from unittest import mock
+        from multiverse.tools import list_agents
+        from multiverse.ui.backend import LocalBackend
+        (self.victim / "properties.json").write_text("[]")
+        real = list_agents.run
+
+        def marked(*args, **kwargs):
+            rows = real(*args, **kwargs)
+            if kwargs.get("json"):
+                for row in rows:
+                    if row.get("damaged") and RECOVER:
+                        row["damaged"] = {**row["damaged"], "recover": "kill"}
+            return rows
+
+        with mock.patch.object(list_agents, "run", marked), mock.patch.object(LocalBackend, "kill", return_value={}) as kill:
+            for RECOVER in (False, True):
+                async with self.dashboard(size=(130, 36)) as d:
+                    _, rows = self.rows(d)
+                    d.select(next(name for name, row in rows.items() if "⚠" in row[0]))
+                    await d.press("K")
+                    if not RECOVER:
+                        self.assertEqual(len(d.app.screen_stack), 1)
+                        self.assertIn("cannot be used", d.status)
+                        continue
+                    self.assertEqual(len(d.app.screen_stack), 2, d.status)
+                    shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
+                    self.assertIn("tagged terminal (its runtime record is missing)", shown)
+                    await d.press("ctrl+enter")
+                    await d.until(lambda: kill.called, "the kill to be requested")
+                    self.assertEqual(kill.call_args.args[1], self.victim.name)
 
     async def test_putting_the_file_back_puts_the_row_back(self):
         (self.victim / "properties.json").write_text("[]")

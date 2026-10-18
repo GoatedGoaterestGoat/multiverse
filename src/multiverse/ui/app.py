@@ -190,6 +190,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
 
     def check_action(self, action, parameters):
         if action in ('kill', 'stop', 'resume'):
+            if self.ready() and self.selected and isinstance(self.selected.get('damaged'), dict):
+                return True  # the action itself says why a damaged record cannot be acted on (or goes on, if kill can recover it)
             eligible = ('stopped', 'dormant') if action == 'resume' else ('alive', 'ending', 'stopped', 'dormant')
             return bool(self.ready() and self.selected and self.selected.get('live') in eligible)
         if action == "filter":

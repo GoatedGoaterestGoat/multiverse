@@ -82,6 +82,8 @@ Press `g` for a new subverse, type a name and press `Enter`. The subverse uses i
 
 The bottom line shows each result, such as `worker has your message for its next turn.` [Messaging](../cli/messaging.md#read-the-result) explains each one.
 
+**A damaged record.** An agent whose record file cannot be read shows as a row marked `⚠`, with `live` and `status` `unknown`. Its summary and the inspector name the file and the reason. The other agents are not affected, and the row recovers on the next refresh once the file is repaired or restored. Message, resume, move, delete and attach refuse such a row and say why. `K` does the same, except for an agent whose `runtime.json` is missing: `K` then asks for confirmation and finds the agent's tagged terminal to stop it. The [agents guide](../cli/agents.md#damaged-records) covers the same records from the CLI.
+
 ## Move and delete
 
 Press `x` on an agent or subverse to pick it up. Move to the destination folder and press `Enter` or `x` to drop it there, or press `Esc` to cancel. Press `d` to send it to the trash; the confirmation says what will go. Neither works on running agents, so stop them first.
