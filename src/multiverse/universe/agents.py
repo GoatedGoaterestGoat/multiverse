@@ -1,33 +1,63 @@
 """Agent records: identity and names, the runtime record of the current launch, and reported progress."""
 from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
-from . import sessions
+from . import sessions, records
 
 
-def directory(root, reference):
-    matches = []
+def directory(root, reference, *, allow_damaged=False):
+    matches, damaged = [], []
     for path in (root / "state" / "agents").glob("*/properties.json"):
-        data = read(path)
-        if reference in (data["id"], data["name"]) or data["id"].startswith(reference):
+        try:
+            data = records.properties(path)
+        except records.RecordError as error:
+            damaged.append(error)
+            data = error.data or {}
+        identity = data.get('id') if isinstance(data.get('id'), str) else path.parent.name
+        name = data.get('name')
+        if (reference in (identity, name, path.parent.name) or identity.startswith(reference)
+                or path.parent.name.startswith(reference)):
             matches.append(path.parent)
     if not matches:
-        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents.")
+        detail = (" Unusable records: " + "; ".join(f"{error.file}: {error.reason}" for error in damaged)) if damaged else ""
+        raise ValueError(f"No agent named {reference} here. Run mv2 list to see this universe's agents." + detail)
     if len(matches) != 1:
         detail = ". Use a full UUID from these matches: " + ", ".join(sorted(path.name for path in matches))
         raise ValueError(f"Expected one agent matching {reference!r}; found {len(matches)}{detail}")
+    if not allow_damaged:
+        # Recheck the selected record, never a peer's runtime. Actions cannot
+        # treat unreadable identity or launch facts as an empty/stopped agent.
+        records.properties(matches[0] / 'properties.json')
+        records.runtime(matches[0] / 'runtime.json')
     return matches[0]
+
+
+def name_matches(path, name):
+    """A peer's name, or conservative reservation evidence from a damaged file."""
+    try:
+        return records.properties(path).get('name') == name
+    except records.RecordError as error:
+        owner = f'agent {path.parent.name}'
+        try:
+            mentioned = (error.data or {}).get('name') == name or records.mentions(path, name)
+        except (OSError, ValueError) as unreadable:
+            raise records.RecordError(path, f'Cannot check {owner}: cannot read safely ({unreadable}); '
+                                      'fix its permissions or repair the record before retrying') from error
+        if mentioned:
+            raise records.RecordError(path, f'Cannot check {owner}: damaged record mentions name {name!r}; '
+                                      'repair it before retrying') from error
+        return False
 
 
 def check_available_name(root, name):
     for path in (root / "state" / "agents").glob("*/properties.json"):
-        if read(path).get("name") == name:
+        if name_matches(path, name):
             raise ValueError(f"This universe already has an agent named {name}; "
                              f"pick another name or resume it with mv2 resume {name}")
 
 
 def runtime(agent_dir):
     path = agent_dir / "runtime.json"
-    return read(path) if path.exists() else {}
+    return records.runtime(path)
 
 
 def update_runtime(agent_dir, launch_id, **changes):

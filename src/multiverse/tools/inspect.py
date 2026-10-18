@@ -29,8 +29,8 @@ def tail(capture, lines):
 
 def facts(root, agent):
     """The agent's row from the listing: the same facts the dashboard shows."""
-    identity = agents.directory(root, agent).name
-    return next(row for row in lifecycle.listing(root) if row["id"] == identity)
+    identity = agents.directory(root, agent, allow_damaged=True).name
+    return next(row for row in lifecycle.listing(root, only=identity) if row["id"] == identity)
 
 
 def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
@@ -38,18 +38,25 @@ def cli_run(root=None, *, agent, lines=TAIL_LINES, json=False):
     row = facts(root, agent)
     live = row["live"] == "alive"
     # A pane that is gone answers with the reason it is gone, not with a terminal.
-    try:
-        answer, note = run(root, agent=agent), None
-    except (OSError, ValueError, RuntimeError) as error:
-        answer, note = "", str(error)
+    damage = row.get("damaged")
+    damage_reason = f"{damage['file']}: {damage['reason']}" if damage else None
+    if damage:
+        answer, note = "", damage_reason
+    else:
+        try:
+            answer, note = run(root, agent=agent), None
+        except (OSError, ValueError, RuntimeError) as error:
+            answer, note = "", str(error)
     capture = answer if live else ""
     note = None if live else (answer or note or row.get("reason") or "it is not running")  # kept for --json
-    error = (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
+    error = damage_reason or (row.get('runtime', {}).get('native_refusal') or {}).get('message') or row.get("connection_error") or row.get("launch_error")
     fallback = (row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason")
     if json:
         result = {"name": row["name"], "harness": row["harness"], "mode": mode(row), "live": row["live"],
                 "status": row.get("status"), "phase": row.get("phase"), "summary": row.get("summary", ""),
                 "error": error, "fallback": fallback, "terminal": capture if capture else None, "note": note}
+        if damage:
+            result['damaged'] = damage
         if row.get('runtime', {}).get('auto_recovery'):
             result['recovery'] = row['runtime']['auto_recovery']
         return result

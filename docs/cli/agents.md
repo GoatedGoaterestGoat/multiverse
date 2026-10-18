@@ -91,6 +91,22 @@ At launch, each agent gets:
 
 Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands default to the agent's own universe and identity. An agent can therefore run `send`, `inbox`, `report`, `list` and `spawn` without extra options.
 
+## Damaged records
+
+If an agent's `properties.json` or `runtime.json` cannot be read, list and inspect
+show that agent with its file and reason. Other agents remain readable. Doctor
+reports the damage as a problem and exits nonzero. Use the damaged row's UUID
+when its name cannot be recovered. Commands that would act on the damaged agent
+refuse until its record is repaired; listing does not rewrite or reset it.
+Name and conversation claims skip a readable damaged peer only when its bytes
+(and, for conversations, its lineage journal) do not mention the requested name
+or UUID. A possible collision or unreadable evidence names the peer and refuses
+until that evidence is repaired. The check is a conservative substring search,
+so a damaged file may reserve a name mentioned elsewhere in that file too.
+Unreadable peer evidence can block new names or conversation claims; it does not
+prevent inspecting, stopping or messaging a healthy agent. Doctor also names an
+agent whose recorded workspace folder has disappeared.
+
 ## When a launch fails
 
 Starting without `--wait` returns after setup; that command's normal exit does not fail the agent. A launch that is still preparing isn't failed for being slow. mv2 waits while preparation makes progress, up to 60 seconds without progress and 180 seconds in total.

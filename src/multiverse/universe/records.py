@@ -8,6 +8,7 @@ only what a reader depends on, not a schema: a record that merely lacks a field 
 """
 from pathlib import Path
 import json
+import re
 
 MAX_BYTES = 8 * 1024 * 1024  # a record is a few kilobytes; a file this large is not one
 
@@ -70,3 +71,23 @@ def runtime(path):
     if not Path(path).exists():
         return {}
     return _object(path)
+
+
+def mentions(path, value):
+    """Bounded raw evidence scan; absence is useful only when the file was readable."""
+    needle, tail, scanned = value.encode().lower(), b'', 0
+    with Path(path).open('rb') as stream:
+        while chunk := stream.read(65536):
+            scanned += len(chunk)
+            if scanned > MAX_BYTES:
+                raise ValueError('file is too large to inspect safely')
+            combined = tail + chunk.lower()
+            # A truncated JSON string can still reserve an ASCII name/UUID
+            # through Unicode escapes. Decode conservatively outside strings
+            # too: a false positive refuses; it must never release a claim.
+            decoded = re.sub(rb'\\u00([0-9a-f]{2})',
+                             lambda match: bytes([int(match[1], 16)]), combined).lower()
+            if needle in decoded:
+                return True
+            tail = combined[-6 * len(needle):]
+    return False

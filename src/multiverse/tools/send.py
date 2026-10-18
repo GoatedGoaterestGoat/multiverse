@@ -5,7 +5,7 @@ import sys
 from .. import universe, display
 from ..runtime import native
 from ..store import read, lock
-from ..universe import agents
+from ..universe import agents, records
 from ..universe.mailbox import append_message, message_record, update_message
 from ._common import delivery_summary
 from ._messaging import delivery_line, failure_reason
@@ -47,12 +47,17 @@ def run(root=None, *, agent, text=None, file=None, stdin=False, sender=None, del
     for reference in references:
         try:
             directory = agents.directory(root, reference)
-        except ValueError:
+        except ValueError as error:
+            damaged = isinstance(error, records.RecordError)
             if len(references) == 1:
+                if damaged:
+                    raise  # The target is known; preserve its named record error.
                 raise ValueError('Could not find one matching agent. Run mv2 list and use its name.') from None
-            name = failure_reason(reference)
-            result = {'ok': False, 'saved': False, 'reason': 'Could not find one matching agent'}
-            line = f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.'
+            name = display.clean(reference) if damaged else failure_reason(reference)
+            reason = display.clean(str(error)) if damaged else 'Could not find one matching agent'
+            result = {'ok': False, 'saved': False, 'reason': reason}
+            line = (f'Not sent to {name}: {reason}.' if damaged else
+                    f'Not sent to {name}: could not find one matching agent. Run mv2 list and use its name.')
         else:
             if directory in seen:
                 continue  # An alias of the same recipient must not duplicate a prompt.

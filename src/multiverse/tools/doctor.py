@@ -1,5 +1,6 @@
 """Check local definitions and report uncertain agent state."""
 import sys
+from pathlib import Path
 
 from ..runtime import lifecycle
 from .. import compaction, universe
@@ -23,6 +24,15 @@ def check(root, notes=None):
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
             catalog.catalog(scope)
             for item in lifecycle.listing(scope):
+                damage = item.get('damaged')
+                if damage:
+                    problem = f"{item['name']}: {damage['file']}: {damage['reason']}"
+                    found.append((problem, problem))
+                    continue  # No inbox, compaction or process action on damaged records.
+                workdir = item.get('workspace')
+                if isinstance(workdir, str) and workdir and not Path(workdir).is_dir():
+                    problem = f"{item['name']}: missing workspace folder: {workdir}"
+                    found.append((problem, problem))
                 runtime = item.get("runtime", {})
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
                 recovery = runtime.get('auto_recovery') or {}

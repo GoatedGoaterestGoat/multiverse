@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ..harnesses.types import normalize_session_id
 from ..store import lock, now, read, uid, write
-from . import parent, tree
+from . import parent, tree, records
 
 
 class SessionConflict(ValueError):
@@ -126,17 +126,7 @@ def provider(root, data):
 
 def _journal_mentions(path, native_id):
     """Inspect damaged, readable evidence without parsing or repairing another agent."""
-    needle, tail, scanned = native_id.encode().lower(), b'', 0
-    with path.open('rb') as stream:
-        while chunk := stream.read(65536):
-            scanned += len(chunk)
-            if scanned > 8 * 1024 * 1024:
-                raise ValueError('journal is too large to inspect safely')
-            combined = tail + chunk.lower()
-            if needle in combined:
-                return True
-            tail = combined[-len(needle):]
-    return False
+    return records.mentions(path, native_id)
 
 
 def claim(root, directory, data, native_id, home=None):
@@ -148,7 +138,27 @@ def claim(root, directory, data, native_id, home=None):
         for path in (scope / 'state' / 'agents').glob('*/properties.json'):
             if path.parent.resolve() == own_directory:
                 continue
-            other = read(path)
+            try:
+                other = records.properties(path)
+            except records.RecordError as error:
+                owner = f'agent {path.parent.name}'
+                journal = path.parent / 'sessions.jsonl'
+                try:
+                    known = (error.data or {}).get('native_session_id')
+                    mentioned = known == native_id or records.mentions(path, native_id)
+                    try:
+                        journal.stat()
+                    except FileNotFoundError:
+                        pass  # No earlier generation exists for this peer.
+                    else:
+                        mentioned = records.mentions(journal, native_id) or mentioned
+                except (OSError, ValueError) as unreadable:
+                    raise SessionConflict(f'Cannot check {owner}: {path} or {journal} cannot be read safely '
+                                          f'({unreadable}); fix permissions or repair the record before retrying') from error
+                if mentioned:
+                    raise SessionConflict(f'Cannot claim session reserved by {owner}: {path} or {journal} '
+                                          'mentions this session; repair the damaged record before retrying') from error
+                continue
             # A valid lineage cannot change its provider or storage scope. Exclude
             # known disjoint namespaces before touching potentially unreadable
             # journals. Unknown legacy/malformed scope still needs inspection.

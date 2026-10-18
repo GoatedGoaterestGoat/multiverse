@@ -10,7 +10,7 @@ from contextlib import ExitStack
 import os
 
 from . import exact, parent, trash, tree, workspace
-from .agents import directory, runtime, update_runtime
+from .agents import directory, runtime, update_runtime, name_matches
 from . import sessions
 from ..store import lock, now, read, write
 from ..terminal.tmux import observe, owned
@@ -95,7 +95,7 @@ def move_agent(root, reference, destination):
     if not (destination / "harnesses" / properties["harness"] / "harness.json").is_file():
         raise ValueError(f'The destination has no {properties["harness"]} harness configured')
     for path in (destination / "state" / "agents").glob("*/properties.json"):
-        if read(path)["name"] == properties["name"]:
+        if name_matches(path, properties["name"]):
             raise ValueError(f'The destination already has an agent named {properties["name"]}')
     target = destination / "state" / "agents" / agent_dir.name
     with ExitStack() as stack:
@@ -105,7 +105,7 @@ def move_agent(root, reference, destination):
         # Spawn publishes names under the same namespace before agents.lock.
         stack.enter_context(lock(destination / 'state' / '.agents.lock'))
         for path in (destination / 'state' / 'agents').glob('*/properties.json'):
-            if read(path)['name'] == properties['name']:
+            if name_matches(path, properties['name']):
                 raise ValueError(f'The destination already has an agent named {properties["name"]}')
         target.parent.mkdir(parents=True, exist_ok=True)
         agent_dir.rename(target)
