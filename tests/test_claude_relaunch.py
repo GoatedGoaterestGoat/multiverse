@@ -1,7 +1,8 @@
 """Claude's own record of a launch's process: the binding it shows and delivery after /restart.
 
 Claude keeps ~/.claude/sessions/<pid>.json for each interactive process: its sessionId,
-procStart (the start in UTC) and the socket it listens on. /restart runs the new
+procStart (its start: `ps -o lstart` in UTC on macOS, /proc/<pid>/stat field 22 in clock
+ticks on Linux) and the socket it listens on. /restart runs the new
 version in the same process without mv2's --messaging-socket-path, so Claude then
 listens on its own socket; /clear moves it to a new sessionId.
 """
