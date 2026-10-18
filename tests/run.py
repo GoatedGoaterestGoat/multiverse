@@ -40,9 +40,10 @@ import time
 import traceback
 import unittest
 
-import tracking  # beside this file
-
 HERE = Path(__file__).resolve().parent
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))  # for tracking, beside this file: started by runpy, this is not on sys.path
+import tracking  # noqa: E402
 SHARD_SECONDS = 20  # a module the record says takes longer is split into shards of about this
 UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
 TIMEOUT = 1200

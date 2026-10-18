@@ -894,6 +894,20 @@ class RunnerTest(unittest.TestCase):
             pass
         process.wait()
 
+    def test_the_runner_works_however_and_wherever_it_is_started(self):
+        self.module("test_fine", """
+            import unittest
+            class Fine(unittest.TestCase):
+                def test_fine(self): pass
+            """)
+        through_runpy = ["-c", "import runpy, sys; sys.argv = sys.argv[1:]; "
+                               "runpy.run_path(sys.argv[0], run_name='__main__')"]
+        for how in ([], through_runpy):  # runpy.run_path, unlike a script, does not put its directory on sys.path
+            result = subprocess.run([sys.executable, *how, *self.command()[1:]], cwd="/", text=True,
+                                    capture_output=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout.splitlines()[-1], "OK")
+
     def kill_if_running(self, pid):
         """Kill `pid` if it is still one this test started (never a process that took the number since)."""
         command = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], text=True, capture_output=True).stdout
