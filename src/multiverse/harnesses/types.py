@@ -140,6 +140,18 @@ class AgentIdentitySpec:
 
 
 @dataclass(frozen=True)
+class StartupRetrySpec:
+    """One replacement argv after a proved, exited pre-start native refusal.
+
+    Core retains every other selected command field. The adapter's
+    startup_retryable snapshot predicate must identify the exact native error;
+    only core can authorize a retry and publish these conditional notices.
+    """
+    argv: tuple[str, ...]
+    notices: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CommandSpec:
     """`environment` is set for the launched process; core identity variables win."""
     argv: tuple[str, ...]
@@ -157,6 +169,7 @@ class CommandSpec:
     agent_identity: AgentIdentitySpec | None = None
     # Presentation for this selected candidate, including a late plain fallback.
     notices: tuple[str, ...] = ()
+    startup_retry: StartupRetrySpec | None = None
 
 
 @dataclass(frozen=True)
@@ -233,10 +246,15 @@ class SessionHandle:
     home: str | None = None
     pid: int | None = None
     pid_started: str | None = None
+    # Core's exact-conversation pause/restart context; no native ownership grant.
+    queue_state: Mapping[str, Any] | None = None
 
     @classmethod
     def from_records(cls, properties, runtime, directory):
         endpoint = runtime.get('control_endpoint')
+        queue = runtime.get('queue_state')
+        if not isinstance(queue, dict) or queue.get('native_session_id') != properties.get('native_session_id'):
+            queue = None
         return cls(properties['id'], properties['harness'], properties['workspace'],
                    runtime.get('launch_id'), properties.get('native_session_id'),
                    str(directory / 'session.jsonl'), runtime.get('state', 'unknown'),
@@ -245,7 +263,7 @@ class SessionHandle:
                    runtime.get('native_versions'), runtime.get('native_relay'),
                    NativeServiceHandle.from_record(runtime.get('native_service')),
                    AttachmentSpec(**runtime['attachment']) if runtime.get('attachment') else None,
-                   properties.get('native_session_home'), runtime.get('pid'), runtime.get('pid_started'))
+                   properties.get('native_session_home'), runtime.get('pid'), runtime.get('pid_started'), queue)
 
 
 @dataclass(frozen=True, kw_only=True)
