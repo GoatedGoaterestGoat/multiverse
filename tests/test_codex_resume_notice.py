@@ -51,3 +51,15 @@ class ResumeNoticeTest(unittest.TestCase):
         self.assertEqual(len(notice.splitlines()), 1)
         self.assertIn('\\n', notice)
         self.assertIn('\\t', notice)
+
+    def test_saved_sqlite_root_override_is_explained_too(self):
+        effective = {'CODEX_HOME': str(self.saved), 'CODEX_SQLITE_HOME': str(self.saved / 'database')}
+        caller = {'CODEX_HOME': str(self.saved), 'CODEX_SQLITE_HOME': str(self.requested)}
+        notice = self.adapter.resume_notice(self.session, caller, effective)
+        self.assertIn('saved Codex database home ' + json.dumps(effective['CODEX_SQLITE_HOME']), notice)
+        self.assertIn('ignored CODEX_SQLITE_HOME=' + json.dumps(str(self.requested)), notice)
+        caller['CODEX_HOME'] = str(self.requested / 'config')
+        notice = self.adapter.resume_notice(self.session, caller, effective)
+        self.assertIn('ignored CODEX_HOME=', notice)
+        self.assertIn('ignored CODEX_SQLITE_HOME=', notice)
+        self.assertEqual(len(notice.splitlines()), 1)

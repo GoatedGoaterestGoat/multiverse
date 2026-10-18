@@ -17,18 +17,19 @@ STABLE = frozenset({'MV2_IDENTITY_MODE', 'MV2_UNIVERSE', 'MV2_AGENT_ID', 'MV2_AG
 
 def resume_notice(caller_environment, effective_environment):
     """Explain a caller override discarded by the saved native environment."""
-    requested = caller_environment.get('CODEX_HOME')
-    saved = effective_environment.get('CODEX_HOME')
-    if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
-        return None
-    try:
-        kept = Path(saved).expanduser().resolve()
-        if Path(requested).expanduser().resolve() == kept:
-            return None
-    except (OSError, ValueError, RuntimeError):
-        return None  # A diagnostic cannot claim an unverified storage choice.
-    return (f'Kept its saved Codex home {json.dumps(str(kept))}; '
-            f'ignored CODEX_HOME={json.dumps(requested)}.')
+    notices = []
+    for key, label in (('CODEX_HOME', 'Codex home'), ('CODEX_SQLITE_HOME', 'Codex database home')):
+        requested, saved = caller_environment.get(key), effective_environment.get(key)
+        if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+            continue
+        try:
+            kept = Path(saved).expanduser().resolve()
+            if Path(requested).expanduser().resolve() == kept:
+                continue
+        except (OSError, ValueError, RuntimeError):
+            continue  # A diagnostic cannot claim an unverified storage choice.
+        notices.append(f'Kept its saved {label} {json.dumps(str(kept))}; ignored {key}={json.dumps(requested)}.')
+    return ' '.join(notices) or None
 
 
 def storage_environment(context):
