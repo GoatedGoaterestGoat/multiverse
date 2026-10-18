@@ -90,6 +90,26 @@ class ClaudeFreshResumeNoticeTest(BaseTest):
                                      ({'CLAUDE_CONFIG_DIR': ''}, None)):
                 with self.subTest(caller=caller):
                     self.assertEqual(self.adapter.resume_notice(self.session(native), caller, self.environment), expected)
+            # Launched with the default storage (CLAUDE_CONFIG_DIR absent or empty): the kept storage is the launch's
+            # recorded home, else HOME/.claude of the launch environment, and never this process's.
+            home = self.work / 'home'
+            (home / '.claude').mkdir(parents=True)
+            default = str((home / '.claude').resolve())
+            named = f'Kept its saved Claude storage "{default}"; ignored CLAUDE_CONFIG_DIR="{other}".'
+            pinned = replace(self.session(native), home=default)
+            for session, effective, expected in ((pinned, {}, named), (pinned, {'CLAUDE_CONFIG_DIR': ''}, named),
+                                                 (self.session(native), {'HOME': str(home)}, named),
+                                                 (self.session(native), {}, None),  # nothing says where: no claim
+                                                 (pinned, {}, named)):
+                with self.subTest(home=session.home is not None, effective=effective):
+                    with patch.dict(os.environ, {'HOME': str(self.work / 'checker-home')}):
+                        notice = self.adapter.resume_notice(session, {'CLAUDE_CONFIG_DIR': other}, effective) or ''
+                    # Only the storage sentence: a fresh-start note may follow it.
+                    if expected:
+                        self.assertTrue(notice.startswith(expected), notice)
+                    else:
+                        self.assertNotIn('Kept its saved', notice)
+            self.assertNotIn('Kept its saved', self.adapter.resume_notice(pinned, {'CLAUDE_CONFIG_DIR': default}, {}) or '')
             # A fresh start keeps its own note after this one.
             fresh = self.adapter.resume_notice(self.session(str(uuid4())), {'CLAUDE_CONFIG_DIR': other}, self.environment)
             self.assertTrue(fresh.startswith(ignored + ' '), fresh)

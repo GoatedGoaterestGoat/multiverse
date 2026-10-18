@@ -567,11 +567,24 @@ def prompt_recorded(native_id, prompt, since, environment):
     return prompt_evidence(native_id, prompt, since, environment)[0]
 
 
-def ignored_storage(caller, effective):
-    """A caller's CLAUDE_CONFIG_DIR that the resume replaced with the recorded one, named as Codex names an
-    ignored CODEX_HOME; None when they are the same storage or either is unset."""
-    requested, saved = (caller or {}).get('CLAUDE_CONFIG_DIR'), (effective or {}).get('CLAUDE_CONFIG_DIR')
-    if not isinstance(requested, str) or not requested or not isinstance(saved, str) or not saved:
+def ignored_storage(caller, effective, home=None):
+    """A caller's CLAUDE_CONFIG_DIR that the resume replaced with the recorded storage, named as Codex names an
+    ignored CODEX_HOME; None when it is unset, the same storage, or nothing says where the kept one is.
+
+    The kept storage is the launch's CLAUDE_CONFIG_DIR when it had one; else, for the default storage, its
+    recorded home (session.home), or HOME/.claude of the launch environment. Never this process's.
+    """
+    requested = (caller or {}).get('CLAUDE_CONFIG_DIR')
+    if not isinstance(requested, str) or not requested:
+        return None
+    effective = effective or {}
+    saved = effective.get('CLAUDE_CONFIG_DIR')
+    if not (isinstance(saved, str) and saved):
+        launch_home = effective.get('HOME')
+        saved = (home if isinstance(home, str) and os.path.isabs(home)
+                 else os.path.join(launch_home, '.claude') if isinstance(launch_home, str) and os.path.isabs(launch_home)
+                 else None)
+    if saved is None:
         return None
     try:
         kept = Path(saved).expanduser().resolve()
@@ -680,7 +693,8 @@ class ClaudeAdapter(ConfiguredAdapter):
     def resume_notice(self, session, caller_environment, effective_environment):
         """What a resume result adds: a caller's CLAUDE_CONFIG_DIR it ignored for the storage recorded at spawn,
         and a fresh start (same evidence as `resume`)."""
-        notes = [ignored_storage(caller_environment, effective_environment), fresh_start(session, effective_environment)]
+        notes = [ignored_storage(caller_environment, effective_environment, session.home),
+                 fresh_start(session, effective_environment)]
         return ' '.join(note for note in notes if note) or None
 
     def startup_prompt_evidence(self, session, prompt, since, environment):
