@@ -177,6 +177,8 @@ class DamagedPeerClaimsTest(BaseTest):
                 try:
                     with self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
                         claim()
+                    with self.assertRaisesRegex(records.RecordError, orphan.name):
+                        agents.check_available_name(self.root, 'unreserved')
                 finally:
                     evidence.rmdir() if name == 'launches' else evidence.unlink()
         stat, runtime = Path.stat, orphan / 'runtime.json'
@@ -185,9 +187,11 @@ class DamagedPeerClaimsTest(BaseTest):
                 if path == runtime:
                     raise OSError(code, 'fixture cannot inspect', str(path))
                 return stat(path, *args, **kwargs)
-            with self.subTest(orphan_stat=code), patch.object(Path, 'stat', failed_stat), \
-                    self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
-                claim()
+            with self.subTest(orphan_stat=code), patch.object(Path, 'stat', failed_stat):
+                with self.assertRaisesRegex(sessions.SessionConflict, orphan.name):
+                    claim()
+                with self.assertRaisesRegex(records.RecordError, orphan.name):
+                    agents.check_available_name(self.root, 'unreserved')
         with self.subTest('a plugin-only folder holds nothing'):
             claim()
             bound = agents.bind_session(child, target.name, native)

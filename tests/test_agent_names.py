@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import io
+import shutil
 import sys
 import threading
 from unittest.mock import Mock, patch
@@ -103,6 +104,25 @@ class AgentNamesTest(BaseTest):
             self.assertEqual(sum('preparation fixture fails' in result for result in results), 1, results)
             self.assertEqual(sum('already has an agent named same' in result for result in results), 3, results)
             self.assertEqual(len(named('same')), 1)
+
+    def test_orphan_folders_reserve_no_spawn_name(self):
+        """Plugin-only leftovers cannot block every spawn; the conservative damaged-peer scan otherwise mistakes absence for unreadable authority (LC-25)."""
+        for index, leftover in enumerate((None, 'compaction', 'compaction/state.json', 'status-items/item.json')):
+            with self.subTest(leftover=leftover):
+                orphan = self.root / 'state/agents' / str(uuid4())
+                orphan.mkdir()
+                try:
+                    if leftover == 'compaction':
+                        (orphan / leftover).mkdir()
+                    elif leftover:
+                        write(orphan / leftover, {'leftover': True})
+                    before = {p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}
+                    launched = lifecycle.start(self.root, orphan.name if index == 0 else f'new-{index}', harness='fake')
+                    self.assertNotEqual(launched['id'], orphan.name)
+                    self.assertEqual(read(self.root / 'state/agents' / launched['id'] / 'properties.json')['id'], launched['id'])
+                    self.assertEqual({p.relative_to(orphan): p.read_bytes() for p in orphan.rglob('*') if p.is_file()}, before)
+                finally:
+                    shutil.rmtree(orphan)  # Each row proves its own shape, even when an earlier row fails.
 
     def test_addressing_precedence(self):
         """An exact name beats another agent's uuid prefix but never its full uuid, an ambiguous reference is refused

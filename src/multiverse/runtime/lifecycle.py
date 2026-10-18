@@ -37,15 +37,19 @@ def damaged_row(scope, error, properties=None):
     except ValueError:
         shown = str(error.file)
     label = error.file.name if error.file.suffix == ".json" else shown
+    reason, summary = error.reason, f"damaged: {label}: {error.reason}"
     recover = {'recover': 'kill'} if getattr(error, 'recover', None) == 'kill' else {}
     try:
         if error.file.name == 'properties.json' and agents.orphaned(agent_dir):
             recover = {'recover': 'remove'}
+            shown = str(Path(shown).parent)
+            reason = summary = (f'leftover folder with no agent records; '
+                                f'mv2 remove {agent_dir.name} moves it to the trash')
     except OSError:
         pass  # Unreadable authority is not an orphan-removal hint.
     return {"id": agent_dir.name, "name": text("name") or agent_dir.name, "harness": text("harness"), "universe": str(scope),
             "live": "unknown", "status": "unknown", "phase": text("phase") or "unknown",
-            "summary": f"damaged: {label}: {error.reason}", "damaged": {"file": shown, "reason": error.reason, **recover}}
+            "summary": summary, "damaged": {"file": shown, "reason": reason, **recover}}
 
 
 def text_defaults(row):

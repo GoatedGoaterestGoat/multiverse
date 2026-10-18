@@ -103,12 +103,13 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 ## Damaged records
 
 An old agent folder containing only plugin leftovers, with no `properties.json`,
-`runtime.json`, `sessions.jsonl` or `launches` path, cannot reserve a native
-conversation. It does not block session claims or resumes elsewhere. Doctor
-still names it as an orphan folder to remove with `mv2 remove UUID`. Removal
+`runtime.json`, `sessions.jsonl` or `launches` path, cannot reserve a name or native
+conversation. It does not block spawns, session claims or resumes elsewhere.
+List and doctor identify the leftover folder and offer `mv2 remove UUID` to move it to trash. Removal
 checks that no terminal is tagged for that agent on the current servers before
 moving the folder and its plugin leftovers to trash; unreadable servers or new
-core records refuse the move. Any surviving core record or
+core records refuse the move. A refusal names any tagged pane that must be verified and closed first.
+Any surviving core record or
 launch directory, or an error inspecting one, keeps the usual recovery checks.
 
 While a launch is being prepared, both the text listing and `mv2 list --json`
@@ -119,7 +120,7 @@ reported as unknown.
 If an agent's `properties.json` or `runtime.json` cannot be read, list and inspect
 show that agent with its file and reason. Other agents remain readable. Doctor
 reports the damage as a problem and exits nonzero. Use the damaged row's UUID
-when its name cannot be recovered. An existing agent folder still reserves its
+when its name cannot be recovered. A folder with surviving core records still reserves its
 UUID when properties.json is missing. Commands that would act on damaged
 identity refuse until it is repaired; listing does not rewrite or reset it.
 

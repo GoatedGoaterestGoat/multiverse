@@ -79,6 +79,8 @@ def name_matches(path, name):
     except records.RecordError as error:
         owner = f'agent {path.parent.name}'
         try:
+            if orphaned(path.parent):
+                return False  # No current or historical record can reserve a name.
             mentioned = (error.data or {}).get('name') == name or records.mentions(path, name)
         except (OSError, ValueError) as unreadable:
             remedy = ('restore or remove the record' if isinstance(unreadable, FileNotFoundError)

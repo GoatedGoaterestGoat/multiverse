@@ -117,7 +117,7 @@ def mismatch(directory, facts, observation):
     return None
 
 
-def discover(directory, properties, socket_path=None, *, facts=None):
+def discover(directory, properties, socket_path=None, *, facts=None, orphan=False):
     """One snapshot per recorded/current server. No name or PID based adoption."""
     root = directory.parents[2]
     if (properties.get('id') != directory.name
@@ -159,6 +159,10 @@ def discover(directory, properties, socket_path=None, *, facts=None):
             if (pane.get('@mv2_agent_id') != properties['id']
                     or pane.get('@mv2_universe_id') != properties['universe_id']):
                 continue
+            if orphan:
+                raise records.RecordError(directory,
+                    f'tagged pane {pane.get("pane_id")} on terminal server {address or "multiverse-v2"} '
+                    'still belongs to this folder; verify and close that terminal before removing the folder')
             identifier = pane.get('@mv2_launch_id')
             if not _uuid(identifier) or identifier not in requests:
                 raise _problem(directory, 'a tagged terminal has no valid saved launch request')
@@ -172,16 +176,16 @@ def discover(directory, properties, socket_path=None, *, facts=None):
     return found
 
 
-def require_stopped(directory, properties, socket_path=None, *, facts=None, operation=None):
-    if discover(directory, properties, socket_path, facts=facts):
+def require_stopped(directory, properties, socket_path=None, *, facts=None, operation=None, orphan=False):
+    if discover(directory, properties, socket_path, facts=facts, orphan=orphan):
         refusal = f'refusing to {operation} this agent' if operation else 'refusing a duplicate launch'
         raise _problem(directory, 'a running terminal is still tagged for this agent; ' + refusal,
                        recommend_kill=operation != 'kill')
     if facts and (reason := attachments.recorded_process_problem(directory, facts)):
-        raise _problem(directory, reason, recommend_kill=operation != 'kill')
+        raise _problem(directory, reason, recommend_kill=False)
     for launch in launches(directory):
         if reason := attachments.problem(directory, {'launch_id': launch.name}):
-            raise _problem(directory, reason, recommend_kill=operation != 'kill')
+            raise _problem(directory, reason, recommend_kill=False)
     if facts or (directory / 'runtime.json').exists():
         return ['runtime.json had damaged launch authority; no running terminal or recorded process was found, '
                 'so this starts a new launch']

@@ -22,7 +22,7 @@ def _stopped(agent_dir):
     from ..runtime import missing_runtime
     from .agents import interrupted_preparation
     if orphaned(agent_dir):
-        missing_runtime.require_stopped(agent_dir, _orphan_identity(agent_dir), operation='move or remove')
+        missing_runtime.require_stopped(agent_dir, _orphan_identity(agent_dir), operation='move or remove', orphan=True)
         if not orphaned(agent_dir):
             raise records.RecordError(agent_dir / 'properties.json',
                                       'core records changed during orphan discovery; retry with the current record')

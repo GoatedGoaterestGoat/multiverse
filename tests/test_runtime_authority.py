@@ -238,11 +238,13 @@ class DamagedRuntimeTest(unittest.TestCase):
             write(self.path, {**stopped, 'pid': 'abc'})
             before = self.path.read_bytes()
             for operation in (lambda: lifecycle.start(self.lab, resume='worker', socket_path=self.socket),
-                              lambda: lifecycle.kill(self.lab, 'worker')):
+                              lambda: lifecycle.kill(self.lab, 'worker'),
+                              lambda: relocate.remove_agent(self.lab, 'worker')):
                 with self.assertRaises(records.RecordError) as caught:
                     operation()
                 self.assertIn('remove', str(caught.exception))
                 self.assertIn('runtime.json', str(caught.exception))
+                self.assertNotIn('use mv2 kill', str(caught.exception))
                 self.assertEqual(self.path.read_bytes(), before)
 
 

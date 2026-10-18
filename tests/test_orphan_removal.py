@@ -5,6 +5,7 @@ from unittest.mock import patch
 from multiverse.runtime import lifecycle
 from multiverse.store import read, uid, write
 from multiverse.terminal.tmux import Tmux
+from multiverse.tools import list_agents
 from multiverse.universe import records, relocate
 from test_multiverse import BaseTest
 
@@ -26,8 +27,12 @@ class OrphanRemovalTest(BaseTest):
         for snapshot in (({'%1': pane}, None), ({}, 'Permission denied')):
             with self.subTest(snapshot=snapshot), patch.object(Tmux, 'snapshot', return_value=snapshot), \
                     patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')), \
-                    self.assertRaises(records.RecordError):
+                    self.assertRaises(records.RecordError) as caught:
                 relocate.remove_agent(self.root, self.directory.name)
+            if snapshot[0]:
+                self.assertIn('%1', str(caught.exception))
+                self.assertNotIn('restore', str(caught.exception).lower())
+                self.assertNotIn('runtime.json', str(caught.exception))
             self.assertTrue(self.note.exists())
             self.assertFalse((self.root / 'trash').exists())
         for name in ('runtime.json', 'sessions.jsonl', 'launches'):
@@ -44,6 +49,9 @@ class OrphanRemovalTest(BaseTest):
         with self.subTest('no evidence'):
             row = lifecycle.listing(self.root)[0]
             self.assertEqual(row['damaged'].get('recover'), 'remove')
+            shown = list_agents.run(self.root, wide=True)
+            self.assertIn('leftover folder with no agent records', shown)
+            self.assertIn(f'mv2 remove {self.directory.name}', shown)
             with patch.object(Tmux, 'snapshot', return_value=({}, None)), \
                     patch.object(Tmux, 'run', side_effect=AssertionError('no terminal action')):
                 removed = relocate.remove_agent(self.root, self.directory.name)
