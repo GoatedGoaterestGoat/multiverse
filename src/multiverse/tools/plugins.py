@@ -414,6 +414,8 @@ def text(action, result):
     if action == "host":
         state = "running" if result["running"] else "not running"
         lines = [f'The plugin host for {result["universe"]} is {state}' + (f' (pid {result["pid"]}).' if result["running"] and result.get("pid") else ".")]
+        if result.get("problem"):
+            lines.append(f'! {result["problem"]}; the host rewrites it when it starts.')
         if result.get("needed"):
             lines.append(f'Plugins that need it: {", ".join(result["needed"])}.')
         elif result["action"] in ("start", "status"):

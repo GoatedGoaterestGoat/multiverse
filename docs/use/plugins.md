@@ -123,6 +123,7 @@ There is one host per top-level universe, in a tmux session on mv2's server. It 
 - A worker that exits is restarted at most 3 times in 5 minutes. After that it stays stopped, and `mv2 plugins host` and `P` show the reason. Turn the plugin off and on again to give it a fresh start.
 - A plugin whose event handlers keep hanging is also left stopped, after 3 such restarts within a day, however long each run takes. `mv2 plugins` and `mv2 doctor` say so too.
 - The host's log is `state/plugins/host/host.log` in the top-level universe.
+- If the host's `state/plugins/host/status.json` is damaged, `mv2 plugins host` says its status is unknown and why. The host rewrites the file when it starts.
 
 ## Safe mode
 

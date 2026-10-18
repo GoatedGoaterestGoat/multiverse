@@ -62,6 +62,46 @@ def host_directory(root):
     return Path(root) / "state" / "plugins" / "host"
 
 
+STATUS_TEXT = ("state", "started_at", "updated_at", "socket", "session", "pane")
+
+
+def _recorded(root):
+    """(what status.json records, keeping only fields of the right type; why the file cannot be used, or None).
+
+    Never raises: a missing file records nothing, and an unreadable one, one that is not JSON (empty, cut short)
+    or not a JSON object leaves the status unknown, with the reason. The host rewrites it when it starts."""
+    path = host_directory(root) / "status.json"
+    try:
+        value = json.loads(path.read_text())
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, ValueError) as error:
+        detail = "it is not JSON (empty or cut short)" if isinstance(error, json.JSONDecodeError) else str(error)
+        return {}, f"state/plugins/host/status.json cannot be used: {detail}, so the host's status is unknown"
+    if not isinstance(value, dict):
+        return {}, (f"state/plugins/host/status.json cannot be used: it holds {json.dumps(value)[:40]}, not an "
+                    "object, so the host's status is unknown")
+    recorded = {key: value[key] for key in STATUS_TEXT if isinstance(value.get(key), str)}
+    if _is_pid(value.get("pid")):
+        recorded["pid"] = value["pid"]
+    if isinstance(value.get("workers"), dict):
+        recorded["workers"] = {name: {"pid": info["pid"] if _is_pid(info.get("pid")) else None,
+                                      "state": info["state"] if isinstance(info.get("state"), str) else "unknown",
+                                      "restarts": info["restarts"] if _is_count(info.get("restarts")) else 0}
+                               for name, info in value["workers"].items() if isinstance(info, dict)}
+    if isinstance(value.get("stopped"), dict):
+        recorded["stopped"] = {name: why for name, why in value["stopped"].items() if isinstance(why, str)}
+    return recorded, None
+
+
+def _is_pid(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _is_count(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def needed(root):
     """{plugin name: [universes where it is on]} of plugins in the tree that need the host. Reads manifests only."""
     result = {}
@@ -96,12 +136,9 @@ def running(root):
     """Whether a supervisor runs for this tree: its process is alive and its heartbeat (status.json, written every
     SUPERVISE_SECONDS) is recent. It never takes the host lock, so a status check can never make a supervisor
     that is just starting find the lock taken and give up."""
-    try:
-        recorded = json.loads((host_directory(root) / "status.json").read_text())
-    except (OSError, ValueError):
-        return False
-    pid = recorded.get("pid") if isinstance(recorded, dict) else None
-    if recorded.get("state") != "running" or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+    recorded, _ = _recorded(root)
+    pid = recorded.get("pid")
+    if recorded.get("state") != "running" or pid is None:
         return False
     try:
         os.kill(pid, 0)
@@ -111,7 +148,7 @@ def running(root):
         pass  # alive, someone else's: the beat below decides
     except OSError:
         return False
-    return _age(recorded.get("updated_at", "")) <= HEARTBEAT_SECONDS
+    return _age(recorded.get("updated_at", ""), unknown=float("inf")) <= HEARTBEAT_SECONDS
 
 
 def supervise(root, *, exit_when_idle=True, stopping=None):
@@ -285,7 +322,7 @@ def _write_status(root, started, workers, restarts, stopped, state="running"):
     try:
         path = host_directory(root) / "status.json"
         with _status_lock(root):
-            previous = json.loads(path.read_text()) if path.is_file() else {}
+            previous, _ = _recorded(root)
             write(path, {**{key: previous[key] for key in ("socket", "session", "pane") if key in previous},
                          "state": state, "pid": os.getpid(), "started_at": started, "updated_at": now(),
                          "workers": {name: {"pid": process.pid,
@@ -305,7 +342,8 @@ def _beat(root, stopping):
         try:
             with _status_lock(root):
                 recorded = json.loads(path.read_text())
-                if recorded.get("state") == "running" and recorded.get("pid") == os.getpid():
+                if (isinstance(recorded, dict) and recorded.get("state") == "running"
+                        and recorded.get("pid") == os.getpid()):
                     write(path, {**recorded, "updated_at": now()})
         except (OSError, ValueError):
             continue
@@ -317,24 +355,18 @@ def left_stopped(root):
     try:
         while universes.parent(top) is not None:
             top = universes.parent(top)
-        recorded = json.loads((host_directory(top) / "status.json").read_text())
     except (OSError, ValueError, AttributeError):
         return {}
-    stopped = recorded.get("stopped") if isinstance(recorded, dict) else None
-    return {name: why for name, why in stopped.items() if isinstance(why, str)} if isinstance(stopped, dict) else {}
+    return _recorded(top)[0].get("stopped", {})
 
 
 def status(root):
     """{running, state, pid, workers, stopped, ...} of this tree's host."""
     root = Path(root)
-    path = host_directory(root) / "status.json"
-    try:
-        recorded = json.loads(path.read_text())
-    except (OSError, ValueError):
-        recorded = {}
+    recorded, problem = _recorded(root)
     alive = running(root)
     return {**recorded, "running": alive, "state": "running" if alive else "stopped",
-            "needed": sorted(needed(root))}
+            "needed": sorted(needed(root)), **({"problem": problem} if problem else {})}
 
 
 def start(root):
@@ -360,10 +392,7 @@ def start(root):
     path.parent.mkdir(parents=True, exist_ok=True)
     where = {"socket": terminal["socket"], "session": terminal["session"], "pane": terminal["pane"]}
     with _status_lock(root):
-        try:
-            recorded = json.loads(path.read_text())
-        except (OSError, ValueError):
-            recorded = {}
+        recorded, _ = _recorded(root)
         if recorded.get("state") == "running" and recorded.get("pid") and running(root):
             write(path, {**recorded, **where})  # the supervisor was quicker: only say where it runs
         else:
@@ -392,7 +421,7 @@ def stop(root):
             Tmux(recorded["socket"]).run("kill-session", "-t", recorded["session"])
         except Exception:
             pass  # already gone
-    return {**status(root), "stopped": not running(root)}
+    return status(root)  # its `running` says whether it stopped
 
 
 def _cursor_path(scope, name):
@@ -455,12 +484,12 @@ def _write_cursor(scope, name, sequence, journal=None):
 _cursor_journals = {}  # cursor path -> the journal last written beside it by this process
 
 
-def _age(text):
+def _age(text, unknown=0.0):
     try:
         moment = datetime.fromisoformat(text.replace("Z", "+00:00"))
         return max(0.0, (datetime.now(timezone.utc) - moment).total_seconds())
-    except (AttributeError, ValueError):
-        return 0.0
+    except (AttributeError, TypeError, ValueError):
+        return unknown
 
 
 def work(root, name, supervisor=None):
