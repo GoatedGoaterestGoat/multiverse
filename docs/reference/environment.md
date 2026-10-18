@@ -70,5 +70,6 @@ login and global settings. Codex selects canonical storage paths for its
 frontend, service and tools. The native child receives the launching command's
 `HOME`, and storage variables absent from the selected environment are explicitly
 removed, so an older tmux server cannot supply a different home. A resume that
-would change the saved conversation's storage is refused with both paths; restore
-the original storage at the saved path, or spawn a new agent for the new storage.
+would change the saved conversation's storage, including a plain launch whose
+saved path now follows a different symlink, is refused before its launch records
+change. The error shows both paths; restore the original storage at the saved path, or spawn a new agent for the new storage.

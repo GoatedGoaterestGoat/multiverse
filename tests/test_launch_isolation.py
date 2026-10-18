@@ -65,7 +65,7 @@ class LaunchIsolationTest(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
     def test_launch_storage_presence_survives_tmux_and_resume(self):
-        """Storage values and absence must survive tmux and resume; inherited server variables otherwise silently split the recorded home from the child's transcripts."""
+        """Storage values, absence and alias identity must survive tmux and resume; inherited variables or retargeted paths can silently select another account or transcript store."""
         for family, selected in (
                 ('claude', {'CLAUDE_CONFIG_DIR': None}),
                 ('claude', {'CLAUDE_CONFIG_DIR': ''}),
@@ -108,6 +108,33 @@ class LaunchIsolationTest(unittest.TestCase):
                         self.assertEqual({key: environment.get(key) for key in selected}, expected, mode)
                         self.assertEqual(environment['HOME'], caller['HOME'], mode)
                         self.assertEqual(read(directory / 'properties.json')['native_storage_environment'], expected)
+                    if family == 'codex' and selected['CODEX_HOME'] is not None:
+                        for key in ('CODEX_HOME', 'CODEX_SQLITE_HOME'):
+                            with self.subTest(retargeted=key):
+                                path = Path(expected[key])
+                                path.mkdir(parents=True, exist_ok=True)
+                                original = path.with_name(path.name + '-original')
+                                different = path.with_name(path.name + '-different')
+                                different.mkdir()
+                                paths = [directory / 'properties.json', directory / 'runtime.json',
+                                         *directory.glob('launches/*/request.json')]
+                                before = {path: path.read_bytes() for path in paths}
+                                launches = list((directory / 'launches').iterdir())
+                                created = backend.create.call_count
+                                path.rename(original)
+                                path.symlink_to(different, target_is_directory=True)
+                                try:
+                                    with self.assertRaisesRegex(ValueError, 'Native session storage differs') as caught:
+                                        lifecycle.start(self.root, resume=result['id'])
+                                    self.assertIn(str(path), str(caught.exception))
+                                    self.assertIn(str(different), str(caught.exception))
+                                    self.assertIn('Restore the original storage', str(caught.exception))
+                                    self.assertEqual({path: path.read_bytes() for path in paths}, before)
+                                    self.assertEqual(list((directory / 'launches').iterdir()), launches)
+                                    self.assertEqual(backend.create.call_count, created)
+                                finally:
+                                    path.unlink()
+                                    original.rename(path)
                     if family == 'codex' and selected['CODEX_SQLITE_HOME'] is None:
                         properties = read(directory / 'properties.json')
                         properties['native_service_identity'] = {'provider': 'codex', 'scope': {

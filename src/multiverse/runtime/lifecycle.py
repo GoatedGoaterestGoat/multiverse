@@ -310,10 +310,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         if home is not None:
             home = agents.sessions.canonical_home(home)
             if properties.get('native_session_home') not in (None, home):
-                raise ValueError(f'Native session storage differs from the saved conversation: '
-                                 f'saved {properties["native_session_home"]!r}; requested {home!r}. '
-                                 'Restore the original storage at its saved path (undo a rename or symlink change), '
-                                 'or spawn a new agent for the requested storage')
+                raise _storage_difference(properties['native_session_home'], home)
             properties['native_session_home'] = home
             if session is not None:
                 session = replace(session, home=home)
@@ -325,9 +322,19 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
         notices = display.notice_lines(missing_notices,
                     _resume_notices(adapter, session, ambient, context.environment) if resume else [])
         command = adapter.resume(session, context) if resume else adapter.spawn(context)
-        # An adapter may select canonical storage for both its service and frontend.
+        # An adapter may resolve a saved path through a changed symlink. Compare
+        # its effective selection with recorded strings, never re-resolve history.
+        selected_storage = dict(storage)
         for selected in (command.environment, command.shared_service.environment if command.shared_service else {}):
-            storage.update({key: selected[key] for key in storage if key in selected})
+            selected_storage.update({key: selected[key] for key in storage if key in selected})
+        if resume:
+            recorded_storage = {**saved, **(properties.get('native_service_identity') or {}).get('scope', {}),
+                                **(properties.get('native_storage_environment') or {})}
+            for key, value in selected_storage.items():
+                recorded = recorded_storage.get(key)
+                if recorded not in (None, '') and recorded != value:
+                    raise _storage_difference(recorded, value, variable=key)
+        storage = selected_storage
         command = _storage_command(command, storage)
         properties['native_storage_environment'] = storage
         if _queue_wake:
@@ -681,6 +688,14 @@ def _initial_runtime(launch_id, command, adapter, session, previous, resume, rec
             # this launch reports again, without treating it as fresh usage.
             runtime_record['last_usage'] = measured
     return runtime_record
+
+
+def _storage_difference(recorded, selected, *, variable=None):
+    label = f' ({variable})' if variable else ''
+    return ValueError(f'Native session storage differs from the saved conversation{label}: '
+                      f'saved {recorded!r}; requested {selected!r}. '
+                      'Restore the original storage at its saved path (undo a rename or symlink change), '
+                      'or spawn a new agent for the requested storage')
 
 
 def _storage_environment(adapter, properties, environment, ambient, resume):
