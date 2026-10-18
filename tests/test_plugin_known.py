@@ -64,7 +64,7 @@ class NotInstalledNoteTest(PluginTestCase):
 
     def test_on_but_not_installed_is_a_note(self):
         (self.root / "plugin-settings" / "compaction.json").unlink(missing_ok=True)
-        self.enable("compaction")  # the development template does this
+        self.enable("compaction")  # as a template's plugins.json can
         self.assertFalse([problem for problem in plugins.problems(self.root) if "compaction" in problem])
         self.assertEqual(plugins.notes(self.root), [
             "compaction is on here but not installed (an optional plugin: mv2 plugins install compaction, which "

@@ -1,6 +1,6 @@
 # Compatibility
 
-mv2's requirements and the harness versions it was checked against are listed here. Version numbers appear only on this page, and other pages link to it.
+mv2's requirements and the harness versions it was checked against are listed here. Version numbers appear only on this page and in the README's badges, and other pages link to it.
 
 ## Requirements
 

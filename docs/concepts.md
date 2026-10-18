@@ -62,7 +62,7 @@ mv2 never guesses state from terminal text. When it has no reliable source for a
 
 ## Templates
 
-A template is a starting set of definitions. `mv2 init` and `mv2 subverse` install one: `base` (the default), `development`, `testing`, or your own in `~/.multiverse/templates/NAME`. After that, the universe owns its copy. `mv2 refresh` brings in template updates for files you haven't edited. See [subverses](use/subverses.md) and [prompts](cli/prompts.md).
+A template is a starting set of definitions. `mv2 init` and `mv2 subverse` install one: the bundled `base` (the default) or your own in `~/.multiverse/templates/NAME`. After that, the universe owns its copy. `mv2 refresh` brings in template updates for files you haven't edited. See [subverses](use/subverses.md) and [prompts](cli/prompts.md).
 
 ## Prompts: bootstrap, skills, workflows and commands
 

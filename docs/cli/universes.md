@@ -6,7 +6,7 @@ Create universes and subverses, choose templates and check a universe from a she
 
 ```sh
 mv2 init ~/my-project
-mv2 init ~/my-project --template development --name my-project
+mv2 init ~/my-project --template qa --name my-project
 ```
 
 `init` installs a template into `DIRECTORY/.multiverse`, where `DIRECTORY` defaults to the current directory. It prints `Created universe NAME in PATH.` (`--json` prints the record) and refuses if a `.multiverse` is already there. Running `mv2` with no command, in a folder without a universe, does the same with the `base` template and then opens the dashboard. Neither command starts any agents.
@@ -25,8 +25,8 @@ Put `-u` before the command: `mv2 -u ~/other-project/.multiverse list`.
 
 ```sh
 mv2 subverse review
-mv2 subverse tests --template testing
-mv2 subverse feature-x --template development --workspace ~/worktrees/feature-x
+mv2 subverse tests --template qa
+mv2 subverse feature-x --workspace ~/worktrees/feature-x
 mv2 -u .multiverse/subverses/review spawn --name reviewer --task 'Review the open PR.'
 ```
 
@@ -36,15 +36,9 @@ Subverses don't inherit their parent's prompts after creation. Each one gets a c
 
 ## Templates
 
-| Template | Adds |
-| --- | --- |
-| `base` | The coordination and mv2-help skills, a help command, a review workflow, and Claude, Codex and Pi harness definitions |
-| `development` | `base`'s skills and help command, development-role, implement, handoff and review workflows, a change-report form, and a Codex harness definition |
-| `testing` | `base`'s skills and help command, testing-role, reproduce, retest and review workflows, bug-report and retest-report forms, and a Codex harness definition |
+mv2 bundles one template, `base`: the coordination and mv2-help skills, a help command, a review workflow, and Claude, Codex and Pi harness definitions. `mv2 init` and `mv2 subverse` use it unless you pass `--template`.
 
-`development` also turns on the compaction plugin where it is installed. `development` and `testing` include only the Codex harness. To use Claude or Pi there, copy `harnesses/claude/` or `harnesses/pi/` from a `base` universe or from `src/multiverse/templates/base/`.
-
-`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then among the bundled templates. A template is a directory with a `universe.json` at its top (name, workspace and description) and the definition files you want: `bootstrap.md`, `skills/`, `harnesses/` and so on. It can't contain symlinks. To make your own, copy a bundled template from `src/multiverse/templates/` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
+`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then in `src/multiverse/templates/`. A template is a directory with a `universe.json` at its top (name, workspace and description) and the definition files you want: `bootstrap.md`, `skills/`, `harnesses/` and so on. It can't contain symlinks. To make your own, such as the `qa` template above, copy `src/multiverse/templates/base/` to `~/.multiverse/templates/qa` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
 
 ## Prompts
 

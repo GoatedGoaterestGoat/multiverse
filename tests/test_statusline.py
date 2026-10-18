@@ -12,7 +12,7 @@ from isolation import isolate
 
 # The mod's defaults (hooks/statusline.ts DEFAULTS, asserted there too), in display order.
 DEFAULT_ITEMS = {'agent': False, 'phase': True, 'summary': False, 'inbox': True, 'compaction': True}
-TEMPLATES = ('base', 'development', 'testing')
+TEMPLATES = ('base',)
 # What the tmux bar may show (codex-ui's renderer owns their meaning); the Claude mod's own items are the five above.
 TMUX_ITEMS = {'agent', 'harness', 'status', 'phase', 'summary', 'inbox', 'context'}
 

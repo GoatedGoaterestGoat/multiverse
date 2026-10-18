@@ -1,4 +1,4 @@
-"""Independent offline lab regressions: no tmux server or model calls."""
+"""Offline harness contracts: no tmux server or model calls."""
 from contextlib import ExitStack
 import os
 from pathlib import Path
@@ -22,7 +22,7 @@ from multiverse.store import read, write
 from isolation import isolate
 
 
-class LabHarnessContracts(unittest.TestCase):
+class HarnessContracts(unittest.TestCase):
     def setUp(self):
         isolate(self)
         temporary = tempfile.TemporaryDirectory(prefix='mv2-offline-')
@@ -43,7 +43,7 @@ class LabHarnessContracts(unittest.TestCase):
         self.patches.enter_context(patch('multiverse.runtime.lifecycle.shutil.which', return_value=sys.executable))
         self.patches.enter_context(patch.dict(os.environ, MV2_TMUX_SOCKET=self.socket))
         self.patches.enter_context(patch('multiverse.runtime.native.start_shared_service',
-            side_effect=AssertionError('Offline lab must never prepare a native daemon')))
+            side_effect=AssertionError('Offline tests must never prepare a native daemon')))
 
     def start(self, name='offline', **kwargs):
         return lifecycle.start(self.root, name=name, task='literal $(false) `false`\nquoted',
@@ -53,7 +53,7 @@ class LabHarnessContracts(unittest.TestCase):
         return read(self.root / 'state/agents' / row['id'] / 'launches' /
                     row['runtime']['launch_id'] / 'request.json')
 
-    def test_h001_socket_survives_real_runner_and_parent_identity_is_removed(self):
+    def test_socket_survives_real_runner_and_parent_identity_is_removed(self):
         row = self.start()
         request = self.request(row)
         self.assertEqual(request['env'].get('MV2_TMUX_SOCKET'), self.socket)
@@ -104,7 +104,7 @@ class LabHarnessContracts(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, 'No native session ID recorded'):
             lifecycle.start(self.root, resume=row['id'], socket_path=self.socket)
 
-    def test_h002_empty_read_and_existing_message_boundaries(self):
+    def test_empty_read_and_existing_message_boundaries(self):
         row = self.start()
         directory = self.root / 'state/agents' / row['id']
         self.assertEqual(inbox(directory), {'messages': [], 'cursor': 0})
@@ -126,16 +126,15 @@ class LabHarnessContracts(unittest.TestCase):
         self.assertEqual(set((self.root / 'state/agents').iterdir()), before)
 
     def test_agent_facing_templates_describe_current_messaging(self):
-        for template in ('base', 'development', 'testing'):
-            root = templates.TEMPLATES / template
-            for path in root.rglob('*.md'):
-                with self.subTest(path=path):
-                    text = path.read_text()
-                    self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
-            self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
-            skill = (root / 'skills/coordination/SKILL.md').read_text()
-            self.assertIn('deliver AGENT --retry', skill)
-            self.assertIn('deliver AGENT --check', skill)
+        root = templates.TEMPLATES / 'base'
+        for path in root.rglob('*.md'):
+            with self.subTest(path=path):
+                text = path.read_text()
+                self.assertNotRegex(text.lower(), r'\back\b|acknowledg|--reply-to|--message-id')
+        self.assertIn('marks them read automatically', (root / 'bootstrap.md').read_text())
+        skill = (root / 'skills/coordination/SKILL.md').read_text()
+        self.assertIn('deliver AGENT --retry', skill)
+        self.assertIn('deliver AGENT --check', skill)
 
 
 if __name__ == '__main__':
