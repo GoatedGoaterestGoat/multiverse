@@ -85,9 +85,10 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failing_backend_operation_never_ends_the_dashboard(self):
         """Send, inspect, spawn and attach raising, attach inside Textual's suspend, leave the error on show, the rows
-        listed, a spawn draft kept and input working; fragile because Textual ends the app on an unhandled worker
-        exception and suspend() skips its resume when the body raises, and these errors happen only in the field
-        (LAB-UI003)."""
+        listed, a spawn draft kept and input working, and a send that is saved but not delivered is not reported as
+        complete; fragile because Textual ends the app on an unhandled worker exception and suspend() skips its resume
+        when the body raises, these errors happen only in the field (LAB-UI003), and a returned failure, unlike a
+        raised one, reads as success unless the status is built from the delivery receipt."""
         resumed = []
 
         @contextmanager
@@ -106,6 +107,17 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.press("ctrl+enter")
                 await self.settle(pilot)
                 self.assertIn("read-only", self.status())
+                self.assertFalse(self.app.operating)
+            undelivered = {"saved": True, "state": "unavailable", "ok": False,
+                           "native_delivery": {"state": "unavailable", "reason": "Native bridge is unavailable"}}
+            with self.subTest(operation="send, saved but not delivered"), \
+                    patch.object(self.backend, "send", return_value=undelivered):
+                await pilot.press("m")
+                self.app.screen.query_one("#field-text", TextArea).load_text("Keep this saved")
+                await pilot.press("ctrl+enter")
+                await self.settle(pilot)
+                self.assertIn("Native bridge is unavailable", self.status())
+                self.assertNotIn("complete", self.status())
                 self.assertFalse(self.app.operating)
             with self.subTest(operation="inspect"), \
                     patch.object(self.backend, "inspect", side_effect=OSError("Pane unavailable")):
@@ -303,6 +315,27 @@ class DashboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.backend.agents), created)
             self.assertEqual(self.backend.agents[-1]["harness"], "codex")
             self.assertEqual(self.backend.agents[-1]["universe"], str(self.review))
+
+    async def test_escape_on_a_kill_or_delete_confirmation_does_nothing(self):
+        """Esc on the Kill and Delete confirmations leaves the agent in place and running, and Ctrl+Enter on the same
+        confirmation carries the action out; fragile because Esc hands the callback None and a callback that does not
+        check for it kills or deletes on cancel, the one slip that loses work, and nothing else notices."""
+        async with self.app.run_test(size=(120, 32)) as pilot:
+            await self.settle(pilot)
+            agents = len(self.backend.agents)
+            for key, title, done in (("K", "Kill", lambda: [call[0] for call in self.backend.calls] == ["kill"]),
+                                     ("d", "Delete", lambda: len(self.backend.agents) == agents - 1)):
+                with self.subTest(title):
+                    await pilot.press(key)
+                    self.assertIsInstance(self.app.screen, Form)
+                    self.assertIn(title, self.app.screen.form_title)
+                    await pilot.press("escape")
+                    await self.settle(pilot)
+                    self.assertEqual(len(self.app.screen_stack), 1)
+                    self.assertFalse(done(), f"Esc on the {title} confirmation carried it out")
+                    await pilot.press(key, "ctrl+enter")  # the same confirmation does act when it is accepted
+                    await self.settle(pilot)
+                    self.assertTrue(done(), f"Ctrl+Enter on the {title} confirmation did nothing")
 
     async def test_enter_uses_cursor_before_highlight_message_is_dispatched(self):
         """Enter acts on the row under the cursor even before Textual has dispatched the highlight message; kept for
