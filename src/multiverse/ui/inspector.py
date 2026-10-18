@@ -204,8 +204,13 @@ def native_mode(state, row):
     selection = row.get('runtime', {}).get('native_mode')
     if selection:
         state.append(f'\nMode: {clean(selection["mode"])} ({clean(selection["policy"])})', style=theme.SUBTEXT0)
-        if selection.get('fallback_reason'):
-            state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
+
+
+def fallback(state, row):
+    """Why the launch is not what was asked for (a Claude Code too old for the mod, a relay that was unavailable)."""
+    selection = row.get('runtime', {}).get('native_mode')
+    if selection and selection.get('fallback_reason'):
+        state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
 
 
 def launch_error(state, row):
@@ -228,7 +233,8 @@ def versions(state, row):
                      + (' (different)' if mismatch else ''), style=theme.YELLOW if mismatch else theme.SUBTEXT0)
 
 
-AGENT_FACTS = (identity, damage, progress, context, native_mode, launch_error, relay_loss, versions)
+# What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, progress, context, native_mode, versions)
 
 
 def agent_state(row):

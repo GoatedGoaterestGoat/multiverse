@@ -643,11 +643,15 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def action_details(self):
         if self.ready() and (row := self.visible_rows.get(self.selected_key)):
             fields = (("summary", "CURRENT WORK"), ("task", "INITIAL PROMPT"), ("phase", "REPORTED PHASE"),
-                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("reason", "OBSERVATION"),
+                      ("live", "TERMINAL"), ("status", "HARNESS STATUS"), ("launch_mode", "LAUNCH MODE"),
+                      ("fallback_reason", "FALLBACK"), ("reason", "OBSERVATION"),
                       ("usage_detail", "NATIVE SESSION USAGE"), ("universe", "UNIVERSE"), ("id", "AGENT ID")) if self.selected else (
                           ("description", "DESCRIPTION"), ("path", "CONFIGURATION & STATE"), ("total", "AGENTS INCLUDING SUBVERSES"))
+            mode = (row.get("runtime") or {}).get("native_mode") if self.selected else None
+            row = {**row, "launch_mode": f"{mode['mode']} ({mode['policy']})" if mode else "",
+                   "fallback_reason": (mode or {}).get("fallback_reason") or ""}
             content = "\n\n".join(f"{label}\n{row.get(key, '—')}" for key, label in fields
-                                    if key != "task" or row.get(key))
+                                    if key not in ("task", "launch_mode", "fallback_reason") or row.get(key))
             self.push_screen(Details(row["name"], content))
 
     def action_preview(self):
