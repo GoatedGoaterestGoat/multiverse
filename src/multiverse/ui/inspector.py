@@ -188,7 +188,9 @@ def damage(state, row):
     if not isinstance(found, dict):
         return
     if found.get("recover") == "remove":  # nothing here is an agent: there is nothing to repair, only a folder to remove
-        state.append("\nLeftover folder: " + clean(str(Path(found.get("file", "")).parent)), style=f"bold {theme.YELLOW}")
+        folder = Path(found.get("file", ""))
+        folder = folder.parent if folder.name == "properties.json" else folder  # older listings name the missing file
+        state.append("\nLeftover folder: " + clean(str(folder)), style=f"bold {theme.YELLOW}")
         state.append("\nNo agent records, only leftover files. Press d to move it to the trash; mv2 first checks that "
                      "no terminal is running for it. The other agents are not affected.", style=theme.SUBTEXT0)
         return

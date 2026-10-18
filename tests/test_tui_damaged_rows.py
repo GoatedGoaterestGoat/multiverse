@@ -139,6 +139,8 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     self.assertIn("trash", row)
                     self.assertIn("trash", inspector)
                     self.assertNotIn("Fix or restore", inspector)
+                    folder = next(line for line in inspector.splitlines() if line.startswith("Leftover folder:"))
+                    self.assertTrue(folder.endswith(orphan.name), folder)  # the folder d removes, not its parent
                     row, inspector = await shown(lost, "lost")  # a terminal may be running: K, then the file
                     self.assertIn("K", inspector)
                     self.assertIn("terminal", inspector)
