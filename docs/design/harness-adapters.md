@@ -45,7 +45,19 @@ absolute `CLAUDE_CONFIG_DIR` or `HOME`, and never the checking process's, which
 could find nothing and wrongly prove the prompt absent. After a None, core asks the
 optional `startup_prompt_evidence_reason` with the same arguments: one line naming
 the folder or transcript that can't be read, or the damaged row, and what to fix,
-without the command, which core adds. Every transcript lookup lists
+without the command, which core adds. Missing reason hooks default to no additional
+diagnostic; they cannot change the evidence result.
+
+Core retains the failed launch's exact prompt, start time, conversation identity
+and storage context after observing its process exit. `deliver --check` re-asks
+the evidence hook with that snapshot, even after another launch or conversation
+replaces the current one. True confirms consumption; False makes the message
+retryable; None remains uncertain. This path never reconciles the current native
+binding or resends input. Older receipts can be qualified from the matching
+exited runtime, request and task while those original facts remain available;
+missing facts never authorize retry. A new wake clears the preceding snapshot.
+
+Every transcript lookup lists
 Claude's folders itself rather than with a glob, which skips unreadable folders
 silently: when part of the storage can't be read, resume tries the saved
 conversation and usage names the folder, instead of either reading the scan as

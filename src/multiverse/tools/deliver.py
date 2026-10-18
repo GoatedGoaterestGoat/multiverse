@@ -32,8 +32,8 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         state = tracking['submission_state']
         # An accepted submission can gain receipt evidence while the launch that
         # took it runs; check it until consumption is confirmed. A queue acceptance
-        # receipt is not transcript evidence. A resume prompt has no
-        # receipt to correlate.
+        # receipt is not transcript evidence. Accepted resume prompts have no
+        # native receipt ID; failed-startup uncertainty has its own evidence check.
         attempts = tracking.get('attempts') or [{}]
         evidence = tracking.get('native_receipt')
         confirmed = isinstance(evidence, dict) and evidence.get('transcript_confirmed') is True

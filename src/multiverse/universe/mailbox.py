@@ -294,7 +294,7 @@ def update_message(agent_dir, message_id, **changes):
     return after
 
 
-def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False):
+def finish_wake(directory, launch_id, message_id, started, reason='', *, uncertain=False, prompt_context=None):
     """A CLI prompt has no native receipt ID; record process-start evidence only."""
     if not message_id:
         return
@@ -310,7 +310,8 @@ def finish_wake(directory, launch_id, message_id, started, reason='', *, uncerta
                               'consumption is unconfirmed') if started else reason,
                    'launch_id': launch_id, 'value': {'transcript_confirmed': None}}
         update_message(directory, message_id, submission_state='unknown' if uncertain else 'accepted' if started else 'failed',
-                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'])
+                       attempts=[*tracking.get('attempts', [])[:-1], receipt], native_receipt=receipt['value'],
+                       **({'wake_prompt_context': prompt_context} if prompt_context is not None else {}))
 
 
 def end_startup_messages(directory, launch_id, reason, cancelled=False):

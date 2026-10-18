@@ -428,8 +428,10 @@ def finish_failed_wake(launch, request, environment, process, reason):
     from multiverse import harnesses
     from multiverse.harnesses.types import SessionHandle
     from multiverse.runtime.native import adapter_hook
+    from multiverse.runtime.wake import prompt_context
     from multiverse.universe.mailbox import finish_wake
     evidence = None
+    snapshot = None
     if process is None:
         evidence = False  # No child was ever created.
     elif process.poll() is not None:
@@ -439,14 +441,22 @@ def finish_failed_wake(launch, request, environment, process, reason):
             if facts.get('launch_id') == launch.name:
                 adapter = harnesses.load(Path(environment['MV2_UNIVERSE']), properties['harness'])
                 hook = adapter_hook(adapter, 'startup_prompt_evidence')
+                from multiverse.universe.mailbox import message_record
+                message, tracking = message_record(directory, message_id)
+                target = tracking.get('target_session') or message.get('target_session')
+                if target and properties.get('native_session_id') != target:
+                    raise ValueError('The wake conversation changed before startup evidence was recorded')
+                session = SessionHandle.from_records(properties, facts, directory)
+                prompt, since = (launch / 'task.md').read_text(), facts.get('started_at')
+                snapshot = prompt_context(adapter, session, prompt, since, environment)
                 if hook is not None:
-                    evidence = hook(SessionHandle.from_records(properties, facts, directory),
-                                    (launch / 'task.md').read_text(), facts.get('started_at'), dict(environment))
+                    evidence = hook(session, prompt, since, dict(environment))
         except Exception:
             evidence = None  # Missing or unreadable evidence can never authorize replay.
     if evidence is False and process is not None:
         reason += '\nThe harness recorded no consumption of this startup prompt; saved for explicit retry'
-    finish_wake(launch.parent.parent, launch.name, message_id, False, reason, uncertain=evidence is not False)
+    finish_wake(launch.parent.parent, launch.name, message_id, False, reason,
+                uncertain=evidence is not False, prompt_context=snapshot)
 
 
 def main():

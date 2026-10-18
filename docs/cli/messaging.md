@@ -82,7 +82,8 @@ doctor count failures; reading does not rewrite the ledger. If `deliver --retry`
 finalizes earlier refusals, it says how many and does not resend them. After an
 explicit ledger reset, `--check` gives the manual-reading advice for untracked
 messages on a running launch-only agent, without repeatedly asking an unsupported
-receipt API. Accepted or uncertain tracking is never changed into retryable input.
+receipt API. This launch-only classification never makes accepted or uncertain
+tracking retryable.
 
 A refused live delivery to a launch-only agent is final. It stays in inbox
 history as `launch-only`, but is not counted as a failure to retry and does not
@@ -162,9 +163,12 @@ remain readable and are never overwritten.
 
 A wake launch that exits during startup becomes a definite failure only when
 the harness's exact conversation record shows no consumption of its starting
-prompt. The result says it was saved for explicit retry. Evidence of consumption,
-unreadable records, and harnesses without this check remain uncertain; no
-automatic resend occurs.
+prompt. The result says it was saved for explicit retry. If the evidence was
+unreadable, restore access to the named storage path and run `mv2 deliver NAME --check`.
+It rechecks the original launch's conversation, prompt and start time without
+sending anything. Recorded consumption confirms the message; proven absence
+makes it retryable. Missing original launch facts or unreadable records keep it
+uncertain and explain what to repair. Harnesses without this check stay uncertain.
 
 A send from a legacy launch must carry that agent's exact current launch ID,
 just as report does. An outdated launch is refused before any message is saved.

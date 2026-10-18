@@ -474,6 +474,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                 # first so a crash can never silently replay this command-line input.
                 update_message(agent_dir, resume_message_id, submission_state='submitting',
                                delivery_method='resume_prompt', wake_launch_id=launch_id,
+                               wake_prompt_context=None,
                                target_session=properties.get('native_session_id'),
                                attempts=[*tracking.get('attempts', []), {'state': 'unknown',
                                    'reason': 'Resume registered; awaiting native process startup',

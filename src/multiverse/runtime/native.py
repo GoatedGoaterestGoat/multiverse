@@ -604,6 +604,10 @@ def deliver(root, reference, message_id, retry=False, check=False):
     # take their own shorter lock, separate from read-position changes.
     with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
         message, tracking = message_record(directory, message_id)
+        if (check and tracking.get('delivery_method') == 'resume_prompt'
+                and tracking.get('submission_state') in ('submitting', 'unknown', 'accepted')):
+            from . import wake
+            return wake.check(root, directory, message, tracking)
         try:
             _, adapter, session, executor = context(root, directory.name, reconcile=True)
         except Exception as error:
@@ -618,11 +622,6 @@ def deliver(root, reference, message_id, retry=False, check=False):
         if tracking.get('submission_state') == 'launch-only':
             receipt = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
             return {**receipt, 'message_id': message_id, 'reused': True, 'ok': False}
-        if check and tracking.get('delivery_method') == 'resume_prompt' and tracking.get('submission_state') != 'failed':
-            if tracking.get('submission_state') == 'unknown' and tracking.get('attempts'):
-                return {**tracking['attempts'][-1], 'ok': False}
-            return {'state': 'unknown', 'ok': False, 'reason': 'Interactive resume prompt has no correlatable native receipt; no resend',
-                    'value': {'transcript_confirmed': None}}
         deferred = tracking.get('deferred_launch_id')
         if deferred and tracking.get('submission_state') == 'pending':
             if (deferred != session.launch_id or observe(executor.properties, executor.facts)['live'] != 'alive'

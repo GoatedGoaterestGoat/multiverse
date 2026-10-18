@@ -68,13 +68,16 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
     if state == 'unknown':
         if accepted:
             return f'{name}: message accepted; no confirmation yet. Do not resend.'
+        if value.get('evidence_problem'):
+            return (f"{name}: cannot yet tell whether it received the message. {clean(value['evidence_problem']).rstrip('.')}; "
+                    f"then run mv2 deliver {name} --check. Do not resend.")
         return f"{name}: cannot yet tell whether it received the message. Saved; run mv2 deliver {name} --check before sending again."
+    if value.get('transcript_confirmed') is True:
+        return f'{name}: message confirmed in its conversation.'
     if wake or 'interactive starting prompt' in reason or 'interactive prompt' in reason:
         return f'{name} was stopped; resuming it with your message.'
     if state == 'pending':
         return f'{name} is starting; your message will be delivered when ready.'
-    if value.get('transcript_confirmed') is True:
-        return f'{name}: message confirmed in its conversation.'
     if check:
         if 'queue' in reason.lower():
             return f'{name}: message is queued for its next turn. Do not resend.'
