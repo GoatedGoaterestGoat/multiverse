@@ -22,6 +22,8 @@ def template_source(template):
         personal = Path.home() / ".multiverse" / "templates" / template
         source = personal if personal.is_dir() else TEMPLATES / template
     if not (source / "universe.json").is_file():
+        if source.is_dir():
+            raise ValueError(f"{source} is not a template: it has no universe.json")
         raise ValueError(f"Unknown template: {template}")
     # Templates are trusted local code, but do not follow links outside a template.
     if any(p.is_symlink() for p in source.rglob("*")):

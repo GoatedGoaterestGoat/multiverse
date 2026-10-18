@@ -44,7 +44,7 @@ Subverses don't inherit their parent's prompts after creation. Each one gets a c
 
 `development` also turns on the compaction plugin where it is installed. `development` and `testing` include only the Codex harness. To use Claude or Pi there, copy `harnesses/claude/` or `harnesses/pi/` from a `base` universe or from `src/multiverse/templates/base/`.
 
-`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then among the bundled templates. To make your own, copy a bundled template from `src/multiverse/templates/` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
+`--template` takes a directory path or a name. mv2 looks a name up in `~/.multiverse/templates/NAME` first, then among the bundled templates. A template is a directory with a `universe.json` at its top (name, workspace and description) and the definition files you want: `bootstrap.md`, `skills/`, `harnesses/` and so on. It can't contain symlinks. To make your own, copy a bundled template from `src/multiverse/templates/` and edit it; [templates](../develop/templates.md) explains the layout. Templates are trusted files, since their harness definitions can run programs.
 
 ## Prompts
 

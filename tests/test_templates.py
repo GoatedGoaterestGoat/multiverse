@@ -32,6 +32,16 @@ class RoleTemplatesTest(unittest.TestCase):
                                      read(templates.TEMPLATES / name / "harnesses/codex/harness.json"))
                     self.assertFalse(any(path.is_symlink() for path in clone.rglob("*")))
 
+    def test_a_directory_without_universe_json_is_named_as_not_a_template(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory).resolve() / "mytpl"
+            (folder / "skills").mkdir(parents=True)
+            (folder / "bootstrap.md").write_text("hello\n")
+            with self.assertRaisesRegex(ValueError, "is not a template: it has no universe.json"):
+                templates.template_source(str(folder))
+            with self.assertRaisesRegex(ValueError, "Unknown template: no-such-template"):
+                templates.template_source("no-such-template")
+
     def test_bootstrap_is_short_and_workflows_load_only_on_request(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory).resolve()

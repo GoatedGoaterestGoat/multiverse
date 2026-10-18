@@ -70,7 +70,7 @@ Choose the items and their order in `statusline.json` at the universe root:
 {"schema": 1, "items": {"agent": true, "phase": true, "summary": false, "inbox": true, "compaction": true}}
 ```
 
-A running `/compact` shows its progress on the same line. `mv2 refresh --apply` adds `statusline.json` to a universe that lacks it.
+A running `/compact` shows its progress on the same line. `mv2 refresh --apply` adds `statusline.json` to a universe created before it existed. If you deleted it, refresh keeps it deleted; copy it from a new universe or from `src/multiverse/templates/base/` to get it back.
 
 **`/multiverse`.** With a live connection, `/multiverse` is a real Claude command. Its subcommands are `list`, `NAME [args]`, `send AGENT TEXT` and `inbox` (see [messaging](../cli/messaging.md#inside-claude-and-pi-sessions)). Only a prompt you type can run `send`, `inbox` or a catalog entry. Any other caller can only list. Recent Claude Code versions suggest the subcommands and agent names as you type.
 
@@ -110,7 +110,7 @@ The live connection runs through Codex's shared app-server daemon. There is one 
 
 **Shared conversations.** Another Codex client on the same daemon can open an agent's conversation at the same time, for example `codex resume` in another window. It is still the same agent, so its `mv2 report` and `mv2 inbox` work from either client. While another client has it open, Codex keeps the conversation's current settings. A resume can't change its permissions then, and `mv2 inspect NAME` names the settings that differ. See [shared conversations](../design/shared-conversations.md).
 
-**Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it ("This conversation is open in another app"), and mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
+**Opened elsewhere.** A different Codex server, or a `codex resume --no-daemon` session, can hold the conversation. Codex then refuses to open it: a plain launch shows "This conversation is open in another app", and a connected one gets "thread … already has an active writer". mv2 shows that refusal as the launch's error in `mv2 list`, `mv2 inspect`, `--wait` and `mv2 send`. Pressing R in Codex doesn't clear it. Close the other session, run `mv2 kill NAME --attachment-only`, then run `mv2 resume NAME`.
 
 On supported Codex layouts, startup refusal observation ends when the ordinary composer is ready. Later navigation does not turn that successful launch into a startup refusal. Loading, resuming and forking screens stay under observation. An incomplete or unrecognized screen stays under observation for a bounded startup period.
 

@@ -171,7 +171,7 @@ mv2 resume NAME
 
 ### Codex: "This conversation is open in another app"
 
-A different Codex server, or a `codex resume --no-daemon` session, holds the conversation. mv2 shows Codex's refusal as the launch's error, and pressing R in Codex doesn't clear it. Close the other session, then close mv2's terminal without cancelling the conversation's work, and resume:
+A connected launch reports the same refusal as "thread … already has an active writer". A different Codex server, or a `codex resume --no-daemon` session, holds the conversation. mv2 shows Codex's refusal as the launch's error, and pressing R in Codex doesn't clear it. Close the other session, then close mv2's terminal without cancelling the conversation's work, and resume:
 
 ```sh
 mv2 kill NAME --attachment-only
