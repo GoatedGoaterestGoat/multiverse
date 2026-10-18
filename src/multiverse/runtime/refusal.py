@@ -22,11 +22,13 @@ def startup_deadline(facts):
     return time.monotonic() + remaining
 
 
-def settle_startup(directory, launch_id, state, *, deadline=None):
+def settle_startup(directory, launch_id, state, *, deadline=None, require_process_ready=False):
     def changes(facts):
         observed = (facts.get('native_startup_observation') or {}).get('state')
         if (facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
                 or facts.get('native_refusal') or observed not in (None, 'pending')
+                or (require_process_ready and (facts.get('state') != 'running'
+                    or not facts.get('pid') or not facts.get('startup_checked', True)))
                 or (facts.get('attachment') or {}).get('readiness') != 'process'
                 or (deadline is not None and time.monotonic() >= deadline)):
             return None

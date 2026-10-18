@@ -733,7 +733,7 @@ def _record_ready(agent_dir, launch_id, properties):
         pass
 
 
-def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True):
+def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery=True, settle_on_timeout=True):
     """Observe one launch without holding the lock needed by native binding."""
     request = read(agent_dir / 'launches' / launch_id / 'request.json')
     deadline = time.monotonic() + timeout
@@ -792,6 +792,14 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             return {**result, 'ok': False, 'ready': False, 'error': error}
         remaining = deadline - time.monotonic()
         if remaining <= 0:
+            if (settle_on_timeout and not screen_expired
+                    and (facts.get('native_startup_observation') or {}).get('state') == 'pending'
+                    and (facts.get('attachment') or {}).get('readiness') == 'process'
+                    and launch_ready(adapter, result, {**facts, 'native_startup_observation': None},
+                                     agent_dir, request, live, include_delivery=include_delivery)):
+                screen_expired = True
+                refusal.settle_startup(agent_dir, launch_id, 'unverified', require_process_ready=True)
+                continue  # A concurrent refusal or retry claim must win over this old snapshot.
             return {**result, 'ok': False, 'ready': False, 'timed_out': True,
                     'error': f'Timed out after {timeout:g}s waiting for launch readiness; '
                              'the launch was not stopped. Inspect its runtime or terminal before retrying.'}

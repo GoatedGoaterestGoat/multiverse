@@ -2,6 +2,7 @@
 from dataclasses import replace
 from contextlib import redirect_stdout
 import io
+import subprocess
 import unittest
 from unittest.mock import Mock, patch
 
@@ -60,6 +61,42 @@ class CommandNoticeTest(NativeBackendTest):
         baseline = {**agents.runtime(self.directory), 'state': 'running', 'pid': 123,
                     'startup_checked': False, 'startup_retry': None, 'exit_code': None,
                     'native_relay': None, 'startup_delivery': None}
+        for observed, elapsed, exited in (('pending', 3, True), ('started', 3, False), ('pending', 55, False)):
+            with self.subTest(screen=observed, elapsed=elapsed):
+                write(self.directory / 'runtime.json', {**baseline,
+                    'native_startup_observation': {'state': observed}})
+                child = Mock(pid=123)
+                child.poll.return_value = None
+                child.wait.side_effect = [subprocess.TimeoutExpired('plain', .1), 1]
+                with patch.object(runner.time, 'monotonic', side_effect=[0, elapsed]):
+                    self.assertEqual(runner.wait_startup_candidate(self.directory, launch.name, child, 0), not exited)
+                self.assertEqual(child.wait.call_count, 2 if exited else 1)
+                if exited:
+                    self.assertTrue(agents.runtime(self.directory)['startup_checked'])
+        with self.subTest('slow native setup can fail before its pending screen ever starts'):
+            write(launch / 'request.json', request)
+            write(self.directory / 'runtime.json', {**baseline, 'startup_checked': True,
+                'native_startup_observation': {'state': 'pending'}})
+            child = Mock(return_value=second)
+            with patch.object(self.adapter, 'startup_retryable', return_value=True, create=True), \
+                    patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')):
+                self.assertIsNotNone(runner.retry_startup(launch, request, self.adapter, first,
+                    runner.STARTUP_SECONDS + 1, child, native_id=self.properties.get('native_session_id')))
+            child.assert_called_once()
+        with self.subTest('a wait settling the screen during diagnostic capture wins over retry'):
+            write(launch / 'request.json', request)
+            write(self.directory / 'runtime.json', {**baseline, 'startup_checked': True,
+                'native_startup_observation': {'state': 'pending'}})
+            def settles(_):
+                agents.update_runtime(self.directory, launch.name,
+                                      native_startup_observation={'state': 'unverified'})
+                return True
+            with patch.object(self.adapter, 'startup_retryable', side_effect=settles, create=True), \
+                    patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')):
+                child = Mock()
+                self.assertIsNone(runner.retry_startup(launch, request, self.adapter, first, 3, child,
+                                                      native_id=self.properties.get('native_session_id')))
+                child.assert_not_called()
         for label, changes, code, elapsed, matched in (
                 ('still live', {}, None, 0, True), ('clean exit', {}, 0, 0, True),
                 ('after startup window', {}, 1, runner.STARTUP_SECONDS + 1, True),

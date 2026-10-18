@@ -285,7 +285,8 @@ class StartupDelivery:
         try:
             adapter = harnesses.load(self.root, read(self.agent_dir / 'properties.json')['harness'])
             while not self.stopped.is_set():
-                result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5, include_delivery=False)
+                result = lifecycle.wait_ready(self.root, self.agent_dir, self.launch_id, adapter, .5,
+                                              include_delivery=False, settle_on_timeout=False)
                 if result['ready']:
                     if self.prompt_protocol is not None:
                         if self.prompt_protocol.prompt_error:
@@ -428,20 +429,28 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
     hook = adapter_hook(adapter, 'startup_retryable')
     code = process.poll()
     if (not isinstance(candidate, dict) or hook is None or type(code) is not int or code == 0
-            or elapsed > STARTUP_SECONDS or elapsed < 0 or request.get('rpc_proxy')
+            or elapsed < 0 or request.get('rpc_proxy')
             or request.get('control_endpoint') or request.get('shared_service')):
         return None
     argv = candidate.get('argv')
     if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
         return None
     directory = launch.parent.parent
+    def eligible(facts):
+        from multiverse.runtime.refusal import STARTUP_WINDOW_SECONDS
+        observed = (facts.get('native_startup_observation') or {}).get('state')
+        pending = observed == 'pending'
+        return (facts.get('launch_id') == launch.name and facts.get('pid') == process.pid
+                and facts.get('state') in ('starting', 'running') and not facts.get('ending_at')
+                and (not facts.get('startup_checked') or pending)
+                and observed in (None, 'pending')
+                and elapsed <= (STARTUP_WINDOW_SECONDS if pending else STARTUP_SECONDS)
+                and not facts.get('startup_retry') and not facts.get('native_refusal')
+                and facts.get('startup_delivery') not in ('waiting', 'ready')
+                and (facts.get('native_relay') or {}).get('state') != 'ready')
     with lock(directory / '.launch.lock', create_parent=False):
         facts = runtime(directory)
-        if (facts.get('launch_id') != launch.name or facts.get('pid') != process.pid
-                or facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
-                or facts.get('startup_checked') or facts.get('startup_retry') or facts.get('native_refusal')
-                or facts.get('startup_delivery') in ('waiting', 'ready')
-                or (facts.get('native_relay') or {}).get('state') == 'ready'
+        if (not eligible(facts)
                 or (launch / 'ready-event').exists() or read(launch / 'request.json') != request):
             return None
         try:
@@ -456,14 +465,42 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
             return None  # Unknown output/ownership never authorizes another process.
         notices = notice_lines(request.get('resume_notices'), candidate.get('notices'))
         selected = {**request, 'argv': list(argv), 'startup_retry': None, 'notices': notices}
+        # Serialize with the screen/caller deadline. Once claimed, readiness
+        # cannot describe the old child during the gap before its replacement.
+        def claim(current):
+            if not eligible(current):
+                return None
+            return dict(startup_checked=False, pid=None, launch_notices=notices,
+                        startup_retry={'exit_code': code, 'at': now()})
+        if mutate_runtime(directory, launch.name, claim) is None:
+            return None
         # Durable selection precedes Popen. No binding or input has been accepted.
         write(launch / 'request.json', selected)
-        update_runtime(directory, launch.name, launch_notices=notices,
-                       startup_retry={'exit_code': code, 'at': now()})
         for notice in notices:
             print(notice, flush=True)
         child = spawn(selected)
         return selected, child
+
+
+def wait_startup_candidate(directory, launch_id, process, child_at):
+    """Keep an unstarted screen eligible without delaying a recognized composer."""
+    from multiverse.runtime.refusal import STARTUP_WINDOW_SECONDS
+    while True:
+        elapsed = time.monotonic() - child_at
+        facts = runtime(directory)
+        if facts.get('launch_id') != launch_id or facts.get('ending_at'):
+            return False
+        if elapsed >= STARTUP_SECONDS:
+            pending = (facts.get('native_startup_observation') or {}).get('state') == 'pending'
+            if not pending or facts.get('native_refusal') or elapsed >= STARTUP_WINDOW_SECONDS:
+                return process.poll() is None
+            if not facts.get('startup_checked'):
+                update_runtime(directory, launch_id, startup_checked=True)
+        try:
+            process.wait(timeout=.1)
+            return False
+        except subprocess.TimeoutExpired:
+            pass
 
 
 
@@ -661,21 +698,18 @@ def main():
         child_at = time.monotonic()
         initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
         spawn(request)
-        survived_startup = False
-        if request.get('startup_retry'):
-            try:
-                process.wait(timeout=STARTUP_SECONDS)
-            except subprocess.TimeoutExpired:
-                survived_startup = True
-            else:
-                selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
-                                         native_id=initial_native_id)
-                if selected is not None:
-                    request, process = selected
         if request.get('observe_refusal'):
             refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
             roles['refusal observer'] = attachments.Role(launch, 'refusal observer', started=runner_started)
             refusal_monitor.start()
+        survived_startup = False
+        if request.get('startup_retry'):
+            survived_startup = wait_startup_candidate(agent_dir, launch.name, process, child_at)
+            if not survived_startup:
+                selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
+                                         native_id=initial_native_id)
+                if selected is not None:
+                    request, process = selected
         from multiverse.universe.mailbox import finish_wake
         if request.get('control_endpoint'):
             startup = StartupDelivery(agent_dir, launch.name, Path(env['MV2_UNIVERSE']),

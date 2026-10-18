@@ -57,7 +57,26 @@ class WaitTest(BaseTest):
     def test_readiness_signal_per_launch_mode(self):
         """Plain, extension bridge, Codex bridge, late plain fallback, error and timeout each use their own
         readiness signal; fragile because a wrong one returns --wait before the agent can take messages, so the
-        first message is lost to startup or the wait hangs."""
+        first message is lost to startup or an unknown footer outlasts an explicit short wait."""
+        for label, changes, ready in (
+                ('unknown footer, process ready', {}, True),
+                ('unknown footer, child still starting', {'startup_checked': False}, False),
+                ('known refusal', {'reason': 'Native startup refused'}, False)):
+            self.starting()
+            with self.subTest(mode=label):
+                write(self.directory / 'launches' / self.launch / 'request.json', {})
+                agents.update_runtime(self.directory, self.launch, **dict(
+                    state='running', control_endpoint=None, attachment={'readiness': 'process'},
+                    **{'startup_checked': True, 'native_startup_observation': {'state': 'pending'}, **changes}))
+                result = self.wait(.01)
+                self.assertEqual(result['ready'], ready)
+                if ready:
+                    self.assertEqual(result['runtime']['native_startup_observation']['state'], 'unverified')
+                    self.assertTrue(result['notices'])
+                else:
+                    self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'pending')
+
+        self.starting()
         with self.subTest(mode='codex bridge, bound but never validated'):
             agents.bind_session(self.root, self.directory.name, self.native, self.launch)
             before = read(self.directory / 'runtime.json')

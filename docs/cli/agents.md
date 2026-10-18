@@ -67,7 +67,7 @@ Linux launches record the process's start ticks and boot ID, so a wall-clock adj
 
 A `steer` or `follow-up` message to a stopped agent also resumes it (with a harness that supports waking: Claude Code, Codex and Pi; a custom command harness doesn't), with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
-For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window ends without either, the command uses process readiness and says that screen startup could not be confirmed. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
+For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window or your explicit `--wait-timeout` ends without either, a healthy process that passed its startup check proceeds with a notice that screen startup could not be confirmed. A process that has not passed that check still times out. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
 
 ## Move and remove
 
