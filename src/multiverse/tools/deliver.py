@@ -44,7 +44,7 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                          or isinstance(evidence, dict) and evidence.get('queued_submission_id')
                          and native_id and attempts[-1].get('native_session_id') == native_id
                          and (tracking.get('target_session') or message.get('target_session')) == native_id))
-        if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
+        if not accepted and state not in (('failed', 'launch-only') if retry else ('failed', 'pending', 'submitting', 'unknown', 'cancelled')):
             continue
         try:
             final = native.finalize_launch_only(root, directory, message['id']) if state in ('failed', 'pending') else None
@@ -55,6 +55,9 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
                 receipt = final
             elif retry:
                 with store.lock(directory / '.send.lock'):
+                    if state == 'launch-only' and not native.reopen_launch_only(root, directory, message['id']):
+                        finalized += 1
+                        continue
                     receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
             elif state == 'failed':
                 previous = attempts[-1]

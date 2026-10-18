@@ -598,6 +598,36 @@ def finalize_launch_only(root, directory, message_id):
         return receipt
 
 
+
+def reopen_launch_only(root, directory, message_id):
+    """An explicit retry may reconsider a definite policy refusal, never acceptance.
+
+    The caller holds send.lock. Capability lookup uses the current launch under
+    its lock; normal delivery rechecks generation and session before submitting.
+    """
+    with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
+        message, tracking = message_record(directory, message_id)
+        if tracking.get('submission_state') != 'launch-only':
+            return True  # A concurrent result still goes through normal no-resend checks.
+        previous = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
+        value = previous.get('value')
+        if not isinstance(value, dict) or value.get('launch_only') is not True or value.get('final') is not True:
+            return False
+        _, adapter, session, _ = context(root, directory.name, reconcile=False)
+        capabilities = getattr(adapter, 'capabilities', None)
+        if capabilities is None:
+            return False
+        capability = capabilities(session).get(
+            'send_follow_up' if message.get('delivery') == 'follow-up' else 'send_steer')
+        if capability is None or capability.state != 'supported':
+            return False
+        # Keep the original refusal in attempts. A read alone never creates this
+        # reassessment, and a crash here leaves a definite failure, safe to retry.
+        receipt = {**previous, 'value': {**value, 'final': False}, 'reconsidered_at': now()}
+        update_message(directory, message_id, submission_state='failed', final_reason=None, last_receipt=receipt)
+        return True
+
+
 def deliver(root, reference, message_id, retry=False, check=False, *, new_message=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
@@ -696,7 +726,8 @@ def deliver(root, reference, message_id, retry=False, check=False, *, new_messag
         # Persist BEFORE the native call: a crash cannot turn uncertain submission
         # into pending and silently replay it on restart.
         update_message(directory, message_id, submission_state='submitting', target_session=target or session.native_id,
-                       delivery_method='native', attempts=[*previous, attempt], restart_on_delivery=False)
+                       delivery_method='native', attempts=[*previous, attempt], restart_on_delivery=False,
+                       last_receipt=None, final_reason=None)
         try:
             if not session.native_id:
                 result = NativeResult('unavailable', 'No exact native session ID bound; retry after binding')

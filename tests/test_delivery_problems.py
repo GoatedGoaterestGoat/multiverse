@@ -133,7 +133,7 @@ class DeliveryProblemTest(BaseTest):
         self.assertNotEqual(plain.capabilities(replace(rows[0][2], agent_id=''))['send_steer'].mechanism, 'launch-only')
 
     def test_launch_only_refusal_is_final_and_failed_wakes_stay_retryable(self):
-        """A launch-only refusal is final and never retried, also for a custom harness after a ledger reset, while a
+        """A policy refusal stays final until explicit retry sees messaging connected, including after a ledger reset, while a
         failed wake, pre-submission failure and temporary fallback stay retryable; fragile because three ledger generations and two
         delivery mechanisms share submission_state, and a break silently loses or duplicates messages (LC-23,
         CLAUDE-13, e5bbba0)."""
@@ -209,6 +209,52 @@ class DeliveryProblemTest(BaseTest):
                             deliver.run(root, agent='recipient', retry=True)
                             self.assertEqual(submit.call_count, 1)
 
+        with self.subTest('explicit retry rechecks a final refusal only after messaging connects'):
+            root = self.universe('enabled-bridge')
+            directory = self.recipient(root, self.running())
+            manifest = root / 'harnesses/claude/harness.json'
+            definition = read(manifest)
+            definition['settings']['inbox_bridge'] = False
+            write(manifest, definition)
+            with patch.object(native, 'observe', return_value={'live': 'alive'}), \
+                    patch.object(lifecycle, 'observe', return_value={'live': 'alive'}), \
+                    patch.object(native.NativeExecutor, 'check_session'):
+                self.assertFalse(send.run(root, agent='recipient', text='keep until messaging connects')['ok'])
+                message = mailbox.inbox(directory, all_messages=True)['messages'][0]
+                self.assertEqual(message['tracking']['submission_state'], 'launch-only')
+                ledger = directory / 'inbox-state.json'
+                original = ledger.read_bytes()
+                lines = []
+                with patch.object(harnesses.ClaudeAdapter, 'send',
+                                  return_value=NativeResult('ok', value={'transcript_confirmed': True})) as submit:
+                    result = deliver.run(root, agent='recipient', retry=True, _present=lines.append)
+                    self.assertEqual(ledger.read_bytes(), original)
+                    submit.assert_not_called()
+                    definition['settings']['inbox_bridge'] = True
+                    write(manifest, definition)
+                    facts = {**self.running(), 'native_mode': {'mode': 'bridge', 'policy': 'required'},
+                             'native_bridge': BRIDGE,
+                             'control_endpoint': {'transport': 'unix-lines', 'address': str(self.work / 'inbox.sock')}}
+                    write(directory / 'runtime.json', facts)
+                    # Observing the newly connected launch must not reopen anything.
+                    deliver.run(root, agent='recipient', check=True)
+                    list_agents.run(root, wide=True)
+                    self.assertEqual(ledger.read_bytes(), original)
+                    protected = []
+                    for state in ('accepted', 'unknown', 'submitting'):
+                        saved = self.message(state, directory)
+                        protected.append((saved['id'], mailbox.message_record(directory, saved['id'])[1]))
+                    self.assertTrue(deliver.run(root, agent='recipient', retry=True)['ok'])
+                    submit.assert_called_once()
+                    for identifier, tracking in protected:
+                        self.assertEqual(mailbox.message_record(directory, identifier)[1], tracking)
+                    self.assertEqual(result.get('finalized'), 1)
+                    self.assertIn('final', lines[-1])
+                    self.assertEqual(submit.call_args.args[1].id, message['id'])
+                    self.assertEqual(mailbox.message_record(directory, message['id'])[1]['submission_state'], 'accepted')
+                    deliver.run(root, agent='recipient', retry=True)
+                    self.assertEqual(submit.call_count, 1)
+
         with self.subTest('a custom harness, running then stopped'):
             root = self.universe('custom')
             write(root / 'harnesses/custom/harness.json', CUSTOM)
@@ -226,7 +272,8 @@ class DeliveryProblemTest(BaseTest):
                     with never, patch.object(lifecycle, 'start', side_effect=AssertionError('a final refusal')):
                         for option in ('retry', 'check'):
                             result = deliver.run(root, agent='recipient', **{option: True})
-                            self.assertEqual(result, {'messages': [], 'ok': True})
+                            self.assertEqual(result, {'messages': [], 'ok': True,
+                                **({'finalized': len(history)} if option == 'retry' else {})})
         with self.subTest('a ledger written by main@52b9df4, then reset'):
             fixture = json.loads(OLD_LEDGER.read_text())
             attempt = fixture['tracking']['attempts'][-1]
