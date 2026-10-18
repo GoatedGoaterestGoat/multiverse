@@ -65,7 +65,12 @@ class CodexAdapter(ConfiguredAdapter):
     def _launch_command(self, context):
         command = super()._launch_command(context)
         command = replace(command, argv=tuple(tui_arguments(command.argv)), attachment=AttachmentSpec(mouse=True))
-        from .plugins import prepare
+        from .plugins import prepare, codex_version, CHECKED_VERSION, version_text
+        version = codex_version(command.argv[0], context.values['workspace'])
+        if version is not None and version < CHECKED_VERSION:
+            note = (f'Codex {version_text(version)} is older than the checked release {version_text(CHECKED_VERSION)}; '
+                    'mv2 startup screen checks are disabled. Native /btw requires a supported client and the checked daemon release.')
+            command = replace(command, notices=(*command.notices, note))
         setting = getattr(self, 'settings', {}).get('inbox_bridge')
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = None
@@ -175,7 +180,7 @@ class CodexAdapter(ConfiguredAdapter):
             {'shell_environment_policy': {'set': dict(command.environment)}} if command.environment else {},
             additions.session_config)
         argv[position:position] = options
-        return CommandSpec(tuple(argv), command.unset_env,
+        return CommandSpec(tuple(argv), command.unset_env, notices=command.notices,
                            environment=command.environment, plugins=command.plugins,
                            agent_identity=self.agent_identity_policy(),
                            attachment=AttachmentSpec('service', 'binding', 'idle-existing-service', True, True),

@@ -18,7 +18,7 @@ from multiverse.harnesses.codex import CodexAdapter
 from multiverse.store import read, write
 from multiverse.universe.mailbox import inbox
 from multiverse.tools import send
-from native_safety import isolated_home
+from native_safety import require_checked_codex, isolated_home
 from native_cli import forbidden_python, mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
@@ -30,6 +30,7 @@ class CodexPermissionTest(TerminalBase):
         """On live Codex one thread keeps full access across plain spawn, plain wake, bridge wake and two bridge
         resumes, with wakes through the CLI prompt; fragile because it depends on Codex applying thread/resume
         overrides, and a break shows only as an agent mysteriously unable to write (e6a11a4)."""
+        require_checked_codex(self)
         completed, requests = set(), []
         bad_python = forbidden_python(self.work)
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))

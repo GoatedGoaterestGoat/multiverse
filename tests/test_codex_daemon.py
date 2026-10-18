@@ -28,7 +28,7 @@ from multiverse.harnesses.types import LaunchContext, NativeResult, RpcSpec, Rpc
 from multiverse.universe.mailbox import inbox
 from multiverse.store import read, write
 from multiverse.tools import send
-from native_safety import check_spawn, isolated_home
+from native_safety import require_checked_codex, check_spawn, isolated_home
 from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
@@ -41,6 +41,7 @@ class CodexDaemonTest(TerminalBase):
         mixing, exact-thread stop, no restart on outage, saved CODEX_HOME and CODEX_SQLITE_HOME on resume, no update
         dialog, and config/read after its start workspace is deleted; all of it rests on Codex daemon internals and
         each failure is silent (2fd65b2, 85c2c39)."""
+        require_checked_codex(self)
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         seen_requests = []
         class Handler(BaseHTTPRequestHandler):

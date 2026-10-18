@@ -5,8 +5,9 @@ import subprocess
 import tempfile
 import tomllib
 import unittest
+from unittest.mock import patch
 
-from native_safety import PROTECTED_HOMES, check_connect, check_spawn, install, isolated_home
+from native_safety import PROTECTED_HOMES, check_connect, check_spawn, install, isolated_home, require_checked_codex
 
 install()
 
@@ -43,6 +44,15 @@ class NativeSafetyTest(unittest.TestCase):
         check_spawn(['codex', '--version'], {})
         check_spawn(['codex', '--help'], {})
         check_connect('/tmp/isolated-test/rpc.sock')
+        # Unsupported installed CLIs must never reach native fixture setup.
+        for version in (None, (0, 154, 0), (0, 162, 1), (0, 163, 0), (0, 164, 0)):
+            with self.subTest(cli=version), patch('multiverse.harnesses.codex.plugins.codex_version',
+                                                  return_value=version):
+                if version is None or version < (0, 163, 0):
+                    with self.assertRaisesRegex(unittest.SkipTest, 'require checked CLI'):
+                        require_checked_codex(self)
+                else:
+                    require_checked_codex(self)
         with tempfile.TemporaryDirectory() as path:
             home = isolated_home(path, config='model="offline"\n[model_providers.offline]\nname="Fixture"\n')
             config = tomllib.loads((home / 'config.toml').read_text())

@@ -17,7 +17,7 @@ from multiverse.runtime import native, rpc
 from multiverse.harnesses.types import NativeResult, RpcRequest, RpcSpec
 from multiverse.universe.mailbox import inbox, append_message
 from multiverse.store import read, write
-from native_safety import isolated_home
+from native_safety import require_checked_codex, isolated_home
 from native_cli import mv2_launcher
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
@@ -30,6 +30,7 @@ class CodexTimingTest(TerminalBase):
         transcript-confirmed, and after an interrupt mv2 recovers the accepted item without resending; fragile because
         every step depends on app-server queue and turn semantics, and timing bugs show only as late or doubled
         messages."""
+        require_checked_codex(self)
         self.enterContext(patch.object(lifecycle, '_cli_path', return_value=mv2_launcher(self.work)))
         records = []
         work = self.work

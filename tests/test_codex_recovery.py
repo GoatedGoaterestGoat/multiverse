@@ -27,7 +27,7 @@ from multiverse.runtime.runner import RelayPublisher, StatusWatcher, UsagePublis
 from multiverse.universe.mailbox import append_message, update_message
 from multiverse.store import now, read, write
 from multiverse.terminal.tmux import Tmux
-from native_safety import isolated_home
+from native_safety import require_checked_codex, isolated_home
 from native_processes import PrivateDaemonGroups
 from test_multiverse import TerminalBase, until
 
@@ -458,6 +458,7 @@ class RecoveryWorkerTest(unittest.TestCase):
 class RecoveryLiveTest(TerminalBase):
     def setUp(self):
         super().setUp()
+        require_checked_codex(self)
         self.requests = []
         parent = self
         class Handler(BaseHTTPRequestHandler):

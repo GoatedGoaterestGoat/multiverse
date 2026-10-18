@@ -73,6 +73,17 @@ class CodexLaunchTest(unittest.TestCase):
                                 self.assertEqual(observed[0].rsplit('=', 1)[1].strip(), expected)
                         self.assertEqual(settings[source], flags)
 
+        with self.subTest('older CLI cannot silently disable pinned native features'):
+            for version, warned in (((0, 154, 0), True), ((0, 162, 1), True), ((0, 163, 0), False),
+                                    ((0, 164, 0), False), (None, False)):
+                with patch('multiverse.harnesses.codex.plugins.codex_version', return_value=version):
+                    for mode in ('spawn', 'resume'):
+                        adapter = CodexAdapter.configured('codex', {})
+                        command = adapter.spawn(self.context) if mode == 'spawn' else adapter.resume(session, self.context)
+                        for candidate in (command, command.fallback):
+                            if candidate is not None:
+                                self.assertEqual(any('older than' in note for note in candidate.notices), warned)
+
     def test_resume_permission_flags_become_grants(self):
         """Resume flags (--sandbox, -s, --ask-for-approval, -a, --dangerously-bypass...) become thread/resume grants
         and malformed ones fail before any native call; fragile because of the many spellings, and a miss silently
