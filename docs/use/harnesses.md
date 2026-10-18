@@ -170,7 +170,7 @@ Every setting is optional. A change applies at the next spawn or resume:
 }
 ```
 
-`env` can't set `MV2_*`, `PATH`, `HOME` or the storage variables mv2 reads (`CODEX_HOME`, `CODEX_SQLITE_HOME`, `CLAUDE_CONFIG_DIR`). Its values are stored in plain text in `harness.json` and in each launch's records, so keep secrets out of it. `mv2 capabilities --harness NAME` reports an invalid file. The full schema is in [files](../reference/files.md#harnessesnameharnessjson).
+`env` can't set the names mv2 manages, such as `MV2_*`, `PATH` and `HOME`, or the harness's own storage variables (`CODEX_HOME` and `CODEX_SQLITE_HOME` for Codex, `CLAUDE_CONFIG_DIR` for Claude). [Files](../reference/files.md#harnessesnameharnessjson) lists them all. Its values are stored in plain text in `harness.json` and in each launch's records, so keep secrets out of it. `mv2 capabilities --harness NAME` reports an invalid file. The full schema is in [files](../reference/files.md#harnessesnameharnessjson).
 
 ## Choose a model
 
