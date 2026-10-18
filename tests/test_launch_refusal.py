@@ -26,6 +26,62 @@ class LaunchRefusalTest(BaseTest):
         self.evidence = {'source': 'native-rpc', 'method': 'thread/resume', 'code': -32600,
                          'message': 'This conversation is open in another app', 'native_id': self.thread}
 
+    def test_initial_wait_cannot_return_ready_before_a_later_native_refusal(self):
+        facts = {'launch_id': self.launch, 'state': 'running', 'pid': 123, 'startup_checked': True,
+                 'native_startup_observation': {'state': 'pending'},
+                 'attachment': {'readiness': 'process'}}
+        write(self.directory / 'runtime.json', facts)
+        write(self.directory / 'launches' / self.launch / 'request.json', {'attachment': facts['attachment']})
+        original = lifecycle.launch_result
+        calls = []
+        def sample(root, directory):
+            if calls:
+                refusal.record(self.directory, self.launch, self.evidence)
+            calls.append(True)
+            return original(root, directory)
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        with patch.object(lifecycle, 'launch_result', side_effect=sample), \
+                patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+            result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, 1)
+        self.assertFalse(result['ready'], result)
+        self.assertIn(self.evidence['message'], result['error'])
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_settled_screen_states_keep_process_checks_and_explain_unknown_layout(self):
+        attachment = {'readiness': 'process'}
+        request = {'attachment': attachment}
+        write(self.directory / 'launches' / self.launch / 'request.json', request)
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        for state in ('started', 'unsupported', 'unverified'):
+            with self.subTest(state=state):
+                facts = {'launch_id': self.launch, 'state': 'running', 'pid': 123, 'startup_checked': True,
+                         'native_startup_observation': {'state': state}, 'attachment': attachment}
+                write(self.directory / 'runtime.json', facts)
+                with patch.object(lifecycle, 'observe', return_value={'live': 'alive'}):
+                    result = lifecycle.wait_ready(self.root, self.directory, self.launch, adapter, 1)
+                self.assertTrue(result['ready'])
+                self.assertEqual(bool(result.get('notices')), state == 'unverified')
+                if state == 'unverified':
+                    self.assertIn('could not be confirmed', result['notices'][0])
+                self.assertFalse(lifecycle.launch_ready(adapter, {}, {**facts, 'pid': None}, self.directory, request, 'alive'))
+                self.assertFalse(lifecycle.launch_ready(adapter, {}, facts, self.directory, request, 'dormant'))
+
+    def test_observer_startup_result_is_generation_fenced_and_does_not_recreate_removed_agent(self):
+        facts = {'launch_id': self.launch, 'state': 'running', 'attachment': {'readiness': 'process'}}
+        agents.update_runtime(self.directory, self.launch, **{key: value for key, value in facts.items() if key != 'launch_id'})
+        monitor = runner.RefusalMonitor(self.directory, self.launch, self.root,
+                                        SimpleNamespace(launch_refusal=lambda evidence: None), 'fixture')
+        with patch.object(lifecycle, 'note_ready'):
+            monitor._settled('started')
+        self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'started')
+        write(self.directory / 'runtime.json', {**facts, 'launch_id': 'replacement'})
+        monitor._settled('unverified')
+        self.assertNotIn('native_startup_observation', agents.runtime(self.directory))
+        import shutil
+        shutil.rmtree(self.directory)
+        monitor._settled('started')
+        self.assertFalse(self.directory.exists())
+
     def test_screen_observer_stops_after_validated_bridge_binding_but_observes_plain(self):
         for readiness, relay, observe in (('binding', 'ready', False), ('legacy-binding', 'ready', False),
                                            ('binding', 'starting', True), ('process', 'ready', True)):
@@ -57,6 +113,7 @@ class LaunchRefusalTest(BaseTest):
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
               'startup_checked': True, 'attachment': {'readiness': 'process'},
               'native_versions': {'cli': '0.163.0'}})
+        agents.update_runtime(self.directory, self.launch, native_startup_observation={'state': 'pending'})
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
         monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
         monitor.stopped = clock
@@ -86,6 +143,7 @@ class LaunchRefusalTest(BaseTest):
         self.assertEqual(backend.run.call_count, 2, 'Successful composer should end all pane polling')
         self.assertEqual(clock.elapsed, 0)
         self.assertNotIn('native_refusal', agents.runtime(self.directory))
+        self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'started')
 
     def test_native_loading_composer_does_not_hide_a_real_initial_refusal(self):
         for first in ('loading-0.163.0.json', 'resuming-0.163.0.json'):
@@ -147,6 +205,7 @@ class LaunchRefusalTest(BaseTest):
         write(self.directory / 'runtime.json', {'launch_id': self.launch, 'state': 'running',
               'attachment': {'readiness': 'process'}, 'native_versions': {'cli': '0.163.0'}})
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        agents.update_runtime(self.directory, self.launch, native_startup_observation={'state': 'pending'})
         monitor = runner.RefusalMonitor(self.directory, self.launch, self.root, adapter, 'fixture')
         monitor.stopped = Clock()
         monitor.describe = Mock(return_value=None)
@@ -157,6 +216,7 @@ class LaunchRefusalTest(BaseTest):
             monitor._run()
         self.assertLessEqual(monitor.stopped.elapsed, 60)
         self.assertLessEqual(monitor.describe.call_count, 240)
+        self.assertEqual(agents.runtime(self.directory)['native_startup_observation']['state'], 'unverified')
 
     def test_definite_startup_queue_fails_but_a_registered_wake_prompt_stays_uncertain(self):
         queued = append_message(self.directory, 'not submitted', {}, delivery='steer', target_session=self.thread)

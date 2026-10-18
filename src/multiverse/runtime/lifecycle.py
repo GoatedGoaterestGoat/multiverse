@@ -379,6 +379,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
                                f"Failed record preserved. {recovery}.") from error
     result = (wait_ready(root, agent_dir, launch_id, adapter, wait_timeout) if wait
               else launch_result(root, agent_dir))
+    notices = [*result.get('notices', []), *notices]
     return {**result, 'notices': notices} if notices else result
 
 
@@ -516,7 +517,8 @@ def launch_ready(adapter, properties, facts, agent_dir, request, live, *, includ
     past its startup check, attached as its adapter requires (the bridge registered, the binding validated)
     and, with `include_delivery`, its startup messages delivered. wait_ready and the agent.ready event use
     this one predicate; wait_ready checks the first two itself first, to say why."""
-    if facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost':
+    if ((facts.get('native_startup_observation') or {}).get('state') == 'pending'
+            or facts.get('reason') or (facts.get('native_relay') or {}).get('state') == 'lost'):
         return False
     running = (facts.get('state') == 'running' and bool(facts.get('pid')) and live == 'alive'
                and facts.get('startup_checked', True))
@@ -576,6 +578,9 @@ def wait_ready(root, agent_dir, launch_id, adapter, timeout, *, include_delivery
             return {**result, 'ok': False, 'ready': False, 'error': facts['native_relay']['reason']}
         live = observe(result, facts)['live']
         if launch_ready(adapter, result, facts, agent_dir, request, live, include_delivery=include_delivery):
+            if (facts.get('native_startup_observation') or {}).get('state') == 'unverified':
+                result = {**result, 'notices': [*result.get('notices', []),
+                    'Startup could not be confirmed from the native screen; continuing with process readiness.']}
             return {**result, 'ok': True, 'ready': True}
         error = None
         if facts.get('state') == 'failed' or live in ('ending', 'stopped', 'dormant'):

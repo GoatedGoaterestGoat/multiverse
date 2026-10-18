@@ -183,7 +183,11 @@ authentication, session binding or the first model turn has finished.
 `spawn --wait` and `resume AGENT --wait` opt into a readiness wait after
 registration (`--wait-timeout SECONDS`, default 60). Core waits outside the launch
 lock so native binding can finish. Every child must first survive a two-second
-startup check (`runtime.startup_checked`); plain/legacy launches then require a running child;
+startup check (`runtime.startup_checked`); plain/legacy launches then require a running child.
+A supported plain refusal observer must also settle before readiness: a started screen
+proceeds, refusal fails with the native reason, and the bounded window ending without
+either proceeds with an explicit unconfirmed-screen notice. Unsupported versions keep
+process readiness;
 bridge launches also require the exact native ID and delivery readiness. For
 Codex, `running` means the relay validated the native reply and effective grants.
 Claude/Pi wait for their bridge registration capability. A changed generation is
@@ -926,7 +930,7 @@ with its controls and hidden cursor, at the tested version; quoted history is
 not a refusal. Same-server successful rejoin is never labelled in use.
 
 The plain startup observer runs only for a supported native layout and for at
-most the first 60 seconds after it starts. It stops sooner after validated
+most the first 60 seconds of launch startup. It stops sooner after validated
 bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
 perform no pane polling; later TUI navigation is outside this startup observer.
 
@@ -935,9 +939,11 @@ perform no pane polling; later TUI navigation is outside this startup observer.
 An adapter may provide `launch_started(evidence) -> bool` beside its refusal
 classifier. Both receive the same current owned-pane snapshot: actual CLI
 version, visible text, cursor visibility and integer cursor coordinates. Core
-checks refusal first. Only an exact `True` from the startup hook ends observation;
-it never grants readiness, establishes a binding, changes permissions or clears
-a refusal. For tested Codex 0.163.0, the active empty ordinary composer with its
+checks refusal first. Only an exact `True` from the startup hook confirms the
+additional plain startup condition and ends observation. All process and liveness
+readiness checks still apply; screen evidence never establishes a binding,
+changes permissions or clears a refusal. If neither classifier settles the screen
+within the startup window, process readiness applies with a notice. For tested Codex 0.163.0, the active empty ordinary composer with its
 configured footer is startup evidence. The real loading composer is not. Later
 navigation after that success is no longer classified as a launch failure.
 Unknown layouts retain the bounded startup window and existing relay-loss exit.

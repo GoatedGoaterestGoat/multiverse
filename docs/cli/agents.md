@@ -63,6 +63,8 @@ Before stop completes or a replacement terminal starts, mv2 waits for its old co
 
 A `steer` or `follow-up` message to a stopped agent also resumes it, with the message as its first prompt. An `inbox-only` message never wakes an agent.
 
+For a plain Codex version whose startup screen mv2 recognizes, `--wait` also waits for that screen to settle. A native refusal fails with Codex's reason; a started session proceeds. If the bounded startup window ends without either, the command uses process readiness and says that screen startup could not be confirmed. Other versions keep process readiness. Screen observations never bind a conversation or grant permissions.
+
 ## Move and remove
 
 ```sh

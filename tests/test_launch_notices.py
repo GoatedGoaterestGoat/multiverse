@@ -41,9 +41,9 @@ class LaunchNoticeTest(NativeBackendTest):
         self.assertEqual(len(text.splitlines()), 2)
         with patch.object(self.adapter, 'resume_notice', return_value='Waited launch notice', create=True), \
                 patch.object(lifecycle, 'wait_ready', side_effect=lambda root, directory, *args:
-                             {**lifecycle.launch_result(root, directory), 'ready': True}):
+                             {**lifecycle.launch_result(root, directory), 'ready': True, 'notices': ['Screen unverified.']}):
             waited = lifecycle.start(self.root, resume=self.result['id'], socket_path='/fake', wait=True)
-        self.assertEqual(waited['notices'], ['Waited launch notice'])
+        self.assertEqual(waited['notices'], ['Screen unverified.', 'Waited launch notice'])
 
     def test_missing_invalid_or_failed_optional_notices_never_change_native_scope(self):
         for answer in (None, '', [], 3, ValueError('optional diagnostic failed')):
@@ -72,7 +72,7 @@ class LaunchNoticeCliTest(TerminalBase):
         executable = self.work / 'codex-stand-in'
         executable.write_text(f'#!{sys.executable}\n'
             'import os,sys,time,json\nfrom pathlib import Path\n'
-            'if sys.argv[1:] == ["--version"]: print("codex-cli 0.163.0"); sys.exit()\n'
+            'if sys.argv[1:] == ["--version"]: print("codex-cli 0.164.0"); sys.exit()\n'
             'Path(os.environ["MV2_AGENT_DIR"], "seen.json").write_text(json.dumps({k: os.environ.get(k) for k in ("CODEX_HOME", "CODEX_SQLITE_HOME")}))\n'
             'print("STAND-IN READY", flush=True)\nwhile True: time.sleep(1)\n')
         executable.chmod(0o755)

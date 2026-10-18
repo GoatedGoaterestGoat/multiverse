@@ -1,5 +1,6 @@
 """One terminal child per launch; no central supervisor or model loop."""
 import asyncio
+from datetime import datetime, timezone
 import os
 from pathlib import Path
 import shutil
@@ -328,6 +329,19 @@ class RefusalMonitor:
         if self.thread.is_alive():
             raise TimeoutError('Native refusal observation is still closing')
 
+    def _settled(self, state):
+        def changes(facts):
+            if (facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
+                    or facts.get('native_refusal') or (facts.get('attachment') or {}).get('readiness') != 'process'):
+                return None
+            return {'native_startup_observation': {'state': state, 'at': now()}}
+        try:
+            if mutate_runtime(self.agent_dir, self.launch_id, changes) is not None:
+                from multiverse.runtime.lifecycle import note_ready
+                note_ready(self.root, self.agent_dir, self.launch_id)
+        except (OSError, ValueError):
+            pass  # Never recreate a removed launch or follow a replacement.
+
     def _run(self):
         from multiverse.plugins.harness import version_of
         from multiverse.runtime import native, refusal
@@ -338,9 +352,19 @@ class RefusalMonitor:
                 or facts.get('state') not in ('starting', 'running')
                 or (facts.get('native_relay') or {}).get('state') == 'lost'):
             return
+        # Count setup time too, so the bounded observation finishes before a
+        # default readiness wait begun after setup. Freeze the wall-clock age
+        # into a monotonic deadline once; later clock changes cannot extend it.
+        try:
+            began = datetime.fromisoformat(facts['started_at'])
+            age = (datetime.now(timezone.utc) - began).total_seconds()
+            deadline -= min(REFUSAL_STARTUP_SECONDS, max(0, age))
+        except (KeyError, TypeError, ValueError, OverflowError):
+            pass
         versions = facts.get('native_versions')
         version = (versions.get('cli') if isinstance(versions, dict) else None) or version_of(self.executable)
         if self.supports is not None and not self.supports(version):
+            self._settled('unsupported')
             return  # No known native layout: do no pane observation or launch locking.
         while not self.stopped.is_set() and time.monotonic() < deadline:
             try:
@@ -376,10 +400,13 @@ class RefusalMonitor:
                     refusal.record(self.agent_dir, self.launch_id, evidence)
                     return
                 if callable(self.started) and self.started(snapshot) is True:
-                    return  # Ends observation only; not binding, readiness or permission authority.
+                    self._settled('started')
+                    return  # Settles startup observation only; no binding or permission authority.
             except (OSError, ValueError, RuntimeError, KeyError, subprocess.SubprocessError):
                 pass  # Unavailable or unknown evidence cannot identify a refusal.
             self.stopped.wait(min(.25, max(0, deadline - time.monotonic())))
+        if not self.stopped.is_set():
+            self._settled('unverified')
 
 
 def launch_environment(request):
@@ -518,6 +545,8 @@ def main():
                     service_dir = None
                 attachment = fallback.get('attachment') or {}
         # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
+        if request.get('observe_refusal') and attachment.get('readiness') == 'process':
+            update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
         process = subprocess.Popen(request["argv"], env=env, stdin=None)
         update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=process_started(process.pid))
         if request.get('observe_refusal'):
