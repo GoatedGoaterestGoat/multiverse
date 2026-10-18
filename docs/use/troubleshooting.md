@@ -196,6 +196,7 @@ mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socke
 | `error connecting to PATH (Permission denied)`; LIVE `unknown` | The socket belongs to another user, or a sandbox blocks Unix sockets | Run mv2 as the user who owns the server, or allow the socket in the sandbox |
 | `error connecting to PATH (File name too long)` | Unix socket paths are limited to about 100 characters | Use a shorter `MV2_TMUX_SOCKET` |
 | `tmux ls` doesn't list the agents | They are on mv2's server, not your default one | `mv2 attach NAME`, or `tmux -L multiverse-v2 ls` |
+| `server exited unexpectedly` on spawn, and the server's other sessions are gone | `MV2_TMUX_SOCKET` names a server with a global `window-size manual`; tmux 3.6a crashes on any new session there, with or without mv2 | Use mv2's own server, or unset `window-size` on yours (`tmux set -gu window-size`) |
 
 ### The dashboard doesn't show your agents
 
