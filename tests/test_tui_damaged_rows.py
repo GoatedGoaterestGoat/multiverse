@@ -121,6 +121,38 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     await d.until(lambda: kill.called, "the kill to be requested")
                     self.assertEqual(kill.call_args.args[1], self.victim.name)
 
+    async def test_a_lost_runtime_file_with_launch_history_is_a_row_kill_can_resolve(self):
+        """The real listing, no faked hint: no runtime.json but a launch folder means a terminal may still be running."""
+        from unittest import mock
+        from multiverse.ui.backend import LocalBackend
+        (self.victim / "runtime.json").unlink()
+        (self.victim / "launches" / "0e0e0e0e-0000-4000-8000-000000000001").mkdir(parents=True)
+        with mock.patch.object(LocalBackend, "kill", return_value={}) as kill:
+            async with self.dashboard(size=(130, 36)) as d:
+                _, rows = self.rows(d)
+                self.assertIn("damaged: runtime.json", " ".join(rows["victim"]))
+                d.select("victim")
+                self.assertEqual(d.app.selected["damaged"]["recover"], "kill")
+                await d.press("K")
+                self.assertEqual(len(d.app.screen_stack), 2, d.status)
+                shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
+                self.assertIn("tagged terminal (its runtime record is missing)", shown)
+                await d.press("ctrl+enter")
+                await d.until(lambda: kill.called, "the kill to be requested")
+                self.assertEqual(kill.call_args.args[1], self.victim.name)
+                # A resume has no such way out: the record is still damaged until kill has found the terminal.
+                d.app.set_status("")
+                await d.press("r")
+                self.assertIn("cannot be used", d.status)
+
+    async def test_a_runtime_file_that_is_missing_without_launch_history_is_just_a_dormant_agent(self):
+        (self.victim / "runtime.json").unlink()
+        async with self.dashboard(size=(130, 36)) as d:
+            _, rows = self.rows(d)
+            self.assertNotIn("⚠", rows["victim"][0])
+            d.select("victim")
+            self.assertNotIn("damaged", d.app.selected)
+
     async def test_putting_the_file_back_puts_the_row_back(self):
         (self.victim / "properties.json").write_text("[]")
         async with self.dashboard(size=(130, 36)) as d:
