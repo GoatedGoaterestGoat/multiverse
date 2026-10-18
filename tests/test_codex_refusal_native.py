@@ -93,7 +93,13 @@ class NativeRefusalTest(TerminalBase):
             for bridge in (True, False):
                 write(configuration, {'schema': 2, 'adapter': 'codex', 'settings': {
                     'inbox_bridge': bridge, 'resume_args': [] if bridge else ['--no-daemon']}})
-                lifecycle.start(self.root, resume=properties['id'], socket_path=self.socket)
+                launched = lifecycle.start(self.root, resume=properties['id'], socket_path=self.socket,
+                                           wait=not bridge, wait_timeout=20)
+                if not bridge:
+                    # Ask --wait immediately, before the test has observed a
+                    # refusal. Waiting for its record first masked this race.
+                    self.assertFalse(launched['ready'], launched)
+                    self.assertIn('This conversation is open in another app', launched['error'])
                 try:
                     until(lambda: agents.runtime(directory).get('native_refusal'), seconds=15)
                 except AssertionError:
