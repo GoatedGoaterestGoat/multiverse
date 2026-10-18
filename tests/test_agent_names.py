@@ -127,7 +127,7 @@ class AgentNamesTest(BaseTest):
                     shutil.rmtree(orphan)  # Each row proves its own shape, even when an earlier row fails.
 
     def test_uuid_names_cannot_hide_an_agent_or_orphan(self):
-        """UUID-shaped names must fail before publication, or a harmless-looking spawn hides another agent or an orphan from ID-based recovery."""
+        """Only UUID-shaped names fail before publication; permissive UUID parsers otherwise reject ordinary underscore names while preventing ID-based recovery collisions."""
         saved = self.record('worker')
         orphan = self.root / 'state/agents' / str(uuid4())
         write(orphan / 'compaction/note.json', {'leftover': True})
@@ -140,12 +140,24 @@ class AgentNamesTest(BaseTest):
                 after = {p.relative_to(self.root): p.read_bytes() for p in self.root.rglob('*') if p.is_file()}
                 self.assertEqual(after, before)
         self.backend.create.assert_not_called()
+        for name in ('12345678_1234_5678_1234_56781234', 'worker_0123456789abcdef0123456789abcdef'):
+            with self.subTest(name=name):
+                self.assertEqual(lifecycle.start(self.root, name, harness='fake')['name'], name)
 
     def test_addressing_precedence(self):
         """An exact UUID beats a legacy colliding name, an exact name beats a UUID prefix, and an ambiguous prefix is refused
         naming each match without saving anything, and old duplicate names still resolve by prefix; fragile because
         the precedence is subtle, and a break silently sends to, kills or resumes the wrong agent (abac381,
         14bc474)."""
+        with self.subTest('leftover or damaged peer folders do not steal a healthy short ID'):
+            valid = self.record('healthy', identifier='77777777-0000-4000-8000-000000000001')
+            for suffix, contents in ((2, None), (3, '{broken')):
+                damaged = self.root / 'state/agents' / f'77777777-0000-4000-8000-{suffix:012d}'
+                damaged.mkdir()
+                if contents is not None:
+                    (damaged / 'properties.json').write_text(contents)
+            self.assertEqual(agents.directory(self.root, '77777777'), valid)
+            self.assertEqual(agents.directory(self.root, damaged.name, allow_damaged=True), damaged)
         with self.subTest('an exact name beats another agent\'s uuid prefix'):
             named = self.record('a', identifier='33333333-0000-4000-8000-000000000003')
             prefix = self.record('b', identifier='ab2ea794-0000-4000-8000-000000000004')

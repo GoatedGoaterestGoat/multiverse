@@ -3,6 +3,7 @@ from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
 from . import sessions, records
 import fcntl
+import re
 
 
 def record_paths(root):
@@ -50,9 +51,11 @@ class AmbiguousAgent(ValueError):
 def directory(root, reference, *, allow_damaged=False):
     matches, exact_names, exact_ids, damaged, names = [], [], [], [], {}
     for path in record_paths(root):
+        usable = True
         try:
             data = records.properties(path)
         except records.RecordError as error:
+            usable = False
             damaged.append(error)
             data = error.data or {}
         identity = data.get('id') if isinstance(data.get('id'), str) else path.parent.name
@@ -61,8 +64,8 @@ def directory(root, reference, *, allow_damaged=False):
             exact_names.append(path.parent)
         if reference in (identity, path.parent.name):
             exact_ids.append(path.parent)
-        if (reference in (identity, name, path.parent.name) or identity.startswith(reference)
-                or path.parent.name.startswith(reference)):
+        if (reference in (identity, name, path.parent.name)
+                or usable and (identity.startswith(reference) or path.parent.name.startswith(reference))):
             matches.append(path.parent)
             names[path.parent] = name if isinstance(name, str) and name else path.parent.name
     if exact_ids:
@@ -106,11 +109,7 @@ def name_matches(path, name):
 
 
 def check_available_name(root, name, *, locked=False, exclude=None):
-    try:
-        normalize_session_id(name)
-    except ValueError:
-        pass
-    else:
+    if re.fullmatch(r'(?:[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})', name, re.I):
         raise ValueError("Agent names can't look like an agent ID; choose a name instead of a UUID")
     # The initial check is read-only. Publication repeats it under the
     # namespace/name locks before the atomic rename reserves the identity.

@@ -35,7 +35,7 @@ mv2 list --wide        # full summaries and errors
 
 Each line shows the agent's name, state, reported phase and summary. Agents waiting for you come first.
 
-Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Duplicate names and ambiguous prefixes are refused with the matching agents listed.
+Wherever a command takes an agent, you can give its name, its full ID or an unambiguous ID prefix. An exact full ID wins over an older agent's colliding name; use that older agent's own full ID to address it. An exact name wins over another agent's ID prefix. Leftover folders and unreadable identity records require their full folder ID and do not make a healthy agent's prefix ambiguous. Duplicate names and ambiguous prefixes are refused with the matching agents listed. Names may contain underscores; only the hexadecimal UUID forms, with or without hyphens, are reserved as IDs.
 
 ## Watch an agent
 
