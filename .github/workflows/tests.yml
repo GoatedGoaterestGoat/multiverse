@@ -11,6 +11,8 @@ on:
     - cron: "0 9 * * *"  # nightly, 09:00 UTC: the module-by-module job
   workflow_dispatch:
 
+# Actions are pinned by commit SHA, with the release in a comment: a tag can be moved to other code, a commit
+# cannot. To update one, take the commit of its new release tag (gh api repos/OWNER/REPO/commits/TAG --jq .sha).
 permissions:
   contents: read
 
@@ -28,13 +30,13 @@ jobs:
       matrix:
         python: ["3.11", "3.13"]  # the oldest requires-python allows, and the one mv2 is developed on
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: 22  # test_pi_bridge
-      - uses: astral-sh/setup-uv@v10.0.1  # it publishes no floating major tag
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - name: Install mv2
         run: uv sync --frozen --python ${{ matrix.python }}
       - name: Run the tests
@@ -49,13 +51,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20  # about 6 minutes
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux && tmux -V
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: 22
-      - uses: astral-sh/setup-uv@v10.0.1  # it publishes no floating major tag
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d  # v10.0.1
       - name: Install mv2
         run: uv sync --frozen --python 3.13
       - name: Run each module alone
