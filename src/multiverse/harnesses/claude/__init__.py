@@ -40,7 +40,7 @@ from uuid import uuid4
 
 from ...plugins import harness as plugins
 from ..base import ConfiguredAdapter
-from ...runtime.process import process_snapshot, process_started
+from ...runtime.process import process_snapshot, process_started, start_matches
 from ..types import Capability, NativeEndpoint, NativeResult, ObservedBinding, normalize_session_id
 from ..types import Usage
 from ...store import read
@@ -240,11 +240,14 @@ def process_record(session):
     Only when three starts are one: the one the runner recorded when it started this
     launch's child, the pid's start now, and the file's procStart (in Claude's format).
     A pid reused by a later process fails the first; execve (/restart) keeps the pid and its start.
+    Core compares the recorded start: it knows its forms (a Linux token, or the ctime older launches
+    recorded), and is given the start same_process already read, so this costs no extra query.
     """
     record = process_file(session)
     if record is None or not session.pid_started:
         return None
-    return record if same_process(record, session.pid) == session.pid_started else None
+    observed = same_process(record, session.pid)
+    return record if observed is not None and start_matches(session.pid_started, session.pid, observed=observed) else None
 
 
 def unverified_relaunch(session):
