@@ -157,7 +157,7 @@ class CodexPluginsTest(PluginTestCase):
             self.assertEqual(forwarded['CODEX_HOME'], environment['CODEX_HOME'])
             self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX') for arg in command.argv))
             self.assertNotIn('a "quoted" é', '\n'.join(command.argv))
-            self.assertEqual(command.fallback.environment, env)
+            self.assertEqual(command.fallback.environment, {**env, 'CODEX_HOME': environment['CODEX_HOME']})
             self.assertFalse(any(arg.startswith('shell_environment_policy.set.IS_SANDBOX')
                                  for arg in command.fallback.argv))
 
