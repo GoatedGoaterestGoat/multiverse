@@ -88,12 +88,29 @@ class QueueContinuationWorkerTest(NativeBackendTest):
                        {'attempts': [{'launch_id': self.launch, 'native_session_id': str(uuid4())}]},
                        {'native_receipt': {'queued_submission_id': 'old', 'transcript_confirmed': True}},
                        {'native_receipt': {'turn_id': 'native-history', 'transcript_confirmed': False}},
-                       {'native_receipt': []}):
+                       {'native_receipt': {}}):
             self.accepted(**values)
         self.accepted(delivery='steer')
         self.accepted(delivery='inbox-only')
         self.assertTrue(self.once())
         self.adapter.continue_queued.assert_not_called()
+
+    def test_wrong_typed_receipt_blocks_continuation_with_named_ledger_damage(self):
+        self.accepted('valid accepted receipt')
+        damaged = self.accepted('damaged accepted receipt')
+        path = self.directory / 'inbox-state.json'
+        states = read(path)
+        states[damaged['id']]['native_receipt'] = []
+        write(path, states)
+        before = path.read_bytes()
+        self.assertTrue(self.once())
+        self.adapter.continue_queued.assert_not_called()
+        diagnostic = agents.runtime(self.directory)['queue_continuation']
+        self.assertEqual(diagnostic['state'], 'error')
+        self.assertIn(str(path), diagnostic['reason'])
+        self.assertIn('invalid delivery tracking', diagnostic['reason'])
+        self.assertIn(damaged['id'], diagnostic['reason'])
+        self.assertEqual(path.read_bytes(), before)
 
     def test_acceptance_after_idle_is_detected_without_another_native_notification(self):
         # A valid state file with no accepted entries needs no native RPC.
