@@ -191,6 +191,20 @@ class RunnerTest(unittest.TestCase):
         self.assertIn(f'File "{shown}", line 10, in setUp', result.stdout)
         self.assertNotIn("in marked", result.stdout)  # the runner's own frames are not the test's
 
+    def test_a_test_that_patches_time_sleep_sees_only_its_own_calls(self):
+        self.module("test_patched_sleep", """
+            import threading, time, unittest
+            from unittest import mock
+            class PatchedSleep(unittest.TestCase):
+                def test_fake_clock(self):
+                    calls = []
+                    with mock.patch.object(time, "sleep", side_effect=lambda seconds: calls.append(seconds)):
+                        threading.Event().wait(1.5)  # long enough for any thread of the runner's to sleep
+                    self.assertEqual(calls, [], "a thread of the runner's slept in this test's fake time.sleep")
+            """)
+        result = self.run_tests("test_patched_sleep")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_a_unit_that_does_not_end_within_its_grace_is_killed(self):
         self.module("test_stubborn", """
             import os, signal, time, unittest
@@ -260,11 +274,12 @@ class RunnerTest(unittest.TestCase):
         lines = []
         reader = threading.Thread(target=lambda: lines.extend(runner.stdout), daemon=True)
         reader.start()
-        deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and not (started.exists()
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline and not (self.pid_in(started)
                                                    and any("] test_fails_first:" in line for line in lines)):
             time.sleep(0.05)
-        worker = int(started.read_text())
+        worker = self.pid_in(started)
+        self.assertTrue(worker, "".join(lines))  # the waiting test wrote its pid
         self.addCleanup(self.kill_if_running, worker)  # should the runner leave it behind
         runner.send_signal(how)
         runner.wait(timeout=30)
@@ -274,6 +289,15 @@ class RunnerTest(unittest.TestCase):
         reader.join(timeout=30)
         runner.stdout.close()
         return runner.returncode, "".join(lines), worker, cleaned.exists()
+
+    @staticmethod
+    def pid_in(path):
+        """The pid a test wrote to `path`, or None while it has not (yet): the file exists, empty, before it is."""
+        try:
+            text = path.read_text().strip()
+        except OSError:
+            return None
+        return int(text) if text.isdigit() else None
 
     def running(self, pid):
         try:
@@ -378,7 +402,7 @@ class RunnerTest(unittest.TestCase):
             """)
         self.addCleanup(subprocess.run, ["tmux", "-S", str(socket), "kill-server"], capture_output=True)
         code, output = self.stopped_once(started, "--grace", "1")  # its cleanups never run: it ignores the stop
-        daemon = int(started.read_text())
+        daemon = self.pid_in(started)
         self.addCleanup(self.kill_if_running, daemon)
         self.assertEqual(code, 130, output)
         tmux = subprocess.run(["tmux", "-S", str(socket), "list-sessions"], capture_output=True)

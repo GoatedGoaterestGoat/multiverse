@@ -43,6 +43,7 @@ UNKNOWN_SECONDS = 30  # a module the record does not know starts early, unsplit
 TIMEOUT = 1200
 GRACE = 30  # seconds a unit the runner stops gets to finish its test's cleanups before it is killed
 OBSERVE_SECONDS = 0.5  # how often a worker records who is in the process groups its tests tracked
+_monotonic = time.monotonic  # the real clock, whatever a test patches into the time module while it runs
 SLOTS = Path(f"/tmp/mv2-test-slots-{os.getuid()}")  # shared by every run of the suite on this machine
 
 
@@ -92,7 +93,7 @@ class _Result(unittest.TextTestResult):
         _Result.running = self
 
     def startTest(self, test):
-        self._started, self.test = time.monotonic(), test
+        self._started, self.test = _monotonic(), test
         import home_safety
         home_safety.running(test.id())  # a refused write is charged to this test, even in a plain TestCase
         super().startTest(test)
@@ -105,7 +106,7 @@ class _Result(unittest.TextTestResult):
             self.addError(test, sys.exc_info())
         home_safety.running(None)
         super().stopTest(test)
-        self.times[test.id()], self.test = round(time.monotonic() - self._started, 3), None
+        self.times[test.id()], self.test = round(_monotonic() - self._started, 3), None
 
 
 def _stop(signum, frame):
@@ -189,9 +190,10 @@ def _observe(tracked):
     lasts: its leader can exit first and leave helpers behind, and Run.end_tracked ends the group only while a
     process recorded here is still in it. A group seen empty is not watched again, since its number may later
     belong to another group."""
-    recorded, gone = set(), set()
+    recorded, gone, idle = set(), set(), threading.Event()
     while True:
-        time.sleep(OBSERVE_SECONDS)
+        # Not time.sleep: a test may patch it, for every thread, to drive a fake clock (test_codex_recovery does).
+        idle.wait(OBSERVE_SECONDS)
         groups = {record["group"] for record in _records(tracked) if type(record.get("group")) is int} - gone
         if not groups:
             continue
