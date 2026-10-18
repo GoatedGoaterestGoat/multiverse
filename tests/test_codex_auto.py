@@ -78,6 +78,13 @@ else:
         the daemon at most once; fragile because it depends on Codex flags, daemon availability and config/read
         support that change by version, and a wrong pick starts a second native child or silently drops mv2
         delivery."""
+        with self.subTest('harness auto capability is undecided, not launch-only'):
+            for setting, mechanism in (({}, None), ({'inbox_bridge': True}, None),
+                                       ({'inbox_bridge': False}, 'launch-only')):
+                self.configure(**setting)
+                found = capabilities(self.root, harness='codex')
+                for operation in ('send_steer', 'send_follow_up'):
+                    self.assertEqual(found[operation]['mechanism'], mechanism)
         start = ['app-server', 'daemon', 'start']
         plain = []  # launches checked once all have started, so their readiness waits overlap
         def launch(name, rpc=None, **settings):

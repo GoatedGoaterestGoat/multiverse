@@ -50,12 +50,24 @@ class CodexSideTest(unittest.TestCase):
     def test_side_thread_lifecycle_leaves_the_primary_untouched(self):
         """A /btw side thread's whole lifecycle, down to closing one saturated with requests, leaves the primary
         binding, refusal, usage and status untouched and allows the next /btw; a break goes unnoticed because messages,
-        status or context quietly come from the side thread, or a full side can no longer be interrupted or closed."""
+        status or context quietly come from the side thread, launch identity leaks into its tools, or a full side cannot close."""
         before = self.primary_state()
         error = {'error': {'code': -32603, 'message': 'Native side error'}}
         self.view.outgoing(self.fork())
         self.assertIsNone(self.view.incoming({'id': 10, **error}), 'A native fork error is local and allows a retry')
-        self.open_side()
+        with self.subTest('fork tools keep the same identity and exclusions as the primary'):
+            self.protocol.settings['agent_environment'] = {'MV2_IDENTITY_MODE': 'codex-agent-v1',
+                'MV2_AGENT_ID': 'primary', 'MV2_UNIVERSE': '/fixture/universe', 'MV2_AGENT_DIR': '/fixture/agent'}
+            request = self.fork(config={'shell_environment_policy': {
+                'set': {'MV2_LAUNCH_ID': 'old', 'MV2_CONTROL_SOCKET': '/old', 'MV2_AGENT_ID': 'wrong',
+                        'USER_SETTING': 'keep'}, 'exclude': ['AWS_*']}})
+            original = deepcopy(request)
+            forwarded = self.view.outgoing(request)
+            policy = forwarded['params']['config']['shell_environment_policy']
+            self.assertEqual(policy['set'], {**self.protocol.settings['agent_environment'], 'USER_SETTING': 'keep'})
+            self.assertEqual(policy['exclude'], ['AWS_*', 'MV2_*'])
+            self.assertEqual(request, original, 'The caller frame is not mutated')
+            self.view.incoming(self.forked())
         for identifier, method in enumerate(('thread/inject_items', 'turn/start', 'turn/interrupt'), 20):
             request = {'id': identifier, 'method': method, 'params': {'threadId': self.side}}
             self.assertEqual(self.view.outgoing(request), request)
@@ -101,8 +113,9 @@ class CodexSideTest(unittest.TestCase):
         self.assertIsNone(self.view.side_id)
         self.assertEqual(self.view.side_requests, {})
         self.assertEqual(self.primary_state(), before)
-        self.assertEqual(self.view.outgoing(self.fork(43)), self.fork(43),
-                         'A closed side must not prevent the next /btw')
+        reopened = self.view.outgoing(self.fork(43))
+        self.assertEqual({key: value for key, value in reopened['params'].items() if key != 'config'},
+                         self.fork(43)['params'], 'A closed side must not prevent the next /btw')
         self.assertIsNone(self.view.incoming(self.forked(43)))
         self.protocol.launch_refusal = {'message': 'primary refusal'}
         idle = {'type': 'idle'}
@@ -123,7 +136,7 @@ class CodexSideTest(unittest.TestCase):
                 self.initialize(view, version)
                 with self.assertRaises(LocalProtocolError):
                     view.outgoing(self.fork())
-        for change in ({'ephemeral': False}, {'ephemeral': 1}, {'threadId': self.side},
+        for change in ({'ephemeral': None}, {'ephemeral': 1}, {'threadId': self.side},
                        {'path': '/other/rollout'}, {'lastTurnId': 'turn'}, {'beforeTurnId': 'turn'},
                        {'excludeTurns': False}, {'experimentalPredictionMode': True}, {'cwd': '/other/workspace'}):
             with self.subTest(fork=change), self.assertRaises(LocalProtocolError):

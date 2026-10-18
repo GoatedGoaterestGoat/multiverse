@@ -390,11 +390,13 @@ class LaunchRelayTest(unittest.IsolatedAsyncioTestCase):
             (10, 'thread/start', {}, 'already owns'),
             (11, 'thread/resume', {'threadId': str(uuid4())}, 'does not match'),
             (12, 'thread/fork', {'threadId': self.native_id}, 'separate Multiverse launch'),
+            (14, 'thread/fork', {'threadId': self.native_id, 'ephemeral': False}, 'separate Multiverse launch'),
         ):
             await self.client.send(json.dumps({'id': request_id, 'method': method, 'params': params}))
             response = json.loads(await asyncio.wait_for(self.client.recv(), 2))
             self.assertEqual(response['id'], request_id)
             self.assertIn(reason, response['error']['message'])
+            self.assertIn(reason, self.errors[-1], 'Rejected primary navigation is recorded')
             self.assertTrue(self.received.empty())
             self.assertEqual(read(self.directory / 'properties.json')['native_session_id'], self.native_id)
         # A rejected navigation leaves the original session usable.

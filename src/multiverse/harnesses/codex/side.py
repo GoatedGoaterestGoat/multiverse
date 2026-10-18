@@ -4,6 +4,7 @@ Side conversations inherit native tools and permissions. This is identity and
 request correlation, never an execution sandbox or an mv2 agent registration.
 """
 from pathlib import Path
+from copy import deepcopy
 
 from ..types import NativeResult, normalize_session_id
 from .launch import LaunchProtocol
@@ -75,8 +76,14 @@ class LaunchConnection:
                     and (not isinstance(params['cwd'], str)
                          or Path(params['cwd']).resolve() != Path(self.root.settings['workspace']).resolve()))):
             raise local_error('Only one native ephemeral /btw fork of this launch primary is allowed', identifier)
+        params = deepcopy(params)
+        if 'agent_environment' in self.root.settings:
+            from .identity import session_environment
+            from .plugins import config_tree
+            native = config_tree(object_field(params, 'config').items()) if params.get('config') is not None else {}
+            params['config'] = session_environment(native, self.root.settings['agent_environment'])
         self.fork_request = identifier
-        return value
+        return {**value, 'params': params}
 
     def outgoing(self, value):
         if self.ended:
@@ -88,6 +95,10 @@ class LaunchConnection:
         params = value.get('params')
         native_id = params.get('threadId') if isinstance(params, dict) else None
         if method == 'thread/fork':
+            if isinstance(params, dict) and ('ephemeral' not in params or params['ephemeral'] is False):
+                # Persistent navigation is a primary policy error, not a /btw
+                # failure. Preserve the ordinary recorded navigation diagnostic.
+                raise ValueError('Fork into a separate Multiverse launch to preserve session identity')
             try:
                 return self._fork(value)
             except (TypeError, KeyError, ValueError) as error:
