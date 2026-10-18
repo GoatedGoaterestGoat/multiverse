@@ -253,6 +253,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                     + (f' · {failures} plugin error{"s" if failures != 1 else ""}' if failures else ''))
         if self.host and self.host.get("needed") and not self.host.get("running"):
             line.append(" · host off", style=theme.PEACH)
+        if self.snapshot.get("plugin_trouble"):  # the plugin system itself failed while reading; the agents are unaffected
+            line.append(" · plugins unreadable", style=theme.PEACH)
         self.query_one("#totals", Static).update(line)
 
     @work(group="plugin-host", exclusive=True, exit_on_error=False)
@@ -414,6 +416,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         self.query_one("#agents", DataTable).focus()
 
     def action_refresh(self):
+        """Read everything again, plugins too: a plugin repaired on disk loads again here, and its palette entries show."""
+        columns.reset_plugin_caches()
+        self.load_plugin_registry()
         self.refresh_snapshot()
 
     def action_help(self):
@@ -598,6 +603,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
     def action_plugins(self):
         if self.ready():
             root = self.target_scope()
+            self.load_plugin_registry()  # a plugin repaired since the last look loads again
             self.push_screen(PluginsScreen(root, self.scope_name(root), self.plugin_service), self.plugins_changed)
 
     def plugins_changed(self, changed):
