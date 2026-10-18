@@ -12,23 +12,29 @@ install()
 
 
 class NativeSafetyTest(unittest.TestCase):
-    def test_default_daemon_commands_fail_before_process_creation(self):
+    def test_tests_cannot_touch_the_users_codex_home_or_daemon(self):
+        """Spawn, connect and fixture setup against the user's Codex home, socket or daemon raise before acting;
+        fragile because the guard patches subprocess and socket globally, so a refactor disables it silently and the
+        first sign is a test restarting the user's daemon."""
         for home in PROTECTED_HOMES:
             for operation in ('start', 'stop', 'restart', 'update', 'version'):
                 with self.subTest(home=home, operation=operation), self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
                     subprocess.run(['codex', 'app-server', 'daemon', operation],
                                    env={**os.environ, 'CODEX_HOME': str(home)}, capture_output=True)
-        with self.assertRaises(AssertionError):
+        with self.subTest('resume in the default home'), self.assertRaises(AssertionError):
             check_spawn(['codex', 'resume', 'saved-thread'], {})
-
-    def test_default_socket_and_its_short_target_are_refused(self):
         for home in PROTECTED_HOMES:
             path = home / 'app-server-control/app-server-control.sock'
             for address in (str(path), str(path.resolve())):
-                with socket.socket(socket.AF_UNIX) as client, self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
+                with self.subTest(socket=address), socket.socket(socket.AF_UNIX) as client, \
+                        self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
                     client.connect(address)
+            with self.subTest(fixture_setup=home), self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
+                isolated_home(home)
 
-    def test_isolated_native_home_and_read_only_cli_help_are_allowed(self):
+    def test_isolated_homes_are_allowed_only_with_update_checks_off(self):
+        """An isolated Codex home is allowed only while its update checks are provably off; a break goes unnoticed
+        until a test's Codex updates the user's installed Codex."""
         with tempfile.TemporaryDirectory() as path:
             with self.assertRaisesRegex(AssertionError, 'disable daemon automatic updates'):
                 check_spawn(['codex', 'app-server', 'daemon', 'start'], {'CODEX_HOME': path})
@@ -37,23 +43,12 @@ class NativeSafetyTest(unittest.TestCase):
         check_spawn(['codex', '--version'], {})
         check_spawn(['codex', '--help'], {})
         check_connect('/tmp/isolated-test/rpc.sock')
-
-    def test_fixture_setup_cannot_change_default_home_settings(self):
-        for home in PROTECTED_HOMES:
-            with self.assertRaisesRegex(AssertionError, 'default Codex daemon'):
-                isolated_home(home)
-
-    def test_isolated_home_preserves_provider_config_after_top_level_update_setting(self):
         with tempfile.TemporaryDirectory() as path:
             home = isolated_home(path, config='model="offline"\n[model_providers.offline]\nname="Fixture"\n')
             config = tomllib.loads((home / 'config.toml').read_text())
             self.assertIs(config['check_for_update_on_startup'], False)
             self.assertEqual(config['model_providers']['offline']['name'], 'Fixture')
             check_spawn(['codex', 'resume', 'saved-thread'], {'CODEX_HOME': str(home)})
-
-    def test_missing_or_overwritten_tui_update_setting_blocks_process_creation(self):
-        with tempfile.TemporaryDirectory() as path:
-            home = isolated_home(path)
             config = home / 'config.toml'
             for contents in (None, '', 'check_for_update_on_startup=true\n',
                              'check_for_update_on_startup="false"\n',

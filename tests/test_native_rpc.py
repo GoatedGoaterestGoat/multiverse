@@ -37,15 +37,37 @@ class RpcTransportTest(unittest.TestCase):
                                     on_success=(RpcNotification('initialized', {}),))
         return NativeResult('ok', value=response['result'])
 
-    def test_response_id_mismatch_is_not_accepted(self):
-        def handler(connection):
-            request = json.loads(connection.recv())
-            connection.send(json.dumps({'id': request['id'] + 1, 'result': {}}))
-        self.serve(handler)
-        with self.assertRaisesRegex(ValueError, 'ID mismatch'):
-            execute(RpcSpec(self.path, self.plan))
+    def test_uncorrelated_or_malformed_reply_is_never_acceptance(self):
+        """An uncorrelated or malformed reply is an error, never acceptance; a break marks a message delivered when
+        someone else's reply arrived."""
+        with self.subTest('reply to another request id'):
+            def handler(connection):
+                request = json.loads(connection.recv())
+                connection.send(json.dumps({'id': request['id'] + 1, 'result': {}}))
+            self.serve(handler)
+            with self.assertRaisesRegex(ValueError, 'ID mismatch'):
+                execute(RpcSpec(self.path, self.plan))
+        self.path = str(Path(self.temp.name) / 'malformed-socket')
+        with self.subTest('a thread that is not an object'):
+            def handler(connection):
+                request = json.loads(connection.recv())
+                connection.send(json.dumps({'id': request['id'], 'result': {}}))
+                connection.recv()  # initialized notification
+                request = json.loads(connection.recv())
+                connection.send(json.dumps({'id': request['id'], 'result': {'thread': None}}))
+            self.serve(handler)
+            session = SessionHandle('agent', 'codex', self.temp.name, native_id='exact', state='running',
+                                    endpoint=NativeEndpoint('unix-websocket', self.path))
+            adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
+            executor = native.NativeExecutor(self.temp.name)
+            with patch.object(executor, 'check_session'):
+                observed = adapter.capabilities(session, executor)['send_steer']
+            self.assertEqual(observed.state, 'error')
+            self.assertIn('thread must be an object', observed.reason)
 
     def test_timeout_does_not_hang_and_acceptance_stays_unknown(self):
+        """An RPC timeout is bounded and leaves acceptance unknown; fragile because this classification is what stops a
+        retry from double-sending, and a hang inside an agent's tool call is silent."""
         def handler(connection):
             connection.recv()
             time.sleep(.3)
@@ -55,24 +77,9 @@ class RpcTransportTest(unittest.TestCase):
             execute(RpcSpec(self.path, self.plan), timeout=.1)
         self.assertLess(time.monotonic() - started, 1)
 
-    def test_malformed_thread_is_a_failed_capability_not_an_exception(self):
-        def handler(connection):
-            request = json.loads(connection.recv())
-            connection.send(json.dumps({'id': request['id'], 'result': {}}))
-            connection.recv()  # initialized notification
-            request = json.loads(connection.recv())
-            connection.send(json.dumps({'id': request['id'], 'result': {'thread': None}}))
-        self.serve(handler)
-        session = SessionHandle('agent', 'codex', self.temp.name, native_id='exact', state='running',
-                                endpoint=NativeEndpoint('unix-websocket', self.path))
-        adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
-        executor = native.NativeExecutor(self.temp.name)
-        with patch.object(executor, 'check_session'):
-            observed = adapter.capabilities(session, executor)['send_steer']
-        self.assertEqual(observed.state, 'error')
-        self.assertIn('thread must be an object', observed.reason)
-
     def test_native_permission_request_is_unanswered_even_from_async_caller(self):
+        """A server-initiated approval request is never answered by mv2, even from an async caller; a break goes
+        unnoticed because an auto-reply silently approves a command."""
         observed = []
         def handler(connection):
             request = json.loads(connection.recv())
