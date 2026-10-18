@@ -419,6 +419,53 @@ def launch_environment(request):
     return env
 
 
+def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_id):
+    """Select one argv-only retry while the exited child still owns this launch."""
+    from multiverse.display import notice_lines
+    from multiverse.runtime.native import adapter_hook
+    from multiverse.terminal.tmux import owned
+    candidate = request.get('startup_retry')
+    hook = adapter_hook(adapter, 'startup_retryable')
+    code = process.poll()
+    if (not isinstance(candidate, dict) or hook is None or type(code) is not int or code == 0
+            or elapsed > STARTUP_SECONDS or elapsed < 0 or request.get('rpc_proxy')
+            or request.get('control_endpoint') or request.get('shared_service')):
+        return None
+    argv = candidate.get('argv')
+    if not isinstance(argv, (list, tuple)) or not argv or not all(isinstance(arg, str) and arg for arg in argv):
+        return None
+    directory = launch.parent.parent
+    with lock(directory / '.launch.lock', create_parent=False):
+        facts = runtime(directory)
+        if (facts.get('launch_id') != launch.name or facts.get('pid') != process.pid
+                or facts.get('state') not in ('starting', 'running') or facts.get('ending_at')
+                or facts.get('startup_checked') or facts.get('startup_retry') or facts.get('native_refusal')
+                or facts.get('startup_delivery') in ('waiting', 'ready')
+                or (facts.get('native_relay') or {}).get('state') == 'ready'
+                or (launch / 'ready-event').exists() or read(launch / 'request.json') != request):
+            return None
+        try:
+            properties = read(directory / 'properties.json')
+            if properties.get('native_session_id') != native_id:
+                return None  # A newly bound conversation is already native startup evidence.
+            backend, pane = owned(properties, facts, states=('alive', 'stopped'))
+            text = bounded_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane))
+            if hook({'text': text, 'exit_code': code, 'argv': request['argv'], 'elapsed': elapsed}) is not True:
+                return None
+        except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
+            return None  # Unknown output/ownership never authorizes another process.
+        notices = notice_lines(request.get('resume_notices'), candidate.get('notices'))
+        selected = {**request, 'argv': list(argv), 'startup_retry': None, 'notices': notices}
+        # Durable selection precedes Popen. No binding or input has been accepted.
+        write(launch / 'request.json', selected)
+        update_runtime(directory, launch.name, launch_notices=notices,
+                       startup_retry={'exit_code': code, 'at': now()})
+        for notice in notices:
+            print(notice, flush=True)
+        child = spawn(selected)
+        return selected, child
+
+
 
 def finish_failed_wake(launch, request, environment, process, reason):
     """A failed startup is retryable only with exact harness negative evidence."""
@@ -546,7 +593,7 @@ def main():
                            'env': {**fallback.get('environment', {}), **request['env']},
                            'control_endpoint': None, 'shared_service': False, 'rpc_proxy': None,
                            'native_mode': selection, 'fallback': None, 'attachment': fallback.get('attachment'),
-                           'notices': notices}
+                           'notices': notices, 'startup_retry': fallback.get('startup_retry')}
                 write(launch / 'request.json', request)
                 env = launch_environment(request)
                 # A sender may have queued input while relay startup was still
@@ -592,19 +639,40 @@ def main():
                 attachment = fallback.get('attachment') or {}
                 for notice in notices:
                     print(notice, flush=True)
+        # Load before publishing pending observation: a configuration error must
+        # fail startup, not leave an observer that was never started pending.
+        adapter = None
+        if request.get('observe_refusal') or request.get('startup_retry'):
+            from multiverse import harnesses
+            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
         # The native UI owns this terminal; only its launch and interactive attach inherit stdin.
         if request.get('observe_refusal') and attachment.get('readiness') == 'process':
             update_runtime(agent_dir, launch.name, native_startup_observation={'state': 'pending'})
-        process = subprocess.Popen(request["argv"], env=env, stdin=None)
-        child_started = process_started(process.pid)
-        try:
-            attachments.record_child(launch, process.pid, child_started)
-        except (OSError, ValueError):
-            pass  # Extra recovery evidence must not prevent primary PID registration.
-        update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=child_started)
+        def spawn(selected):
+            nonlocal process
+            process = subprocess.Popen(selected['argv'], env=env, stdin=None)
+            child_started = process_started(process.pid)
+            try:
+                attachments.record_child(launch, process.pid, child_started)
+            except (OSError, ValueError):
+                pass  # Extra recovery evidence must not prevent primary PID registration.
+            update_runtime(agent_dir, launch.name, pid=process.pid, pid_started=child_started)
+            return process
+        child_at = time.monotonic()
+        initial_native_id = read(agent_dir / 'properties.json').get('native_session_id')
+        spawn(request)
+        survived_startup = False
+        if request.get('startup_retry'):
+            try:
+                process.wait(timeout=STARTUP_SECONDS)
+            except subprocess.TimeoutExpired:
+                survived_startup = True
+            else:
+                selected = retry_startup(launch, request, adapter, process, time.monotonic() - child_at, spawn,
+                                         native_id=initial_native_id)
+                if selected is not None:
+                    request, process = selected
         if request.get('observe_refusal'):
-            from multiverse import harnesses
-            adapter = harnesses.load(Path(env['MV2_UNIVERSE']), read(agent_dir / 'properties.json')['harness'])
             refusal_monitor = RefusalMonitor(agent_dir, launch.name, Path(env['MV2_UNIVERSE']), adapter, request['argv'][0])
             roles['refusal observer'] = attachments.Role(launch, 'refusal observer', started=runner_started)
             refusal_monitor.start()
@@ -637,6 +705,8 @@ def main():
             roles['recovery monitor'] = attachments.Role(launch, 'recovery monitor', started=runner_started)
             recovery_monitor.start()
         try:
+            if survived_startup:
+                raise subprocess.TimeoutExpired(request['argv'], STARTUP_SECONDS)
             code = process.wait(timeout=STARTUP_SECONDS)
         except subprocess.TimeoutExpired:
             startup_checked = True

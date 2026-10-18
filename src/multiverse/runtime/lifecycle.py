@@ -643,6 +643,7 @@ def _request(argv, env, command, endpoint, resume_message_id):
             "attachment": asdict(command.attachment) if command.attachment else None,
             "native_mode": command.native_mode,
             "fallback": asdict(command.fallback) if command.fallback else None,
+            "startup_retry": asdict(command.startup_retry) if command.startup_retry else None,
             "resume_message_id": resume_message_id,
             "rpc_proxy": asdict(command.rpc_proxy) if command.rpc_proxy else None}
 
