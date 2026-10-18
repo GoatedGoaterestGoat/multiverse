@@ -159,9 +159,9 @@ def rebind_session(root, reference, previous, session_id, reason, launch_id, *, 
 
 
 def report(root, reference, phase=None, summary=None):
-    agent_dir = directory(root, reference)
+    agent_dir = directory(root, reference, allow_damaged=True)
     with lock(agent_dir / ".properties.lock"):
-        data = read(agent_dir / "properties.json")
+        data = records.properties(agent_dir / "properties.json", harness_optional=True)
         if phase is not None:
             data["phase"] = phase
         if summary is not None:

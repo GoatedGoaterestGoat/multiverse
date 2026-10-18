@@ -960,6 +960,13 @@ runtime lock, so a late frame cannot reclassify an unverified startup. It stops 
 bridge binding, a recognized ordinary composer, native refusal, relay loss or launch exit. Unsupported versions
 perform no pane polling; later TUI navigation is outside this startup observer.
 
+Agent data callbacks (`report` and `inbox`) validate the selected properties and
+actor or current-launch proof independently of harness configuration. A damaged
+harness name or configuration cannot block those callbacks; all other identity
+fields still require valid records. Reporting itself does not need runtime data
+for its optional event metadata. Launch, terminal and delivery operations retain
+their full record validation.
+
 ### Successful plain startup observation
 
 An adapter may provide `launch_started(evidence) -> bool` beside its refusal

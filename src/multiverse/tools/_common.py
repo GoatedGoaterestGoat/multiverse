@@ -27,7 +27,10 @@ def callback(root, agent, *, agent_scoped=False):
     root = universe.resolve(root)
     if not agent:
         raise ValueError("Specify --agent outside an agent session")
-    directory = agents.directory(root, agent)
+    directory = agents.directory(root, agent, allow_damaged=agent_scoped)
+    if agent_scoped:
+        from ..universe import records
+        records.properties(directory / 'properties.json', harness_optional=True)
     from ..runtime.agent_identity import actor
     caller = actor()
     if caller is not None:

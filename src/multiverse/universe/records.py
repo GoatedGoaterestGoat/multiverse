@@ -57,10 +57,16 @@ def _object(path):
     return data
 
 
-def properties(path):
-    """An agent's `properties.json` as a dict; RecordError when it cannot be used."""
+def properties(path, *, harness_optional=False):
+    """An agent's `properties.json` as a dict; RecordError when it cannot be used.
+
+    Own report/callback paths do not interpret the harness; harness_optional
+    lets them report even when only that configuration field is damaged.
+    """
     data = _object(path)
     for key in TEXT_FIELDS:
+        if harness_optional and key == 'harness':
+            continue  # Agent data callbacks do not interpret the harness configuration.
         if key in data and not isinstance(data[key], str) and (data[key] is not None or key in IDENTITY_FIELDS):
             raise RecordError(path, f"{key} must be a string, not {_kind(data[key])}", data)
     return data

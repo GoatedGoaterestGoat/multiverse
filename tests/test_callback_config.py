@@ -39,6 +39,18 @@ class CallbackConfigTest(BaseTest):
             self.assertEqual(report.run(self.root, agent=self.identity, summary='saved')['summary'], 'saved')
             self.assertEqual(inbox.run(self.root, agent=self.identity)['messages'], [])
 
+    def test_callbacks_still_refuse_damaged_identity_fields_or_unreadable_objects(self):
+        for value in ({**self.properties, 'id': []}, {**self.properties, 'name': []}, []):
+            with self.subTest(value=value):
+                write(self.directory / 'properties.json', value)
+                before = (self.directory / 'properties.json').read_bytes()
+                with patch.dict(os.environ, self.env, clear=True):
+                    for action in (report.run, inbox.run):
+                        with self.assertRaisesRegex(ValueError, 'properties.json'):
+                            action(self.root, agent=self.identity)
+                self.assertEqual((self.directory / 'properties.json').read_bytes(), before)
+                self.assertFalse((self.directory / 'inbox.cursor').exists())
+
     def test_bad_configuration_does_not_relax_launch_or_agent_authority(self):
         for action in (report.run, inbox.run):
             with self.subTest(action=action), patch.dict(os.environ, {**self.env, 'MV2_LAUNCH_ID': 'old'}, clear=True):
