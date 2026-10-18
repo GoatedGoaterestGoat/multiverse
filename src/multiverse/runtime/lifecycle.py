@@ -476,7 +476,7 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             # Adapter variables never override this launch's identity.
             env = {**command.environment, **env}
             write(launch / "request.json", {**_request(argv, env, command, endpoint, None if _queue_wake else resume_message_id),
-                                           'notices': selected_notices, 'resume_notices': notices, 'workspace': str(workdir),
+                                           'notices': selected_notices, 'resume_notices': notices,
                                            'previous_agent_identity': previous_agent_identity,
                                            'previous_agent_environment': previous_agent_environment,
                                            'agent_environment': dict(agent_environment) if command.agent_identity else None,

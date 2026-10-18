@@ -473,7 +473,7 @@ def retry_startup(launch, request, adapter, process, elapsed, spawn, *, native_i
             backend, pane = owned(properties, facts, states=('alive', 'stopped'))
             text = startup_output(backend.run('capture-pane', '-p', '-S', f'-{OUTPUT_LINES}', '-t', pane), prelude)
             if hook({'text': text, 'exit_code': code, 'argv': request['argv'], 'elapsed': elapsed,
-                     'workspace': request.get('workspace', properties.get('workspace'))}) is not True:
+                     'agent_dir': str(directory)}) is not True:
                 return None
         except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.SubprocessError):
             return None  # Unknown output/ownership never authorizes another process.

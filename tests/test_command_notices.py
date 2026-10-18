@@ -2,7 +2,6 @@
 from dataclasses import replace
 from contextlib import redirect_stdout
 import io
-import json
 from pathlib import Path
 import subprocess
 import unittest
@@ -22,28 +21,23 @@ class CommandNoticeTest(NativeBackendTest):
         original = read(launch / 'request.json')
         original['fallback']['startup_retry'] = {'argv': ['plain', '--retry'], 'notices': ['Retry selected.']}
         write(launch / 'request.json', original)
-        from multiverse.harnesses.codex import CodexAdapter
-        diagnostic = json.loads((Path(__file__).parent / 'fixtures/codex/add-dir-readonly.json').read_text())[0]['text']
-        matcher = CodexAdapter.configured('codex', {'inbox_bridge': False}).startup_retryable
+        diagnostic = f'Candidate cannot use its generated root ({self.directory}).'
         saved = 'Saved native storage retained.'
-        for label, notices, capture, starts in (
-                ('only native output', [], diagnostic, 2),
-                ('retained home notice', [saved], saved + '\n' + diagnostic, 2),
-                ('multiple printed notices', [saved, 'Plugin note.'], saved + '\nPlugin note.\n' + diagnostic, 2),
-                ('historical request workspace', [], diagnostic, 2),
-                ('wrapped notice', [saved], 'Saved native sto\nrage retained.\n' + diagnostic, 2),
-                ('native screen cleared the notice', [saved], diagnostic, 2),
-                ('unprinted discarded notice', [], 'Discarded bridge note.\n' + diagnostic, 1),
-                ('changed notice', [saved], 'Saved different storage retained.\n' + diagnostic, 1),
-                ('unrelated prefix', [saved], 'Other failure\n' + saved + '\n' + diagnostic, 1),
-                ('unrelated suffix', [saved], saved + '\n' + diagnostic + '\nOther failure', 1),
-                ('known prelude at end is still native output', [saved], saved + '\n' + diagnostic + '\n' + saved, 1),
-                ('known notice joined to native text', [saved], saved + diagnostic, 1)):
+        for label, notices, capture, expected in (
+                ('only native output', [], diagnostic, diagnostic),
+                ('retained home notice', [saved], saved + '\n' + diagnostic, diagnostic),
+                ('multiple printed notices', [saved, 'Plugin note.'], saved + '\nPlugin note.\n' + diagnostic, diagnostic),
+                ('wrapped notice', [saved], 'Saved native sto\nrage retained.\n' + diagnostic, diagnostic),
+                ('native screen cleared the notice', [saved], diagnostic, diagnostic),
+                ('unprinted discarded notice', [], 'Discarded bridge note.\n' + diagnostic, None),
+                ('changed notice', [saved], 'Saved different storage retained.\n' + diagnostic, None),
+                ('native prefix', [saved], 'Native chrome\n' + saved + '\n' + diagnostic, None),
+                ('native suffix', [saved], saved + '\n' + diagnostic + '\nNative chrome', diagnostic + '\nNative chrome'),
+                ('known prelude at end stays', [saved], saved + '\n' + diagnostic + '\n' + saved, diagnostic + '\n' + saved),
+                ('known notice joined to native text', [saved], saved + diagnostic, None)):
             with self.subTest(output=label):
                 request = {**original, 'notices': ['Discarded bridge note.'], 'resume_notices': [],
                            'fallback': {**original['fallback'], 'notices': notices}}
-                if label == 'historical request workspace':
-                    request.pop('workspace', None)
                 write(launch / 'request.json', request)
                 write(self.directory / 'runtime.json', self.facts)
                 write(self.directory / 'properties.json', self.properties)
@@ -59,8 +53,9 @@ class CommandNoticeTest(NativeBackendTest):
                         self.assertEqual(agents.runtime(self.directory)['launch_notices'], ['Retry selected.'])
                     return first if len(calls) == 1 else second
                 def check(snapshot):
-                    self.assertEqual(snapshot['workspace'], self.properties['workspace'])
-                    return matcher(snapshot)
+                    self.assertEqual(snapshot['agent_dir'], str(self.directory))
+                    self.assertEqual(snapshot['text'], capture if expected is None else expected)
+                    return diagnostic in snapshot['text']
                 with patch.object(runner.sys, 'argv', ['runner', str(launch)]), \
                         patch.object(rpc, 'LaunchProxy', return_value=proxy), \
                         patch.object(runner, 'process_started', return_value=None), \
@@ -69,10 +64,9 @@ class CommandNoticeTest(NativeBackendTest):
                         patch('multiverse.terminal.tmux.owned', return_value=(self.backend, '%1')), \
                         patch.object(runner, 'launch_diagnostic', return_value={}):
                     self.assertEqual(runner.main(), 1)
-                self.assertEqual(calls, [['plain'], ['plain', '--retry']][:starts])
-                if starts == 2:
-                    self.assertIsNone(read(launch / 'request.json')['startup_retry'])
-                    self.assertEqual(agents.runtime(self.directory)['startup_retry']['exit_code'], 1)
+                self.assertEqual(calls, [['plain'], ['plain', '--retry']])
+                self.assertIsNone(read(launch / 'request.json')['startup_retry'])
+                self.assertEqual(agents.runtime(self.directory)['startup_retry']['exit_code'], 1)
 
         with self.subTest('adapter load failure cannot leave an observer pending or start its child'):
             from multiverse import harnesses
