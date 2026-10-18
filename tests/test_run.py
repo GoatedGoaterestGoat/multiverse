@@ -299,7 +299,7 @@ class RunnerTest(unittest.TestCase):
                    "SSH_AUTH_SOCK": "/planted/agent.sock"}
         kept = {"GIT_AUTHOR_NAME": "not a credential"}  # git's identity, which tests need
         elsewhere = {"MV2_CLI": "/another/checkout/bin/mv2", "MV2_PYTHON": "/another/checkout/.venv/bin/python"}
-        own = {"MV2_CLI": str(RUNNER.parents[1] / "bin" / "mv2"), "MV2_PYTHON": sys.executable}
+        own = {"MV2_CLI": str(RUNNER.parents[1] / "bin" / "mv2"), "MV2_PYTHON": os.path.normpath(sys.executable)}
         self.module("test_secrets", f"""
             import json, os, subprocess, sys, unittest
             NAMES = {sorted(planted) + sorted(kept)!r}
@@ -316,7 +316,9 @@ class RunnerTest(unittest.TestCase):
                     mv2 = subprocess.run([sys.executable, "-c", "import json, os; print(json.dumps("
                                           "[os.environ.get('MV2_CLI'), os.environ.get('MV2_PYTHON')]))"],
                                          capture_output=True, text=True, check=True)
-                    self.assertEqual(json.loads(mv2.stdout), {[own["MV2_CLI"], own["MV2_PYTHON"]]!r})
+                    # As written: the same interpreter may be named through "..", as plain unittest from tests/ does.
+                    self.assertEqual([os.path.normpath(path) for path in json.loads(mv2.stdout)],
+                                     {[own["MV2_CLI"], own["MV2_PYTHON"]]!r})
             """)
         result = subprocess.run(self.command("-v", "test_secrets"), env={**os.environ, **planted, **kept, **elsewhere},
                                 text=True,
