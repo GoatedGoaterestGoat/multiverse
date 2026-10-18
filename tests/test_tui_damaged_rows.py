@@ -153,45 +153,36 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             d.select("victim")
             self.assertNotIn("damaged", d.app.selected)
 
-    async def test_a_record_free_folder_can_be_deleted_only_when_the_listing_says_remove_can_resolve_it(self):
-        """A folder under state/agents with no records at all is a damaged row; core marks a proven orphan recover=remove."""
-        from unittest import mock
-        from multiverse.tools import list_agents
-        from multiverse.ui.backend import LocalBackend
-        orphan = self.root / "state" / "agents" / "5f5f5f5f-0000-4000-8000-0000000000aa"
+    async def test_a_record_free_folder_is_deleted_for_real_and_one_with_launch_history_is_not_offered(self):
+        """Real folders, the real listing hint and the real removal: nothing faked."""
+        agents = self.root / "state" / "agents"
+        orphan = agents / "5f5f5f5f-0000-4000-8000-0000000000aa"
         (orphan / "plugin-state").mkdir(parents=True)
-        real = list_agents.run
-
-        def marked(*args, **kwargs):
-            rows = real(*args, **kwargs)
-            if kwargs.get("json"):
-                for row in rows:
-                    if row["id"] == orphan.name and HINT:
-                        row["damaged"] = {**row["damaged"], "recover": "remove"}
-            return rows
-
-        with mock.patch.object(list_agents, "run", marked), mock.patch.object(LocalBackend, "remove_agent", return_value={}) as remove:
-            for HINT in (False, True):
-                async with self.dashboard(size=(130, 36)) as d:
-                    d.select(orphan.name)
-                    self.assertIn("damaged", d.app.selected)
-                    d.app.set_status("")
-                    await d.press("d")
-                    if not HINT:  # no hint: the usual refusal, naming the damage
-                        self.assertEqual(len(d.app.screen_stack), 1)
-                        self.assertIn("cannot be deleted while its record is damaged", d.status)
-                        continue
-                    self.assertEqual(len(d.app.screen_stack), 2, d.status)
-                    shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
-                    self.assertIn("a folder with no agent record", shown)
-                    self.assertIn("mv2 checks that no terminal is running for it", shown)
-                    await d.press("ctrl+enter")
-                    await d.until(lambda: remove.called, "the removal to be requested")
-                    self.assertEqual(remove.call_args.args[1], orphan.name)
-                    d.app.set_status("")
-                    await d.press("x")  # moving it is still refused: only removal can resolve it
-                    self.assertIsNone(d.app.moving)
-                    self.assertIn("cannot be moved while its record is damaged", d.status)
+        (orphan / "plugin-state" / "note.txt").write_text("leftover")
+        haunted = agents / "6a6a6a6a-0000-4000-8000-0000000000bb"
+        (haunted / "launches" / "7b7b7b7b-0000-4000-8000-0000000000cc").mkdir(parents=True)  # launch history: not an orphan
+        async with self.dashboard(size=(130, 36)) as d:
+            d.select(haunted.name)
+            self.assertNotIn("recover", d.app.selected["damaged"])
+            await d.press("d")
+            self.assertEqual(len(d.app.screen_stack), 1)
+            self.assertIn("cannot be deleted while its record is damaged", d.status)
+            d.select(orphan.name)
+            self.assertEqual(d.app.selected["damaged"]["recover"], "remove")
+            d.app.set_status("")
+            await d.press("x")  # moving it is refused: only removal can resolve it
+            self.assertIsNone(d.app.moving)
+            self.assertIn("cannot be moved while its record is damaged", d.status)
+            await d.press("d")
+            self.assertEqual(len(d.app.screen_stack), 2, d.status)
+            shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
+            self.assertIn("a folder with no agent record", shown)
+            self.assertIn("mv2 checks that no terminal is running for it", shown)
+            await d.press("ctrl+enter")
+            await d.until(lambda: not orphan.exists(), "the folder to be moved to the trash")
+            await d.refresh()
+            self.assertNotIn(orphan.name, [row[0].lstrip("│├╰─ ▸▾").rstrip(" ⚠●") for row in d.table()[1]])
+            self.assertTrue(haunted.exists())  # the other folder was not touched
 
     async def test_putting_the_file_back_puts_the_row_back(self):
         (self.victim / "properties.json").write_text("[]")
