@@ -105,7 +105,10 @@ Agents run mv2 through their shell as `"$MV2_CLI"`. Inside an agent, commands de
 An old agent folder containing only plugin leftovers, with no `properties.json`,
 `runtime.json`, `sessions.jsonl` or `launches` path, cannot reserve a native
 conversation. It does not block session claims or resumes elsewhere. Doctor
-still names it as an orphan folder to remove. Any surviving core record or
+still names it as an orphan folder to remove with `mv2 remove UUID`. Removal
+checks that no terminal is tagged for that agent on the current servers before
+moving the folder and its plugin leftovers to trash; unreadable servers or new
+core records refuse the move. Any surviving core record or
 launch directory, or an error inspecting one, keeps the usual recovery checks.
 
 While a launch is being prepared, both the text listing and `mv2 list --json`
