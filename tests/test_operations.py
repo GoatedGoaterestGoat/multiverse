@@ -156,11 +156,15 @@ class OperationTest(BaseTest):
         self.assertEqual(retried['message_id'], failed_id)
         self.assertEqual(len(inbox(self.directory, all_messages=True)['messages']), 2)
 
-    def test_backend_delivery_recovery_matches_tools_without_resubmitting(self):
+    def test_backend_delivery_confirms_once_and_tools_never_resubmit(self):
         message = send.run(self.root, agent=self.agent, text='Check my receipt', delivery='follow-up')
         backend = LocalBackend()
-        self.assertEqual(backend.deliver(self.root, self.agent, check=True),
-                         deliver.run(self.root, agent=self.agent, check=True))
+        checked = backend.deliver(self.root, self.agent, check=True)
+        self.assertTrue(checked['ok'])
+        self.assertEqual(len(checked['messages']), 1)
+        self.assertIs(checked['messages'][0]['transcript_confirmed'], True)
+        self.assertEqual(deliver.run(self.root, agent=self.agent, check=True), {'messages': [], 'ok': True})
+        self.assertEqual(len([call for call in self.adapter.calls if call[0] == 'get_delivery']), 1)
         self.assertEqual(backend.deliver(self.root, self.agent, retry=True),
                          deliver.run(self.root, agent=self.agent, retry=True))
         self.assertEqual(len([call for call in self.adapter.calls if call[0] == 'send']), 1)
