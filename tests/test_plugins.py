@@ -1,5 +1,6 @@
 """The plugin core: manifests, discovery, trust, plugins.json, settings, loading and the API."""
-import importlib
+import contextlib
+import io
 import json
 import threading
 import time
@@ -10,40 +11,38 @@ import sys
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse import plugins
-from multiverse.plugins import api, config, loader, manifest, settings, trust
+from multiverse import cli, plugins
+from multiverse.plugins import __main__ as helper, api, config, loader, manifest, settings, trust
 from multiverse.plugins.testing import PluginTestCase
+from multiverse.tools import doctor, plugins as tool
+from multiverse.universe import catalog
 
 SCHEMA = {"type": "object", "additionalProperties": False, "properties": {
     "greeting": {"type": "string", "minLength": 1},
     "limits": {"type": "object", "properties": {"count": {"type": "integer", "minimum": 0, "maximum": 10}}}}}
+HARMFUL = ("import os\nopen(os.environ['MARKER'], 'w').write('ran')\n"
+           "def register(mv):\n    pass\n")
 
-HELLO = """
-from multiverse.plugins import api
 
-def register(mv):
-    mv.cli.command("hello", lambda parser: parser.add_argument("--who", default="world"),
-                   lambda root=None, who="world": {"greeting": f"hello {who}"})
-    mv.bootstrap.line("Say hello with mv2 hello.")
-    mv.doctor.check(lambda universe: ["hello is lonely"] if not universe.agents() else [])
-    mv.dashboard.column("hello", "Hi", 6, lambda row: "hi " + row["name"])
-"""
+def run_quietly(call, stdin=""):
+    """(exit code, stdout, stderr) of `call` run as a command's main: SystemExit is its exit code."""
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(sys, "stdin", io.StringIO(stdin)), contextlib.redirect_stdout(out), \
+            contextlib.redirect_stderr(err):
+        try:
+            code = call()
+        except SystemExit as exit:
+            code = exit.code
+    code = 0 if code is None else code if isinstance(code, int) else 1
+    return code, out.getvalue(), err.getvalue()
 
 
 class ManifestTest(PluginTestCase):
-    def test_reads_a_complete_manifest(self):
-        directory = self.write_plugin("hello", {"description": " Greets. ", "module": "plugin",
-            "extends": ["cli", "bootstrap"], "permissions": ["agents.read", "models.claude"],
-            "commands": {"hello": "Say hello"}, "settings": {"version": 2, "schema": "schema.json"}})
-        found = manifest.load(directory)
-        self.assertEqual((found.name, found.version, found.api, found.module, found.default),
-                         ("hello", "0.1.0", (1, 0), "plugin", "off"))
-        self.assertEqual(found.description, "Greets.")
-        self.assertEqual(found.commands, {"hello": "Say hello"})
-        self.assertEqual(found.settings, manifest.Settings(2, "schema.json"))
-        self.assertIn("use claude models (this spends tokens)", found.permission_texts())
-
-    def test_refuses_what_it_cannot_use(self):
+    def test_manifest_and_discovery_refusals(self):
+        """Bad or reserved names, unknown extension points, permissions or harness entries, a schema or extension
+        path outside the plugin, unknown fields and bad JSON make a manifest invalid, a newer API reads as update
+        mv2 and an enabled absent plugin as missing; fragile because the newer-API check must come before the
+        unknown-name checks and the path checks keep a plugin's files inside it."""
         cases = {
             "name": ({"name": "Hello_World"}, "name must be"),
             "reserved": ({"name": "launches"}, "reserved"),
@@ -54,6 +53,16 @@ class ManifestTest(PluginTestCase):
             "field": ({"colour": "red"}, "unknown fields: colour"),
             "escape": ({"settings": {"version": 1, "schema": "../x.json"}}, "inside the plugin"),
             "default": ({"default": "maybe"}, 'default must be'),
+            "harness permission": ({"harnesses": {"claude": [{"dir": "c"}]}}, 'needs the permission "harness.claude"'),
+            "harness family": ({"permissions": ["harness.claude"], "harnesses": {"emacs": []}},
+                               "unknown harness family"),
+            "harness version": ({"permissions": ["harness.claude"],
+                                 "harnesses": {"claude": [{"dir": "c", "min_version": "2.1"}]}}, "MAJOR.MINOR.PATCH"),
+            "harness escape": ({"permissions": ["harness.pi"], "harnesses": {"pi": [{"extension": "/etc/x.ts"}]}},
+                               "inside the plugin"),
+            "core status item": ({"extends": ["statusline"], "statusline": {"inbox": {}}}, "one mv2 draws itself"),
+            "undeclared status item": ({"statusline": {"trees": {}}}, 'needs "statusline" in extends'),
+            "a name unknown at its own api": ({"permissions": ["transcript.read"]}, "unknown permissions: transcript"),
         }
         for label, (fields, expected) in cases.items():
             with self.subTest(label):
@@ -64,62 +73,100 @@ class ManifestTest(PluginTestCase):
         (self.plugins_dir / "broken" / "plugin.json").write_text("{")
         with self.assertRaisesRegex(manifest.ManifestError, "not valid JSON"):
             manifest.load(self.plugins_dir / "broken")
+        with self.subTest("harness versions it does not fit"):
+            found = manifest.load(self.write_plugin("guard", {
+                "extends": ["launch", "statusline"], "permissions": ["harness.claude", "harness.pi", "harness.codex"],
+                "harnesses": {"claude": [{"dir": "claude", "min_version": "2.1.290", "needs_bridge": True}],
+                              "pi": [{"extension": "pi/extension.ts"}],
+                              "codex": [{"min_version": "0.162.1", "max_version": "0.162.1",
+                                         "config": {"model_verbosity": "low"}}]},
+                "statusline": {"trees": {"claude": True, "tmux": True}}}))
+            [claude] = found.harnesses["claude"]
+            self.assertEqual((claude.path, claude.min_version, claude.needs_bridge), ("claude", (2, 1, 290), True))
+            self.assertIsNone(claude.fits((2, 1, 296)))
+            self.assertIn("2.1.290", claude.fits((2, 1, 289)))
+            self.assertIsNotNone(claude.fits(None))
+            [codex] = found.harnesses["codex"]
+            self.assertEqual(codex.fields, {"config": {"model_verbosity": "low"}})
+            self.assertIn("0.162.1 or older", codex.fits((0, 162, 2)))
+            self.assertEqual(found.statusline, (manifest.Item("trees", True, True),))
+        with self.subTest("states in a universe"):
+            self.enable("ghost")
+            self.write_plugin("future", {"api": "1.999"})
+            self.enable("future")
+            # Written for a newer API, with names this mv2 does not know yet: incompatible, never invalid.
+            self.write_plugin("newer", {"api": "1.999", "permissions": ["transcripts.read", "models.claude"],
+                                        "extends": ["transcripts"], "transcripts": {"rows": 10}})
+            self.enable("newer")
+            (self.plugins_dir / "bad").mkdir()
+            (self.plugins_dir / "bad" / "plugin.json").write_text("[]")
+            self.write_plugin("typo", {"permissions": ["transcript.read"]})
+            states = {found.name: found for found in plugins.entries(self.root)}
+            self.assertEqual(states["ghost"].state, "missing")
+            have = ".".join(map(str, loader.API_VERSION))
+            for name in ("future", "newer"):
+                self.assertEqual(states[name].state, "incompatible")
+                self.assertIn(f"needs plugin API 1.999; this mv2 has {have}; update mv2", states[name].problem)
+            self.assertIn("transcripts.read", states["newer"].manifest.permission_texts())
+            self.assertEqual(states["bad"].state, "invalid")
+            self.assertEqual(states["typo"].state, "invalid")
+        with self.subTest("mv2 plugins new"):
+            parent = self.work / "new-plugins"
+            parent.mkdir()
+            for name in ("core", "plugins", "list"):
+                with self.subTest(name), self.assertRaises(ValueError):
+                    tool.run(self.root, plugin_action="new", name=name, directory=str(parent))
+            self.assertEqual(list(parent.iterdir()), [])
+            tool.run(self.root, plugin_action="new", name="fresh", directory=str(parent))
+            self.assertTrue((parent / "fresh" / "plugin.json").exists())
 
 
 class DiscoveryTest(PluginTestCase):
-    def test_off_unless_enabled_and_only_bundled_plugins_default_on(self):
-        self.write_plugin("quiet", {"default": "on"})
-        found = self.entry("quiet")
-        self.assertEqual((found.state, found.on, found.source), ("off", False, "path"))
-        self.enable("quiet")
-        self.assertEqual(self.entry("quiet").state, "on")
+    bundled = True  # typeahead is the bundled plugin a cloned repository's copy would replace
 
-    def test_precedence_records_what_is_shadowed(self):
-        self.write_plugin("twin", {"version": "1.0.0"})
-        universe_copy = self.write_plugin("twin", {"version": "2.0.0"}, where=self.root / "plugins")
-        personal = self.write_plugin("twin", {"version": "3.0.0"}, where=self.home / ".multiverse" / "plugins")
-        found = self.entry("twin")
-        self.assertEqual((found.source, found.manifest.version), ("path", "1.0.0"))
-        self.assertEqual(found.shadowed, [("universe", universe_copy), ("personal", personal)])
-        with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": ""}):
-            # An untrusted universe copy never hides another source's plugin; trusted, it comes first.
+    def test_which_copy_runs_and_whether_it_is_on(self):
+        """Path, universe, personal and bundled copies take precedence in that order, an untrusted copy never hides
+        another, and only bundled plugins default on; a security boundary, since a cloned repository's
+        plugins/NAME or a plugin's own default must never run code the user did not choose."""
+        with self.subTest("only bundled plugins default on"):
+            self.write_plugin("quiet", {"default": "on"})
+            found = self.entry("quiet")
+            self.assertEqual((found.state, found.on, found.source), ("off", False, "path"))
+            self.enable("quiet")
+            self.assertEqual(self.entry("quiet").state, "on")
+            self.assertEqual((self.entry("typeahead").source, self.entry("typeahead").on), ("bundled", True))
+        with self.subTest("precedence"):
+            self.write_plugin("twin", {"version": "1.0.0"})
+            universe_copy = self.write_plugin("twin", {"version": "2.0.0"}, where=self.root / "plugins")
+            personal = self.write_plugin("twin", {"version": "3.0.0"}, where=self.home / ".multiverse" / "plugins")
             found = self.entry("twin")
-            self.assertEqual((found.source, found.shadowed), ("personal", [("universe", universe_copy)]))
-            trust.trust(universe_copy)
-            self.assertEqual(self.entry("twin").source, "universe")
-
-    def test_universe_plugins_need_trust_at_their_content(self):
-        directory = self.write_plugin("local", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"},
-                                      where=self.root / "plugins")
-        self.enable("local")
-        found = self.entry("local")
-        self.assertEqual(found.state, "untrusted")
-        self.assertIn("mv2 plugins trust local", found.problem)
-        with self.assertRaises(plugins.PluginError):
-            loader.load(found)
-        trust.trust(directory)
-        self.assertEqual(self.entry("local").state, "on")
-        self.assertTrue((self.home / ".multiverse" / trust.FILE).is_file())
-        (directory / "plugin.py").write_text("def register(mv): print('changed')\n")
-        self.assertEqual(self.entry("local").state, "changed")
-        (directory / "link").symlink_to(self.home)
-        with self.assertRaisesRegex(ValueError, "symbolic links"):
-            trust.fingerprint(directory)
-
-    def test_missing_invalid_and_incompatible_plugins_say_why(self):
-        self.enable("ghost")
-        self.write_plugin("future", {"api": "1.999"})
-        self.enable("future")
-        (self.plugins_dir / "bad").mkdir()
-        (self.plugins_dir / "bad" / "plugin.json").write_text("[]")
-        states = {found.name: (found.state, found.problem) for found in plugins.entries(self.root)}
-        self.assertEqual(states["ghost"][0], "missing")
-        self.assertEqual(states["future"][0], "incompatible")
-        have = ".".join(map(str, loader.API_VERSION))
-        self.assertIn(f"needs plugin API 1.999; this mv2 has {have}; update mv2", states["future"][1])
-        self.assertEqual(states["bad"][0], "invalid")
+            self.assertEqual((found.source, found.manifest.version), ("path", "1.0.0"))
+            self.assertEqual(found.shadowed, [("universe", universe_copy), ("personal", personal)])
+            with mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": ""}):
+                # An untrusted universe copy never hides another source's plugin; trusted, it comes first.
+                found = self.entry("twin")
+                self.assertEqual((found.source, found.shadowed), ("personal", [("universe", universe_copy)]))
+                trust.trust(universe_copy)
+                self.assertEqual(self.entry("twin").source, "universe")
+        with self.subTest("a universe copy of a bundled plugin"):
+            marker = self.work / "marker"
+            os.environ["MARKER"] = str(marker)
+            copy = self.write_plugin("typeahead", {"version": "9.9.9", "module": "plugin"}, {"plugin.py": HARMFUL},
+                                     where=self.root / "plugins")
+            found = self.entry("typeahead")
+            self.assertEqual(found.source, "bundled")
+            self.assertIn("universe", [source for source, _ in found.shadowed])
+            item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "typeahead")
+            self.assertEqual((item["source"], item["overrides"]), ("bundled", []))  # untrusted: shadowed, no more
+            self.assertFalse(marker.exists())
+            trust.trust(copy)
+            item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "typeahead")
+            self.assertEqual(item["source"], "universe")
+            self.assertEqual([entry["source"] for entry in item["overrides"]], ["bundled"])
 
     def test_safe_mode_loads_nothing(self):
+        """MV2_PLUGINS=off loads no plugin; a break goes unnoticed because safe mode is used only after a plugin
+        has broken mv2, the worst time to find it broken."""
         self.write_plugin("hello", {"module": "plugin", "extends": ["bootstrap"]},
                           {"plugin.py": "def register(mv): mv.bootstrap.line('hi')\n"})
         self.enable("hello")
@@ -129,432 +176,362 @@ class DiscoveryTest(PluginTestCase):
             self.assertEqual(plugins.bootstrap_lines(self.root), [])
         self.assertEqual(plugins.bootstrap_lines(self.root), ["hi"])
 
-    def test_no_inheritance_between_universe_and_subverse(self):
-        self.write_plugin("hello")
-        child = self.subverse("child")
-        self.enable("hello")
-        self.assertTrue(self.entry("hello").on)
-        self.assertFalse(self.entry("hello", child).on)
-
 
 class ConfigTest(PluginTestCase):
-    def test_enabling_keeps_the_rest_of_the_file(self):
-        # "keys" is from before plugins lost their dashboard keys: still read, and kept.
-        config.path(self.root).write_text(json.dumps({"schema": 1, "theme": "dusk", "keys": {"u": None},
-                                                      "enabled": {"a": True}}, indent=1))
-        config.set_enabled(self.root, "b", True)
-        data = json.loads(config.path(self.root).read_text())
-        self.assertEqual(data, {"schema": 1, "theme": "dusk", "keys": {"u": None}, "enabled": {"a": True, "b": True}})
-        self.assertIsNone(config.load(self.root).problem)
-
-    def test_an_unusable_file_reads_as_defaults_and_is_never_rewritten(self):
-        config.path(self.root).write_text('{"enabled": {"a": "yes"}}')
-        found = config.load(self.root)
-        self.assertEqual(found.enabled, {})
-        self.assertIn("enabled.a must be true or false", found.problem)
-        with self.assertRaisesRegex(ValueError, "enabled.a"):
+    def test_plugins_json_keeps_unknown_keys_and_survives_damage(self):
+        """Writing plugins.json keeps keys from newer and older mv2, and an unusable file reads as defaults and is
+        never rewritten; a break goes unnoticed because older runners sharing the universe silently turn every
+        plugin off or the next write drops the newer fields."""
+        path = config.path(self.root)
+        with self.subTest("an older mv2's keys"):
+            # "keys" is from before plugins lost their dashboard keys: still read, and kept.
+            path.write_text(json.dumps({"schema": 1, "theme": "dusk", "keys": {"u": None}, "enabled": {"a": True}}))
             config.set_enabled(self.root, "b", True)
-        self.assertEqual(config.path(self.root).read_text(), '{"enabled": {"a": "yes"}}')
-        self.write_plugin("b")
-        self.assertIn("plugins.json cannot be used", plugins.problems(self.root)[0])
+            self.assertEqual(json.loads(path.read_text()),
+                             {"schema": 1, "theme": "dusk", "keys": {"u": None}, "enabled": {"a": True, "b": True}})
+            self.assertIsNone(config.load(self.root).problem)
+        with self.subTest("a newer mv2's keys"):
+            self.write_plugin("tool")
+            config.set_enabled(self.root, "tool", True)
+            path.write_text(json.dumps({**json.loads(path.read_text()), "access": {"tool": "spend"},
+                                        "access_ceiling": "observe"}))
+            loaded = config.load(self.root)
+            self.assertIsNone(loaded.problem)
+            self.assertTrue(loaded.is_on("tool"))
+            self.assertEqual(plugins.entry(self.root, "tool").state, "on")
+            self.assertTrue(any("access, access_ceiling" in note for note in plugins.notes(self.root)))
+            config.set_enabled(self.root, "tool", False)  # writing it keeps what a newer mv2 put there
+            self.assertEqual(json.loads(path.read_text())["access"], {"tool": "spend"})
+        with self.subTest("unusable"):
+            for text in ('{"enabled": {"a": "yes"}}', '{"schema": 1, "access": {}, "enabled": {"a": "yes"}}'):
+                path.write_text(text)
+                found = config.load(self.root)
+                self.assertEqual(found.enabled, {})
+                self.assertIn("enabled.a must be true or false", found.problem)
+                with self.assertRaisesRegex(ValueError, "enabled.a"):
+                    config.set_enabled(self.root, "b", True)
+                self.assertEqual(path.read_text(), text)
+                self.assertIn("plugins.json cannot be used", plugins.problems(self.root)[0])
+
+
+CHECKED = """
+def register(mv):
+    def check(values):
+        if values.get("level", 1) not in (1, 2):
+            raise ValueError("level must be 1 or 2")
+    mv.settings.check(check)
+"""
+SCREENED = """
+def register(mv):
+    def check(values):
+        if values.get("level", 1) not in (1, 2):
+            raise ValueError("level must be 1 or 2")
+    mv.settings.check(check)
+    mv.dashboard.settings(screen="screens:Settings")
+    def run(root, **arguments):
+        return {"ran": True}
+    mv.cli.command("screened", lambda parser: None, run)
+"""
+LEVELS = {"type": "object", "properties": {"schema": {"type": "integer"}, "level": {"type": "integer"}}}
+LEVEL_SETTINGS = {"version": 1, "schema": "settings.schema.json", "defaults": "defaults/settings.json"}
 
 
 class SettingsTest(PluginTestCase):
-    def plugin_with_settings(self, check=None):
-        code = "def register(mv):\n    pass\n" if check is None else check
-        self.write_plugin("greeter", {"module": "plugin", "settings": {
-            "version": 2, "schema": "schema.json", "defaults": "defaults.json", "legacy": "greeter.json"}},
-            {"plugin.py": code, "schema.json": json.dumps(SCHEMA),
-             "defaults.json": json.dumps({"schema": 2, "greeting": "hello"})})
-        return self.entry("greeter").manifest
+    def greeter(self, name, check=None):
+        self.write_plugin(name, {"module": "plugin", "settings": {
+            "version": 2, "schema": "schema.json", "defaults": "defaults.json", "legacy": f"{name}.json"}},
+            {"plugin.py": "def register(mv):\n    pass\n" if check is None else check,
+             "schema.json": json.dumps(SCHEMA), "defaults.json": json.dumps({"schema": 2, "greeting": "hello"})})
+        return self.entry(name).manifest
 
-    def test_defaults_file_legacy_and_problems(self):
-        manifest_ = self.plugin_with_settings()
-        found = settings.read(self.root, manifest_)
-        self.assertEqual((found.values, found.source, found.problem), ({"schema": 2, "greeting": "hello"}, "defaults", None))
-        (self.root / "greeter.json").write_text('{"old": true}')
-        self.assertEqual(settings.read(self.root, manifest_).source, "defaults")  # a pre-plugin file is never read
-        settings.path(self.root, "greeter").parent.mkdir(exist_ok=True)
-        settings.path(self.root, "greeter").write_text('{"schema": 1, "greeting": "x"}')
-        self.assertIn("run mv2 plugins migrate", settings.read(self.root, manifest_).problem)
-        settings.path(self.root, "greeter").write_text('{"schema": 2, "greeting": "", "extra": 1}')
-        self.assertIn("greeter.json: greeting must have at least 1 characters", settings.read(self.root, manifest_).problem)
+    def leveled(self, name, code=CHECKED):
+        self.write_plugin(name, {"module": "plugin", "settings": LEVEL_SETTINGS}, {
+            "plugin.py": code, "settings.schema.json": json.dumps(LEVELS),
+            "defaults/settings.json": json.dumps({"schema": 1, "level": 1})})
+        self.enable(name)
+        return settings.path(self.root, name)
 
-    def test_edit_changes_only_named_keys_and_refuses_bad_results(self):
-        manifest_ = self.plugin_with_settings()
-        path = settings.path(self.root, "greeter")
-        path.parent.mkdir(exist_ok=True)
-        path.write_text('{"schema": 2, "limits": {"count": 3}, "greeting": "hey"}')
-        settings.edit(self.root, manifest_, {"limits.count": 4})
-        self.assertEqual(json.loads(path.read_text()), {"schema": 2, "limits": {"count": 4}, "greeting": "hey"})
-        settings.edit(self.root, manifest_, {("limits", "count"): settings.DELETE})
-        self.assertEqual(json.loads(path.read_text()), {"schema": 2, "greeting": "hey"})
-        with self.assertRaisesRegex(ValueError, "at most 10"):
-            settings.edit(self.root, manifest_, {"limits.count": 11})
-        with self.assertRaisesRegex(ValueError, "unknown setting 'colour'"):
-            settings.edit(self.root, manifest_, {"colour": "red"})
-        self.assertEqual(json.loads(path.read_text()), {"schema": 2, "greeting": "hey"})
+    def mv2_settings(self, name, *assignments):
+        """`mv2 plugins settings NAME --set ...` as a new process runs it: nothing loaded yet."""
+        loader.reset()
+        return tool.run(self.root, plugin_action="settings", name=name, assignments=assignments)
 
-    def test_the_plugins_own_check_runs_once_it_is_loaded(self):
-        self.plugin_with_settings(
-            "def register(mv):\n"
-            "    @mv.settings.check\n"
-            "    def check(values):\n"
-            "        if values.get('greeting') == 'boo':\n"
-            "            raise ValueError('greeting: too scary')\n")
-        self.enable("greeter")
-        loader.load(self.entry("greeter"))
-        with self.assertRaisesRegex(ValueError, "too scary"):
-            plugins.edit_settings(self.root, "greeter", {"greeting": "boo"})
-        settings.path(self.root, "greeter").parent.mkdir(exist_ok=True)
-        settings.path(self.root, "greeter").write_text('{"schema": 2, "greeting": "boo"}')
-        found = self.entry("greeter")
-        self.assertEqual(found.state, "unusable")
-        self.assertFalse(found.usable)
-        self.assertEqual(loader.active(self.root), [])
+    def state(self, name):
+        loader.reset()
+        return next(item for item in plugins.listing(self.root) if item["name"] == name)["state"]
 
-    def test_unsupported_schema_keywords_are_refused(self):
-        with self.assertRaisesRegex(ValueError, "unsupported keywords: oneOf"):
-            settings.check_schema({"oneOf": []})
-
-    def test_enabling_installs_default_settings_once(self):
-        self.plugin_with_settings()
-        result = plugins.set_enabled(self.root, "greeter", True)
-        self.assertEqual(result["installed"], [str(settings.path(self.root, "greeter"))])
-        self.assertEqual(plugins.set_enabled(self.root, "greeter", True)["installed"], [])
-        self.assertEqual(plugins.settings_of(self.root, "greeter")[0], {"schema": 2, "greeting": "hello"})
+    def test_settings_edit_writes_only_valid_named_changes(self):
+        """A settings edit changes only named keys, DELETE removes one, a schema refusal or the plugin's own check
+        (plugin on or off) writes nothing, a refused file reads unusable while the plugin keeps its command, and
+        enabling twice never reinstalls defaults; fragile because the check needs the plugin's code even where it
+        is off (COMPACTION-2), and a break quietly writes a bad file."""
+        with self.subTest("only the named keys"):
+            manifest_ = self.greeter("greeter")
+            path = settings.path(self.root, "greeter")
+            path.parent.mkdir(exist_ok=True)
+            path.write_text('{"schema": 2, "limits": {"count": 3}, "greeting": "hey"}')
+            settings.edit(self.root, manifest_, {"limits.count": 4})
+            self.assertEqual(json.loads(path.read_text()), {"schema": 2, "limits": {"count": 4}, "greeting": "hey"})
+            settings.edit(self.root, manifest_, {("limits", "count"): settings.DELETE})
+            self.assertEqual(json.loads(path.read_text()), {"schema": 2, "greeting": "hey"})
+            with self.assertRaisesRegex(ValueError, "at most 10"):
+                settings.edit(self.root, manifest_, {"limits.count": 11})
+            with self.assertRaisesRegex(ValueError, "unknown setting 'colour'"):
+                settings.edit(self.root, manifest_, {"colour": "red"})
+            self.assertEqual(json.loads(path.read_text()), {"schema": 2, "greeting": "hey"})
+        with self.subTest("defaults are installed once"):
+            self.greeter("fresh")
+            result = plugins.set_enabled(self.root, "fresh", True)
+            self.assertEqual(result["installed"], [str(settings.path(self.root, "fresh"))])
+            self.assertEqual(plugins.set_enabled(self.root, "fresh", True)["installed"], [])
+            self.assertEqual(plugins.settings_of(self.root, "fresh")[0], {"schema": 2, "greeting": "hello"})
+        with self.subTest("its own check, once loaded"):
+            self.greeter("scary", "def register(mv):\n"
+                                  "    @mv.settings.check\n"
+                                  "    def check(values):\n"
+                                  "        if values.get('greeting') == 'boo':\n"
+                                  "            raise ValueError('greeting: too scary')\n")
+            self.enable("scary")
+            loader.load(self.entry("scary"))
+            with self.assertRaisesRegex(ValueError, "too scary"):
+                plugins.edit_settings(self.root, "scary", {"greeting": "boo"})
+            settings.path(self.root, "scary").write_text('{"schema": 2, "greeting": "boo"}')
+            found = self.entry("scary")
+            self.assertEqual(found.state, "unusable")
+            self.assertFalse(found.usable)
+            self.assertNotIn("scary", [loaded.name for loaded in loader.active(self.root)])
+        with self.subTest("its own check refuses an edit"):
+            path = self.leveled("picky")
+            self.mv2_settings("picky", "level=2")
+            before = path.read_text()
+            with self.assertRaisesRegex(ValueError, "level must be 1 or 2"):
+                self.mv2_settings("picky", "level=3")
+            self.assertEqual(path.read_text(), before)
+            self.assertIn(self.state("picky"), ("on", "loaded"))
+        with self.subTest("its own check runs where the plugin is off"):
+            path = self.leveled("dormant")
+            self.enable("dormant", on=False)
+            with self.assertRaisesRegex(ValueError, "level must be 1 or 2"):
+                self.mv2_settings("dormant", "level=3")
+            self.assertFalse(path.exists())
+        with self.subTest("a file its check refuses"):
+            path = self.leveled("refused")
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"schema": 1, "level": 9}))
+            self.assertEqual(self.state("refused"), "unusable")
+            loader.reset()
+            self.assertEqual(tool.run(self.root, plugin_action="info", name="refused")["state"], "unusable")
+            self.assertIn("level must be 1 or 2", self.mv2_settings("refused")["problem"])
+            loader.reset()
+            self.assertTrue(any("refused" in text and "its settings cannot be used" in text
+                                for _, text in doctor.check(self.root)))
+            self.mv2_settings("refused", "level=1")  # and it can be fixed from the command line
+            self.assertIn(self.state("refused"), ("on", "loaded"))
+        with self.subTest("code that cannot run: its schema alone"):
+            path = self.leveled("broken", "raise RuntimeError('cannot load')\n")
+            written = self.mv2_settings("broken", "level=3")
+            self.assertIn("failed to load: RuntimeError: cannot load", written["unchecked"])
+            self.assertEqual(json.loads(path.read_text())["level"], 3)
+            with self.assertRaises(ValueError):
+                self.mv2_settings("broken", "level=x")
+        with self.subTest("a refused file keeps its command and screen"):
+            self.write_plugin("screened", {"module": "plugin", "extends": ["dashboard.settings", "cli"],
+                                           "commands": {"screened": "Show its state"}, "settings": {"version": 1}},
+                              {"plugin.py": SCREENED})
+            self.enable("screened")
+            settings.path(self.root, "screened").write_text('{"schema": 1, "level": 9}')
+            loader.reset()  # a fresh process: nothing loaded yet
+            item = next(entry for entry in plugins.listing(self.root) if entry["name"] == "screened")
+            self.assertEqual(item["settings"]["screen"], "screens:Settings")
+            self.assertIn("screened", plugins.commands(self.root))
+            loader.reset()
+            with mock.patch.object(sys, "argv", ["mv2", "-u", str(self.root), "screened"]), \
+                    contextlib.chdir(self.work):
+                code, out, err = run_quietly(cli.main)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out), {"ran": True})
+            self.assertIn("plugin screened: its settings cannot be used: level must be 1 or 2", err)
 
 
 class LoadingTest(PluginTestCase):
-    def test_register_records_contributions_and_imports_once(self):
-        self.write_plugin("hello", {"module": "plugin", "extends": ["cli", "bootstrap", "doctor", "dashboard.column"],
-                                    "permissions": ["agents.read"], "commands": {"hello": "Say hello"}},
-                          {"plugin.py": HELLO})
-        self.enable("hello")
-        loaded = loader.load(self.entry("hello"))
-        self.assertIs(loader.load(self.entry("hello")), loaded)
-        self.assertEqual(self.entry("hello").state, "loaded")
-        self.assertEqual(set(loaded.registrations.commands), {"hello"})
-        self.assertEqual(loaded.registrations.columns["hello"].value({"name": "w"}), "hi w")
-        self.assertTrue(loaded.package.startswith("mv2_plugins.hello_"))
-        self.assertEqual(plugins.bootstrap_lines(self.root), ["Say hello with mv2 hello."])
-        command = plugins.command(self.root, "hello")
-        self.assertEqual(command.run(who="you"), {"greeting": "hello you"})
-        universe = api.Universe(self.root, api.Plugin(loaded))
-        self.assertEqual(plugins.doctor(self.root, lambda plugin: universe), ["hello: hello is lonely"])
-
-    def test_plugin_modules_import_their_own_package(self):
-        self.write_plugin("layered", {"module": "plugin", "extends": ["bootstrap"]}, {
-            "plugin.py": "from .parts.words import LINE\ndef register(mv): mv.bootstrap.line(LINE)\n",
-            "parts/__init__.py": "", "parts/words.py": "LINE = 'from a subpackage'\n"})
-        self.enable("layered")
-        loaded = loader.load(self.entry("layered"))
-        self.assertEqual(loaded.registrations.bootstrap, ["from a subpackage"])
-        self.assertEqual(loaded.resolve("parts.words:LINE"), "from a subpackage")
-
-    def test_a_failing_plugin_is_left_out_and_says_why(self):
-        self.write_plugin("crash", {"module": "plugin"}, {"plugin.py": "raise RuntimeError('boom')\n"})
-        self.write_plugin("sneaky", {"module": "plugin"}, {"plugin.py": "def register(mv): mv.bootstrap.line('x')\n"})
-        self.write_plugin("good", {"module": "plugin", "extends": ["bootstrap"]},
-                          {"plugin.py": "def register(mv): mv.bootstrap.line('fine')\n"})
-        for name in ("crash", "sneaky", "good"):
-            self.enable(name)
-        self.assertEqual([loaded.name for loaded in loader.active(self.root)], ["good"])
-        states = {found.name: (found.state, found.problem) for found in plugins.entries(self.root)}
-        self.assertEqual(states["crash"], ("failed", "crash failed to load: RuntimeError: boom"))
-        self.assertIn('does not list it in "extends"', states["sneaky"][1])
-        problems = plugins.problems(self.root)
-        self.assertTrue(any("crash failed to load" in problem for problem in problems))
-        self.assertEqual(plugins.bootstrap_lines(self.root), ["fine"])
-
     def test_bootstrap_lines_are_bounded(self):
+        """A plugin's bootstrap lines are bounded in count and length and refused if they hold any line separator;
+        a break goes unnoticed because the extra text silently enters every agent's bootstrap, costing context or
+        injecting lines into the prompt."""
         self.write_plugin("chatty", {"module": "plugin", "extends": ["bootstrap"]},
                           {"plugin.py": "def register(mv):\n    for n in range(3): mv.bootstrap.line(f'line {n}')\n"})
         self.enable("chatty")
         self.assertEqual(self.entry("chatty").state, "on")
         self.assertEqual(plugins.bootstrap_lines(self.root), [])
         self.assertIn("at most 2 bootstrap lines", self.entry("chatty").problem)
-
-    def test_command_conflicts_and_reserved_names(self):
-        for name in ("one", "two"):
-            self.write_plugin(name, {"extends": ["cli"], "commands": {"shared": "x", f"own-{name}": "y", "list": "z"}})
-            self.enable(name)
-        self.assertEqual(set(plugins.commands(self.root, reserved={"list"})), {"own-one", "own-two"})
-        problems = plugins.problems(self.root, reserved={"list"})
-        self.assertIn("one and two both declare mv2 shared; neither is used", problems)
-        self.assertIn("one, two declares mv2 list, which mv2 itself uses; it is ignored", problems)
-
-    def test_guard_records_errors_without_raising(self):
-        self.write_plugin("hello", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
-        self.enable("hello")
-        loaded = loader.load(self.entry("hello"))
-        self.assertEqual(loader.guard(loaded, "column hello", lambda: 1 / 0, root=self.root, default="—"), "—")
-        self.assertEqual(loader.errors(), {"hello": ["column hello: ZeroDivisionError: division by zero"]})
-        log = (self.root / "state" / "plugins" / "hello" / "errors.log").read_text()
-        self.assertIn("ZeroDivisionError", log)
-        self.assertEqual(plugins.listing(self.root)[0]["errors"], ["column hello: ZeroDivisionError: division by zero"])
+        self.enable("chatty", on=False)
+        for text in ("one\rtwo", "one two", "one\ntwo", "one\x85two", " "):
+            with self.subTest(text=text):
+                self.write_plugin("split", {"module": "plugin", "extends": ["bootstrap"]},
+                                  {"plugin.py": f"def register(mv): mv.bootstrap.line({text!r})\n"})
+                self.enable("split")
+                loader.reset()
+                self.assertEqual(catalog._plugin_lines(self.root), [])
+                self.assertIn("one line of text", self.entry("split").problem)
+        self.enable("split", on=False)
+        self.write_plugin("long", {"module": "plugin", "extends": ["bootstrap"]},
+                          {"plugin.py": "def register(mv):\n    mv.bootstrap.line('a' * 200)\n"
+                                        "    mv.bootstrap.line('b' * 101)\n"})
+        self.enable("long")
+        self.assertEqual(catalog._plugin_lines(self.root), [])
+        self.assertIn(f"{api.BOOTSTRAP_CHARACTERS} characters", self.entry("long").problem)
 
 
 class ApiTest(PluginTestCase):
-    def make(self, permissions=()):
-        self.write_plugin("probe", {"module": "plugin", "permissions": list(permissions)},
-                          {"plugin.py": "def register(mv): pass\n"})
-        self.enable("probe")
-        return api.Plugin(loader.load(self.entry("probe")))
-
-    def test_permissions_are_enforced(self):
-        mv = self.make()
-        universe = mv.universe(self.root)
-        with self.assertRaisesRegex(api.Error, "did not ask for permission 'agents.read'"):
-            universe.agents()
-        with self.assertRaisesRegex(api.Error, "agents.control"):
-            universe.spawn("worker")
-        self.assertEqual(universe.name, "test")
-        self.assertTrue(any(item["name"] == "coordination" for item in universe.catalog()))
-
-    def test_universe_and_state(self):
-        mv = self.make(["agents.read"])
-        child = self.subverse("child")
-        universe = mv.universe(self.root)
-        self.assertEqual(universe.agents(), [])
-        self.assertEqual(universe.subverses(), [mv.universe(child)])
-        self.assertEqual(mv.universe(child).parent, universe)
-        self.assertEqual(mv.state_dir(universe), self.root / "state" / "plugins" / "probe")
-        mv.log("hello", universe)
-        self.assertIn("hello", (self.root / "state" / "plugins" / "probe" / "plugin.log").read_text())
-        self.assertEqual(mv.process, "cli")
-        with self.assertRaisesRegex(api.Error, "No agent named nobody"):
-            universe.agent("nobody")
-
-
-class ListingTest(PluginTestCase):
-    def test_listing_describes_every_plugin(self):
-        self.write_plugin("hello", {"description": "Greets", "permissions": ["messages.send"],
-                                    "settings": {"version": 1}})
-        self.enable("hello")
-        [item] = plugins.listing(self.root)
-        self.assertEqual({key: item[key] for key in ("name", "on", "state", "source", "version", "description")},
-                         {"name": "hello", "on": True, "state": "loaded", "source": "path", "version": "0.1.0",
-                          "description": "Greets"})  # loaded: a plugin with settings is, so its own check runs
-        self.assertEqual(item["permissions"], ["send messages to any agent in this universe, as this plugin"])
-        self.assertEqual(item["settings"]["values"], {"schema": 1})
-        plugins.set_enabled(self.root, "hello", False)
-        self.assertFalse(plugins.listing(self.root)[0]["on"])
-
-
-class InspectorFactsTest(PluginTestCase):
-    def test_facts_come_in_plugin_name_order(self):
-        for name in ("two", "one"):
-            self.write_plugin(name, {"module": "plugin", "extends": ["dashboard.inspector"]}, {
-                "plugin.py": f"def register(mv):\n    mv.dashboard.inspector(lambda row: '{name}')\n"})
-            self.enable(name)
-        self.assertEqual([fact(None) for _, fact in plugins.inspector_facts(self.root)], ["one", "two"])
+    def test_api_calls_need_their_declared_permission(self):
+        """An API call without its declared permission raises (including agents in a panel's context without
+        agents.read), a registration outside extends leaves the plugin out, and an import error leaves only it
+        out; a break goes unnoticed because the plugin simply gets access the user never approved."""
+        with self.subTest("registrations and imports"):
+            self.write_plugin("crash", {"module": "plugin"}, {"plugin.py": "raise RuntimeError('boom')\n"})
+            self.write_plugin("sneaky", {"module": "plugin"},
+                              {"plugin.py": "def register(mv): mv.bootstrap.line('x')\n"})
+            self.write_plugin("good", {"module": "plugin", "extends": ["bootstrap"]},
+                              {"plugin.py": "def register(mv): mv.bootstrap.line('fine')\n"})
+            for name in ("crash", "sneaky", "good"):
+                self.enable(name)
+            self.assertEqual([loaded.name for loaded in loader.active(self.root)], ["good"])
+            states = {found.name: (found.state, found.problem) for found in plugins.entries(self.root)}
+            self.assertEqual(states["crash"], ("failed", "crash failed to load: RuntimeError: boom"))
+            self.assertIn('does not list it in "extends"', states["sneaky"][1])
+            self.assertTrue(any("crash failed to load" in problem for problem in plugins.problems(self.root)))
+            self.assertEqual(plugins.bootstrap_lines(self.root), ["fine"])
+        with self.subTest("calls"):
+            self.write_plugin("probe", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
+            self.enable("probe")
+            universe = api.Plugin(loader.load(self.entry("probe"))).universe(self.root)
+            with self.assertRaisesRegex(api.Error, "did not ask for permission 'agents.read'"):
+                universe.agents()
+            with self.assertRaisesRegex(api.Error, "agents.control"):
+                universe.spawn("worker")
+            self.assertEqual(universe.name, "test")
+            self.assertTrue(any(item["name"] == "coordination" for item in universe.catalog()))
+        with self.subTest("a panel's agents"):
+            panel = ("def register(mv):\n"
+                     "    @mv.dashboard.panel('board', title='Board')\n"
+                     "    def board(context):\n"
+                     "        return []\n")
+            self.write_plugin("boards", {"module": "plugin", "extends": ["dashboard.panel"],
+                                         "permissions": ["agents.read"]}, {"plugin.py": panel})
+            self.write_plugin("blind", {"module": "plugin", "extends": ["dashboard.panel"]}, {"plugin.py": panel})
+            self.enable("boards")
+            self.enable("blind")
+            rows = [{"id": "a1", "name": "worker", "universe": str(self.root), "live": "alive"}]
+            found = {loaded.name: loaded for loaded, _, _ in plugins.dashboard_panels(self.root)}
+            self.assertEqual([agent.name for agent in plugins.panel_context(found["boards"], self.root, {}, rows,
+                                                                            set()).agents], ["worker"])
+            self.assertEqual(plugins.panel_context(found["blind"], self.root, {}, rows, set()).agents, ())
 
 
-class ApiOneThreeTest(PluginTestCase):
-    def make(self):
-        self.write_plugin("probe", {"module": "plugin", "extends": ["helper"], "permissions": ["agents.read"],
-                                    "settings": {"version": 1, "schema": "schema.json"}},
-                          {"plugin.py": "def register(mv):\n    mv.helper.action('status', lambda arguments: 0)\n"
-                                        "    @mv.settings.check\n    def check(values, universe):\n"
-                                        "        if values.get('needs') and not (universe / values['needs']).exists():\n"
-                                        "            raise ValueError('needs ' + values['needs'])\n",
-                           "schema.json": '{"type": "object"}'})
-        self.enable("probe")
-        return api.Plugin(loader.load(self.entry("probe")))
+HELPERS = """
+import json, sys
 
-    def test_agents_sessions_and_harnesses(self):
-        mv = self.make()
-        directory = self.agent("worker", native_id="1b4e28ba-2fa1-11d2-883f-0016d3cca427",
-                               runtime={"native_mode": {"mode": "bridge"}})
-        agent = mv.agent_at(directory)
-        self.assertEqual(agent.name, "worker")
-        session = agent.session()
-        launch_id = json.loads((directory / "runtime.json").read_text())["launch_id"]
-        self.assertEqual((session.family, session.native_id, session.launch_id, session.native_mode),
-                         ("claude", "1b4e28ba-2fa1-11d2-883f-0016d3cca427", launch_id, {"mode": "bridge"}))
-        with mock.patch.dict(os.environ, {"MV2_AGENT_DIR": str(directory)}):
-            self.assertEqual(mv.current_agent().id, agent.id)
-        info = mv.harness_info(self.root, "claude")
-        self.assertEqual((info.family, info.executable, info.bridge), ("claude", "claude", True))
-        self.assertEqual(info.home, Path(os.environ["CLAUDE_CONFIG_DIR"]))  # PluginTestCase's temporary one
-        with self.assertRaisesRegex(api.Error, "not an agent's directory"):
-            mv.agent_at(self.root)
+def register(mv):
+    mv.helper.action("refuse", lambda arguments: 2)
+    mv.helper.action("crash", lambda arguments: 1 / 0)
 
-    def test_harness_homes_and_text(self):
-        self.assertEqual(api._harness_home("claude", {"CLAUDE_CONFIG_DIR": "/c"}), Path("/c"))
-        self.assertEqual(api._harness_home("claude", {"HOME": "/h"}), Path("/h/.claude"))
-        self.assertEqual(api._harness_home("codex", {"CODEX_HOME": "/x"}), Path("/x"))
-        self.assertEqual(api._harness_home("pi", {}), None)
-        self.assertEqual(api._harness_home("pi", {"PI_CODING_AGENT_DIR": "/p"}), Path("/p"))
-        self.assertEqual(api._harness_home("", {}), None)
-        self.assertEqual((api.text.tokens(82400), api.text.tokens(8200), api.text.clean("a\x1bb")), ("82k", "8.2k", "a b"))
+    @mv.helper.action("status")
+    def status(arguments):
+        print("status", *arguments)
+        return 3
 
-    def test_files_helper_command_and_a_check_that_sees_the_universe(self):
-        mv = self.make()
-        path = self.work / "state.json"
-        api.files.write_json(path, {"a": 1})
-        self.assertEqual(api.files.read_json(path), {"a": 1})
-        with api.files.lock(self.work / "x.lock"):
-            pass
-        self.assertIn("T", api.files.now())
-        self.assertEqual(mv.helper.command("status", "--fast", universe=self.root)[-6:],
-                         ["-u", str(self.root), "run", "probe", "status", "--fast"])
-        with self.assertRaisesRegex(ValueError, "needs marker"):
-            plugins.edit_settings(self.root, "probe", {"needs": "marker"})
-        (self.root / "marker").write_text("")
-        plugins.edit_settings(self.root, "probe", {"needs": "marker"})
-
-    def test_testing_helpers(self):
-        self.executable("fake-claude", "echo 2.1.296")
-        import subprocess
-        self.assertEqual(subprocess.run(["fake-claude"], capture_output=True, text=True).stdout.strip(), "2.1.296")
-        path = self.claude_transcript("abc", [{"type": "user"}])
-        self.assertTrue(path.is_relative_to(self.claude_config))
-
-    def test_a_helper_owns_stdin_stdout_and_its_exit_code(self):
-        import subprocess, sys as system
-        self.write_plugin("pipe", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": (
-            "import json, sys\n"
-            "def register(mv):\n"
-            "    @mv.helper.action('guard')\n"
-            "    def guard(arguments):\n"
-            "        request = json.load(sys.stdin)\n"
-            "        for n in range(3):\n"
-            "            print(json.dumps({'event': 'progress', 'n': n}), flush=True)\n"
-            "        return 2 if request.get('refuse') else 0\n")})
-        self.enable("pipe")
-        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
-                       "MV2_UNIVERSE": str(self.root)}
-        result = subprocess.run([system.executable, "-m", "multiverse.plugins", "run", "pipe", "guard"],
-                                input='{"refuse": true}', env=environment, capture_output=True, text=True, timeout=60)
-        self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertEqual([json.loads(line)["n"] for line in result.stdout.splitlines()], [0, 1, 2])
-
-
-class NoDashboardKeysTest(PluginTestCase):
-    def test_plugins_get_no_dashboard_keys(self):
-        """API 1.6: a plugin's way into the dashboard is its settings (under P) and the command palette."""
-        self.write_plugin("old", {"module": "plugin", "extends": ["dashboard.key"]},
-                          {"plugin.py": "def register(mv): pass\n"})
-        self.assertIn("extension points this mv2 does not have: dashboard.key", self.entry("old").problem or "")
-        self.write_plugin("caller", {"module": "plugin", "extends": ["dashboard.screen"]},
-                          {"plugin.py": "def register(mv):\n    mv.dashboard.key('c', 'C', screen='ui:S')\n"})
-        self.enable("caller")
-        self.assertIn("has no attribute 'key'", str(self._load("caller")))
-        self.assertFalse(hasattr(api.SettingsAccess, "screen"))
-
-    def _load(self, name):
-        try:
-            loader.load(self.entry(name))
-        except plugins.PluginError as error:
-            return error
-
-
-class TestingHelpersTest(PluginTestCase):
-    def setUp(self):
-        super().setUp()
-        self.directory = self.write_plugin("deep", {"module": "plugin"}, {
-            "plugin.py": "from .engine import store\ndef register(mv): pass\n",
-            "engine/__init__.py": "",
-            "engine/store.py": "from .model import VALUE\ndef later():\n    from .model import VALUE as again\n    return again\n",
-            "engine/model.py": "VALUE = 42\n"})
-
-    def test_plugin_module_needs_no_universe_and_is_the_one_mv2_loads(self):
-        from multiverse.plugins.testing import plugin_module
-        store = plugin_module(self.directory, "engine.store")  # the plugin is not on anywhere
-        self.assertEqual((store.VALUE, store.later()), (42, 42))
-        self.assertIs(plugin_module(self.directory, "engine.store"), store)  # one copy per process
-        self.enable("deep")
-        self.assertIs(importlib.import_module(f"{loader.load(self.entry('deep')).package}.engine.store"), store)
-        with self.assertRaises(FileNotFoundError):
-            plugin_module(self.work / "nowhere", "engine.store")
-
-    def test_module_of_the_plugin_under_test(self):
-        self.plugin = self.directory
-        self.enable("deep")
-        self.assertEqual(self.module("engine.model").VALUE, 42)
-
-
-class GuardedTest(PluginTestCase):
-    """One helper for every call into plugin code: a daemon thread with a time budget (PR #20 review, item 4)."""
-
-    def setUp(self):
-        super().setUp()
-        self.write_plugin("calls", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
-        self.enable("calls")
-        self.loaded = loader.load(self.entry("calls"))
-        self.release = threading.Event()
-        self.addCleanup(self.release.set)
-
-    def hang(self):
-        self.release.wait(10)
-        return "late"
-
-    def test_timeout_busy_and_keys(self):
-        first = loader.guarded(self.loaded, "column x", self.hang, root=self.root, timeout=0.1)
-        self.assertEqual(first.state, "timeout")
-        busy = loader.guarded(self.loaded, "column x", self.hang, root=self.root, timeout=0.1)
-        self.assertEqual((busy.state, busy.value), ("busy", None))
-        other = loader.guarded(self.loaded, "column y", lambda: 3, root=self.root, timeout=0.1)
-        self.assertEqual((other.state, other.value), ("ok", 3))
-        keyed = loader.guarded(self.loaded, "column x", lambda: 4, root=self.root, timeout=0.1, key="row 2")
-        self.assertEqual((keyed.state, keyed.value), ("ok", 4))  # a key of its own is not busy
-        self.assertEqual(self.loaded.errors, ["column x: TimeoutError: took longer than 0.1 s"])  # once
-        self.release.set()
-
-    def test_system_exit_and_errors_are_contained(self):
-        def leave():
-            raise SystemExit(3)
-        for timeout in (None, 1):
-            with self.subTest(timeout=timeout):
-                outcome = loader.guarded(self.loaded, "action", leave, root=self.root, timeout=timeout)
-                self.assertEqual(outcome.state, "error")
-                self.assertIn("SystemExit", outcome.error)
-                self.assertIsNone(loader.guard(self.loaded, "action", leave, root=self.root, timeout=timeout,
-                                               default=None))
-
-    def test_no_global_lock_while_calling(self):
-        holder = threading.Thread(target=lambda: (loader._lock.acquire(), self.release.wait(10), loader._lock.release()))
-        holder.start()
-        self.addCleanup(holder.join, 10)
-        started = time.monotonic()
-        outcome = loader.guarded(self.loaded, "fact", lambda: 5, root=self.root, timeout=1)
-        self.assertEqual((outcome.state, outcome.value), ("ok", 5))
-        self.assertLess(time.monotonic() - started, 1)
-        self.release.set()
-
-    def test_errors_log_is_throttled_and_rotated(self):
-        log = self.root / "state" / "plugins" / "calls" / "errors.log"
-        for index in range(50):  # a column failing differently on every row, every refresh
-            loader.guard(self.loaded, "column x", lambda index=index: 1 / 0 if index % 2 else int(f"x{index}"),
-                         root=self.root)
-        self.assertEqual(log.read_text().count("Traceback"), 1)  # one traceback per call site and minute
-        with mock.patch.object(loader, "ERRORS_LOG_BYTES", 2000):
-            for index in range(200):
-                loader.record(self.loaded, f"call {index}", ValueError("x" * 50), self.root)
-        self.assertTrue(log.with_name("errors.log.1").exists())
-        self.assertLess(log.stat().st_size, 2000 + 4000)
+    @mv.helper.action("guard")
+    def guard(arguments):
+        request = json.load(sys.stdin)
+        for n in range(3):
+            print(json.dumps({"event": "progress", "n": n}), flush=True)
+        return 2 if request.get("refuse") else 0
+"""
 
 
 class HelperExitTest(PluginTestCase):
-    """`python -m multiverse.plugins run` exits 2 only when the action returns 2 (PR #20 review)."""
-
-    def run_helper(self, *arguments):
-        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
-        return subprocess.run([sys.executable, "-m", "multiverse.plugins", *arguments], env=environment,
-                              capture_output=True, text=True, timeout=60).returncode
-
-    def test_only_the_action_exits_2(self):
-        self.write_plugin("guardian", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": (
-            "def register(mv):\n    mv.helper.action('refuse', lambda arguments: 2)\n")})
+    def test_helper_exit_codes_and_streams(self):
+        """python -m multiverse.plugins run exits 1 with empty stdout when mv2 refuses and 2 only for the action's
+        own refusal, with the action's own stdin and stdout; a break goes unnoticed in mv2 because GOAT's Claude
+        hook reads these codes, so a stray print or a crash exiting 2 changes what Claude does."""
+        self.write_plugin("guardian", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": HELPERS})
         self.write_plugin("broken", {"module": "plugin", "extends": ["helper"]}, {"plugin.py": "raise SystemExit(2)\n"})
         self.enable("guardian")
         self.enable("broken")
         root = str(self.root)
-        self.assertEqual(self.run_helper("-u", root, "run", "guardian", "refuse"), 2)  # deliberate
-        for arguments in ((), ("run",), ("--nope",), ("-u", root, "run", "ghost", "refuse"),
-                          ("-u", root, "run", "broken", "refuse"), ("-u", str(self.work / "none"), "run", "a", "b"),
-                          ("-u", root, "run", "guardian", "missing")):
+        # One real process: the exit code, stdin and stdout of `python -m` itself.
+        environment = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        result = subprocess.run([sys.executable, "-m", "multiverse.plugins", "-u", root, "run", "guardian", "guard"],
+                                input='{"refuse": true}', env=environment, capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertEqual([json.loads(line)["n"] for line in result.stdout.splitlines()], [0, 1, 2])
+        cases = (
+            (("-u", root, "run", "guardian", "refuse"), 2, ""),  # deliberate
+            (("-u", root, "run", "guardian", "status", "a", "--b"), 3, "status a --b\n"),
+            (("-u", root, "run", "guardian", "guard"), 0, "".join(f'{{"event": "progress", "n": {n}}}\n'
+                                                                    for n in range(3))),
+            ((), 1, ""), (("run",), 1, ""), (("--nope",), 1, ""),
+            (("-u", root, "run", "ghost", "refuse"), 1, ""), (("-u", root, "run", "broken", "refuse"), 1, ""),
+            (("-u", str(self.work / "none"), "run", "a", "b"), 1, ""),
+            (("-u", root, "run", "guardian", "missing"), 1, ""), (("-u", root, "run", "guardian", "crash"), 1, ""),
+        )
+        for arguments, code, stdout in cases:
             with self.subTest(arguments):
-                self.assertEqual(self.run_helper(*arguments), 1)
+                loader.reset()  # each a new process
+                self.assertEqual(run_quietly(lambda: helper.main(list(arguments)), stdin="{}")[:2], (code, stdout))
+        self.assertIn("ZeroDivisionError", (self.root / "state" / "plugins" / "guardian" / "errors.log").read_text())
+
+
+class GuardedTest(PluginTestCase):
+    def test_guarded_calls_are_bounded_contained_and_lock_free(self):
+        """loader.guarded(), the wrapper around every call into plugin code, times out, never starts a second
+        thread for a busy site, contains SystemExit, records errors without raising and holds no global lock
+        during the call; fragile because holding loader._lock deadlocks a plugin call that loads another plugin,
+        and a break shows only with a slow plugin, as a frozen dashboard or killed host."""
+        self.write_plugin("calls", {"module": "plugin"}, {"plugin.py": "def register(mv): pass\n"})
+        self.enable("calls")
+        loaded = loader.load(self.entry("calls"))
+        with self.subTest("an error is recorded, never raised"):
+            self.assertEqual(loader.guard(loaded, "column z", lambda: 1 / 0, root=self.root, default="—"), "—")
+            self.assertEqual(loader.errors()["calls"], ["column z: ZeroDivisionError: division by zero"])
+            log = (self.root / "state" / "plugins" / "calls" / "errors.log").read_text()
+            self.assertIn("ZeroDivisionError", log)
+            self.assertEqual(plugins.listing(self.root)[0]["errors"], ["column z: ZeroDivisionError: division by zero"])
+        with self.subTest("time, busy sites and keys"):
+            release = threading.Event()
+            self.addCleanup(release.set)
+
+            def hang():
+                release.wait(10)
+                return "late"
+            before = len(loaded.errors)
+            first = loader.guarded(loaded, "column x", hang, root=self.root, timeout=0.1)
+            self.assertEqual(first.state, "timeout")
+            busy = loader.guarded(loaded, "column x", hang, root=self.root, timeout=0.1)
+            self.assertEqual((busy.state, busy.value), ("busy", None))
+            other = loader.guarded(loaded, "column y", lambda: 3, root=self.root, timeout=0.1)
+            self.assertEqual((other.state, other.value), ("ok", 3))
+            keyed = loader.guarded(loaded, "column x", lambda: 4, root=self.root, timeout=0.1, key="row 2")
+            self.assertEqual((keyed.state, keyed.value), ("ok", 4))  # a key of its own is not busy
+            self.assertEqual(loaded.errors[before:], ["column x: TimeoutError: took longer than 0.1 s"])  # once
+            release.set()
+
+        def leave():
+            raise SystemExit(3)
+        for timeout in (None, 1):
+            with self.subTest("SystemExit", timeout=timeout):
+                outcome = loader.guarded(loaded, "action", leave, root=self.root, timeout=timeout)
+                self.assertEqual(outcome.state, "error")
+                self.assertIn("SystemExit", outcome.error)
+                self.assertIsNone(loader.guard(loaded, "action", leave, root=self.root, timeout=timeout, default=None))
+        with self.subTest("no global lock"):
+            held = threading.Event()
+            holder = threading.Thread(target=lambda: (loader._lock.acquire(), held.wait(10), loader._lock.release()))
+            holder.start()
+            self.addCleanup(holder.join, 10)
+            self.addCleanup(held.set)
+            started = time.monotonic()
+            outcome = loader.guarded(loaded, "fact", lambda: 5, root=self.root, timeout=1)
+            self.assertEqual((outcome.state, outcome.value), ("ok", 5))
+            self.assertLess(time.monotonic() - started, 1)
+            held.set()

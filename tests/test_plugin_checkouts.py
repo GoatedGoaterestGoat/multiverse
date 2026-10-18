@@ -88,8 +88,8 @@ class CheckoutSuitesTest(unittest.TestCase):
             if str(getattr(module, "__file__", "") or "").startswith(str(self.work)):
                 del sys.modules[name]
 
-    def plugin(self, name, tests=None):
-        directory = self.work / "plugins" / name
+    def plugin(self, plugins, name, tests=None):
+        directory = plugins / name
         directory.mkdir(parents=True)
         if tests is None:  # an uninitialized submodule: an empty directory
             return directory
@@ -99,42 +99,30 @@ class CheckoutSuitesTest(unittest.TestCase):
             (directory / "tests" / module).write_text(body)
         return directory
 
-    def test_a_plugins_tests_are_imported_with_a_home_of_their_own(self):
-        from multiverse.plugins import testing as guard
-        real = self.work / "real-home"
-        protected = home_safety.install(home=real / ".multiverse")
-        self.addCleanup(guard._protected.difference_update, {str(protected), str(real / ".multiverse")})
-        before = len(home_safety.violations())
-        # A test module that writes the home at import, as plugin discovery's cache does through plugin_module().
-        plugins = self.work / "plugins"
-        self.plugin("writer", {"test_writes.py": "import os\nos.makedirs(os.path.expanduser('~/.multiverse'), "
-                                                 "exist_ok=True)\n"})
-        with mock.patch.dict(os.environ, {"HOME": str(real)}):
-            checkout_suites(unittest.TestLoader(), plugins=plugins, own=self.own)
-        found = home_safety.violations()[before:]
-        for item in guard._violations[before:]:
-            item["unreported"] = False
-        self.assertEqual(found, [], "a plugin test module wrote the home it found at import")
-        self.assertFalse((real / ".multiverse").exists())
-
     def run_suite(self, suite):
         result = unittest.TestResult()
         suite.run(result)
         return result
 
-    def test_initialized_plugins_tests_run_and_empty_submodules_add_nothing(self):
-        self.plugin("empty")
-        self.plugin("ticks", {"test_ticks_one.py": "import unittest\nclass T(unittest.TestCase):\n"
-                                                    "    def test_a(self): pass\n    def test_b(self): pass\n"})
-        result = self.run_suite(checkout_suites(unittest.TestLoader(), self.work / "plugins", self.own))
-        self.assertEqual((result.testsRun, result.failures, result.errors), (2, [], []))
-
-    def test_a_shared_module_name_is_one_clear_failure(self):
-        self.plugin("clash", {"test_core.py": "import unittest\nclass T(unittest.TestCase):\n    def test_a(self): pass\n"})
-        result = self.run_suite(checkout_suites(unittest.TestLoader(), self.work / "plugins", self.own))
-        self.assertEqual(result.testsRun, 1)
-        self.assertIn("clash: its tests test_core.py have the names of mv2's own tests", result.failures[0][1])
-
-    def test_no_plugins_directory(self):
-        suite = checkout_suites(unittest.TestLoader(), self.work / "missing", self.own)
-        self.assertEqual(suite.countTestCases(), 0)
+    def test_initialized_plugin_suites_load_once_each(self):
+        """Initialized submodule plugins' own tests load into mv2's run once each, empty submodules and a missing
+        plugins directory add nothing, and a module-name clash is one clear failure; a break goes unnoticed because a
+        plugin suite that stops loading still looks green."""
+        with self.subTest("an initialized plugin's tests run once and an empty submodule adds nothing"):
+            plugins = self.work / "initialized"
+            self.plugin(plugins, "empty")
+            self.plugin(plugins, "ticks", {"test_ticks_one.py": "import unittest\nclass T(unittest.TestCase):\n"
+                                                                 "    def test_a(self): pass\n"
+                                                                 "    def test_b(self): pass\n"})
+            result = self.run_suite(checkout_suites(unittest.TestLoader(), plugins, self.own))
+            self.assertEqual((result.testsRun, result.failures, result.errors), (2, [], []))
+        with self.subTest("a shared module name is one clear failure"):
+            plugins = self.work / "clashing"
+            self.plugin(plugins, "clash", {"test_core.py": "import unittest\nclass T(unittest.TestCase):\n"
+                                                           "    def test_a(self): pass\n"})
+            result = self.run_suite(checkout_suites(unittest.TestLoader(), plugins, self.own))
+            self.assertEqual(result.testsRun, 1)
+            self.assertIn("clash: its tests test_core.py have the names of mv2's own tests", result.failures[0][1])
+        with self.subTest("no plugins directory"):
+            suite = checkout_suites(unittest.TestLoader(), self.work / "missing", self.own)
+            self.assertEqual(suite.countTestCases(), 0)

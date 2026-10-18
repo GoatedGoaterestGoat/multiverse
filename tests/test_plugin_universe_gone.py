@@ -26,8 +26,9 @@ class UniverseGoneTest(PluginTestCase):
         os.rename(self.sub, self.work / "trashed-subverse")  # as core removal does: renamed away first
 
     def test_a_removed_universe_is_never_made_again(self):
-        """Every plugin writer and log refuses a removed universe's root: easy to break and unnoticed, since any
-        mkdir with parents (or store.write) on such a path quietly makes an orphan root with no universe.json."""
+        """No plugin writer or log, mv2's own plugin logs included, makes a removed universe's root again; easy to
+        break and unnoticed, since any mkdir with parents (or store.write) brings back a universe.json-less folder
+        (a460e2b)."""
         state = self.sub / "state" / "plugins" / "writer"
 
         def locked():
@@ -63,8 +64,8 @@ class UniverseGoneTest(PluginTestCase):
                 self.assertFalse(self.sub.exists(), f"{name} brought the removed universe back")
 
     def test_a_removal_between_two_steps_still_wins(self):
-        """A removal right before the plugin's own folder is made still wins: an existence check first, then a
-        mkdir with parents, would pass the check and then make the removed root again."""
+        """A universe removal right before a plugin's own folder is made still wins; fragile because the window lies
+        between an existence check and the mkdir, which would make the removed root again (a460e2b)."""
         real = Path.mkdir
         target = self.sub / "state" / "plugins" / "writer"
 

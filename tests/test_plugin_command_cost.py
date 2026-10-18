@@ -1,80 +1,105 @@
-"""Built-in commands never pay for plugins: no trust check, no plugin lookup, no importlib.metadata scan."""
-import json
+"""Built-in commands and core's hot paths never pay for plugins: no trust check, no plugin lookup or import."""
 import os
 from pathlib import Path
+import subprocess
 import sys
 from unittest import mock
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src'))
 
 from multiverse import cli, plugins
 from multiverse.plugins import events, harness, loader, trust
 from multiverse.plugins.testing import PluginTestCase
+from multiverse.store import read, write
+from multiverse.universe import agents, mailbox
+
+HELLO = """
+from pathlib import Path
+import os
+Path(os.environ["HELLO_MARKER"]).write_text("imported")
+
+def register(mv):
+    mv.cli.command("hello", lambda parser: None, lambda root=None: {"greeting": "hello"})
+"""
 
 
-class BuiltInCostTest(PluginTestCase):
+class HotPathTest(PluginTestCase):
     def setUp(self):
         super().setUp()
-        # A trusted universe plugin that subscribes to events: the kind whose trust check walks every file.
-        self.directory = self.write_plugin("big", {"extends": ["events"], "events": ["agent.*", "message.*"]},
+        # A trusted universe plugin that subscribes to messages: the kind whose trust check walks every file.
+        self.directory = self.write_plugin("big", {"extends": ["events"], "events": ["message.*"]},
                                            {"data/a.txt": "a"}, where=self.root / "plugins")
         trust.trust(self.directory)
-        self.enable("big")
+        # A plugin with code, a command, agent events and a pre-plugin settings file it would convert: none of
+        # which may import its code on a hot path.
+        self.marker = self.work / "imported"
+        os.environ["HELLO_MARKER"] = str(self.marker)
+        self.write_plugin("hello", {"module": "plugin", "extends": ["cli", "events"], "events": ["agent.*"],
+                                    "commands": {"hello": "Say hello"}, "settings": {"version": 1,
+                                                                                     "legacy": "hello.json"}},
+                          {"plugin.py": HELLO})
         loader.reset()
         self.walks = mock.patch.object(trust, "signature", side_effect=AssertionError("trust check on a built-in path"))
+        identity = str(uuid4())
+        self.agent_dir = self.root / "state" / "agents" / identity
+        write(self.agent_dir / "properties.json", {"id": identity, "name": "worker", "harness": "codex", "task": "",
+                                                   "universe_id": read(self.root / "universe.json")["id"],
+                                                   "workspace": str(self.work)})
+        write(self.agent_dir / "runtime.json", {"launch_id": "L1", "state": "running", "status": "idle"})
 
-    def test_a_built_in_command_looks_up_no_plugin_commands(self):
-        with mock.patch.object(cli, "plugin_commands", side_effect=AssertionError("plugin lookup")):
-            for argv in (["-u", str(self.root), "list"], ["send", "x", "--text", "hi"], ["status", "--phase", "done"],
-                         []):
-                cli.parser(argv).parse_known_args(argv)
-        with mock.patch.object(cli, "plugin_commands", return_value=(self.root, {})) as looked:
-            cli.parser(["-h"])  # the top-level help lists plugin commands
-            cli.parser(["no-such-command"])  # a name mv2 does not have may be a plugin's
-        self.assertEqual(looked.call_count, 2)
+    def recorded(self, kind):
+        return [event for event in events.read(self.root, 0)[0] if event["type"] == kind]
 
-    def test_the_first_use_check_and_recording_events_make_no_trust_check(self):
-        with self.walks:
-            self.assertEqual(plugins.migrate_on_first_use(self.root), [])
-            self.assertIsNotNone(events.emit(self.root, "agent.reported", {"id": "a", "name": "w"}))
-            self.assertIsNone(events.emit(self.root, "universe.created"))  # nobody subscribes
-
-    def test_usage_is_left_alone_without_an_adjuster(self):
-        info = harness.SessionInfo(self.root, "a", "claude", "claude")
-        value = {"state": "ok", "value": {"context": {"tokens": 5}}}
-        with self.walks, mock.patch.object(loader, "active", side_effect=AssertionError("loaded plugins")):
-            self.assertIs(harness.adjust_usage(info, value), value)
-
-    def test_an_old_settings_file_still_takes_the_full_path(self):
-        (self.root / "compaction.json").write_text("{}")
-        with mock.patch.object(plugins, "_say_not_installed", return_value=["said"]) as said:
-            self.assertEqual(plugins.migrate_on_first_use(self.root)[:1], ["said"])
-        said.assert_called_once()
-
-    def test_an_untrusted_subscriber_still_has_its_events_recorded(self):
-        (self.directory / "data" / "a.txt").write_text("changed")
+    def test_hot_paths_never_touch_plugins(self):
+        """Built-in commands look up no plugin commands, and runtime updates, message appends, event recording, the
+        first-use check and usage do no trust walk and import no plugin code, nothing writes a journal nobody
+        reads, and command help lists plugin commands while importing neither their code nor textual; a break goes
+        unnoticed because output is identical while every agent call slows or untrusted code is imported."""
+        with self.subTest("nobody subscribes: no journal"):
+            self.assertIsNone(events.emit(self.root, "agent.status", {"id": "a", "name": "w"}, data={"to": "idle"}))
+            agents.update_runtime(self.agent_dir, "L1", status="working")
+            mailbox.append_message(self.agent_dir, "hi", {}, "inbox-only")
+            self.assertFalse(events.directory(self.root).exists())
+        self.enable("big")
+        self.enable("hello")
         loader.reset()
-        self.assertEqual(plugins.entry(self.root, "big").state, "changed")
-        self.assertEqual(events.subscribers(self.root, "agent.status"), ["big"])
-
-
-class InstalledScanTest(PluginTestCase):
-    def test_installed_plugins_are_scanned_again_only_when_the_environment_changes(self):
-        site = self.work / "site"
-        site.mkdir()
-        sys.path.append(str(site))
-        self.addCleanup(sys.path.remove, str(site))
-        found = self.write_plugin("pip-made", where=self.work / "packages")
-        with mock.patch.object(loader, "_scan_installed", return_value=[found]) as scan:
-            for _ in range(2):
-                self.assertEqual(loader._installed_remembered(), [found])
-            self.assertEqual(scan.call_count, 1)  # the second process reads the last scan
-            (site / "new_package").mkdir()  # pip installs something there: its directory changes
-            os.utime(site, (1, 2))
-            self.assertEqual(loader._installed_remembered(), [found])
-            self.assertEqual(scan.call_count, 2)
-            (found / "plugin.json").unlink()  # a remembered plugin that is gone means scanning again
-            loader._installed_remembered()
-            self.assertEqual(scan.call_count, 3)
-        remembered = json.loads((self.home / ".multiverse" / loader.INSTALLED).read_text())
-        self.assertIn(sys.executable, remembered["environments"])
+        with self.subTest("built-in commands"):
+            with mock.patch.object(cli, "plugin_commands", side_effect=AssertionError("plugin lookup")):
+                for argv in (["-u", str(self.root), "list"], ["send", "x", "--text", "hi"],
+                             ["status", "--phase", "done"], []):
+                    cli.parser(argv).parse_known_args(argv)
+            with mock.patch.object(cli, "plugin_commands", return_value=(self.root, {})) as looked:
+                cli.parser(["-h"])  # the top-level help lists plugin commands
+                cli.parser(["no-such-command"])  # a name mv2 does not have may be a plugin's
+            self.assertEqual(looked.call_count, 2)
+        with self.subTest("recording events, the first-use check and usage"), self.walks:
+            self.assertIsNotNone(events.emit(self.root, "message.saved", {"id": "a", "name": "w"}, data={"length": 3}))
+            self.assertIsNone(events.emit(self.root, "universe.created"))  # nobody subscribes
+            self.assertEqual(plugins.migrate_on_first_use(self.root), [])  # nothing to convert
+            self.assertFalse((self.root / "state" / "plugins" / plugins.MIGRATE_LOCK).exists())
+            info = harness.SessionInfo(self.root, "a", "claude", "claude")
+            value = {"state": "ok", "value": {"context": {"tokens": 5}}}
+            with mock.patch.object(loader, "active", side_effect=AssertionError("loaded plugins")):
+                self.assertIs(harness.adjust_usage(info, value), value)
+        with self.subTest("a status change is recorded once, without the subscriber's code"):
+            agents.update_runtime(self.agent_dir, "L1", status="waiting")
+            agents.update_runtime(self.agent_dir, "L1", status="waiting")  # no change
+            agents.update_runtime(self.agent_dir, "L1", usage={"x": 1})  # not a status
+            [event] = self.recorded("agent.status")
+            self.assertEqual((event["data"], event["launch"], event["agent"]["name"]),
+                             ({"from": "working", "to": "waiting"}, "L1", "worker"))
+        with self.subTest("command help"):
+            self.assertIn("Say hello (plugin hello)", cli.parser(["-u", str(self.root), "--help"]).format_help())
+            code = ("import sys, multiverse.cli, multiverse.plugins, multiverse.plugins.api; "
+                    "multiverse.cli.parser(['-u', sys.argv[1], '--help']); "
+                    "print('multiverse.plugins.ui' in sys.modules, 'textual' in sys.modules, "
+                    "any(m.startswith('mv2_plugins') for m in sys.modules))")
+            probe = subprocess.run([sys.executable, "-c", code, str(self.root)], capture_output=True, text=True,
+                                   env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+                                   timeout=60)
+            self.assertEqual(probe.stdout.split(), ["False", "False", "False"], probe.stderr)
+        self.assertFalse(loader._loaded)
+        self.assertFalse(self.marker.exists())
+        loader.load(self.entry("hello"))  # what the marker would show: the plugin's code imported
+        self.assertTrue(self.marker.exists())

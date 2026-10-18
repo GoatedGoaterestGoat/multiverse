@@ -1,19 +1,17 @@
-"""mv2 plugins host and its status file (BUG-DASHBOARD-005, and qa-plugins's damaged-file cases).
-
-The CLI cases are qa-plugins's (18d4e7b, 91a9413) and qa-dashboard's (7bf3224) black-box tests, run on this
-checkout's own mv2 with a private tmux server."""
+"""mv2 plugins host and its status file (BUG-DASHBOARD-005, and qa-plugins's and qa-dashboard's damaged-file cases,
+18d4e7b, 91a9413, 7bf3224), with the CLI run in this process."""
+import contextlib
+import io
 import json
-import os
 from pathlib import Path
-import subprocess
 import sys
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from multiverse.plugins import host, loader
+from multiverse import cli
+from multiverse.plugins import host
 from multiverse.plugins.testing import PluginTestCase
 
-SOURCE = Path(__file__).resolve().parents[1] / "src"
-HANDLER = 'def register(mv):\n    mv.events.on("agent.reported", lambda event: None)\n'
 DAMAGED = {  # status.json as found on disk -> whether it says why
     "true": True, "[1, 2]": True, "null": True, "42": True, '"running"': True,
     "": True, '{"state": "runn': True, "\x00\x01": True,
@@ -23,73 +21,31 @@ DAMAGED = {  # status.json as found on disk -> whether it says why
 }
 
 
-class HostCommandTest(PluginTestCase):
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(loader.reset)
-        self.socket = str(self.work / "t.sock")
-        self.addCleanup(lambda: subprocess.run(["tmux", "-S", self.socket, "kill-server"], capture_output=True))
-        self.status_file = host.host_directory(self.root) / "status.json"
+class StatusReadersTest(PluginTestCase):
+    """Every reader of the status file: none raises, whatever the file holds."""
 
     def mv2(self, *arguments):
-        environment = {**os.environ, "PYTHONPATH": str(SOURCE), "MV2_TMUX_SOCKET": self.socket}
-        return subprocess.run([sys.executable, "-m", "multiverse.cli", "-u", str(self.root), *arguments],
-                              env=environment, cwd=self.work, stdin=subprocess.DEVNULL, capture_output=True,
-                              text=True, timeout=60)
-
-    def assertClean(self, result, code=0):
-        self.assertNotIn("Traceback", result.stderr + result.stdout)
-        self.assertEqual(result.returncode, code, result.stderr)
-
-    def test_stop_without_a_running_host_returns_cleanly(self):
-        self.assertClean(self.mv2("plugins", "host", "stop"))
-
-    def test_stop_stops_the_host_and_says_so(self):
-        self.write_plugin("hostprobe", {"module": "plugin", "extends": ["events"], "events": ["agent.reported"]},
-                          {"plugin.py": HANDLER})
-        self.assertClean(self.mv2("plugins", "enable", "hostprobe"))
-        self.assertClean(self.mv2("plugins", "host", "start"))
-        self.assertTrue(host.running(self.root))
-        stopped = self.mv2("plugins", "host", "stop")
-        self.assertClean(stopped)
-        self.assertIn("is not running", stopped.stdout)
-        self.assertFalse(host.running(self.root))
-        self.assertIn("not running", self.mv2("plugins", "host").stdout)
-
-    def test_a_damaged_status_file_is_status_unknown_never_a_traceback(self):
-        self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        for text, says_why in DAMAGED.items():
-            with self.subTest(status=text[:30]):
-                self.status_file.write_text(text)
-                for action in ((), ("status",), ("stop",)):
-                    result = self.mv2("plugins", "host", *action)
-                    self.assertClean(result)
-                    self.assertIn("is not running", result.stdout)
-                    if says_why:
-                        self.assertIn("status.json cannot be used", result.stdout)
-                self.status_file.write_text(text)
-                self.assertClean(self.mv2("list", "--json"))
-
-    def test_a_host_starts_over_a_damaged_status_file(self):
-        self.write_plugin("hostprobe", {"module": "plugin", "extends": ["events"], "events": ["agent.reported"]},
-                          {"plugin.py": HANDLER})
-        self.assertClean(self.mv2("plugins", "enable", "hostprobe"))
-        self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        self.status_file.write_text("true")
-        self.assertClean(self.mv2("plugins", "host", "start"))
-        self.assertTrue(host.running(self.root))
-        self.assertIsInstance(json.loads(self.status_file.read_text()), dict)
-        self.assertClean(self.mv2("plugins", "host", "stop"))
-        self.assertFalse(host.running(self.root))
-
-
-class StatusReadersTest(PluginTestCase):
-    """Every reader of the status file in-process: none raises, whatever the file holds."""
+        """(exit code, stdout) of `mv2 -u ROOT ARGUMENTS`; an error mv2 does not turn into a message raises here."""
+        out = io.StringIO()
+        with mock.patch.object(sys, "argv", ["mv2", "-u", str(self.root), *arguments]), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cli.main()
+            except SystemExit as exit:
+                return exit.code or 0, out.getvalue()
+        return 0, out.getvalue()
 
     def test_every_reader_takes_a_damaged_file(self):
+        """Every reader of the host's status.json (host.status, running, left_stopped, mv2 plugins host, its stop and
+        mv2 list) takes all ten damaged forms as status unknown, the supervisor's write replaces it, and host stop
+        with no host exits 0; a break goes unnoticed because the file is damaged only after a crash, and then mv2
+        plugins, doctor and the dashboard show a traceback (BUG-DASHBOARD-005)."""
+        code, out = self.mv2("plugins", "host", "stop")  # no host has ever run here
+        self.assertEqual(code, 0)
+        self.assertIn("is not running", out)
         path = host.host_directory(self.root) / "status.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        for text in DAMAGED:
+        for text, says_why in DAMAGED.items():
             with self.subTest(status=text[:30]):
                 path.write_text(text)
                 status = host.status(self.root)
@@ -99,5 +55,12 @@ class StatusReadersTest(PluginTestCase):
                 self.assertTrue(all(isinstance(why, str) for why in status.get("stopped", {}).values()))
                 self.assertFalse(host.running(self.root))
                 self.assertTrue(all(isinstance(why, str) for why in host.left_stopped(self.root).values()))
+                for action in ((), ("status",), ("stop",)):
+                    code, out = self.mv2("plugins", "host", *action)
+                    self.assertEqual(code, 0)
+                    self.assertIn("is not running", out)
+                    if says_why:
+                        self.assertIn("status.json cannot be used", out)
+                self.assertEqual(self.mv2("list", "--json")[0], 0)
                 host._write_status(self.root, "now", {}, {}, {})  # the supervisor's own write over it
                 self.assertEqual(json.loads(path.read_text())["state"], "running")

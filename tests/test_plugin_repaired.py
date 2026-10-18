@@ -1,5 +1,6 @@
 """A plugin that failed to load and is then repaired on disk, and one whose entry cannot be built (BUG-DASHBOARD-003)."""
 import json
+import os
 from pathlib import Path
 import sys
 from unittest import mock
@@ -17,47 +18,50 @@ def register(mv):
 '''
 SETTINGS = {"version": 1, "schema": "settings.schema.json", "defaults": "defaults/settings.json"}
 SCHEMA = {"type": "object", "properties": {"schema": {"type": "integer"}, "count": {"type": "integer"}}}
+PLAIN = {"plugin.py": "def register(mv):\n    pass\n"}
 
 
-class RepairedPluginTest(PluginTestCase):
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(loader.reset)
-        self.directory = self.write_plugin("badfield", {"module": "plugin", "extends": ["dashboard.settings"],
-                                                        "settings": SETTINGS}, {
+class OneBadEntryTest(PluginTestCase):
+    def test_one_bad_plugin_entry_never_hides_the_others(self):
+        """entries(), listing() and problems() list every plugin with its own state when one failed and was
+        repaired, one raises in compatible(), one has properties: 3 and one a bad pattern, and the repaired one
+        loads; fragile because every new per-entry field can raise and the failure cache is shared
+        (BUG-DASHBOARD-003)."""
+        for case in (self.failed_then_repaired, self.compatible_raises, self.malformed_schema):
+            # Each case alone: its own plugins, its own universe, nothing loaded.
+            where = self.work / case.__name__
+            with self.subTest(case.__name__), mock.patch.dict(os.environ, {"MV2_PLUGIN_PATH": str(where)}):
+                loader.reset()
+                case(where, self.subverse(case.__name__))
+
+    def failed_then_repaired(self, where, root):
+        directory = self.write_plugin("badfield", {"module": "plugin", "extends": ["dashboard.settings"],
+                                                   "settings": SETTINGS}, {
             "plugin.py": PLUGIN.format(kind="integer"),  # not a field kind: register() raises
             "settings.schema.json": json.dumps(SCHEMA),
-            "defaults/settings.json": json.dumps({"schema": 1, "count": 1})})
-        self.write_plugin("other", {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
-        self.enable("badfield")
-        self.enable("other")
-
-    def test_a_repaired_plugin_loads_and_never_breaks_the_list(self):
+            "defaults/settings.json": json.dumps({"schema": 1, "count": 1})}, where=where)
+        self.write_plugin("other", {"module": "plugin"}, PLAIN, where=where)
+        self.enable("badfield", root=root)
+        self.enable("other", root=root)
         with self.assertRaises(loader.PluginError):
-            loader.load(self.entry("badfield"))  # as the dashboard's first load would
-        self.assertEqual(self.entry("badfield").state, "failed")
-        plugins.edit_settings(self.root, "badfield", {"count": 4})  # Configure, then save
-        (self.directory / "plugin.py").write_text(PLUGIN.format(kind="int"))  # repaired on disk
-        listed = {item["name"]: item for item in plugins.listing(self.root)}
+            loader.load(self.entry("badfield", root))  # as the dashboard's first load would
+        self.assertEqual(self.entry("badfield", root).state, "failed")
+        plugins.edit_settings(root, "badfield", {"count": 4})  # Configure, then save
+        (directory / "plugin.py").write_text(PLUGIN.format(kind="int"))  # repaired on disk
+        listed = {item["name"]: item for item in plugins.listing(root)}
         self.assertEqual(set(listed), {"badfield", "other"})
         self.assertIn(listed["badfield"]["state"], ("on", "loaded"))
-        self.assertNotIsInstance(self.entry("badfield").loaded, loader.Failed)  # never the old failure as loaded
-        self.assertEqual(plugins.problems(self.root), [])
-        loaded = loader.load(self.entry("badfield"))
+        self.assertNotIsInstance(self.entry("badfield", root).loaded, loader.Failed)  # never the old failure
+        self.assertEqual(plugins.problems(root), [])
+        loaded = loader.load(self.entry("badfield", root))
         self.assertEqual([field.path for field in loaded.registrations.settings_fields], ["count"])
-        self.assertEqual(self.entry("badfield").state, "loaded")
-        self.assertEqual(plugins.edit_settings(self.root, "badfield", {"count": 5})["count"], 5)
+        self.assertEqual(self.entry("badfield", root).state, "loaded")
+        self.assertEqual(plugins.edit_settings(root, "badfield", {"count": 5})["count"], 5)
 
-
-class OneEntryCannotBeBuiltTest(PluginTestCase):
-    def setUp(self):
-        super().setUp()
-        self.addCleanup(loader.reset)
+    def compatible_raises(self, where, root):
         for name in ("alpha", "breaks", "gamma"):
-            self.write_plugin(name, {"module": "plugin"}, {"plugin.py": "def register(mv):\n    pass\n"})
-            self.enable(name)
-
-    def test_the_other_plugins_are_still_listed(self):
+            self.write_plugin(name, {"module": "plugin"}, PLAIN, where=where)
+            self.enable(name, root=root)
         original = loader.compatible
 
         def compatible(found):
@@ -65,13 +69,31 @@ class OneEntryCannotBeBuiltTest(PluginTestCase):
                 raise RuntimeError("something unforeseen\nwith a second line")
             return original(found)
         with mock.patch.object(loader, "compatible", compatible):
-            entries = {found.name: found for found in loader.entries(self.root)}
-            listed = {item["name"] for item in plugins.listing(self.root)}
-            problems = plugins.problems(self.root)
+            entries = {found.name: found for found in loader.entries(root)}
+            listed = {item["name"] for item in plugins.listing(root)}
+            problems = plugins.problems(root)
         self.assertEqual(set(entries), {"alpha", "breaks", "gamma"})
         self.assertEqual(listed, {"alpha", "breaks", "gamma"})
         self.assertEqual(entries["alpha"].state, "on")
         self.assertEqual(entries["breaks"].state, "failed")
-        self.assertEqual(entries["breaks"].problem,
-                         "breaks could not be read: RuntimeError: something unforeseen")
-        self.assertEqual(problems, ["breaks could not be read: RuntimeError: something unforeseen"])
+        self.assertIn("breaks could not be read: RuntimeError: something unforeseen", entries["breaks"].problem)
+        self.assertNotIn("second line", entries["breaks"].problem)
+        self.assertEqual(problems, [entries["breaks"].problem])
+
+    def malformed_schema(self, where, root):
+        self.write_plugin("odd", {"settings": {"version": 1, "schema": "schema.json"}},
+                          {"schema.json": json.dumps({"type": "object", "properties": 3}), "defaults.json": "{}"},
+                          where=where)
+        self.write_plugin("rex", {"settings": {"version": 1, "schema": "schema.json"}},
+                          {"schema.json": json.dumps({"type": "object", "properties": {
+                              "name": {"type": "string", "pattern": "(["}}})}, where=where)
+        self.write_plugin("fine", {}, where=where)
+        for name in ("odd", "rex", "fine"):
+            self.enable(name, root=root)
+        states = {entry["name"]: entry for entry in plugins.listing(root)}  # never raises
+        self.assertEqual(set(states), {"odd", "rex", "fine"})
+        self.assertIn("schema", states["odd"]["problem"])
+        self.assertIn("pattern", states["rex"]["problem"])
+        self.assertIsNone(states["fine"]["problem"])
+        with self.assertRaisesRegex(ValueError, "pattern"):
+            plugins.edit_settings(root, "rex", {"name": "x"})
