@@ -383,18 +383,25 @@ class RefusalMonitor:
                     properties = read(self.agent_dir / 'properties.json')
                     backend, pane = owned(properties, facts)
                     text = backend.run('capture-pane', '-p', '-t', pane)[-32768:]
-                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}').split('\t')
+                    cursor = backend.run('display-message', '-p', '-t', pane, '#{cursor_flag}\t#{cursor_x}\t#{cursor_y}\t#{pane_width}').split('\t')
                     # Recheck tags after both observations as well as before.
                     owned(properties, facts)
-                x = y = None
-                if len(cursor) == 3:
+                x = y = width = None
+                if len(cursor) in (3, 4):
                     try:
                         x, y = int(cursor[1]), int(cursor[2])
                     except ValueError:
                         pass  # Unknown position cannot identify a successful composer.
+                if len(cursor) == 4:
+                    try:
+                        width = int(cursor[3])
+                        if width <= 0:
+                            width = None
+                    except ValueError:
+                        pass
                 snapshot = {'cli_version': version, 'text': text,
-                            'cursor_visible': {'0': False, '1': True}.get(cursor[0]) if len(cursor) == 3 else None,
-                            'cursor_x': x, 'cursor_y': y, 'native_id': properties.get('native_session_id')}
+                            'cursor_visible': {'0': False, '1': True}.get(cursor[0]) if len(cursor) in (3, 4) else None,
+                            'cursor_x': x, 'cursor_y': y, 'width': width, 'native_id': properties.get('native_session_id')}
                 evidence = self.describe(snapshot)
                 if evidence is not None:
                     refusal.record(self.agent_dir, self.launch_id, evidence)
