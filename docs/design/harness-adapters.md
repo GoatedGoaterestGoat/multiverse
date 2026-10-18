@@ -38,8 +38,12 @@ asks `startup_prompt_evidence(session, prompt, since, environment)`: Claude says
 True when the session's transcript has a user row with that prompt from the
 launch's start on, False when the transcript is missing or complete without one
 (the message is then a definite failure that `--retry` resends), and None when it
-can't tell (unreadable or damaged rows, or no aware start time), which keeps the
-message uncertain. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
+can't tell (unreadable or damaged rows, a storage folder it can't read, or no aware
+start time), which keeps the message uncertain. Every transcript lookup lists
+Claude's folders itself rather than with a glob, which skips unreadable folders
+silently: when part of the storage can't be read, resume tries the saved
+conversation and usage names the folder, instead of either reading the scan as
+proof that nothing is there. Claude takes the bootstrap with `--append-system-prompt` on spawn and on
 every resume. Claude Code keeps a conversation's system prompt as recorded at its
 first request (`--system-prompt-snapshot`, on by default since 2.1.267), which
 would leave a resumed agent with the bootstrap it started with: a plugin's

@@ -73,13 +73,62 @@ def claude_home(environment=None):
     return (Path(source['HOME']) if source.get('HOME') else Path.home()) / '.claude'
 
 
+class Unreadable(Exception):
+    """A folder or file under Claude's storage that can't be read, so a lookup can't tell what is there."""
+
+
+def session_transcripts(native_id, environment=None):
+    """Every main transcript of `native_id` (`projects/*/<id>.jsonl`), oldest first.
+
+    Raises Unreadable when a folder can't be listed or searched. pathlib's glob skips those silently, so a
+    scan that finds nothing would otherwise read as proof the transcript is absent.
+    """
+    projects = claude_home(environment) / 'projects'
+    try:
+        entries = list(os.scandir(projects))
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise Unreadable(f"{projects} can't be read") from error
+    found = []
+    for entry in entries:
+        candidate = Path(entry.path) / f'{native_id}.jsonl'
+        try:
+            if not entry.is_dir():
+                continue
+            found.append((candidate.stat().st_mtime, candidate))
+        except FileNotFoundError:
+            continue
+        except OSError as error:  # a project folder that can't be searched could hold it
+            raise Unreadable(f"{entry.path} can't be read") from error
+    return [path for _, path in sorted(found)]
+
+
+def subagent_transcripts(main):
+    """The subagent transcripts beside a main transcript; Unreadable when part of that folder can't be read."""
+    folder = main.parent / main.stem / 'subagents'
+    found = []
+
+    def unreadable(error):
+        if not isinstance(error, FileNotFoundError):
+            raise Unreadable(f"{error.filename or folder} can't be read") from error
+
+    for directory, _, files in os.walk(folder, onerror=unreadable):
+        found.extend(Path(directory) / name for name in files if name.endswith('.jsonl'))
+    return sorted(found)
+
+
 def has_saved_conversation(native_id, environment=None):
     """Whether Claude has written a transcript for this session.
 
     Claude writes nothing until the first message, so a session that was never
-    used has none, and `--resume` refuses it.
+    used has none, and `--resume` refuses it. When its storage can't be read this
+    says yes: resume then tries the conversation, and Claude says if it is gone.
     """
-    return any((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
+    try:
+        return bool(session_transcripts(native_id, environment))
+    except Unreadable:
+        return True
 
 
 def peer_token(socket_path, home=None):
@@ -232,7 +281,7 @@ def context_reading(native_id):
     Tokens are input + cache written + cache read. Subagent transcripts are
     excluded: they have their own context windows.
     """
-    mains = sorted((claude_home() / 'projects').glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
+    mains = session_transcripts(native_id)
     if not mains:
         return None
     with _transcripts_lock:
@@ -259,12 +308,12 @@ def moment(text):
 
 
 def measured_usage(native_id):
-    """Cumulative usage of the session and its subagents, from their transcripts."""
-    projects = claude_home() / 'projects'
-    mains = sorted(projects.glob(f'*/{native_id}.jsonl'), key=lambda path: path.stat().st_mtime)
+    """Cumulative usage of the session and its subagents, from their transcripts. Raises Unreadable rather
+    than total a scan that skipped part of the storage."""
+    mains = session_transcripts(native_id)
     if not mains:
         return None
-    paths = [mains[-1], *sorted((mains[-1].parent / native_id / 'subagents').glob('**/*.jsonl'))]
+    paths = [mains[-1], *subagent_transcripts(mains[-1])]
     with _transcripts_lock:
         transcripts = [_transcripts.setdefault(path, Transcript(path)).read() for path in paths]
     responses = [usage for transcript in transcripts for usage in transcript.responses.values()]
@@ -424,8 +473,8 @@ def prompt_recorded(native_id, prompt, since, environment):
     if not native_id or not text or start is None or start.tzinfo is None:
         return None
     try:
-        paths = list((claude_home(environment) / 'projects').glob(f'*/{native_id}.jsonl'))
-    except OSError:
+        paths = session_transcripts(native_id, environment)
+    except Unreadable:
         return None
     unsure = False
     for path in paths:
@@ -765,8 +814,11 @@ class ClaudeAdapter(ConfiguredAdapter):
                 reported['context_reported_at'] = mod.get('reported_at')
         except (OSError, ValueError, TypeError):
             pass
-        usage = measured_usage(session.native_id)
-        reading = context_reading(session.native_id)
+        try:
+            usage = measured_usage(session.native_id)
+            reading = context_reading(session.native_id)
+        except Unreadable as error:
+            return NativeResult('error', f"Claude's transcript storage can't be read: {error}")
         context = dict(reported['context']) if isinstance(reported.get('context'), dict) else {}
         responded = moment(reading[1]) if reading else None
         reported_at = moment(reported.get('context_reported_at'))

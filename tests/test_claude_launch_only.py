@@ -317,6 +317,76 @@ class ClaudeStartupPromptEvidenceTest(BaseTest):
         self.transcript(self.row(self.PROMPT), raw='not json\n')
         self.assertIs(self.evidence(), True)
 
+
+class ClaudeUnreadableStorageTest(BaseTest):
+    """pathlib's glob silently skips folders it can't read, so a scan that found nothing proved nothing. Every
+    transcript lookup now says it can't tell (reviewer finding on 78113fb): a failed wake stays uncertain, a
+    resume tries the saved conversation, and usage reports the folder instead of a wrong or missing number."""
+
+    SINCE = '2026-10-18T10:00:00.000000+00:00'
+    PROMPT = 'Message from lead:\nPlease rebase.'
+
+    def setUp(self):
+        super().setUp()
+        if os.geteuid() == 0:
+            self.skipTest('root reads folders whatever their mode')
+        self.storage = self.work / 'claude-config'
+        self.environment = {'CLAUDE_CONFIG_DIR': str(self.storage)}
+        self.enterContext(patch.dict(os.environ, self.environment))
+        self.native = str(uuid4())
+        self.project = self.storage / 'projects' / '-w'
+        self.project.mkdir(parents=True)
+        row = {'type': 'user', 'message': {'role': 'user', 'content': self.PROMPT}, 'timestamp': '2026-10-18T10:00:05.000Z'}
+        response = {'type': 'assistant', 'message': {'id': 'msg_1', 'usage': {'input_tokens': 10, 'output_tokens': 5}},
+                    'timestamp': '2026-10-18T10:00:06.000Z'}
+        (self.project / f'{self.native}.jsonl').write_text(json.dumps(row) + '\n' + json.dumps(response) + '\n')
+
+    def lock(self, path):
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o700)
+
+    def test_a_folder_that_cannot_be_read_never_proves_a_prompt_absent(self):
+        from multiverse.harnesses.claude import prompt_recorded
+        self.assertIs(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment), True)  # readable control
+        self.lock(self.project)  # the transcript's own folder
+        self.assertIsNone(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment))
+        self.project.chmod(0o700)
+        other = self.storage / 'projects' / '-elsewhere'
+        other.mkdir()
+        (self.project / f'{self.native}.jsonl').unlink()
+        self.lock(other)  # another project folder, which could hold it
+        self.assertIsNone(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment))
+        other.chmod(0o700)
+        self.lock(self.storage / 'projects')  # the projects folder itself
+        self.assertIsNone(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment))
+        (self.storage / 'projects').chmod(0o700)
+        self.assertIs(prompt_recorded(self.native, self.PROMPT, self.SINCE, self.environment), False)  # all read: absent
+
+    def test_resume_tries_the_saved_conversation_when_its_folder_cannot_be_read(self):
+        from multiverse.harnesses.claude import fresh_start
+        self.lock(self.project)
+        session = SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native)
+        self.assertIsNone(fresh_start(session, self.environment))  # no fresh start, no note: Claude says if it is gone
+
+    def test_usage_names_the_folder_it_cannot_read_instead_of_a_wrong_number(self):
+        adapter = harnesses.load(self.root, 'claude')
+        agent = self.work / 'agent'
+        agent.mkdir()
+        session = SessionHandle(str(uuid4()), 'claude', str(self.work), native_id=self.native,
+                                session_file=str(agent / 'session.jsonl'))
+        self.assertEqual(adapter.get_usage(session).value['total_tokens'], 15)  # readable control
+        subagents = self.project / self.native / 'subagents'
+        subagents.mkdir(parents=True)
+        self.lock(subagents)  # a subagent's usage would be missing from the total
+        found = adapter.get_usage(session)
+        self.assertEqual(found.state, 'error')
+        self.assertIn(str(subagents), found.reason)
+        subagents.chmod(0o700)
+        self.lock(self.project)
+        found = adapter.get_usage(session)
+        self.assertEqual(found.state, 'error')  # not "has not written a transcript yet"
+        self.assertIn("can't be read", found.reason)
+
 class ClaudeInheritedVariablesTest(BaseTest):
     def test_a_parent_claudes_ide_port_and_inbox_never_reach_an_agent(self):
         # A Claude agent spawned from inside Claude inherits the parent's IDE port and its inbox path and secret.
