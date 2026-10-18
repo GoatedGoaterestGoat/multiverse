@@ -36,11 +36,19 @@ def error_text(error, tail=2):
     return " | ".join(line if line == "…" else shorten(line, ERROR_LENGTH) for line in lines)
 
 
+def live_label(row):
+    """A proven in-progress preparation has no native process to call alive yet."""
+    facts = row.get('runtime') or {}
+    if row['live'] == 'unknown' and facts.get('preparing') is True and facts.get('state') == 'starting':
+        return 'starting'
+    return row['live']
+
+
 def state(row):
     """What a person asks first: what a live agent is doing, otherwise why it is not live."""
     if row["live"] == "alive":
         return row["status"] if row.get("status") not in (None, "unknown", "—") else "alive"
-    return row["live"]
+    return live_label(row)
 
 
 HARNESS_NAMES = {"codex": "Codex", "claude": "Claude", "pi": "Pi"}

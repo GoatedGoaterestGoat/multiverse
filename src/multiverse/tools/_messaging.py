@@ -53,6 +53,9 @@ def delivery_line(name, receipt, *, delivery='steer', wake=False, check=False, a
         if value.get('pre_submission_failure') is True:
             return (f"Not delivered to {name}: {why}. Saved without submission; repair the named file, "
                     f"then mv2 deliver {name} --retry.")
+        if value.get('repair_runtime'):
+            return (f"Not delivered to {name}: {why}. Saved; restore {clean(value['repair_runtime'])}, "
+                    f"or run mv2 kill {name} to close its verified terminal, then mv2 deliver {name} --retry.")
         if value.get('wake_refused') is True or value.get('definite_failure') is True:
             return (f"Not delivered to {name}: {why}. Saved; fix the reason, "
                     f"then mv2 deliver {name} --retry.")

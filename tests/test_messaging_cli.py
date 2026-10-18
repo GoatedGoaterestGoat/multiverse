@@ -275,9 +275,8 @@ class MessagingCliTest(BaseTest):
         self.assertIn('--delivery inbox-only', self.stderr)
         self.assertIn('mv2 attach first', self.stderr)
         self.assertNotIn('mv2 kill', self.stderr)
-        self.assertEqual(self.output('deliver', 'first', '--retry', code=1), '')
-        self.assertIn('--delivery inbox-only', self.stderr)
-        self.assertNotIn('resume it', self.stderr)
+        self.assertEqual(self.output('deliver', 'first', '--retry'), 'first: no messages to retry.\n')
+        self.assertEqual(self.stderr, '')
         self.assertEqual(len(self.history('first')), 1)
 
     def test_retry_failure_goes_to_stderr_while_json_stays_on_stdout(self):

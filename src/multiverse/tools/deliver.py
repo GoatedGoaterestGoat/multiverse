@@ -42,7 +42,12 @@ def run(root=None, *, agent, retry=False, check=False, json=False, _present=None
         if not accepted and state not in (('failed',) if retry else ('failed', 'pending', 'submitting', 'unknown')):
             continue
         try:
-            if retry:
+            final = native.finalize_launch_only(root, directory, message['id']) if state == 'failed' else None
+            if final is not None and retry:
+                continue
+            if final is not None:
+                receipt = final
+            elif retry:
                 with store.lock(directory / '.send.lock'):
                     receipt = native.send_or_wake(root, directory.name, message['id'], retry=True)
             elif state == 'failed':

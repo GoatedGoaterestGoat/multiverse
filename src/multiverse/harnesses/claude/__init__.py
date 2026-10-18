@@ -718,7 +718,8 @@ class ClaudeAdapter(ConfiguredAdapter):
         bridge = self._bridge(session)
         for name in ('send_steer', 'send_follow_up'):
             result[name] = (Capability('supported', mechanism='claude-peer-inbox', required=True) if bridge.ready
-                            else Capability('unavailable', bridge.reason, required=True))
+                            else Capability('unavailable', bridge.reason,
+                                mechanism='launch-only' if bridge.launch_only else None, required=True))
         if bridge.launched and session.session_file:
             result['get_delivery'] = Capability('supported', mechanism='claude-mod-receipt')
         result['ask'] = (Capability('supported', mechanism='claude-model-fork') if bridge.ready and session.session_file

@@ -7,6 +7,8 @@ from multiverse import harnesses
 from multiverse.runtime import lifecycle
 from multiverse.store import read, write
 from multiverse.universe import agents
+from multiverse import display
+from multiverse.tools import doctor
 from test_multiverse import BaseTest
 
 
@@ -36,6 +38,12 @@ class PublicationTest(BaseTest):
                 self.assertEqual(len(folders), 1)
                 self.assertTrue((folders[0] / 'properties.json').is_file())
                 self.assertEqual(read(folders[0] / 'properties.json')['name'], 'preparing')
+                row = lifecycle.listing(self.root, only=folders[0].name)[0]
+                self.assertNotIn('damaged', row, row)
+                self.assertEqual(row['runtime']['state'], 'starting')
+                self.assertTrue((folders[0] / 'runtime.json').is_file())
+                self.assertEqual(display.state(row), 'starting')
+                self.assertTrue(doctor.run(self.root)['ok'])
             finally:
                 release.set()
             with self.assertRaisesRegex(ValueError, 'preparation fixture'):
@@ -52,6 +60,41 @@ class PublicationTest(BaseTest):
         from multiverse.universe.relocate import remove_agent
         remove_agent(self.root, directory.name)
         self.assertEqual(list((self.root / 'state' / 'agents').glob('*/properties.json')), [])
+
+    def test_abandoned_pre_child_stage_is_failed_and_can_be_removed(self):
+        directory, properties, _, _ = lifecycle._record(self.root, 'abandoned', None, 'sleeper', None, None)
+        from multiverse.store import uid
+        with lifecycle._publish_record(self.root, directory, properties, uid()):
+            pass  # Like a killed preparer: the minimal stage remains, but its lock is released.
+        row = lifecycle.listing(self.root)[0]
+        self.assertEqual(row['live'], 'dormant')
+        self.assertEqual(row['runtime']['state'], 'failed')
+        self.assertFalse(row['runtime']['preparing'])
+        self.assertIn('preparation ended', '\n'.join(doctor.run(self.root)['problems']))
+        from multiverse.universe.relocate import remove_agent
+        remove_agent(self.root, directory.name)
+        self.assertFalse(directory.exists())
+
+    def test_preparing_flag_with_child_evidence_cannot_bypass_stopped_check(self):
+        directory, properties, _, _ = lifecycle._record(self.root, 'unknown', None, 'sleeper', None, None)
+        from multiverse.store import uid
+        launch_id = uid()
+        with lifecycle._publish_record(self.root, directory, properties, launch_id):
+            write(directory / 'launches' / launch_id / 'request.json', {'argv': ['/bin/sleep', '600']})
+        row = lifecycle.listing(self.root)[0]
+        self.assertEqual(row['live'], 'unknown')
+        self.assertIn('runtime.json', row['damaged']['file'])
+        self.assertEqual(display.live_label(row), 'unknown')
+        self.assertFalse(doctor.run(self.root)['ok'])
+        self.assertIn('runtime.json', '\n'.join(doctor.run(self.root)['problems']))
+        with self.assertRaisesRegex(ValueError, 'running or its liveness is unknown'):
+            lifecycle.start(self.root, resume='unknown')
+        before = (directory / 'runtime.json').read_bytes()
+        with self.assertRaisesRegex(ValueError, 'runtime.json: preparation record has native startup evidence') as caught:
+            lifecycle.kill(self.root, 'unknown')
+        self.assertIn('repair or remove', str(caught.exception))
+        self.assertIn('mv2 kill unknown', str(caught.exception))
+        self.assertEqual((directory / 'runtime.json').read_bytes(), before)
 
     def test_same_name_is_reserved_once_and_different_names_prepare_together(self):
         entered = threading.Barrier(2)

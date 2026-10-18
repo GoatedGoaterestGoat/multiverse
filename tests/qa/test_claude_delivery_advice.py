@@ -64,7 +64,8 @@ class ClaudeLaunchOnly(unittest.TestCase):
         self.mv2('kill', 'worker')
         self.mv2('resume', 'worker', '--wait')
         result = self.mv2('deliver', 'worker', '--retry', code=None)
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0)
+        self.assertIn('no messages to retry', result.stdout)
         self.assertNotIn('resume it', result.stdout + result.stderr)
 
     def agent_dir(self, name):

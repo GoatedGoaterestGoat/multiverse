@@ -85,6 +85,18 @@ class WakeTest(BaseTest):
         self.assertEqual(self.messages()[-1]['tracking']['submission_state'], 'failed')
         self.start.assert_not_called()
 
+    def test_missing_runtime_wake_refusal_names_restore_or_kill_before_retry(self):
+        from multiverse.universe.records import RecordError
+        path = self.directory / 'runtime.json'
+        self.start.side_effect = RecordError(path, 'a running terminal is still tagged for this agent')
+        lines = []
+        result = send.run(self.root, agent=self.agent, text='wake after metadata loss', _present_error=lines.append)
+        self.assertFalse(result['ok'])
+        self.assertIn('restore ' + str(path), lines[0])
+        self.assertIn('mv2 kill wake', lines[0])
+        self.assertIn('mv2 deliver wake --retry', lines[0])
+        self.assertNotIn('resume it', lines[0])
+
     def test_stopped_wrapper_can_wake_and_uncertain_prompt_never_replays(self):
         agents.update_runtime(self.directory, 'old', state='stopped')
         send.run(self.root, agent=self.agent, text='wake')

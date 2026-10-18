@@ -2,6 +2,7 @@
 from ..harnesses.types import normalize_session_id
 from ..store import existing_lock, lock, now, read, write
 from . import sessions, records
+import fcntl
 
 
 def record_paths(root):
@@ -54,8 +55,10 @@ def name_matches(path, name):
         try:
             mentioned = (error.data or {}).get('name') == name or records.mentions(path, name)
         except (OSError, ValueError) as unreadable:
+            remedy = ('restore or remove the record' if isinstance(unreadable, FileNotFoundError)
+                      else 'fix its permissions or repair the record')
             raise records.RecordError(path, f'Cannot check {owner}: cannot read safely ({unreadable}); '
-                                      'fix its permissions or repair the record before retrying') from error
+                                      f'{remedy} before retrying') from error
         if mentioned:
             raise records.RecordError(path, f'Cannot check {owner}: damaged record mentions name {name!r}; '
                                       'repair it before retrying') from error
@@ -77,6 +80,55 @@ def check_available_name(root, name, *, locked=False, exclude=None):
 def runtime(agent_dir):
     path = agent_dir / "runtime.json"
     return records.runtime(path)
+
+
+def preparing(facts):
+    """Only the minimal record published before any terminal or child can exist."""
+    try:
+        canonical = normalize_session_id(facts.get('launch_id')) == facts.get('launch_id')
+    except ValueError:
+        canonical = False
+    return (canonical and facts.get('preparing') is True and facts.get('state') == 'starting'
+            and set(facts) <= {'launch_id', 'state', 'status', 'started_at', 'preparing'})
+
+
+def _child_evidence(agent_dir, facts):
+    launch = agent_dir / 'launches' / facts['launch_id']
+    return any((launch / name).exists() for name in ('request.json', 'registration.json', 'cleanup.json'))
+
+
+def interrupted_preparation(facts, agent_dir):
+    """Caller holds the launch lock: the old preparer has ended without a child."""
+    if not preparing(facts):
+        return facts
+    if _child_evidence(agent_dir, facts):
+        return {**facts, 'preparing': False}  # This is not proven to precede child startup.
+    reason = 'Launch preparation ended before native startup; fix the cause and resume or remove this agent'
+    return {**facts, 'preparing': False, 'state': 'failed', 'error': reason, 'reason': reason}
+
+
+def preparation_snapshot(agent_dir, facts):
+    """Check only a rare minimal stage, without creating files or querying PIDs."""
+    if not preparing(facts):
+        return {**facts, 'preparing': False} if facts.get('preparing') is True else facts
+    if _child_evidence(agent_dir, facts):
+        raise records.RecordError(agent_dir / 'runtime.json',
+            'preparation record has native startup evidence; repair the runtime record before acting on this agent')
+    try:
+        with (agent_dir / '.launch.lock').open('r+') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return facts  # The publishing parent still holds its launch lock.
+            try:
+                # The parent might have finished between our read and this lock.
+                return interrupted_preparation(runtime(agent_dir), agent_dir)
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+    except FileNotFoundError:
+        return interrupted_preparation(facts, agent_dir)
+    except OSError:
+        return {**facts, 'preparing': False}  # Unknown ownership remains unknown.
 
 
 def update_runtime(agent_dir, launch_id, **changes):

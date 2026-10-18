@@ -21,7 +21,7 @@ from ..harnesses.types import (NativeResult, CommandSpec, SessionHandle, Message
 from ..harnesses.types import ObservedBinding, normalize_session_id
 from ..store import lock, now, read
 from ..terminal.tmux import owned, observe
-from ..universe import agents
+from ..universe import agents, records
 from ..universe.mailbox import end_startup_messages, inbox, message_record, update_message
 
 
@@ -532,6 +532,38 @@ def _launch_only_delivery(adapter, session, delivery):
     return capability if capability and capability.mechanism == 'launch-only' else None
 
 
+def finalize_launch_only(root, directory, message_id):
+    """An already-failed, unsubmitted message needs no retry into a missing path.
+
+    Used after ledger repair too. Recheck durable state under the normal delivery
+    locks; never change accepted/uncertain input or invoke an adapter send/RPC.
+    """
+    with lock(directory / '.launch.lock'), lock(directory / '.delivery.lock'):
+        message, tracking = message_record(directory, message_id)
+        if tracking.get('submission_state') != 'failed':
+            return None
+        previous = (tracking.get('attempts') or [{}])[-1]
+        value = previous.get('value')
+        if (tracking.get('delivery_method') == 'resume_prompt' or tracking.get('wake_launch_id')
+                or isinstance(value, dict) and value.get('wake_refused') is True):
+            return None  # A supported wake can succeed after its startup cause is fixed.
+        _, adapter, session, executor = context(root, directory.name, reconcile=False)
+        capability = _launch_only_delivery(adapter, session, message.get('delivery'))
+        if capability is None:
+            return None
+        live = observe(executor.properties, executor.facts)['live']
+        if live not in ('alive', 'stopped', 'dormant'):
+            return None
+        wake = adapter.capabilities(session).get('wake')
+        if live in ('stopped', 'dormant') and wake is not None and wake.state == 'supported':
+            return None
+        receipt = {'state': 'unavailable', 'ok': False, 'reason': capability.reason,
+                   'value': {'launch_only': True}}
+        update_message(directory, message_id, submission_state='launch-only', final_reason='launch-only',
+                       last_receipt=receipt)
+        return receipt
+
+
 def deliver(root, reference, message_id, retry=False, check=False):
     directory = agents.directory(root, reference)
     # Recipient submission is serialized with generation changes. Inbox operations
@@ -549,6 +581,9 @@ def deliver(root, reference, message_id, retry=False, check=False):
             return receipt
         if tracking.get('submission_state') == 'cancelled':
             return {**tracking['last_receipt'], 'message_id': message_id, 'reused': True, 'ok': False}
+        if tracking.get('submission_state') == 'launch-only':
+            receipt = tracking.get('last_receipt') or (tracking.get('attempts') or [{}])[-1]
+            return {**receipt, 'message_id': message_id, 'reused': True, 'ok': False}
         if check and tracking.get('delivery_method') == 'resume_prompt' and tracking.get('submission_state') != 'failed':
             if tracking.get('submission_state') == 'unknown' and tracking.get('attempts'):
                 return {**tracking['attempts'][-1], 'ok': False}
@@ -618,7 +653,8 @@ def deliver(root, reference, message_id, retry=False, check=False):
         if launch_only is not None:
             receipt = {'state': 'unavailable', 'ok': False, 'reason': launch_only.reason,
                        'value': {'launch_only': True}}
-            update_message(directory, message_id, submission_state='failed', attempts=[*previous, receipt])
+            update_message(directory, message_id, submission_state='launch-only', final_reason='launch-only',
+                           attempts=[*previous, receipt])
             return receipt
         attempt = {'state': 'unknown', 'reason': 'Submission in progress', 'message_id': message_id,
                    'native_session_id': session.native_id, 'mode': selected_mode, 'agent_id': session.agent_id,
@@ -638,8 +674,11 @@ def deliver(root, reference, message_id, retry=False, check=False):
         receipt = {**attempt, **result.to_dict(), 'ok': result.state not in ('unavailable', 'error', 'unknown')}
         state = {'native_queued': 'accepted', 'ok': 'accepted', 'pending': 'pending',
                  'unavailable': 'failed', 'error': 'failed', 'unknown': 'unknown'}[result.state]
+        final = state == 'failed' and isinstance(result.value, dict) and result.value.get('launch_only') is True
+        if final:
+            state = 'launch-only'
         update_message(directory, message_id, submission_state=state, attempts=[*previous, receipt],
-                       native_receipt=result.value)
+                       native_receipt=result.value, **({'final_reason': 'launch-only'} if final else {}))
         return receipt
 
 
@@ -661,7 +700,9 @@ def send_or_wake(root, reference, message_id, retry=False):
             launch_only = _launch_only_delivery(adapter, session, message['delivery']) is not None
             receipt = {'state': 'unavailable', 'ok': False, 'reason': 'This harness cannot wake with an interactive resume prompt',
                        'value': {'launch_only': launch_only, 'wake_refused': True}}
-            update_message(directory, message_id, submission_state='failed', attempts=[*tracking.get('attempts', []), receipt])
+            update_message(directory, message_id, submission_state='launch-only' if launch_only else 'failed',
+                           attempts=[*tracking.get('attempts', []), receipt],
+                           **({'final_reason': 'launch-only'} if launch_only else {}))
             return receipt
     if not wake:
         return deliver(root, reference, message_id, retry=retry)
@@ -678,7 +719,8 @@ def send_or_wake(root, reference, message_id, retry=False):
     except Exception as error:
         _, tracking = message_record(directory, message_id)
         receipt = {'state': 'error', 'ok': False, 'reason': f'Could not wake agent: {error}',
-                   'value': {'wake_refused': True}}
+                   'value': {'wake_refused': True, **({'repair_runtime': str(error.file)}
+                       if isinstance(error, records.RecordError) and error.file.name == 'runtime.json' else {})}}
         # If startup was registered, uncertainty belongs to the runner. Never
         # turn a possibly submitted command-line prompt into a retryable failure.
         if tracking.get('submission_state', 'pending') in ('pending', 'failed'):

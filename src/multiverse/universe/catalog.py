@@ -2,15 +2,23 @@
 from pathlib import Path
 
 from ..store import read
+from . import records
 KINDS = ("skills", "commands", "workflows", "harnesses")
 
 
-def _own(root):
+def _own(root, on_error=None):
     result = []
     for kind in KINDS:
         filename = "harness.json" if kind == "harnesses" else "entry.json"
         for path in sorted((root / kind).glob(f"*/{filename}")):
-            meta = read(path)
+            try:
+                meta = records.runtime(path)
+            except records.RecordError as error:
+                problem = ValueError(f'{error.file}: {error.reason}')
+                if on_error is None:
+                    raise problem from error
+                on_error(problem)
+                continue
             result.append({"kind": kind, "name": path.parent.name,
                            "description": meta.get("description", ""), "path": str(path.parent)})
     return result
@@ -25,9 +33,9 @@ def _plugin_entries(root):
         return []
 
 
-def catalog(root):
+def catalog(root, *, on_error=None):
     """The universe's own entries, then those of plugins on here (with `plugin`) that no own entry of the same kind and name shadows."""
-    result = _own(root)
+    result = _own(root, on_error)
     taken = {(entry["kind"], entry["name"]) for entry in result}
     return result + [entry for entry in _plugin_entries(root) if (entry["kind"], entry["name"]) not in taken]
 

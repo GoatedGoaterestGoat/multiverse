@@ -6,6 +6,7 @@ from multiverse.tools import deliver, doctor, inspect, list_agents, send, inbox
 from multiverse.universe import mailbox
 from multiverse import harnesses
 from multiverse.harnesses.types import SessionHandle, NativeEndpoint
+from dataclasses import replace
 from test_multiverse import BaseTest
 
 
@@ -63,3 +64,69 @@ class DeliveryProblemTest(BaseTest):
             with self.subTest(mode=mode, relay=relay):
                 capability = adapter.capabilities(session)['send_steer']
                 self.assertEqual(capability.mechanism == 'launch-only', mode == 'plain')
+
+    def test_launch_only_refusal_is_final_and_old_typed_failures_migrate(self):
+        for state in ('failed', 'accepted', 'unknown', 'cancelled'):
+            message = self.message(state)
+            mailbox.update_message(self.directory, message['id'], native_receipt={'launch_only': True},
+                attempts=[{'state': 'unavailable', 'ok': False, 'reason': 'This harness is launch-only',
+                           'value': {'launch_only': True}}])
+            tracking = mailbox.message_record(self.directory, message['id'])[1]
+            self.assertEqual(tracking['submission_state'], 'launch-only' if state == 'failed' else state)
+            if state == 'failed':
+                self.assertEqual(tracking['final_reason'], 'launch-only')
+        with patch.object(native, 'send_or_wake', side_effect=AssertionError('final refusal must not retry')):
+            self.assertEqual(deliver.run(self.root, agent='recipient', retry=True)['messages'], [])
+        self.assertNotIn('messages not delivered', list_agents.run(self.root, wide=True))
+
+    def test_one_failed_message_is_singular_and_doctor_names_agent(self):
+        self.message('failed')
+        expected = '1 message not delivered: mv2 deliver recipient --retry'
+        self.assertIn(expected, list_agents.run(self.root, wide=True))
+        self.assertIn('recipient: ' + expected, doctor.run(self.root)['problems'])
+
+    def test_failed_wake_is_not_finalized_by_a_launch_only_delivery_capability(self):
+        for changes in ({'delivery_method': 'resume_prompt'}, {'wake_launch_id': uid()}, {}):
+            message = self.message('failed')  # Its saved receipt also marks a refused wake.
+            mailbox.update_message(self.directory, message['id'], **changes)
+            with patch.object(native, 'context', side_effect=AssertionError('wake must keep its retry path')):
+                self.assertIsNone(native.finalize_launch_only(self.root, self.directory, message['id']))
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1]['submission_state'], 'failed')
+
+    def test_claude_capability_marker_distinguishes_design_from_broken_connection(self):
+        from multiverse.harnesses.claude import BRIDGE
+        base = SessionHandle(self.directory.name, 'claude', str(self.work), native_id=uid(), state='running')
+        auto = harnesses.ClaudeAdapter.configured('claude', {})
+        plain = harnesses.ClaudeAdapter.configured('claude', {'inbox_bridge': False})
+        bridge = replace(base, native_mode={'mode': 'bridge', 'policy': 'auto'},
+                         endpoint=NativeEndpoint('unix-lines', str(self.work / 'private.sock')))
+        cases = [(plain, base, 'launch-only'),
+                 (auto, replace(base, native_mode={'mode': 'plain', 'policy': 'auto',
+                       'fallback_reason': 'Claude Code 2.1.279 is older than 2.1.280'}), 'launch-only'),
+                 (auto, bridge, None),
+                 (auto, replace(bridge, bridge=BRIDGE), 'claude-peer-inbox')]
+        cases += [(auto, replace(bridge, state=state), None) for state in ('stopped', 'dormant', 'failed')]
+        for adapter, session, expected in cases:
+            with self.subTest(session=session, expected=expected):
+                found = adapter.capabilities(session)
+                for name in ('send_steer', 'send_follow_up'):
+                    self.assertEqual(found[name].mechanism, expected)
+        self.assertNotEqual(plain.capabilities(replace(base, agent_id=''))['send_steer'].mechanism, 'launch-only')
+
+    def test_stopped_plain_claude_keeps_failed_unsubmitted_input_for_a_supported_wake(self):
+        message = mailbox.append_message(self.directory, 'wake after repair', {}, delivery='steer')
+        mailbox.update_message(self.directory, message['id'], submission_state='failed',
+            attempts=[{'state': 'error', 'reason': 'Ledger failed before submission',
+                       'value': {'pre_submission_failure': True}}])
+        facts = {'state': 'stopped', 'launch_id': uid(), 'native_mode': {'mode': 'plain', 'policy': 'plain'}}
+        write(self.directory / 'runtime.json', facts)
+        with patch.object(native, 'observe', return_value={'live': 'stopped'}):
+            deliver.run(self.root, agent='recipient', check=True)
+            self.assertEqual(mailbox.message_record(self.directory, message['id'])[1]['submission_state'], 'failed')
+            def wake(root, *, resume, resume_message_id, socket_path=None):
+                mailbox.update_message(self.directory, resume_message_id, submission_state='accepted',
+                    delivery_method='resume_prompt', attempts=[{'state': 'ok', 'ok': True}])
+                return {'runtime': facts}
+            with patch.object(lifecycle, 'start', side_effect=wake) as start:
+                self.assertTrue(deliver.run(self.root, agent='recipient', retry=True)['ok'])
+            start.assert_called_once()

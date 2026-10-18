@@ -116,8 +116,12 @@ UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other
 clients and their server are not closed. A failed preparation keeps a named,
 failed record that doctor reports and mv2 remove can clear. New agent folders
-are published with complete minimal properties, including during concurrent
-spawns.
+are published with complete minimal properties and a starting runtime record,
+including during concurrent spawns. While the publishing process holds its launch
+lock, list shows `starting`; it is not a damaged record. If preparation is
+interrupted before any native startup, doctor reports the failed preparation and
+the record can be resumed or removed. Unknown child evidence still requires
+repair of the runtime record rather than assuming the process stopped.
 Name and conversation claims skip a readable damaged peer only when its bytes
 (and, for conversations, its lineage journal) do not mention the requested name
 or UUID. A possible collision or unreadable evidence names the peer and refuses
@@ -126,6 +130,9 @@ so a damaged file may reserve a name mentioned elsewhere in that file too.
 Unreadable peer evidence can block new names or conversation claims; it does not
 prevent inspecting, stopping or messaging a healthy agent. Doctor also names an
 agent whose recorded workspace folder has disappeared.
+Doctor names each damaged harness definition and continues checking the other
+definitions and agents. Restore or remove a missing peer properties file before
+claiming a name that mv2 cannot safely rule out.
 
 ## When a launch fails
 

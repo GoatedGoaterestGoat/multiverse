@@ -77,6 +77,12 @@ mv2 deliver worker --retry    # resend messages that definitely failed
 message failed. It does not resend them. List, inspect and doctor show how many
 messages were not delivered and the `mv2 deliver NAME --retry` command.
 
+A refused live delivery to a launch-only agent is final. It stays in inbox
+history as `launch-only`, but is not counted as a failure to retry and does not
+make doctor report a problem. Resend with `--delivery inbox-only` for manual
+reading, or attach. A new send to a stopped agent still wakes it when its harness
+supports that; a failed wake remains retryable when consumption is ruled out.
+
 `--retry` resends only definite failures. It never resends messages that were accepted or are uncertain. Don't resend an uncertain message by hand, because the agent may already have it.
 
 An accepted native queue entry is still eligible for `mv2 deliver NAME --check`

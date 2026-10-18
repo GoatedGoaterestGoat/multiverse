@@ -178,7 +178,8 @@ class ConfiguredAdapter:
                     required=name in ('spawn', 'resume', 'send_steer', 'send_follow_up')) for name in CAPABILITIES}
         result['session_name'] = Capability('unavailable', 'Native session naming is not verified for this manifest')
         for operation in ('send_steer', 'send_follow_up'):
-            result[operation] = replace(result[operation], mechanism='launch-only')
+            result[operation] = replace(result[operation], mechanism='launch-only',
+                reason='This agent is launch-only: its harness has no way to deliver into a running session')
         result['stop'] = Capability('supported', mechanism='terminal')
         result['spawn'] = Capability('supported', mechanism='terminal', required=True)
         if 'resume' in self.spec:

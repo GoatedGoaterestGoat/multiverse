@@ -82,7 +82,7 @@ def _states(agent_dir):
     for identifier, state in states.items():
         if (not isinstance(state, dict)
                 or ('submission_state' in state and (not isinstance(state['submission_state'], str)
-                    or state['submission_state'] not in ('pending', 'submitting', 'accepted', 'unknown', 'failed', 'cancelled', 'manual')))
+                    or state['submission_state'] not in ('pending', 'submitting', 'accepted', 'unknown', 'failed', 'cancelled', 'manual', 'launch-only')))
                 or (state.get('native_receipt') is not None and not isinstance(state['native_receipt'], dict))
                 or ('attempts' in state and (not isinstance(state['attempts'], list)
                     or any(not isinstance(attempt, dict) for attempt in state['attempts'])))):
@@ -103,6 +103,11 @@ def _states(agent_dir):
                 last = attempts[-1]
                 states[identifier] = {'attempts': attempts, 'target_session': last.get('native_session_id'),
                     'submission_state': {'native_queued': 'accepted', 'error': 'unknown'}.get(last['state'], 'failed')}
+    for state in states.values():
+        last = (state.get('attempts') or [{}])[-1]
+        value = last.get('value')
+        if state.get('submission_state') == 'failed' and isinstance(value, dict) and value.get('launch_only') is True:
+            state.update(submission_state='launch-only', final_reason='launch-only')
     for proof in (agent_dir / 'inbox-unsubmitted').glob('*.json'):
         failed = _ledger(proof)
         identifier = failed.get('message_id')
@@ -135,7 +140,7 @@ def delivery_problem(agent_dir, name):
         _, _, messages = _messages(agent_dir)
         count = sum(message.get('schema') == 2 and message.get('delivery') in ('steer', 'follow-up')
                     and message.get('id') in failed for _, message in messages)
-    return f'{count} messages not delivered: mv2 deliver {name} --retry' if count else None
+    return f'{count} {"message" if count == 1 else "messages"} not delivered: mv2 deliver {name} --retry' if count else None
 
 
 def preflight_delivery(agent_dir):
@@ -265,7 +270,7 @@ def update_message(agent_dir, message_id, **changes):
         before = states.get(message_id, {})
         states[message_id] = after = {**before, **changes}
         write(agent_dir / 'inbox-state.json', states)
-        if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled'):
+        if after.get('submission_state') in ('submitting', 'accepted', 'unknown', 'cancelled', 'launch-only'):
             proof = agent_dir / 'inbox-unsubmitted' / (message_id + '.json')
             if proof.exists():
                 proof.unlink()

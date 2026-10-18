@@ -73,6 +73,7 @@ def listing(root, recursive=False, only=None):
                 continue
             try:
                 facts = records.runtime(path.parent / "runtime.json")
+                facts = agents.preparation_snapshot(path.parent, facts)
                 if not (path.parent / 'runtime.json').exists() and missing_runtime.launches(path.parent):
                     error = records.RecordError(path.parent / 'runtime.json',
                         'is missing; terminal ownership must be checked before another launch')
@@ -194,6 +195,10 @@ def start(root, name=None, task=None, harness="codex", model=None, resume=None, 
             if not workdir.is_dir():
                 raise ValueError(f'Workspace does not exist: {workdir}')
         previous = runtime(agent_dir)
+        if not resume and agents.preparing(previous) and previous['launch_id'] == proposed_launch:
+            previous = {}  # This call published the minimal record while holding this lock.
+        else:
+            previous = agents.interrupted_preparation(previous, agent_dir)
         missing_notices = (missing_runtime.require_stopped(agent_dir, properties, socket_path)
                            if resume and not (agent_dir / 'runtime.json').exists() else [])
         if _recovery:
@@ -476,15 +481,20 @@ def _publish_record(root, agent_dir, properties, launch_id):
                 if agent_dir.exists():
                     raise ValueError(f'Agent directory already exists: {agent_dir}')
                 write(staging / 'properties.json', properties)
+                write(staging / 'runtime.json', {'launch_id': launch_id, 'state': 'starting',
+                      'status': 'unknown', 'started_at': now(), 'preparing': True})
                 agent_dir.parent.mkdir(parents=True, exist_ok=True)
                 staging.rename(agent_dir)
             try:
                 yield
             except BaseException as error:
-                if not (agent_dir / 'runtime.json').exists():
-                    write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
-                          'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
-                          'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
+                try:
+                    if agent_dir.is_dir() and (not (agent_dir / 'runtime.json').exists() or agents.preparing(runtime(agent_dir))):
+                        write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
+                              'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
+                              'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
+                except (OSError, ValueError):
+                    pass  # Keep the original failure; doctor can name damaged state.
                 raise
 
 def _record(root, name, task, harness, model, resume):
@@ -745,7 +755,16 @@ def kill(root, reference, *, attachment_only=False):
         if recovered is not None:
             return recovered
     with lock(agent_dir / '.launch.lock'):
-        facts = runtime(agent_dir)
+        previous = runtime(agent_dir)
+        facts = agents.interrupted_preparation(previous, agent_dir)
+        if facts is not previous and facts.get('state') != 'failed':
+            raise records.RecordError(agent_dir / 'runtime.json',
+                f'preparation record has native startup evidence; repair or remove this damaged runtime record, '
+                f'then run mv2 kill {reference} to discover its tagged terminal')
+        if facts is not previous:
+            update_runtime(agent_dir, facts['launch_id'], state='failed', preparing=False,
+                           error=facts['error'], reason=facts['reason'])
+            facts = runtime(agent_dir)
         if not facts:
             raise records.RecordError(agent_dir / 'runtime.json', 'disappeared during stop; retry to discover the tagged terminal')
         properties = read(agent_dir / 'properties.json')

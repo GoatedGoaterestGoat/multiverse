@@ -436,10 +436,15 @@ or retry database.
 | submitting | Attempt persisted before native API submission or prompt-bearing process startup; a crash makes acceptance unknown. |
 | accepted | Native API accepted, or the resumed interactive process started with its prompt; consumption may remain unconfirmed. |
 | failed | Definite rejection or pre-submission failure; explicit retry permitted. |
+| launch-only | Final refusal: this launch has no native delivery path. History only; not retried or counted as an open failure. |
 | unknown | Submission may have succeeded; never blindly resent, including with `--retry`. |
 
 The immediate tool result `native_queued` maps to accepted; `unavailable`/`error`
-map to failed. Transcript confirmation and an answer are independent evidence,
+map to failed, except a typed `launch_only: true` refusal, which maps to the final
+launch-only state. Only old failed receipts with that exact typed flag are
+normalized to it; accepted and uncertain input is never reclassified. Supported
+stopped-agent wake and failed wake retry stay separate from live delivery.
+Transcript confirmation and an answer are independent evidence,
 never inferred from acceptance.
 
 ```sh

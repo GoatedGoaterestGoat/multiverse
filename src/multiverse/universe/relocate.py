@@ -20,6 +20,8 @@ from ..terminal.tmux import observe, owned
 def _stopped(agent_dir):
     """Require native exit and remove any retained, owned terminal wrapper."""
     properties, facts = read(agent_dir / "properties.json"), runtime(agent_dir)
+    from .agents import interrupted_preparation
+    facts = interrupted_preparation(facts, agent_dir)  # _hold owns this agent's launch lock.
     if not facts.get("launch_id"):
         if not (agent_dir / 'runtime.json').exists():
             from ..runtime import missing_runtime

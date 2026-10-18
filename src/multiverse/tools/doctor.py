@@ -22,7 +22,7 @@ def check(root, notes=None):
         try:
             if not universe.workspace(scope).is_dir():
                 found.append((f"Missing workspace: {scope}", f"The workspace of {scope} does not exist."))
-            catalog.catalog(scope)
+            catalog.catalog(scope, on_error=lambda error: found.append((str(error), str(error))))
             for item in lifecycle.listing(scope):
                 damage = item.get('damaged')
                 if damage:
@@ -35,12 +35,14 @@ def check(root, notes=None):
                     found.append((problem, problem))
                 runtime = item.get("runtime", {})
                 if item.get('delivery_problem'):
-                    problem = f"{scope}: {item['delivery_problem']}"
+                    problem = f"{item['name']}: {item['delivery_problem']}"
                     found.append((problem, problem))
                 failed = bool(item.get("launch_error")) or runtime.get("state") == "failed"
                 recovery = runtime.get('auto_recovery') or {}
                 connection_error = item.get('connection_error')
-                if item["live"] == "unknown" or failed or connection_error or recovery.get('state') in ('failed', 'skipped'):
+                preparing = runtime.get('preparing') is True and runtime.get('state') == 'starting'
+                if ((item["live"] == "unknown" and not preparing) or failed or connection_error
+                        or recovery.get('state') in ('failed', 'skipped')):
                     reason = (runtime.get('native_refusal') or {}).get('message') or connection_error or item.get("reason") or recovery.get('reason') or runtime.get("error", "Launch failed")
                     found.append((f'{item["name"]}: {reason}', f"{item['name']}'s " +
                                   ("last launch failed: " if failed else "connection was lost: " if connection_error
