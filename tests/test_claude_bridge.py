@@ -1,6 +1,7 @@
 """Claude inbox bridge: launch options, steering frames and receipts, with no Claude session."""
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import shutil
@@ -24,6 +25,12 @@ TYPEAHEAD = plugin_loader.BUNDLED / 'typeahead' / 'claude'
 TYPEAHEAD_VERSION = plugin_manifest.load(TYPEAHEAD.parent).harnesses['claude'][0].min_version
 
 TOKEN = '0123456789abcdef0123456789abcdef'
+
+
+def mod_tag():
+    """The mod's own tag regex (hooks/index.ts TAG): Python's frames must be what it reads, since each side keeps its copy."""
+    found = re.search(r'^const TAG = /(.+)/$', (MOD / 'hooks/index.ts').read_text(), re.M)
+    return re.compile(found.group(1).replace('\\/', '/'))
 
 
 class ClaudeBridgeTest(BaseTest):
@@ -266,6 +273,11 @@ class ClaudeBridgeTest(BaseTest):
         frame = json.loads(executor.write_lines.call_args.args[1][1])
         self.assertEqual(frame['priority'], 'next')
         self.assertTrue(frame['message']['content'].startswith(f'<<MV2 follow-up id={message_id}>>'))
+        # Both read as the mod's regex reads them: the mode, this message's id, and mv2's text.
+        for delivery, content in (('steer', json.loads(executor.write_lines.call_args_list[0].args[1][1])['message']['content']),
+                                  ('follow-up', frame['message']['content'])):
+            with self.subTest(tag=delivery):
+                self.assertEqual(mod_tag().search(content).groups(), (delivery, message_id, 'Message from reviewer:\nbody'))
 
     def test_delivery_is_confirmed_only_by_the_mods_receipt(self):
         """Delivery is confirmed only by the mod's receipt file, an id like ../../escape cannot read outside it, and a
@@ -298,8 +310,11 @@ class ClaudeBridgeTest(BaseTest):
                                     endpoint=NativeEndpoint('unix-lines', self.socket), bridge='claude-mod-v1',
                                     session_file=str(agent_dir / 'session.jsonl'))
 
+            frames = []
+
             def answered(target, lines):
-                question = json.loads(lines[1])['msg_id']
+                frames.append(json.loads(lines[1]))
+                question = frames[-1]['msg_id']
                 (agent_dir / 'claude-asks').mkdir(parents=True, exist_ok=True)
                 (agent_dir / 'claude-asks' / f'{question}.json').write_text(json.dumps(
                     {'id': question, 'answered': True, 'text': 'About an hour.', 'usage': {'input_tokens': 3}}) + '\n')
@@ -311,6 +326,9 @@ class ClaudeBridgeTest(BaseTest):
             self.assertEqual(result.state, 'ok', result.reason)
             self.assertEqual(result.value['answer'], 'About an hour.')
             self.assertEqual(list((agent_dir / 'claude-asks').iterdir()), [])  # the answer is consumed
+            # The question goes out with the tag the mod's own regex reads as a side question (Shao, a8925af).
+            found = mod_tag().search(frames[0]['message']['content'])
+            self.assertEqual(found.groups() if found else None, ('ask', frames[0]['msg_id'], 'How long will this take?'))
 
     def test_resume_renders_the_system_prompt_fresh(self):
         """Resume adds --system-prompt-snapshot off right after the bootstrap, only for Claude 2.1.267 and later, unless
