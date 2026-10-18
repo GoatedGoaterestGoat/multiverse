@@ -48,7 +48,8 @@ def plugin_module(directory, name):
     return importlib.import_module(f"{loader.load(found, off=True).package}.{name}")
 
 
-# The guard: no test writes under the real ~/.multiverse. An audit hook (in native_safety's style) refuses
+# The guard: no test writes under the real ~/.multiverse, or under the .multiverse of the mv2 checkout it runs
+# from. An audit hook (in native_safety's style) refuses
 # writes, renames, removals, directories and mode changes there with PermissionError, so the real home is never
 # changed, and records each one, so the test fails (check(), which PluginTestCase calls when it ends) or, for a
 # thread that outlived its test, the process exits 1 at its end.
@@ -64,11 +65,16 @@ _open_context = threading.local()  # the dir_fd of the os.open call running in t
 _WRITES = {"os.mkdir", "os.rmdir", "os.remove", "os.rename", "os.chmod", "os.utime", "os.link", "os.symlink",
            "os.truncate", "shutil.rmtree", "shutil.copyfile", "shutil.move"}
 _REAL_HOME = os.path.join(os.path.expanduser("~"), ".multiverse")  # captured at import, before a test moves HOME
+# The universe of the mv2 checkout this module runs from (src/multiverse/plugins/testing.py), when it runs from
+# one: there, it is the universe agents run in, which a test finding a universe from its directory would change.
+_SOURCE = Path(__file__).resolve().parents[3]
+_CHECKOUT_STATE = str(_SOURCE / ".multiverse") if (_SOURCE / "src" / "multiverse").is_dir() else None
 
 
 def install(home=None, strict=True):
     """Guard this process (once; later calls add directories): no test writes under `home`, by default the real
-    ~/.multiverse as it was when this module was imported. Returns the directory now protected.
+    ~/.multiverse as it was when this module was imported and the .multiverse of the mv2 checkout this module runs
+    from. Returns the directory now protected (the real ~/.multiverse by default).
 
     A refused write counts against the test it came from: the test running then, or for a thread the test that
     started it. Strict (the default): writes that no check() reported (no test named itself, or a thread outlived
@@ -76,9 +82,11 @@ def install(home=None, strict=True):
     makes a process that another caller installed strict lenient again."""
     global _installed, _strict
     _strict = _strict or strict
-    given = os.path.normpath(os.path.abspath(home if home is not None else _REAL_HOME))
-    directory = os.path.realpath(given)
-    _protected.update({given, directory})  # as written and as resolved (/tmp, /var are links on macOS)
+    homes = [home] if home is not None else [_REAL_HOME] + ([_CHECKOUT_STATE] if _CHECKOUT_STATE else [])
+    for each in homes:
+        given = os.path.normpath(os.path.abspath(each))
+        _protected.update({given, os.path.realpath(given)})  # as written and as resolved (/tmp, /var are links)
+    directory = os.path.realpath(os.path.normpath(os.path.abspath(homes[0])))
     if not _installed:
         _installed = True
         start = threading.Thread.start
@@ -111,7 +119,8 @@ def check(test=None):
     for item in found:
         item["unreported"] = False
     if found:
-        raise AssertionError("a test wrote under the real ~/.multiverse (refused): " + "; ".join(
+        raise AssertionError("a test wrote mv2's real state, under ~/.multiverse or this checkout's .multiverse "
+                             "(refused): " + "; ".join(
             f"{item['event']} {item['path']} in {item['test'] or 'no test'} ({item['thread']})" for item in found))
 
 
@@ -148,7 +157,7 @@ def _hook(event, args):
         for candidate in dict.fromkeys((where, os.path.realpath(where))):
             if _guarded(candidate):
                 _record(event, candidate)
-                raise PermissionError(f"a test may not change the real ~/.multiverse: {candidate}")
+                raise PermissionError(f"a test may not change mv2's real state: {candidate}")
 
 
 def _guarded(where):

@@ -65,10 +65,11 @@ class StandInHome(PluginTestCase):
 
 class GuardTest(StandInHome):
     def test_a_write_under_the_protected_home_is_refused_and_recorded(self):
-        """The home guard refuses and records writes into the protected ~/.multiverse by direct path, HOME, a relative
-        name, a dir_fd, a symlink or a chained symlink, and allows fd-relative removal elsewhere and the plugin under
-        test; fragile because audit events carry no dir_fd and do not resolve links, so a miss silently writes the
-        live user's home (PR #23 review #11 and (b), reviewer item 4)."""
+        """The home guard refuses and records writes into the protected ~/.multiverse, and into the .multiverse of
+        the mv2 checkout the tests run from, by direct path, HOME, a relative name, a dir_fd, a symlink or a chained
+        symlink, and allows fd-relative removal elsewhere and the plugin under test; fragile because audit events
+        carry no dir_fd and do not resolve links, so a miss silently writes the live user's home or the live
+        checkout's universe (PR #23 review #11 and (b), reviewer item 4, Shao's re-review)."""
         home = self.real / ".multiverse"
         with self.subTest("by its path and through HOME"):
             with self.assertRaises(PermissionError):
@@ -81,6 +82,15 @@ class GuardTest(StandInHome):
             self.assertEqual({item["event"] for item in found}, {"os.mkdir", "open"})
             self.assertTrue(all(item["test"] == self.id() for item in found))
             (self.work / "elsewhere.txt").write_text("fine")  # anywhere else is left alone
+        with self.subTest("the .multiverse of the checkout the tests run from"):
+            testing.install()  # as every test process does, with no stand-in
+            checkout = Path(testing.__file__).resolve().parents[3] / ".multiverse"
+            # Under a directory that is never there: refused by the guard, or else FileNotFoundError, never a write
+            # into this checkout's universe, which is the one agents run in when the tests run from the live checkout.
+            probe = checkout / f"mv2-guard-probe-{os.getpid()}-{time.monotonic_ns()}" / "probe"
+            with self.assertRaises(PermissionError):
+                os.mkdir(probe)
+            self.assertEqual([item["path"] for item in self.new_violations()], [str(probe)])
         with self.subTest("check raises once for what is not reported"):
             testing._record("open", str(self.protected / "late.json"))
             with self.assertRaisesRegex(AssertionError, "late.json"):
