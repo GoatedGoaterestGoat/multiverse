@@ -555,7 +555,7 @@ keep changing, as they did in PR #16, without breaking plugins.
 
 ### Versioning
 
-- `api.VERSION` is `(1, 9)` today. Adding something raises the minor version.
+- `api.VERSION` is `(1, 10)` today. Adding something raises the minor version.
   Removing or changing something raises the major version.
 - A plugin written for a newer minor version than this mv2 has is reported as
   "needs plugin API 1.N; update mv2", even when its manifest uses fields,
@@ -621,7 +621,12 @@ Plugin utilities:
 
 - `mv.state_dir(universe)`: `state/plugins/NAME/` of a universe.
 - `mv.agent_state_dir(agent)`: `state/agents/<id>/NAME/`. Compaction's existing
-  `state/agents/<id>/compaction/` already fits.
+  `state/agents/<id>/compaction/` already fits. The API never makes an agent's
+  own folder: below it, directories are made one level at a time without their
+  parents, and files are written without making their directory, so an agent
+  removed or moved at any moment (its folder renamed away or deleted) makes a
+  late write fail with `api.AgentGone` instead of bringing it back as an orphan.
+  No lock against removal is needed (1.10).
 - `mv.agent_at(directory)` and `mv.current_agent()` (from `MV2_AGENT_DIR`, else
   `MV2_AGENT_ID`) find an agent from a helper or a hook.
 - `Agent.session()` gives the `SessionInfo` that capability and usage
@@ -632,7 +637,7 @@ Plugin utilities:
   directory where mv2 knows it (Claude's `CLAUDE_CONFIG_DIR` or `~/.claude`,
   Codex's `CODEX_HOME` or `~/.codex`, Pi's `PI_CODING_AGENT_DIR` when set).
 - `api.files` has `read_json`, `write_json` (atomic), `lock` (exclusive, across
-  processes) and `now`.
+  processes), `ensure_dir` (1.10) and `now`.
 - `api.text.clean(value)` and `api.text.tokens(n)` show text and token counts
   the way the rest of mv2 does.
 - `mv.helper.command(name, *args, universe=)` is the argv that runs one of the

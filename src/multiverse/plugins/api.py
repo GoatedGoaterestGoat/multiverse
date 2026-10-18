@@ -20,11 +20,12 @@ Versioning: VERSION's minor rises when something is added, its major when
 something changes or goes. Fields of `record` (an operation's full result)
 are not covered.
 """
+from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass, field
 import os
 from pathlib import Path
 
-from . import harness, loader, settings as settings_files
+from . import agent_files, harness, loader, settings as settings_files
 from .harness import Contribution, LaunchInfo, SessionInfo
 
 VERSION = loader.API_VERSION
@@ -37,11 +38,18 @@ class Error(ValueError):
     """An operation a plugin asked for could not be done; the message says why."""
 
 
+class AgentGone(Error):
+    """A write was for an agent whose folder is gone (removed, or moved to another universe): nothing of it is
+    made again, so a late write never brings a removed agent back. Stop working for that agent."""
+
+
 def _call(function, *args, **kwargs):
     try:
         return function(*args, **kwargs)
     except Error:
         raise
+    except agent_files.Gone as error:
+        raise AgentGone(str(error)) from error
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         raise Error(str(error)) from error
 
@@ -430,15 +438,28 @@ class Files:
 
     @staticmethod
     def write_json(path, value):
-        """Write JSON so a reader sees the old or the new file, never part of one (parents are created)."""
-        from ..store import write
-        return _call(write, path, value)
+        """Write JSON so a reader sees the old or the new file, never part of one. Its missing parents are made,
+        but never an agent's folder (state/agents/<id>): for an agent that is gone, AgentGone, and nothing is
+        made."""
+        return _call(agent_files.write_json, path, value)
 
     @staticmethod
+    @contextmanager
     def lock(path):
-        """An exclusive lock on `path` while the `with` block runs, across processes (it waits)."""
-        from ..store import lock
-        return lock(path)
+        """An exclusive lock on `path` while the `with` block runs, across processes (it waits). Its missing
+        parents are made, but never an agent's folder: AgentGone for an agent that is gone."""
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(agent_files.lock(path))
+            except agent_files.Gone as error:
+                raise AgentGone(str(error)) from error
+            yield
+
+    @staticmethod
+    def ensure_dir(path):
+        """Directory `path`, with its missing parents; returns it. Never an agent's folder: below one, only while
+        it exists (AgentGone once it is gone). Use it, not a mkdir with parents, for anything under an agent."""
+        return _call(agent_files.ensure_dir, path)
 
     @staticmethod
     def now():
@@ -616,10 +637,11 @@ class Plugin:
         return directory
 
     def agent_state_dir(self, agent):
-        """state/agents/<id>/NAME/ of an agent, created on first use."""
-        directory = agent.universe.path / "state" / "agents" / agent.id / self.name
-        directory.mkdir(parents=True, exist_ok=True)
-        return directory
+        """state/agents/<id>/NAME/ of an agent, made on first use while the agent's folder exists; AgentGone once
+        it was removed or moved (its folder is never made again). Make what goes below it with
+        api.files.ensure_dir, write_json or lock, never a mkdir with parents, which would bring a removed agent
+        back as an orphan."""
+        return _call(agent_files.ensure_dir, agent.universe.path / "state" / "agents" / agent.id / self.name)
 
     def log(self, text, universe=None):
         """Append a line to state/plugins/NAME/plugin.log."""

@@ -275,6 +275,7 @@ class LaunchPlanTest(PluginTestCase):
         self.assertEqual(harness.adjust_usage(info, {"context": {"tokens": 5}}),
                          {"context": {"tokens": 5, "estimated": True}})
         agent_dir = self.root / "state" / "agents" / "a"
+        agent_dir.mkdir(parents=True)  # the agent's folder is core's; an item is written only while it exists
         mv = api.Plugin(loader.load(self.entry("guard")))
         mv.statusline.write(agent_dir, "trees", "trees 3/4\n· building")
         self.assertEqual(harness.item_path(agent_dir, "trees").read_text(), "trees 3/4 · building\n")

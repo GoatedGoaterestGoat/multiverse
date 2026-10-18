@@ -16,7 +16,7 @@ import re
 import shutil
 import subprocess
 
-from . import loader
+from . import agent_files, loader
 
 # Core's own variables: the launch's identity and mv2's switches. A plugin may set MV2_<ITS NAME> and
 # MV2_<ITS NAME>_* (its name upper-cased, hyphens as underscores) and nothing else under MV2_.
@@ -490,10 +490,13 @@ def write_item(agent_dir, name, text):
     if not text:
         path.unlink(missing_ok=True)
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(text + "\n")
-    temporary.replace(path)
+    try:
+        agent_files.ensure_dir(path.parent)  # never the agent's folder: a removed agent gets nothing written
+        temporary.write_text(text + "\n")
+        temporary.replace(path)
+    except FileNotFoundError:
+        return
 
 
 def as_json(plan):
