@@ -7,6 +7,8 @@ on:
   push:
     branches: [main, "ci/**"]
   pull_request:
+  schedule:
+    - cron: "0 9 * * *"  # nightly, 09:00 UTC: the module-by-module job
   workflow_dispatch:
 
 permissions:
@@ -20,7 +22,7 @@ jobs:
   suite:
     name: suite (Python ${{ matrix.python }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15  # about 3.5 minutes; a hang fails the run instead of holding it
     strategy:
       fail-fast: false
       matrix:
@@ -40,10 +42,12 @@ jobs:
 
   alone:
     # Each module in a process of its own, one at a time, with plain unittest: a module can pass beside others in
-    # the suite and fail alone, when nothing else loads the machine or reaps for it.
+    # the suite and fail alone, when nothing else loads the machine or reaps for it. tests/run.py already runs each
+    # module in its own process, so this repeats the suite in another way: nightly and on demand, not on every push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: each module alone (Python 3.13)
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 20  # about 6 minutes
     steps:
       - uses: actions/checkout@v7
       - name: Install tmux
@@ -62,7 +66,7 @@ jobs:
           for module in $modules; do
             echo "::group::$module"
             code=0
-            timeout 1200 ../.venv/bin/python -m unittest "$module" || code=$?  # the step runs under bash -e
+            timeout 300 ../.venv/bin/python -m unittest "$module" || code=$?  # the step runs under bash -e
             # 5 is "no tests ran": a module that only holds fixtures for others, which the suite job runs as 0 tests
             if [ $code -ne 0 ] && [ $code -ne 5 ]; then
               failed+=("$module")

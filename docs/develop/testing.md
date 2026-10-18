@@ -70,10 +70,10 @@ Live native tests use local scripted providers and isolated homes. They need no 
 
 ## Continuous integration
 
-`.github/workflows/tests.yml` runs on pull requests and on pushes to `main` and `ci/*` branches, on Ubuntu 24.04 with tmux 3.4 and Node 22. Codex, Claude and Pi aren't installed there, so their live tests skip.
+`.github/workflows/tests.yml` runs on Ubuntu 24.04 with tmux 3.4 and Node 22. Codex, Claude and Pi aren't installed there, so their live tests skip.
 
-- **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, and on 3.13.
-- **each module alone** runs every module `tests/run.py --list` prints by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
+- **suite** runs `tests/run.py` on Python 3.11, the oldest version mv2 supports, and on 3.13, for pull requests and for pushes to `main` and `ci/*` branches. Each takes about three and a half minutes.
+- **each module alone** runs nightly, and on demand from the Actions tab: every module `tests/run.py --list` prints, by itself with plain `unittest`, one at a time. A module can pass beside others and fail alone, when nothing else loads the machine.
 
 The plugin submodules are private and aren't fetched, so CI doesn't run the GOAT and remote-control plugins' own tests. `test_plugin_checkouts` still runs its own tests.
 
