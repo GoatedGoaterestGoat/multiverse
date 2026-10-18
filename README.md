@@ -7,7 +7,7 @@
 <p align="center">
   <a href="https://github.com/GoatedGoaterestGoat/multiverse/stargazers"><img src="https://img.shields.io/github/stars/GoatedGoaterestGoat/multiverse?logo=github&labelColor=1e1e2e&color=cba6f7" alt="GitHub stars"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-cba6f7?labelColor=1e1e2e" alt="MIT license"></a>
-  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.302-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.302"></a>
+  <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Claude%20Code-2.1.303-cba6f7?labelColor=1e1e2e" alt="Checked against Claude Code 2.1.303"></a>
   <a href="docs/reference/compatibility.md#checked-harness-versions"><img src="https://img.shields.io/badge/Codex-0.163.0-cba6f7?labelColor=1e1e2e" alt="Checked against Codex 0.163.0"></a>
 </p>
 
