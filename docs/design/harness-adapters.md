@@ -1331,7 +1331,8 @@ On Claude Code 2.1.292 or newer the launch also loads `claude/typeahead/`, a
 second small plugin that fills the prompt box's typeahead while `/multiverse` is
 typed: the first word offers `list`, `send`, `inbox` and the catalog's commands,
 workflows and skills (`kind/name` when a bare name is shared or reserved); after
-`send` it offers this universe's agents other than this one (a comma list
+`send` it offers this universe's agents, except this one and any row built from a
+damaged record, which `send` can't reach (a comma list
 completes its last name); a catalog entry's arguments get nothing. It reads `mv2
 catalog` and `mv2 list --json` in the background and keeps them five seconds, so
 typing never waits on mv2, and a failed read offers no rows. It is separate
