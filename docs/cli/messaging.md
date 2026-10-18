@@ -47,7 +47,10 @@ A running agent without a live connection can't receive `steer` or `follow-up` m
 | --- | --- | --- |
 | `NAME: message confirmed in its conversation.` | The agent's session recorded it | Nothing |
 | `Sent to NAME; it reads this at its next pause.` | A Claude agent took it; it joins the running turn at the next tool result, or starts a turn if idle | Nothing |
-| `NAME has your message queued for its next turn.` | It was accepted and waits for the turn to end | Nothing. Don't resend it |
+| `NAME has your message for its next turn.` | A `follow-up` was accepted and waits for the turn to end | Nothing. Don't resend it |
+| `NAME has your message queued for its next turn.` | It's in a connected Codex agent's queue, waiting for the turn to end | Nothing. Don't resend it |
+| `NAME started a turn with your message.` | The agent was idle, so the message started a turn | Nothing |
+| `NAME has your message queued; its next turn has not started.` | It's queued, but the turn didn't start | Run `mv2 deliver NAME --check` later; don't resend |
 | `NAME: message accepted; no confirmation yet. Do not resend.` | The session took it, but no confirmation has arrived | Run `mv2 deliver NAME --check` later |
 | `NAME was stopped; resuming it with your message.` | The agent is starting with your message as its prompt | Nothing |
 | `NAME is starting; your message will be delivered when ready.` | It's waiting for the session to be ready | Nothing |
