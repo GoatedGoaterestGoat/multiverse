@@ -13,7 +13,7 @@ mv2 -u .multiverse/subverses/review tui
 ## Layout
 
 - **The list** is one tree. The universe and each subverse are folders, with their agents underneath. Folders fold and unfold.
-- **The header** counts live agents and agents waiting for you (an orange `●` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`.
+- **The header** counts live agents and agents waiting for you (an orange `●` marks them). For Claude agents with a live connection, it also shows your account's rate-limit windows, such as `5h 34% · 7d 12%`. `mv2 changed: reopen` appears when mv2's own code changed on disk after the dashboard started (see [troubleshooting](../use/troubleshooting.md#the-dashboard-says-mv2-changed)).
 - **The inspector** (`p`) shows the selected agent's work, harness and model, state, and a live view of its terminal. When something is wrong, the reason comes right after the agent's name: an unusable record (with its file), a failed launch, a lost connection, the reason a launch fell back to plain, or a plugin the launch left out. For a folder, it shows counts and recent work. It sits on the right in wide terminals and below the list in narrow ones. `v` lists the same launch mode and fallback reason.
 - **The bottom line** shows key hints and the result of your last action. The hints are clickable.
 

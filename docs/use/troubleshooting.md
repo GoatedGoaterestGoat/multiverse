@@ -208,6 +208,12 @@ mv2 runs agents on its own tmux server, `tmux -L multiverse-v2`, or on the socke
 
 The dashboard refreshes every 1.5 seconds, and F5 refreshes it at once. `mv2 list --recursive` shows the same agents.
 
+### The dashboard says "mv2 changed"
+
+The header shows `mv2 changed: reopen`, or an action fails with `mv2 changed since this dashboard started; quit and reopen it`, followed by the import or attribute error it hit.
+
+mv2's source changed on disk after the dashboard started, for example from `mv2 update` or a `git pull`. The dashboard keeps running the code it loaded and loads the rest from disk when it first needs it, so an action can pair new code with old and fail with an error the new code would not give. Press `q` and run `mv2` again. Agents keep running.
+
 ### `mv2 update` refuses
 
 `mv2 update` prints `mv2 was not fully updated: REASON`. `mv2 update --check` shows the same refusal without changing anything.

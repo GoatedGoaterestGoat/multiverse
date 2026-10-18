@@ -33,8 +33,9 @@ class AgentCommands:
             self.set_status(message, error=error)
             succeeded = True
         except Exception as error:
-            self.set_status(f"{label} failed: {error}", error=True)
-            self.notify(str(error), title=label, severity="error", markup=False)
+            reason = self.code_watch.explain(error)  # old code mixed with new code gets its own sentence
+            self.set_status(f"{label} failed: {reason}", error=True)
+            self.notify(reason, title=label, severity="error", markup=False)
         finally:
             self.operating = self.operating_plugin = False
         # A scan started before the action may contain old state. Finish it, then
@@ -122,7 +123,7 @@ class AgentCommands:
                 if attach_error is not None:
                     raise attach_error
         except Exception as error:
-            self.set_status(f"Attach failed: {error}", error=True)
+            self.set_status(f"Attach failed: {self.code_watch.explain(error)}", error=True)
         finally:
             self.operating = False
             self.refresh_snapshot()

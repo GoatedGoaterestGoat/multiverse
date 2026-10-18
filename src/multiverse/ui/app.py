@@ -30,6 +30,7 @@ from .editing import TreeEditing
 from .fleet import FleetView
 from .inspector import Inspector
 from .panels import LocalView
+from .stale import CodeWatch
 from .plugin_service import PluginService, error_text, in_daemon, plugin_of, universe_name
 from .plugins_screen import PluginsScreen
 from .screens import KEYS, Details
@@ -99,8 +100,9 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
         Binding("f5", "refresh", "Refresh", show=False),
     ]
 
-    def __init__(self, root, backend=None, *, refresh_interval=1.5, plugin_service=None):
+    def __init__(self, root, backend=None, *, refresh_interval=1.5, plugin_service=None, code_root=None):
         super().__init__()
+        self.code_watch = CodeWatch(code_root)  # notices mv2's own code changing under this long-running process
         self.plugin_service = plugin_service or PluginService()
         self.plugin_actions, self.plugin_screens = {}, {}
         self.registry_generation = None  # loader.generation() when the palette was last read
@@ -216,6 +218,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 return
             self.snapshot = snapshot
             self.scan_count += 1
+            await asyncio.to_thread(self.code_watch.check)
             self.title = clean(snapshot["name"])
             self.query_one("#brand", Static).update(Text("◈ " + self.title + (" / DEMO" if self.backend.demo else ""),
                                                         style=snapshot["accent"]))
@@ -237,7 +240,7 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
                 self._restore_scroll = None
                 self.call_after_refresh(self.restore_scroll, scroll)
         except Exception as error:
-            self.set_status(f"Could not refresh: {error}", error=True)
+            self.set_status(f"Could not refresh: {self.code_watch.explain(error)}", error=True)
         finally:
             self.scanning = False
             if generation != self._scope_generation:
@@ -257,6 +260,8 @@ class MultiverseApp(FleetView, TreeEditing, AgentCommands, ContainsPluginErrors,
             line.append(" · host off", style=theme.PEACH)
         if self.snapshot.get("plugin_trouble"):  # the plugin system itself failed while reading; the agents are unaffected
             line.append(" · plugins unreadable", style=theme.PEACH)
+        if self.code_watch.stale:  # what is running is no longer what is on disk
+            line.append(" · mv2 changed: reopen", style=theme.PEACH)
         self.query_one("#totals", Static).update(line)
 
     @work(group="plugin-host", exclusive=True, exit_on_error=False)
