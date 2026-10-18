@@ -126,6 +126,25 @@ class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                     self.assertNotIn("recover", d.app.selected["damaged"])
                     await d.press("d")
                     self.assertEqual(len(d.app.screen_stack), 1)
+                with self.subTest("the row and the inspector say what resolves each kind of damaged row"):
+                    await d.press("p")  # the inspector follows the selection from here on
+
+                    async def shown(directory, name):
+                        d.select(name)
+                        await d.until(lambda: name in str(d.app.query_one("#inspect-name", Static).render()), "the inspector")
+                        return " ".join(self.row(d, directory)), self.inspector_text(d)
+
+                    row, inspector = await shown(orphan, orphan.name)  # nothing to fix: the folder only has to go
+                    self.assertIn("leftover", row)
+                    self.assertIn("trash", row)
+                    self.assertIn("trash", inspector)
+                    self.assertNotIn("Fix or restore", inspector)
+                    row, inspector = await shown(lost, "lost")  # a terminal may be running: K, then the file
+                    self.assertIn("K", inspector)
+                    self.assertIn("terminal", inspector)
+                    row, inspector = await shown(broken, broken.name)  # a real damaged agent: repair it
+                    self.assertIn("Fix or restore", inspector)
+                    await d.press("p")
                 with self.subTest("a record-free folder cannot be moved, and is deleted for real"):
                     d.select(orphan.name)
                     self.assertEqual(d.app.selected["damaged"]["recover"], "remove")

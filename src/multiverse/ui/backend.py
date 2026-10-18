@@ -33,6 +33,9 @@ class LocalBackend:
     def snapshot(self, root):
         meta, config = read(root / "universe.json"), view(root)
         members = list_agents.run(root, recursive=True, json=True)
+        for member in members:  # a leftover folder is not a damaged agent: say what to do with it, not what failed to read
+            if isinstance(member.get("damaged"), dict) and member["damaged"].get("recover") == "remove":
+                member["summary"] = "damaged: a leftover folder with no agent records · d moves it to the trash"
         plugin_columns = any(key not in COLUMNS for key in config["columns"])
         trouble, on = [], {}
         if plugin_columns:

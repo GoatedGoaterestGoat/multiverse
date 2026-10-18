@@ -185,9 +185,18 @@ def identity(state, row):
 def damage(state, row):
     """A row whose record cannot be read says which file and why; its other facts are unknown."""
     found = row.get("damaged")
-    if isinstance(found, dict):
-        state.append("\nDamaged: " + clean(found.get("file", "")), style=f"bold {theme.RED}")
-        state.append("\n" + clean(found.get("reason", "")), style=theme.YELLOW)
+    if not isinstance(found, dict):
+        return
+    if found.get("recover") == "remove":  # nothing here is an agent: there is nothing to repair, only a folder to remove
+        state.append("\nLeftover folder: " + clean(str(Path(found.get("file", "")).parent)), style=f"bold {theme.YELLOW}")
+        state.append("\nNo agent records, only leftover files. Press d to move it to the trash; mv2 first checks that "
+                     "no terminal is running for it. The other agents are not affected.", style=theme.SUBTEXT0)
+        return
+    state.append("\nDamaged: " + clean(found.get("file", "")), style=f"bold {theme.RED}")
+    state.append("\n" + clean(found.get("reason", "")), style=theme.YELLOW)
+    if found.get("recover") == "kill":  # a terminal may still be running behind the lost record
+        state.append("\nPress K to find and stop its terminal. Then fix or restore the file and refresh (F5).", style=theme.SUBTEXT0)
+    else:
         state.append("\nFix or restore the file and refresh (F5). The other agents are not affected.", style=theme.SUBTEXT0)
 
 

@@ -114,7 +114,20 @@ class StaleDashboardTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(watch.explain(skew), RAW)  # same code: a real import problem, shown as it is
         app = self.app()
         async with self.running(app):
+            def resume():
+                raise skew
+
+            with self.subTest("before the change the dashboard shows the plain import error"):
+                app.submit_operation("Resume agent", resume)
+                await self.wait(lambda: not app.operating, "the action to end")
+                self.assertIn(RAW, self.status(app))
+                self.assertNotIn("reopen", self.status(app).lower())
             self.change_code()
+            with self.subTest("after the change the dashboard's own action shows the reopen advice"):
+                app.submit_operation("Resume agent", resume)
+                await self.wait(lambda: not app.operating, "the action to end")
+                self.assertIn(RAW, self.status(app))  # the original stays, for whoever has to diagnose it
+                self.assertIn("reopen", self.status(app).lower())
             for error in (skew, ModuleNotFoundError("No module named 'x'"), AttributeError("no attribute y"),
                           TypeError("run() got an unexpected keyword argument 'z'"),
                           NameError("name 'q' is not defined")):
