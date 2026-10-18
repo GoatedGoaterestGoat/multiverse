@@ -213,6 +213,21 @@ def fallback(state, row):
         state.append('\nFallback: ' + clean(selection['fallback_reason']), style=theme.YELLOW)
 
 
+def plugin_problems(state, row):
+    """Plugins the launch left out, and why, from the launch's plugin record (any harness); what the fallback line
+    already says is not repeated."""
+    record = row.get("runtime", {}).get("plugins")
+    if not isinstance(record, dict):
+        return
+    said = str((row.get("runtime", {}).get("native_mode") or {}).get("fallback_reason") or "")
+    found = record.get("plugins") if isinstance(record.get("plugins"), dict) else {}
+    for name, detail in sorted(found.items()):
+        if isinstance(detail, dict) and detail.get("state") == "skipped" and str(detail.get("reason") or "") not in said:
+            state.append(f"\nPlugin {clean(name)} left out: {clean(str(detail.get('reason') or 'no reason given'))}", style=theme.YELLOW)
+    if record.get("error") and str(record["error"]) not in said:
+        state.append("\n" + clean(str(record["error"])), style=theme.YELLOW)
+
+
 def launch_error(state, row):
     if row.get('launch_error'):
         state.append('\n' + clean(row['launch_error'].splitlines()[0]), style=f'bold {theme.RED}')
@@ -234,7 +249,7 @@ def versions(state, row):
 
 
 # What is wrong comes right after who the agent is: the block is short, and a cut must take the routine lines.
-AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, progress, context, native_mode, versions)
+AGENT_FACTS = (identity, damage, launch_error, relay_loss, fallback, plugin_problems, progress, context, native_mode, versions)
 
 
 def agent_state(row):
