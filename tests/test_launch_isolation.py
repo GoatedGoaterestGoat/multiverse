@@ -240,8 +240,6 @@ class LaunchIsolationTest(unittest.TestCase):
         CLAUDE-5)."""
         manifests = sorted(templates.TEMPLATES.glob("*/harnesses/*/harness.json"))
         self.assertEqual({manifest.parent.name for manifest in manifests}, {'claude', 'codex', 'pi'})
-        identity = {"MV2_CLI": "/child/bin/mv2", "MV2_UNIVERSE": "/child", "MV2_AGENT_ID": "child",
-                    "MV2_TMUX_SOCKET": "/actual/tmux.sock"}
         markers = ("CODEX_THREAD_ID", "CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SSE_PORT",
                    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN")
         parent = {"MV2_AGENT_ID": "parent", "MV2_TMUX_SOCKET": "/stale", "MV2_STALE": "parent",
@@ -260,12 +258,20 @@ class LaunchIsolationTest(unittest.TestCase):
                           {**config, "settings": {**config["settings"], **settings}})
                     with patch('multiverse.harnesses.claude.claude_version', return_value=(2, 1, 302)):
                         command = harnesses.load(scope, name).spawn(LaunchContext('spawn', values))
-                    launch_id = str(uuid4())
-                    launch = scope / "agent" / "launches" / launch_id
+                    launch_id, agent_id, universe_id = (str(uuid4()) for _ in range(3))
+                    agent = scope / 'state/agents' / agent_id
+                    launch = agent / 'launches' / launch_id
+                    identity = {'MV2_CLI': '/child/bin/mv2', 'MV2_UNIVERSE': str(scope),
+                                'MV2_AGENT_ID': agent_id, 'MV2_AGENT_DIR': str(agent),
+                                'MV2_LAUNCH_ID': launch_id, 'MV2_TMUX_SOCKET': str(scope / 'absent.sock')}
+                    write(scope / 'universe.json', {'id': universe_id, 'name': 'markers', 'workspace': str(self.work)})
+                    # Real launches publish identity before releasing the runner, including plain launches.
+                    write(agent / 'properties.json', {'id': agent_id, 'universe_id': universe_id,
+                          'name': 'child', 'harness': name, 'workspace': str(self.work)})
                     output = scope / "child.json"
                     code = ('import json,os,pathlib; pathlib.Path(' + repr(str(output)) +
                             ').write_text(json.dumps(dict(os.environ)))')
-                    write(scope / "agent" / "runtime.json", {"launch_id": launch_id})
+                    write(agent / "runtime.json", {"launch_id": launch_id, "state": "starting"})
                     write(launch / "request.json", {"argv": [sys.executable, "-c", code],
                                                     "env": {**command.environment, **identity},
                                                     "unset_env": list(command.unset_env)})

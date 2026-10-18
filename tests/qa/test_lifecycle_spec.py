@@ -75,12 +75,12 @@ class DecidedSpecQuestions(unittest.TestCase):
                 time.sleep(.1)
 
     def test_missing_executable_says_name_did_not_start(self):
-        """Through the real CLI a spawn whose executable is missing says the agent did not start and how to reuse its
-        name (mv2 remove, then spawn) or resume it; a break leaves an agent retrying a name it cannot reuse (de2ec38,
-        Q4; docs/use/troubleshooting.md "A spawn or resume failed")."""
+        """A missing executable releases the name before native preparation; stale advice or a retained reservation otherwise traps CLI retries (Q4)."""
         self.harness('missing', ['/nonexistent/qa-agent'])
-        result = self.mv2('spawn', '--name', 'm', '--harness', 'missing', '--wait', check=False)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('m did not start: Harness executable not found', result.stderr)
-        self.assertIn('mv2 remove m', result.stderr)
-        self.assertIn('resume', result.stderr)
+        for attempt in range(2):
+            with self.subTest(attempt=attempt):
+                result = self.mv2('spawn', '--name', 'm', '--harness', 'missing', '--wait', check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('m did not start: Harness executable not found', result.stderr)
+                self.assertNotIn('mv2 remove m', result.stderr)
+                self.assertEqual(json.loads(self.mv2('list', '--json').stdout), [])
