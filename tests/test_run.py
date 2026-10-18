@@ -110,7 +110,9 @@ class RunnerTest(unittest.TestCase):
             """, extra)
         self.module("test_gamma", f"""
             def load_tests(loader, tests, pattern):
+                top = loader._top_level_dir
                 tests.addTests(loader.discover({str(extra)!r}, top_level_dir={str(extra)!r}))
+                loader._top_level_dir = top  # as test_plugin_checkouts must on Python 3.11
                 return tests
             """)
         recorded = """
