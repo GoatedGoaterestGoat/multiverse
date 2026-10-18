@@ -160,14 +160,16 @@ class PluginService:
         return top
 
     def host_state(self, root):
-        """{needed, running, stopped: {plugin: reason}, pid, workers} for this tree's host, or None when unreadable."""
+        """{needed, running, stopped: {plugin: reason}, pid, workers, problem} for this tree's host, or None when unreadable.
+
+        `problem` is why the host's recorded status cannot be used (a damaged status file), or None."""
         try:
             info = host.status(self.host_top(root))
         except Exception:
             return None
         return {"needed": bool(info.get("needed")), "running": bool(info.get("running")),
                 "stopped": dict(info.get("stopped") or {}), "pid": info.get("pid"),
-                "workers": sorted(info.get("workers") or ())}
+                "workers": sorted(info.get("workers") or ()), "problem": info.get("problem")}
 
     def start_host(self, root):
         """Start the host unless one runs; raises with the reason when it does not come up."""
