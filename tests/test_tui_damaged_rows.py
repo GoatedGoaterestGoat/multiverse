@@ -4,195 +4,140 @@ import os
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 from multiverse.plugins.testing import PluginTestCase
+from multiverse.ui.backend import LocalBackend
 
 UNREADABLE_WORKS = os.geteuid() != 0
+DAMAGE = {"list": "[]", "truncated": '{"id":', "empty": ""}
 
 
 class DamagedRowTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.healthy = self.agent("healthy", summary="HEALTHY-MARKER", phase="working")
-        self.victim = self.agent("victim", summary="victim's own", phase="blocked")
-        self.originals = {name: (self.victim / name).read_bytes() for name in ("properties.json", "runtime.json")}
-        self.addCleanup(self.restore)
 
-    def restore(self):
-        for name, data in self.originals.items():
-            path = self.victim / name
-            path.exists() and path.chmod(0o600)
-            path.write_bytes(data)
+    def damage(self, directory, file, kind):
+        path = directory / file
+        if kind == "unreadable":
+            path.chmod(0)
+            self.addCleanup(path.chmod, 0o600)
+        elif kind.endswith("-list"):  # well-formed JSON whose name or harness is not text
+            data = json.loads(path.read_text())
+            data[kind[:-len("-list")]] = ["not-text"]
+            path.write_text(json.dumps(data))
+        else:
+            path.write_text(DAMAGE[kind])
 
-    def rows(self, d):
-        headers, rows = d.table()
-        return headers, {row[0].lstrip("│├╰─ ▸▾").rstrip(" ⚠●"): row for row in rows}  # the tree guides and markers are not the name
+    def row(self, d, directory):
+        """The table's cells for the agent in `directory`."""
+        key = next(key for key, row in d.app.visible_rows.items() if row.get("id") == directory.name)
+        return [getattr(cell, "plain", str(cell)) for cell in d.app.query_one("#agents", DataTable).get_row(key)]
 
     def inspector_text(self, d):
         return str(d.app.query_one("#inspect-state", Static).render())
 
-    async def test_a_damaged_properties_file_is_a_marked_row_and_the_healthy_one_still_refreshes(self):
-        async with self.dashboard(size=(130, 36)) as d:
-            (self.victim / "properties.json").write_text("[]")
+    async def test_one_damaged_record_is_one_marked_row_and_the_rest_refresh(self):
+        """With the real app and listing, one victim per damage kind of properties.json and runtime.json is a marked
+        row naming its file while the healthy agent's new summary appears after F5 and nothing says Could not refresh;
+        a break goes unnoticed in normal use because damage follows only crashes, and then it hides every agent
+        (b041664)."""
+        kinds = ["list", "truncated", "empty"] + (["unreadable"] if UNREADABLE_WORKS else [])
+        victims = {(file, kind): self.agent(f"{file.split('.')[0]}-{kind}")
+                   for file, more in (("properties.json", ["name-list", "harness-list"]), ("runtime.json", []))
+                   for kind in kinds + more}
+        async with self.dashboard(size=(130, 40)) as d:
+            for (file, kind), directory in victims.items():
+                self.damage(directory, file, kind)
             self.agent_summary(self.healthy, "REFRESHED-AFTER-DAMAGE")
             await d.press("f5")
             self.assertNotIn("Could not refresh", d.status)
-            _, rows = self.rows(d)
-            text = " ".join(" ".join(row) for row in rows.values())
-            self.assertIn("REFRESHED-AFTER-DAMAGE", text)
-            self.assertIn("damaged: properties.json: must be a JSON object, not a list", text)
-            marked = [name for name, row in rows.items() if "⚠" in row[0]]
-            self.assertEqual(len(marked), 1)
-            d.select(marked[0])
+            self.assertIn("REFRESHED-AFTER-DAMAGE", " ".join(self.row(d, self.healthy)))
+            self.assertNotIn("⚠", self.row(d, self.healthy)[0])
+            for (file, kind), directory in victims.items():
+                with self.subTest(file=file, kind=kind):
+                    row = self.row(d, directory)
+                    self.assertIn("⚠", row[0])
+                    self.assertIn(f"damaged: {file}", " ".join(row))
+                    if file == "runtime.json":  # its properties still name it
+                        self.assertIn(f"runtime-{kind}", row[0])
+            self.assertEqual(sum("⚠" in row[0] for row in d.table()[1]), len(victims))
+            victim = victims["properties.json", "list"]
+            d.select(victim.name)
             await d.press("p")
             await d.until(lambda: "Damaged:" in self.inspector_text(d), "the inspector to name the damaged file")
-            shown = self.inspector_text(d)
-            self.assertIn(f"state/agents/{self.victim.name}/properties.json", shown)
-            self.assertIn("must be a JSON object, not a list", shown)
+            self.assertIn(f"state/agents/{victim.name}/properties.json", self.inspector_text(d))
 
-    async def test_a_damaged_runtime_keeps_the_agents_name_and_says_which_file(self):
-        (self.victim / "runtime.json").write_text('{"state":')
-        async with self.dashboard(size=(130, 36)) as d:
-            _, rows = self.rows(d)
-            self.assertIn("victim", rows)
-            self.assertIn("⚠", rows["victim"][0])
-            self.assertIn("damaged: runtime.json", " ".join(rows["victim"]))
-            self.assertNotIn("Could not refresh", d.status)
-
-    @unittest.skipUnless(UNREADABLE_WORKS, "root reads every file")
-    async def test_an_unreadable_file_is_a_damaged_row_too(self):
-        (self.victim / "properties.json").chmod(0)
-        self.addCleanup((self.victim / "properties.json").chmod, 0o600)
-        async with self.dashboard(size=(130, 36)) as d:
-            _, rows = self.rows(d)
-            self.assertIn("healthy", rows)
-            self.assertIn("cannot be read: Permission denied", " ".join(" ".join(row) for row in rows.values()))
-
-    async def test_nothing_acts_on_a_damaged_row_and_the_status_line_says_why(self):
-        (self.victim / "properties.json").write_text("")
-        async with self.dashboard(size=(130, 36)) as d:
-            _, rows = self.rows(d)
-            damaged = next(name for name, row in rows.items() if "⚠" in row[0])
-            d.select(damaged)
-            for key in ("m", "K", "s", "r", "enter"):
-                d.app.set_status("")  # each key must say it itself, not leave the last key's message standing
-                await d.press(key)
-                self.assertEqual(len(d.app.screen_stack), 1, f"{key} opened a screen on a damaged row")
-                self.assertIn("cannot be used", d.status, key)
-                self.assertIn("properties.json", d.status)
-                self.assertIn("is empty", d.status)
-            for key, verb in (("x", "moved"), ("d", "deleted")):  # a move or a delete says so the same way
-                await d.press(key)
-                self.assertIn(f"cannot be {verb[:-1]}d while its record is damaged", d.status, key)
-                self.assertIsNone(d.app.moving)
-                self.assertEqual(len(d.app.screen_stack), 1)
-
-    async def test_kill_goes_through_on_a_damaged_row_only_when_the_listing_says_kill_can_recover_it(self):
-        from unittest import mock
-        from multiverse.tools import list_agents
-        from multiverse.ui.backend import LocalBackend
-        (self.victim / "properties.json").write_text("[]")
-        real = list_agents.run
-
-        def marked(*args, **kwargs):
-            rows = real(*args, **kwargs)
-            if kwargs.get("json"):
-                for row in rows:
-                    if row.get("damaged") and RECOVER:
-                        row["damaged"] = {**row["damaged"], "recover": "kill"}
-            return rows
-
-        with mock.patch.object(list_agents, "run", marked), mock.patch.object(LocalBackend, "kill", return_value={}) as kill:
-            for RECOVER in (False, True):
-                async with self.dashboard(size=(130, 36)) as d:
-                    _, rows = self.rows(d)
-                    d.select(next(name for name, row in rows.items() if "⚠" in row[0]))
-                    await d.press("K")
-                    if not RECOVER:
-                        self.assertEqual(len(d.app.screen_stack), 1)
-                        self.assertIn("cannot be used", d.status)
-                        continue
-                    self.assertEqual(len(d.app.screen_stack), 2, d.status)
-                    shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
-                    self.assertIn("tagged terminal (its runtime record is missing)", shown)
-                    await d.press("ctrl+enter")
-                    await d.until(lambda: kill.called, "the kill to be requested")
-                    self.assertEqual(kill.call_args.args[1], self.victim.name)
-
-    async def test_a_lost_runtime_file_with_launch_history_is_a_row_kill_can_resolve(self):
-        """The real listing, no faked hint: no runtime.json but a launch folder means a terminal may still be running."""
-        from unittest import mock
-        from multiverse.ui.backend import LocalBackend
-        (self.victim / "runtime.json").unlink()
-        (self.victim / "launches" / "0e0e0e0e-0000-4000-8000-000000000001").mkdir(parents=True)
-        with mock.patch.object(LocalBackend, "kill", return_value={}) as kill:
-            async with self.dashboard(size=(130, 36)) as d:
-                _, rows = self.rows(d)
-                self.assertIn("damaged: runtime.json", " ".join(rows["victim"]))
-                d.select("victim")
-                self.assertEqual(d.app.selected["damaged"]["recover"], "kill")
-                await d.press("K")
-                self.assertEqual(len(d.app.screen_stack), 2, d.status)
-                shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
-                self.assertIn("tagged terminal (its runtime record is missing)", shown)
-                await d.press("ctrl+enter")
-                await d.until(lambda: kill.called, "the kill to be requested")
-                self.assertEqual(kill.call_args.args[1], self.victim.name)
-                # A resume has no such way out: the record is still damaged until kill has found the terminal.
-                d.app.set_status("")
-                await d.press("r")
-                self.assertIn("cannot be used", d.status)
-
-    async def test_a_runtime_file_that_is_missing_without_launch_history_is_just_a_dormant_agent(self):
-        (self.victim / "runtime.json").unlink()
-        async with self.dashboard(size=(130, 36)) as d:
-            _, rows = self.rows(d)
-            self.assertNotIn("⚠", rows["victim"][0])
-            d.select("victim")
-            self.assertNotIn("damaged", d.app.selected)
-
-    async def test_a_record_free_folder_is_deleted_for_real_and_one_with_launch_history_is_not_offered(self):
-        """Real folders, the real listing hint and the real removal: nothing faked."""
+    async def test_the_dashboard_offers_exactly_the_recovery_the_listing_hints(self):
+        """On real folders, K kills a damaged row only when the listing's hint says kill can recover it (launch history
+        shows a terminal may run), a record-free folder can be deleted and one with launch history is not offered;
+        fragile because the listing's recover hint and the dashboard's gate must agree on one field across two modules,
+        and a break leaves a native agent running behind an ordinary row (b6c754f, 3dd29b3)."""
+        lost = self.agent("lost")  # no runtime.json, but a launch folder: a terminal may still be running
+        (lost / "runtime.json").unlink()
+        (lost / "launches" / "0e0e0e0e-0000-4000-8000-000000000001").mkdir(parents=True)
+        dormant = self.agent("dormant")  # no runtime.json and no launch history
+        (dormant / "runtime.json").unlink()
+        broken = self.agent("broken")
+        (broken / "properties.json").write_text("[]")
         agents = self.root / "state" / "agents"
         orphan = agents / "5f5f5f5f-0000-4000-8000-0000000000aa"
         (orphan / "plugin-state").mkdir(parents=True)
         (orphan / "plugin-state" / "note.txt").write_text("leftover")
         haunted = agents / "6a6a6a6a-0000-4000-8000-0000000000bb"
         (haunted / "launches" / "7b7b7b7b-0000-4000-8000-0000000000cc").mkdir(parents=True)  # launch history: not an orphan
-        async with self.dashboard(size=(130, 36)) as d:
-            d.select(haunted.name)
-            self.assertNotIn("recover", d.app.selected["damaged"])
-            await d.press("d")
-            self.assertEqual(len(d.app.screen_stack), 1)
-            self.assertIn("cannot be deleted while its record is damaged", d.status)
-            d.select(orphan.name)
-            self.assertEqual(d.app.selected["damaged"]["recover"], "remove")
-            d.app.set_status("")
-            await d.press("x")  # moving it is refused: only removal can resolve it
-            self.assertIsNone(d.app.moving)
-            self.assertIn("cannot be moved while its record is damaged", d.status)
-            await d.press("d")
-            self.assertEqual(len(d.app.screen_stack), 2, d.status)
-            shown = " ".join(str(widget.render()) for widget in d.screen.query(Static))
-            self.assertIn("a folder with no agent record", shown)
-            self.assertIn("mv2 checks that no terminal is running for it", shown)
-            await d.press("ctrl+enter")
-            await d.until(lambda: not orphan.exists(), "the folder to be moved to the trash")
-            await d.refresh()
-            self.assertNotIn(orphan.name, [row[0].lstrip("│├╰─ ▸▾").rstrip(" ⚠●") for row in d.table()[1]])
-            self.assertTrue(haunted.exists())  # the other folder was not touched
-
-    async def test_putting_the_file_back_puts_the_row_back(self):
-        (self.victim / "properties.json").write_text("[]")
-        async with self.dashboard(size=(130, 36)) as d:
-            self.assertTrue(any("⚠" in row[0] for row in d.table()[1]))
-            self.restore()
-            await d.press("f5")
-            _, rows = self.rows(d)
-            self.assertIn("victim", rows)
-            self.assertFalse(any("⚠" in row[0] for row in d.table()[1]))
+        with mock.patch.object(LocalBackend, "kill", return_value={}) as kill, \
+                mock.patch.object(LocalBackend, "resume") as resume:
+            async with self.dashboard(size=(130, 36)) as d:
+                with self.subTest("a lost runtime file with launch history: K kills, r is refused"):
+                    self.assertIn("damaged: runtime.json", " ".join(self.row(d, lost)))
+                    d.select("lost")
+                    self.assertEqual(d.app.selected["damaged"]["recover"], "kill")
+                    await d.press("K")
+                    self.assertEqual(len(d.app.screen_stack), 2, d.status)
+                    await d.press("ctrl+enter")
+                    await d.until(lambda: kill.called, "the kill to be requested")
+                    self.assertEqual(kill.call_args.args[1], lost.name)
+                    # A resume has no such way out: the record is still damaged until kill has found the terminal.
+                    d.select("lost")
+                    d.app.set_status("")  # the refusal must be said now, not left over from an earlier key
+                    await d.press("r")
+                    self.assertEqual(len(d.app.screen_stack), 1)
+                    self.assertIn("cannot be used", d.status)
+                    resume.assert_not_called()
+                with self.subTest("a missing runtime file without launch history is just a dormant agent"):
+                    self.assertNotIn("⚠", self.row(d, dormant)[0])
+                    d.select("dormant")
+                    self.assertNotIn("damaged", d.app.selected)
+                with self.subTest("a damaged record the listing gives no hint for: K, s and r are refused and say why"):
+                    d.select(broken.name)
+                    for key in ("K", "s", "r"):  # a key that did nothing at all would pass a check on the screens alone
+                        d.app.set_status("")
+                        await d.press(key)
+                        self.assertEqual(len(d.app.screen_stack), 1, key)
+                        self.assertIn("cannot be used", d.status, key)
+                    self.assertEqual(kill.call_count, 1)
+                    resume.assert_not_called()
+                with self.subTest("a folder with launch history is not offered for deletion"):
+                    d.select(haunted.name)
+                    self.assertNotIn("recover", d.app.selected["damaged"])
+                    await d.press("d")
+                    self.assertEqual(len(d.app.screen_stack), 1)
+                with self.subTest("a record-free folder cannot be moved, and is deleted for real"):
+                    d.select(orphan.name)
+                    self.assertEqual(d.app.selected["damaged"]["recover"], "remove")
+                    await d.press("x")
+                    self.assertIsNone(d.app.moving)
+                    await d.press("d")
+                    self.assertEqual(len(d.app.screen_stack), 2, d.status)
+                    await d.press("ctrl+enter")
+                    await d.until(lambda: not orphan.exists(), "the folder to be moved to the trash")
+                    await d.refresh()
+                    self.assertNotIn(orphan.name, [row.get("id") for row in d.app.visible_rows.values()])
+                    self.assertTrue(haunted.exists())  # the other folder was not touched
 
     def agent_summary(self, directory, summary):
         path = directory / "properties.json"

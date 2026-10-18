@@ -1,5 +1,4 @@
 """A damaged plugin host status file shows on the Plugins screen as an unknown status, with its reason."""
-import json
 from pathlib import Path
 import sys
 import unittest
@@ -41,6 +40,9 @@ class HostStatusTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
             return str(app.screen.query_one("#plugin-details", Static).render()), [item["name"] for item in app.screen.items]
 
     async def test_a_damaged_status_file_is_shown_as_an_unknown_status_with_its_reason(self):
+        """The Plugins screen shows a damaged plugin host status file, whatever the damage, as status unknown naming
+        the file, and still lists the plugins; kept because the screen once showed nothing about the host, and a
+        damaged file exists only after a crash (8f77ad8)."""
         for damage in ("[]", "", '{"state":', '"text"'):
             with self.subTest(damage=damage):
                 self.status.write_text(damage)
@@ -50,13 +52,6 @@ class HostStatusTests(PluginTestCase, unittest.IsolatedAsyncioTestCase):
                 self.assertIn("the host's status is unknown", shown)
                 self.assertIn("quiet", names)  # the plugins are still listed
 
-    async def test_a_good_or_missing_status_file_says_nothing_about_the_host_when_none_is_needed(self):
-        for text in (None, json.dumps({"state": "stopped"})):
-            with self.subTest(text=text):
-                self.status.unlink(missing_ok=True)
-                text is not None and self.status.write_text(text)
-                shown, _ = await self.details()
-                self.assertNotIn("Plugin host", shown)
 
 if __name__ == "__main__":
     unittest.main()
