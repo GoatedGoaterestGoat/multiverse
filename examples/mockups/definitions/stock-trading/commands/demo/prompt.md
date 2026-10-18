@@ -1,1 +1,0 @@
-Review the fictional Northstar paper portfolio. Read artifacts/portfolio.json and summary.json. Reconcile cash plus marked positions to NAV and distinguish unfilled sample orders from holdings. This demo has no live prices, brokerage connection, or order execution. Never access financial accounts.

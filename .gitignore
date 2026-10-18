@@ -6,10 +6,8 @@ build/
 dist/
 .DS_Store
 /.multiverse/
-/.worktrees/
 /.artifacts/
 /.run/
-/multiverse-v2
 /src/multiverse/harnesses/claude/mod/tsconfig.json
 /src/multiverse/harnesses/claude/typeahead/tsconfig.json
 /src/multiverse/harnesses/claude/typeahead/.claude-plugin/types/

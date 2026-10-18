@@ -100,7 +100,7 @@ mv2 doesn't create the worktree, so make it first.
 
 ## Make your own template
 
-Copy one of the bundled templates in `src/multiverse/templates/`, then change its bootstrap, workflows and view. A setup like the bug hunt above makes a good template once it works. Keep personal templates in `~/.multiverse/templates/NAME`, and use them by name with `mv2 subverse NAME --template NAME`. [Templates](../develop/templates.md) explains every file.
+Copy the bundled template in `src/multiverse/templates/base/`, then change its bootstrap, workflows and view. A setup like the bug hunt above makes a good template once it works. Keep personal templates in `~/.multiverse/templates/NAME`, and use them by name with `mv2 subverse NAME --template NAME`. [Templates](../develop/templates.md) explains every file.
 
 ## Views
 

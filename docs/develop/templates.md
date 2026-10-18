@@ -87,7 +87,7 @@ A launch keeps the bootstrap it started with, so an edited `bootstrap.md` reache
 
 Agent-facing text follows [the docs style](docs-style.md), with one more rule. Every word costs context, in every session that reads it.
 
-- **Keep the bootstrap tiny.** It goes into every launch. The base bootstrap is about 180 words. `tests/test_templates.py` fails when the bundled development or testing bootstrap reaches 300 words with its identity lines.
+- **Keep the bootstrap tiny.** It goes into every launch. The base bootstrap is about 180 words. `tests/test_templates.py` fails when the base bootstrap reaches 300 words with its identity lines.
 - **Load the rest on demand.** Put detail in skills and workflows, and name them in the bootstrap so agents know when to load them.
 - **Make the description enough to decide.** An agent sees only the `entry.json` description before it loads a prompt. Say what the prompt does and when to use it.
 - **Give instructions.** Say what to run, what to check and what to report. Leave out how mv2 works inside.
