@@ -80,17 +80,19 @@ class RpcTransportTest(unittest.TestCase):
     def test_native_permission_request_is_unanswered_even_from_async_caller(self):
         """A server-initiated approval request is never answered by mv2, even from an async caller; a break goes
         unnoticed because an auto-reply silently approves a command."""
-        observed = []
+        observed, received = [], threading.Event()
         def handler(connection):
             request = json.loads(connection.recv())
             connection.send(json.dumps({'id': 'approval', 'method': 'item/commandExecution/requestApproval', 'params': {}}))
             connection.send(json.dumps({'id': request['id'], 'result': {'owned': True}}))
             observed.append(json.loads(connection.recv()))
+            received.set()
         self.serve(handler)
         async def caller():
             return execute(RpcSpec(self.path, self.plan))
         result = asyncio.run(caller())
         self.assertEqual(result.value, {'owned': True})
+        self.assertTrue(received.wait(10), 'the server never got the next message')  # its thread records it
         self.assertEqual(len(observed), 1)
         self.assertEqual(observed[0]['method'], 'initialized')
 
