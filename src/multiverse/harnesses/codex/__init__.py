@@ -9,7 +9,7 @@ from dataclasses import replace
 from collections.abc import Mapping
 
 from ..types import (SessionHandle, Message, Executor, Capability, CommandSpec, NativeResult,
-                     RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
+                     StartupRetrySpec, RpcSpec, SharedServiceSpec, RpcProxySpec, NativeEndpoint, ServiceIdentity, AttachmentSpec)
 from .launch import launch_settings, tui_arguments, plain_arguments
 from .protocol import (check_connection, send_message, get_delivery, stop_session, recovery_check,
                        RECOVERY_MAX_REQUESTS, continue_queued, CONTINUATION_MAX_REQUESTS)
@@ -43,6 +43,10 @@ class CodexAdapter(ConfiguredAdapter):
         from .refusal import supports_plain_refusal
         return supports_plain_refusal(cli_version)
 
+    def startup_retryable(self, snapshot):
+        from .launch import startup_retryable
+        return startup_retryable(snapshot)
+
     def launch_refusal(self, evidence):
         from .refusal import plain_refusal
         return plain_refusal(evidence)
@@ -66,16 +70,18 @@ class CodexAdapter(ConfiguredAdapter):
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = None
         if setting is not True:
-            argv, omitted = plain_arguments(command.argv, self.spec[context.mode], context.values)
-            notices = command.notices
-            if omitted:
+            additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
+            plain_command = additions.apply(command)
+            argv, removable = plain_arguments(command.argv, self.spec[context.mode], context.values)
+            retry = None
+            if removable:
                 name = json.dumps(context.values['name'])
                 directory = json.dumps(context.values['agent_dir'])
-                notices = (*notices, f'Codex: mv2 omitted its extra writable agent folder for {name} ({directory}); '
-                           'no writable sandbox flag was selected. To allow it, give the harness --sandbox workspace-write.')
-            plain_command = replace(command, argv=tuple(argv), notices=notices)
-            additions = prepare(context, plain_command, settings=getattr(self, 'settings', {}), harness_name=self.name)
-            plain = replace(additions.apply(plain_command),
+                retry_argv = additions.apply(replace(command, argv=tuple(argv))).argv
+                retry = StartupRetrySpec(retry_argv, (*plain_command.notices,
+                    f"Codex runs this folder read-only, so {name}'s agent folder ({directory}) is not writable; "
+                    "session-bind, report and inbox need approval. To allow it, give the harness --sandbox workspace-write."))
+            plain = replace(plain_command, startup_retry=retry,
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain

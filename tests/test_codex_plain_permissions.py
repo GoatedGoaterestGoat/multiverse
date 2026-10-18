@@ -1,96 +1,60 @@
-"""Only explicit native writable grants retain mv2's extra plain agent root."""
+"""Native validation chooses whether mv2's own plain writable root is usable."""
 import json
+from pathlib import Path
 import unittest
+from unittest.mock import Mock, patch
 
-from multiverse.harnesses.base import ConfiguredAdapter
+from multiverse.harnesses.codex.plugins import Prepared
+
 from multiverse.harnesses.codex import CodexAdapter
-from multiverse.harnesses.codex.launch import plain_arguments
 from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHandle
 
 
 class PlainPermissionsTest(unittest.TestCase):
-    def setUp(self):
-        self.values = {'workspace': '/workspace', 'agent_dir': '/outside/agent', 'name': 'worker',
-                       'control_socket': '/tmp/private/relay.sock',
-                       'bootstrap_json': json.dumps('bootstrap'), 'task': 'literal task',
-                       'session_id': '0b9925e8-814b-474d-b813-2dc9478ba0c9'}
-
-    def render(self, args=(), mode='spawn', source='args', task=None):
-        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False, source: list(args)})
-        context = LaunchContext(mode, {**self.values, 'task': task or self.values['task']})
-        before = ConfiguredAdapter._launch_command(adapter, context)
-        argv, omitted = plain_arguments(before.argv, adapter.spec[mode], context.values)
-        return before.argv, argv, omitted
-
-    def test_generated_add_dir_is_kept_only_for_explicit_writable_grants(self):
-        """A plain launch keeps mv2's generated --add-dir only with an explicit writable grant, whatever the flag
-        spelling, and never touches the user's own arguments; fragile because Codex has many writable spellings and
-        opaque values that look like flags, and a miss brings back Error adding directories or drops the agent's
-        writable folder (CODEX-03, fe2fb65)."""
-        context = LaunchContext('spawn', self.values,
-            endpoint=NativeEndpoint('unix-websocket', '/tmp/private/native.sock'))
-        session = SessionHandle('agent', 'codex', '/workspace', native_id=self.values['session_id'])
+    def test_plain_retry_removes_only_the_generated_root_after_native_refusal(self):
+        """A read-only native exit retries only the generated root; fragile because trusting config guesses or removing a user's root silently changes permissions."""
+        values = {'workspace': '/workspace', 'agent_dir': '/outside/agent', 'name': 'worker',
+                  'control_socket': '/tmp/private/relay.sock', 'bootstrap_json': json.dumps('bootstrap'),
+                  'task': 'literal task', 'session_id': '0b9925e8-814b-474d-b813-2dc9478ba0c9'}
+        session = SessionHandle('agent', 'codex', '/workspace', native_id=values['session_id'])
         for mode in ('spawn', 'resume'):
-            for settings in ({'inbox_bridge': False}, {'args': ['--no-daemon']}, {}):
-                with self.subTest('default permissions', mode=mode, settings=settings):
-                    adapter = CodexAdapter.configured('codex', settings)
-                    command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
-                    plain = command.fallback if command.native_mode['mode'] == 'bridge' else command
-                    self.assertEqual(plain.native_mode['mode'], 'plain')
-                    self.assertNotIn('--add-dir', plain.argv)
-                    note, = plain.notices
-                    self.assertIn(self.values['agent_dir'], note)
-                    if mode == 'spawn':
-                        self.assertEqual(plain.argv[-2:], ('--', self.values['task']))
-                    else:
-                        self.assertIn(self.values['session_id'], plain.argv)
-                    if plain is command:
-                        self.assertIsNone(command.rpc_proxy)
-        for mode in ('spawn', 'resume'):
-            for flags in ([], ['--sandbox', 'read-only'], ['-sread-only'],
-                          ['-c', 'sandbox_mode="workspace-write"'], ['--profile', 'trusted']):
-                with self.subTest(mode=mode, flags=flags):
-                    before, argv, omitted = self.render(flags, mode)
-                    self.assertTrue(omitted)
-                    index = before.index('--add-dir')
-                    self.assertEqual(argv, list(before[:index] + before[index + 2:]))
-        forms = (['--sandbox', 'workspace-write'], ['--sandbox=danger-full-access'],
-                 ['-s', 'workspace-write'], ['-sworkspace-write'], ['-s=danger-full-access'],
-                 ['--dangerously-bypass-approvals-and-sandbox'], ['--approve-for-me'],
-                 ['--yolo'], ['--not-so-yolo'])
-        for mode in ('spawn', 'resume'):
-            for source in ('args', 'spawn_args', 'resume_args'):
-                for flags in forms:
-                    with self.subTest(mode=mode, source=source, flags=flags):
-                        before, argv, omitted = self.render(flags, mode, source)
-                        self.assertEqual(omitted, source not in ('args', mode + '_args'))
-                        if not omitted:
-                            self.assertEqual(argv, list(before))
-        for mode in ('spawn', 'resume'):
-            with self.subTest('user directories', mode=mode):
-                flags = ['--add-dir', self.values['agent_dir'], '--add-dir=/user/root',
-                         '--sandbox', 'read-only']
-                before, argv, omitted = self.render(flags, mode)
-                self.assertTrue(omitted)
-                self.assertEqual(argv.count('--add-dir'), 1)
-                self.assertIn('--add-dir=/user/root', argv)
-                self.assertEqual(argv[-(len(flags) + 2):-2], flags)
-        for flags in (['--model', '--sandbox=workspace-write'],
-                      ['--add-dir', '--dangerously-bypass-approvals-and-sandbox'],
-                      ['-c', 'developer_instructions="--approve-for-me"']):
-            with self.subTest('opaque values', flags=flags):
-                self.assertTrue(self.render(flags)[2])
-        with self.subTest('prompt text'):
-            self.assertTrue(self.render(task='--sandbox workspace-write --approve-for-me')[2])
-        for flags in (['--sandbox'], ['--sandbox=unknown'],
-                      ['-sread-only', '--sandbox=workspace-write'],
-                      ['--approve-for-me', '-sread-only']):
-            with self.subTest('malformed or conflicting', flags=flags):
-                before, argv, omitted = self.render(flags)
-                self.assertTrue(omitted)
-                self.assertEqual(argv[argv.index('-c') + 2:-2], flags)
-        with self.subTest('custom recipe'):
-            argv = ['codex', '--add-dir', '/user/root', '--', 'task']
-            actual, omitted = plain_arguments(argv, ['codex', '--add-dir', '/user/root', '--', '{task}'], self.values)
-            self.assertEqual(actual, argv)
-            self.assertFalse(omitted)
+            for base_settings in ({'inbox_bridge': False}, {'args': ['--no-daemon']}, {}):
+                for flags in ([], ['--sandbox', 'read-only'], ['--sandbox', 'workspace-write'],
+                              ['--profile', 'named'], ['--add-dir', values['agent_dir'], '--add-dir=/user/root']):
+                    with self.subTest(mode=mode, settings=base_settings, flags=flags):
+                        settings = {**base_settings, 'args': [*base_settings.get('args', []), *flags]}
+                        adapter = CodexAdapter.configured('codex', settings)
+                        context = LaunchContext(mode, values, endpoint=NativeEndpoint('unix-websocket', '/tmp/native'))
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                        plain = command.fallback if command.native_mode['mode'] == 'bridge' else command
+                        self.assertEqual(plain.native_mode['mode'], 'plain')
+                        index = plain.argv.index('--add-dir')
+                        self.assertEqual(plain.argv[index + 1], values['agent_dir'])
+                        retry = plain.startup_retry
+                        self.assertIsNotNone(retry)
+                        self.assertEqual(retry.argv, plain.argv[:index] + plain.argv[index + 2:])
+                        self.assertEqual(plain.notices, (), 'Notice applies only when native refusal selects the retry')
+                        self.assertIn('read-only', retry.notices[-1])
+                        self.assertIn(values['agent_dir'], retry.notices[-1])
+                        self.assertEqual(retry.argv[-1], values['task'] if mode == 'spawn' else values['session_id'])
+                        if plain is not command:
+                            self.assertIsNone(command.startup_retry, 'Bridge grants never use the plain retry')
+        with self.subTest('plugin config prefixes preserve generated-root provenance'):
+            plan = Mock(environment={})
+            plan.record.return_value = {}
+            prepared = Prepared(plan, 'bootstrap', defaults={'model_reasoning_effort': 'high'})
+            with patch('multiverse.harnesses.codex.plugins.prepare', return_value=prepared):
+                plain = CodexAdapter.configured('codex', {'inbox_bridge': False}).spawn(
+                    LaunchContext('spawn', values))
+            index = plain.argv.index('--add-dir')
+            self.assertEqual(plain.startup_retry.argv, plain.argv[:index] + plain.argv[index + 2:])
+            self.assertIn('model_reasoning_effort="high"', plain.startup_retry.argv)
+        adapter = CodexAdapter.configured('codex', {'inbox_bridge': False})
+        capture = json.loads((Path(__file__).parent / 'fixtures/codex/add-dir-readonly.json').read_text())[0]
+        evidence = {'text': capture['text'], 'exit_code': 1, 'argv': ['codex', '--add-dir', '/outside/agent']}
+        for changed, expected in (({}, True), ({'exit_code': 0}, False), ({'exit_code': None}, False),
+                                  ({'exit_code': True}, False), ({'text': 'quota exceeded'}, False),
+                                  ({'text': capture['text'].replace('Error adding directories:', 'Warning:')}, False),
+                                  ({'text': capture['text'] + '\nDifferent startup failure'}, False)):
+            with self.subTest(evidence=changed):
+                self.assertIs(adapter.startup_retryable({**evidence, **changed}), expected)
