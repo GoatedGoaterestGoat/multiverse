@@ -48,7 +48,9 @@ class ConfiguredAdapter:
         if unknown:
             raise ValueError(f'Unknown harness settings: {sorted(unknown)}')
         bridge = settings.get('inbox_bridge', False)
-        if not isinstance(bridge, bool) or (bridge and not cls.supports_bridge):
+        if not isinstance(bridge, bool):
+            raise ValueError('inbox_bridge must be true or false')
+        if bridge and not cls.supports_bridge:
             raise ValueError('inbox_bridge is not supported by this adapter')
         spec = json.loads((cls.package / 'defaults.json').read_text())
         for key in ('model', 'unset_env', 'env'):
