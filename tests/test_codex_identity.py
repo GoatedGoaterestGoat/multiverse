@@ -1,13 +1,16 @@
 """Shared-conversation identity and native launch refusals, without a real daemon."""
 from copy import deepcopy
+from dataclasses import replace
+import os
 import unittest
+from unittest.mock import patch
 from uuid import uuid4
 import json
 from pathlib import Path
 
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex import CodexAdapter
-from multiverse.harnesses.types import LaunchContext, NativeEndpoint
+from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHandle
 
 
 class NativeRefusalTest(unittest.TestCase):
@@ -198,9 +201,7 @@ class SharedIdentityTest(unittest.TestCase):
             'params': {'config': config or {}}})
 
     def test_tool_shell_identity_is_stable_and_never_per_launch(self):
-        """The env Codex gives tool shells carries the stable agent identity and never per-launch values, even when user
-        or native config sets them; a break goes unnoticed because mv2 calls from the agent's shell still work, just as
-        the wrong launch."""
+        """Codex tools keep stable identity and every frontend selects the same canonical storage; drift can silently authorize the wrong launch or open another home."""
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True})
         with self.subTest(source='two launches'):
             a, b = (adapter.spawn(self.context(launch)) for launch in ('old', 'new'))
@@ -230,3 +231,31 @@ class SharedIdentityTest(unittest.TestCase):
             self.assertEqual(values['CODEX_HOME'], '/native/home')
             self.assertEqual(values['APP_TOKEN'], 'secret')
             self.assertEqual(values['MV2_MY_PLUGIN_SETTING'], 'plugin-value')
+        for storage, expected in (
+                ({}, {'CODEX_HOME': '/launch/home/.codex'}),
+                ({'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'},
+                 {'CODEX_HOME': '/native/home', 'CODEX_SQLITE_HOME': '/native/database'}),
+                ({'CODEX_HOME': 'relative-home', 'CODEX_SQLITE_HOME': 'relative-database'},
+                 {'CODEX_HOME': str(Path('relative-home').resolve()),
+                  'CODEX_SQLITE_HOME': str(Path('relative-database').resolve())})):
+            for settings in ({'inbox_bridge': False}, {'args': ['--no-daemon']}, {}, {'inbox_bridge': True}):
+                for mode in ('spawn', 'resume'):
+                    with self.subTest(storage=storage, settings=settings, mode=mode), \
+                            patch.dict(os.environ, {'HOME': '/launch/home'}), \
+                            patch('multiverse.harnesses.codex.plugins.codex_version', return_value=None):
+                        adapter = CodexAdapter.configured('codex', {**settings, 'env': {'DEBUG': 'keep'}})
+                        context = self.context('storage')
+                        environment = {key: value for key, value in context.environment.items()
+                                       if key not in adapter.storage_env}
+                        context = replace(context, mode=mode, environment={**environment, **storage})
+                        session = SessionHandle('agent', 'codex', '/workspace', native_id=context.values['session_id'])
+                        command = adapter.spawn(context) if mode == 'spawn' else adapter.resume(session, context)
+                        if command.shared_service:
+                            self.assertEqual(command.shared_service.environment, expected)
+                            stable = command.rpc_proxy.settings['agent_environment']
+                            self.assertEqual({key: stable[key] for key in adapter.storage_env if key in stable}, expected)
+                        plain = command.fallback if command.shared_service else command
+                        if plain is not None:
+                            self.assertEqual({key: plain.environment[key] for key in adapter.storage_env
+                                              if key in plain.environment}, expected)
+                            self.assertEqual(plain.environment['DEBUG'], 'keep')

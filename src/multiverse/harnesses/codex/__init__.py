@@ -75,6 +75,7 @@ class CodexAdapter(ConfiguredAdapter):
         policy = 'auto' if setting is None else 'required' if setting else 'plain'
         plain = None
         if setting is not True:
+            from .identity import storage_environment
             additions = prepare(context, command, settings=getattr(self, 'settings', {}), harness_name=self.name)
             plain_command = additions.apply(command)
             argv, removable = plain_arguments(command.argv, self.spec[context.mode], context.values)
@@ -87,6 +88,7 @@ class CodexAdapter(ConfiguredAdapter):
                     f"Codex runs this folder read-only, so {name}'s agent folder ({directory}) is not writable; "
                     "session-bind, report and inbox need approval. To allow it, give the harness --sandbox workspace-write."))
             plain = replace(plain_command, startup_retry=retry,
+                            environment={**plain_command.environment, **storage_environment(context)},
                             native_mode={'policy': policy, 'mode': 'plain', 'fallback_reason': None})
         if setting is False:
             return plain
