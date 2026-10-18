@@ -163,8 +163,10 @@ or unreadable request still refuses recovery with its path and repair advice.
 It never guesses a child PID or contacts a shared server from the conversation
 UUID alone. Native cancellation uses only a validated generation-private relay
 when available; otherwise the result says cancellation is unconfirmed. Other
-clients and their server are not closed. A failed preparation keeps a named,
-failed record that doctor reports and mv2 remove can clear. New agent folders
+clients and their server are not closed. A new spawn refused during validation,
+before native preparation starts, releases its reserved name so it can be retried.
+Once native preparation begins, a failure keeps a named record that doctor
+reports and mv2 remove can clear. New agent folders
 are published with complete minimal properties and a starting runtime record,
 including during concurrent spawns. While the publishing process holds its launch
 lock, list shows `starting`; it is not a damaged record. Doctor also accepts the

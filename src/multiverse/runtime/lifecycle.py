@@ -552,6 +552,7 @@ def _publish_record(root, agent_dir, properties, launch_id):
     """
     with tempfile.TemporaryDirectory(prefix='.agent-create-', dir=root / 'state') as temporary:
         staging = Path(temporary)
+        published = dict(properties)
         with lock(staging / '.launch.lock'):
             with agents.sessions.namespace(root), lock(root / 'state' / '.agents.lock'):
                 check_available_name(root, properties['name'], locked=True)
@@ -566,10 +567,26 @@ def _publish_record(root, agent_dir, properties, launch_id):
                 yield
             except BaseException as error:
                 try:
-                    if agent_dir.is_dir() and (not (agent_dir / 'runtime.json').exists() or agents.preparing(runtime(agent_dir))):
-                        write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
-                              'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
-                              'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
+                    if agent_dir.is_dir():
+                        facts = runtime(agent_dir)
+                        minimal = agents.preparing(facts) and facts.get('launch_id') == launch_id
+                        unstarted = minimal and all(
+                            path.name == launch_id and all(item.name in ('bootstrap.md', 'task.md')
+                                                          for item in path.iterdir())
+                            for path in missing_runtime.launches(agent_dir))
+                        if unstarted:
+                            # This is our new reservation, before a runner/service
+                            # could start. Rename under the publication namespace;
+                            # the staging context disposes of only this attempt.
+                            with agents.sessions.namespace(root), lock(root / 'state' / '.agents.lock'), \
+                                    lock(agent_dir / '.properties.lock', create_parent=False):
+                                if (runtime(agent_dir) == facts
+                                        and read(agent_dir / 'properties.json') == published):
+                                    agent_dir.rename(staging)
+                        if agent_dir.is_dir() and (not (agent_dir / 'runtime.json').exists() or minimal):
+                            write(agent_dir / 'runtime.json', {'launch_id': launch_id, 'state': 'failed',
+                                  'status': 'unknown', 'error': str(error) or 'Launch preparation interrupted',
+                                  'reason': str(error) or 'Launch preparation interrupted', 'stopped_at': now()})
                 except (OSError, ValueError):
                     pass  # Keep the original failure; doctor can name damaged state.
                 raise

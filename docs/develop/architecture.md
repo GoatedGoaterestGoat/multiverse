@@ -82,7 +82,7 @@ runner.py LAUNCH_DIR                                tmux pane
      remove the pane unless the launch failed during startup
 ```
 
-Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core owns processes, tmux, records and locks. A failed launch keeps its record with the error, so `mv2 resume` can retry.
+Adapters only describe a launch. They return a `CommandSpec` and never touch tmux or runtime files. Core owns processes, tmux, records and locks. A new spawn refused before native preparation releases its name. Once native preparation begins, a failed launch keeps its record with the error, so `mv2 resume` can retry.
 
 A selected command may describe one argv-only startup retry. The runner considers it only after a nonzero exit before readiness, binding or delivery. A pending screen observation keeps this window open for up to 55 seconds; a recognized composer or a caller's process-readiness fallback closes it. Commands without supported screen observation keep the two-second startup window. The adapter must recognize the exact diagnostic from that owned pane. Under the launch lock, the runner records the selected argv and notices before starting the replacement child. It never retries a live warning or an already-started conversation.
 

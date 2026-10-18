@@ -9,6 +9,7 @@ from multiverse.runtime import lifecycle, missing_runtime
 from multiverse.store import read, uid, write
 from multiverse.universe import agents, relocate
 from multiverse import display
+from multiverse.harnesses.types import CommandSpec
 from multiverse.tools import doctor
 from test_multiverse import BaseTest
 
@@ -54,20 +55,21 @@ class PublicationTest(BaseTest):
                 future.result()
 
     def test_preparation_end_states(self):
-        """A failed preparation stays named and removable, an abandoned one is failed, never starting, and removable
+        """A validation failure releases its new name, an abandoned preparation is failed, never starting, and removable
         without discovery, and a preparing flag with native child evidence is a damaged unknown row that resume, kill
         and remove refuse; fragile because preparing is a crash state only a killed preparer produces, and a break
         strands undeletable agents or starts a second child (e5bbba0, 1eb2abc)."""
-        with self.subTest('failed preparation'):
-            with patch.object(harnesses, 'load', return_value=self.adapter), \
-                    patch.object(self.adapter, 'spawn', side_effect=ValueError('preparation fixture fails')):
-                with self.assertRaisesRegex(ValueError, 'preparation fixture'):
-                    lifecycle.start(self.root, name='failed', harness='sleeper')
-            directory = agents.directory(self.root, 'failed')
-            self.assertEqual(read(directory / 'runtime.json')['state'], 'failed')
-            self.assertIn('preparation fixture fails', read(directory / 'runtime.json')['error'])
-            relocate.remove_agent(self.root, directory.name)
-            self.assertFalse(directory.exists())
+        for label, behavior, reason in (
+                ('adapter refusal', {'side_effect': ValueError('preparation fixture fails')}, 'preparation fixture'),
+                ('missing executable', {'return_value': CommandSpec([str(self.work / 'missing-cli')])},
+                 'Harness executable not found')):
+            with self.subTest(preflight=label), patch.object(harnesses, 'load', return_value=self.adapter), \
+                    patch.object(self.adapter, 'spawn', **behavior):
+                for _ in range(2):  # The same name remains usable without removing a failed record first.
+                    with self.assertRaisesRegex(ValueError, reason):
+                        lifecycle.start(self.root, name='failed', harness='sleeper')
+                    self.assertEqual(list(agents.record_paths(self.root)), [])
+                    agents.check_available_name(self.root, 'failed')
         with self.subTest('abandoned before the child'):
             directory, properties, _, _ = lifecycle._record(self.root, 'abandoned', None, 'sleeper', None, None)
             with lifecycle._publish_record(self.root, directory, properties, uid()):

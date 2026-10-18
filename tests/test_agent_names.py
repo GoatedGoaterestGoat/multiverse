@@ -97,15 +97,27 @@ class AgentNamesTest(BaseTest):
                     patch.object(adapter, 'spawn', side_effect=prepare), ThreadPoolExecutor() as pool:
                 results = list(pool.map(start, ('one', 'two')))
             self.assertEqual([str(result) for result in results], ['preparation fixture fails'] * 2)
-            self.assertEqual((len(named('one')), len(named('two'))), (1, 1))
+            self.assertEqual((len(named('one')), len(named('two'))), (0, 0))
         with self.subTest('four spawns of one name whose preparation fails'):
+            entered, release = threading.Event(), threading.Event()
+            def refuse(context):
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError('contenders did not finish')
+                raise ValueError('preparation fixture fails')
             with patch.object(harnesses, 'load', return_value=adapter), \
-                    patch.object(adapter, 'spawn', side_effect=ValueError('preparation fixture fails')), \
-                    ThreadPoolExecutor() as pool:
-                results = [str(result) for result in pool.map(start, ['same'] * 4)]
+                    patch.object(adapter, 'spawn', side_effect=refuse), ThreadPoolExecutor() as pool:
+                first = pool.submit(start, 'same')
+                try:
+                    self.assertTrue(entered.wait(5))
+                    results = [str(result) for result in pool.map(start, ['same'] * 3)]
+                finally:
+                    release.set()
+                results.append(str(first.result()))
             self.assertEqual(sum('preparation fixture fails' in result for result in results), 1, results)
             self.assertEqual(sum('already has an agent named same' in result for result in results), 3, results)
-            self.assertEqual(len(named('same')), 1)
+            self.assertEqual(len(named('same')), 0)
+            agents.check_available_name(self.root, 'same')
 
     def test_orphan_folders_reserve_no_spawn_name(self):
         """Plugin-only leftovers cannot block every spawn; the conservative damaged-peer scan otherwise mistakes absence for unreadable authority (LC-25)."""
