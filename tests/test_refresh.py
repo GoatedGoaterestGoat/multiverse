@@ -43,7 +43,7 @@ class RefreshTest(unittest.TestCase):
         edits and deletions are kept, a missing manifest means unknown, a file new to the template is added, take
         refuses paths outside it, and a template that is gone is refused naming the universe and how to compare;
         fragile because a missing manifest flips the default, and a break silently overwrites a user's edited bootstrap
-        or harness.json (LC-7, LC-13, LC-14)."""
+        or harness.json, including copying a parent's template over a subverse's own source (LC-7, LC-13, LC-14)."""
         manifest = (self.root / templates.MANIFEST).read_text()
         with self.subTest('a dry run writes nothing'):
             self.put("bootstrap.md", "Bootstrap v2\n")
@@ -98,6 +98,22 @@ class RefreshTest(unittest.TestCase):
             self.assertEqual((self.root / "bootstrap.md").read_text(), "Bootstrap v4\n")
         with self.subTest('take refuses paths outside the template'), self.assertRaises(ValueError):
             self.plan(take=["universe.json"])
+        with self.subTest("recursive apply uses each nested universe's recorded source"):
+            child = self.root / 'subverses/child'
+            self.put('subverses/child/bootstrap.md', 'Child v2\n')
+            other = self.work / 'other-template'
+            write(other / 'universe.json', {'schema': 1, 'name': 'other', 'workspace': '..'})
+            self.put('bootstrap.md', 'Other v1\n', other)
+            independent = templates.create(self.root / 'subverses/independent', 'independent', str(other), self.work)
+            self.put('bootstrap.md', 'Other v2\n', other)
+            self.put('bootstrap.md', 'Bootstrap v5\n')
+            result = refresh.run(self.root, recursive=True, apply=True)
+            plans = {plan['universe']: plan for plan in result['universes']}
+            for scope, source, text in ((self.root, self.template, 'Bootstrap v5\n'),
+                                        (child, self.template / 'subverses/child', 'Child v2\n'),
+                                        (independent, other, 'Other v2\n')):
+                self.assertEqual(plans[str(scope)]['source'], str(source))
+                self.assertEqual((scope / 'bootstrap.md').read_text(), text)
         with self.subTest('a template that is gone names the universe, the template and how to compare'):
             shutil.rmtree(self.template)
             with self.assertRaises(ValueError) as caught:

@@ -1,13 +1,17 @@
 """Launch readiness is bound to one generation and never holds the bind lock."""
 from concurrent.futures import ThreadPoolExecutor
 import threading
+import io
+import sys
+from contextlib import redirect_stdout, redirect_stderr
 import time
 from unittest.mock import patch
 from uuid import uuid4
 
 from multiverse.universe import agents
 from multiverse.runtime import lifecycle
-from multiverse import harnesses
+from multiverse import cli, harnesses
+from multiverse.tools import spawn, resume
 from multiverse.store import read, write
 from test_multiverse import BaseTest
 
@@ -130,8 +134,8 @@ class WaitTest(BaseTest):
 
     def test_wait_never_follows_a_replacement_and_reports_the_runners_failure(self):
         """wait never follows a replacement launch, reports the failure the runner publishes after the pane exits,
-        and stays bounded when the runner died; fragile because pane exit and the runner's last write race
-        (2adfa85)."""
+        and stays bounded when the runner died; pane exit races the last write, and losing the failed-outcome
+        guard silently prints success and exits zero for a failed --wait (2adfa85)."""
         with self.subTest(launch='replaced'):
             write(self.directory / 'runtime.json', {**agents.runtime(self.directory), 'launch_id': 'replacement'})
             with self.assertRaisesRegex(ValueError, 'refusing to follow a replacement'):
@@ -151,6 +155,16 @@ class WaitTest(BaseTest):
             self.assertFalse(result['ready'])
             self.assertEqual(result['runtime']['state'], 'failed')
             self.assertEqual(result['error'], 'Native startup failed: No such file or directory')
+            for tool, arguments in ((spawn, ['spawn', '--name', 'waiting']),
+                                    (resume, ['resume', 'waiting'])):
+                with self.subTest(command=arguments[0]), patch.object(tool, 'run', return_value=result), \
+                        patch.object(sys, 'argv', ['mv2', '-u', str(self.root), *arguments, '--wait']):
+                    output, errors = io.StringIO(), io.StringIO()
+                    with redirect_stdout(output), redirect_stderr(errors), self.assertRaises(SystemExit) as exited:
+                        cli.main()
+                    self.assertEqual(exited.exception.code, 1)
+                    self.assertIn(result['error'], errors.getvalue())
+                    self.assertEqual(output.getvalue(), '')
 
         self.starting()
         with self.subTest(launch='runner died'):

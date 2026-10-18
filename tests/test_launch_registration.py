@@ -202,11 +202,12 @@ progress.release()
 class RegistrationOrderTest(TerminalBase):
     def test_status_is_prepared_before_pane_and_child_waits_for_finished_registration(self):
         """On real tmux the status line is prepared before the pane and the native child runs only after the launch
-        is fully recorded; a break lets the native process call mv2 before its identity exists, failing
-        intermittently."""
+        is fully recorded; missing targets can change other sessions' status, while early release lets the native
+        process call mv2 before its identity exists, failing intermittently."""
         from multiverse.terminal.tmux import Tmux, status_setup
         from multiverse.universe import agents
         original_create = Tmux.create
+        original_configure = Tmux.configure_status
         original_launched = lifecycle._launched
         stages = []
 
@@ -218,6 +219,22 @@ class RegistrationOrderTest(TerminalBase):
             self.assertEqual(stages, ['prepared'])
             stages.append('pane')
             return original_create(backend, *args)
+
+        def configure(backend, terminal, *args, **kwargs):
+            with patch.object(backend, 'run', wraps=backend.run) as run:
+                original_configure(backend, terminal, *args, **kwargs)
+            run.assert_called_once()
+            commands = [[]]
+            for value in run.call_args.args:
+                if value == ';':
+                    commands.append([])
+                else:
+                    commands[-1].append(value)
+            for command in commands:
+                self.assertNotIn('-g', command)
+                self.assertIn('-t', command)
+                target = terminal['pane'] if '-w' in command or command[0] == 'rename-window' else terminal['session']
+                self.assertEqual(command[command.index('-t') + 1], target)
 
         def launched(root, directory, launch_id, *args):
             launch = directory / 'launches' / launch_id
@@ -234,6 +251,7 @@ class RegistrationOrderTest(TerminalBase):
 
         with patch.object(lifecycle, 'status_setup', side_effect=prepare), \
              patch.object(Tmux, 'create', new=create), \
+             patch.object(Tmux, 'configure_status', new=configure), \
              patch.object(lifecycle, '_launched', side_effect=launched):
             result = lifecycle.start(self.root, 'registered', harness='fake', socket_path=self.socket,
                                      wait=True, wait_timeout=8)

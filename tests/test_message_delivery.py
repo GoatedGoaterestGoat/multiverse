@@ -61,7 +61,8 @@ class InboxDeliveryTest(DeliveryFixture):
     def test_concurrent_senders_have_unique_ids_and_preserve_individual_modes(self):
         """24 concurrent senders get unique ids and keep their own modes, and 16 concurrent deliver --retry calls
         submit once; fragile because correctness rests on file locks, and races show only as rare silent
-        duplicates."""
+        duplicates; cross-universe sender labels must also survive framing or identically named agents silently
+        become indistinguishable to the recipient."""
         with ThreadPoolExecutor(max_workers=8) as pool:
             messages = list(pool.map(lambda i: self.send(str(i), delivery='steer' if i % 2 else 'follow-up'), range(24)))
         self.assertEqual(len({m['id'] for m in messages}), 24)
@@ -76,6 +77,12 @@ class InboxDeliveryTest(DeliveryFixture):
             results = list(pool.map(lambda _: native.deliver(self.root, self.agent, messages[0]['id'], retry=True), range(16)))
         self.assertTrue(all(r['reused'] for r in results))
         self.assertEqual(len(self.calls), 24)
+        origin = self.work / 'origin-universe'
+        write(origin / 'universe.json', {'name': 'review'})
+        for scope, suffix in ((self.root, ''), (origin, ' (in universe review)')):
+            with self.subTest(sender_universe=str(scope)):
+                self.send('sender context', sender={'name': 'auditor', 'universe': str(scope)})
+                self.assertEqual(self.calls[-1][1].framed, f'Message from auditor{suffix}:\nsender context')
 
     def test_definite_failure_is_retryable_and_unknown_never_is(self):
         """A definite failure (rejected, or a harness load error) is saved and retryable, while unknown or submitting

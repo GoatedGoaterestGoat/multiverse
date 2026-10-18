@@ -148,7 +148,7 @@ class MessagingCliTest(BaseTest):
     def test_advice_follows_the_agents_state(self):
         """Delivery advice follows state: live and broken gets kill then resume, stopped gets resume without kill,
         launch-only gets inbox-only or attach with no restart; fragile because agents read and follow the advice, so
-        wrong advice causes a kill-and-resume loop nobody sees (14bc474, LC-1)."""
+        wrong advice causes a kill-and-resume loop or a duplicate after uncertain acceptance (14bc474, LC-1)."""
         self.behavior = NativeResult('unavailable', 'Claude has not published the inbox key for this launch')
         self.assertEqual(self.output('send', 'first', '--text', 'private', code=1), '')
         self.assertLess(self.stderr.index('mv2 kill first'), self.stderr.index('mv2 resume first'))
@@ -180,6 +180,14 @@ class MessagingCliTest(BaseTest):
             listing = list_agents.run(self.root, wide=True)
         self.assertIn('mv2 deliver first --retry', listing)  # only where a retry can help
         self.assertNotIn('mv2 deliver third --retry', listing)
+
+        with self.subTest('uncertain acceptance tells the sender to check, never restart or retry'):
+            self.behavior = TimeoutError('connection lost after submission')
+            self.assertEqual(self.output('send', 'first', '--text', 'uncertain body', code=1), '')
+            self.assertIn('mv2 deliver first --check', self.stderr)
+            for advice in ('mv2 kill', 'mv2 resume', 'resume it', '--retry'):
+                self.assertNotIn(advice, self.stderr)
+            self.assertEqual(self.history('first')[-1]['tracking']['submission_state'], 'unknown')
 
         store.write(self.root / 'harnesses/custom/harness.json',
                     {'schema': 1, 'spawn': [sys.executable, '-c', 'pass'], 'resume': [sys.executable, '-c', 'pass']})

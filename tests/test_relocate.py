@@ -1,5 +1,6 @@
 """Moving and removing agents and subverses on disk."""
 import os
+import shutil
 from pathlib import Path
 import sys
 import tempfile
@@ -32,8 +33,8 @@ class RelocateTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def agent(self, scope, name, harness="claude", launched=True):
-        agent_id = f"{name}-0000-0000-0000-000000000000"[:36]
+    def agent(self, scope, name, harness="claude", launched=True, agent_id=None):
+        agent_id = agent_id or f"{name}-0000-0000-0000-000000000000"[:36]
         agent_dir = scope / "state/agents" / agent_id
         write(agent_dir / "properties.json", {"id": agent_id, "name": name, "harness": harness,
                                               "universe_id": read(scope / "universe.json")["id"],
@@ -52,8 +53,36 @@ class RelocateTests(unittest.TestCase):
     def test_move_subverse_rewrites_nested_workspaces_for_new_depth(self):
         """Moving a subverse rewrites the relative workspace of it and its nested subverses for the new depth; a break
         goes unnoticed until an agent resumes in the wrong directory, because the .. chain is wrong only at another
-        depth."""
-        self.agent(self.deep, "inner")
+        depth; unknown liveness and destination name collisions must refuse before moving any records, or live
+        agents lose their files and duplicate names hide each other."""
+        inner = self.agent(self.deep, "inner")
+        for label, action in (
+                ('move agent', lambda: relocate.move_agent(self.deep, 'inner', self.review)),
+                ('remove agent', lambda: relocate.remove_agent(self.deep, 'inner')),
+                ('move subverse', lambda: relocate.move_subverse(self.lab, self.review)),
+                ('remove subverse', lambda: relocate.remove_subverse(self.lab))):
+            with self.subTest(refusal=label), patch.object(relocate, 'observe',
+                    return_value={'live': 'unknown', 'reason': 'private socket unavailable'}):
+                before = (inner / 'properties.json').read_bytes()
+                with self.assertRaisesRegex(ValueError, 'unknown'):
+                    action()
+                self.assertEqual((inner / 'properties.json').read_bytes(), before)
+                self.assertTrue(self.lab.is_dir())
+                self.assertFalse((self.review / 'subverses/lab').exists())
+        duplicate = self.agent(self.review, 'inner', agent_id=str(uuid4()))
+        with self.subTest(refusal='duplicate agent name'), self.live():
+            before = (inner / 'properties.json').read_bytes()
+            with self.assertRaisesRegex(ValueError, 'already has an agent named'):
+                relocate.move_agent(self.deep, 'inner', self.review)
+            self.assertEqual((inner / 'properties.json').read_bytes(), before)
+            self.assertTrue(duplicate.is_dir())
+        occupied = templates.create(self.review / 'subverses/lab', 'occupied', workdir=self.work)
+        with self.subTest(refusal='duplicate subverse name'), self.live():
+            with self.assertRaisesRegex(ValueError, 'already has a subverse named'):
+                relocate.move_subverse(self.lab, self.review)
+            self.assertTrue(inner.is_dir())
+        shutil.rmtree(duplicate)
+        shutil.rmtree(occupied)
         with self.live():
             result = relocate.move_subverse(self.lab, self.review)
         moved = self.review / "subverses/lab"
