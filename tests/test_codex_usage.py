@@ -4,11 +4,16 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
+from uuid import uuid4
 from unittest.mock import patch
 
 import test_codex_launch as launch_tests
-from multiverse.runtime import rpc
+from multiverse.runtime import lifecycle, rpc
+from multiverse.universe import agents
+from multiverse.ui import tree
+from test_multiverse import TerminalBase
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
 from multiverse.harnesses.codex.usage import last_measurement, notification
@@ -143,6 +148,48 @@ class CodexUsageRuntimeTest(unittest.TestCase):
                 self.assertIsNone(last_measurement({'last_usage': invalid}, 'thread'))
                 self.assertEqual(last_measurement({'usage': invalid, 'last_usage': valid}, 'thread'), valid)
         self.assertIsNone(last_measurement({'usage': valid}, None))
+
+
+class CodexUsageLifecycleTest(TerminalBase):
+    def test_context_survives_repeated_resumes_until_a_fresh_reading(self):
+        """Context must survive real launch-record replacement and refresh; a silent loss otherwise looks like an empty context to the dashboard and compaction."""
+        worker = self.work / 'codex-stand-in'
+        worker.write_text(f'#!{sys.executable}\nimport sys,time\n'
+                          'if sys.argv[1:] == ["--version"]:\n'
+                          '    print("codex-cli 0.162.1"); raise SystemExit(0)\n'
+                          'print("READY", flush=True)\ntime.sleep(120)\n')
+        worker.chmod(0o700)
+        write(self.root / 'harnesses/custom-codex/harness.json', {'schema': 2, 'adapter': 'codex',
+              'settings': {'executable': str(worker), 'inbox_bridge': False}})
+        started = lifecycle.start(self.root, 'context', harness='custom-codex', socket_path=self.socket,
+                                  wait=True, wait_timeout=5)
+        self.assertTrue(started['ready'], started)
+        directory = agents.directory(self.root, started['id'])
+        self.addCleanup(lifecycle.kill, self.root, started['id'])
+        native_id = str(uuid4())
+        agents.bind_session(self.root, started['id'], native_id)
+        launch = started['runtime']['launch_id']
+        agents.update_runtime(directory, launch, native_mode={'policy': 'auto', 'mode': 'bridge'})
+        UsagePublisher(directory, launch)(notification(event(native_id, tokens=180000), native_id))
+        original = read(directory / 'runtime.json')['usage']
+        def row():
+            return tree.with_usage(lifecycle.listing(self.root)[0])
+        for index in range(2):
+            with self.subTest(resume=index):
+                lifecycle.kill(self.root, started['id'])
+                self.assertEqual(row()['context'], '180k/258k')
+                resumed = lifecycle.start(self.root, resume=started['id'], socket_path=self.socket,
+                                          wait=True, wait_timeout=5)
+                self.assertTrue(resumed['ready'], resumed)
+                self.assertEqual(row()['context'], '180k/258k')
+                self.assertTrue(row()['usage']['value']['context']['last_known'])
+                self.assertEqual(row()['usage']['value']['context_reported_at'], original['reported_at'])
+                self.assertEqual(read(directory / 'runtime.json')['last_usage'], original)
+        launch = resumed['runtime']['launch_id']
+        agents.update_runtime(directory, launch, native_mode={'policy': 'auto', 'mode': 'bridge'})
+        UsagePublisher(directory, launch)(notification(event(native_id, tokens=20000), native_id))
+        self.assertEqual(row()['context'], '20k/258k')
+        self.assertNotIn('last_known', row()['usage']['value']['context'])
 
 
 class CodexUsageRelayTest(unittest.IsolatedAsyncioTestCase):

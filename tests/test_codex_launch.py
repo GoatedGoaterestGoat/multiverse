@@ -16,7 +16,7 @@ from multiverse.universe import agents
 from multiverse.runtime import rpc
 from multiverse.harnesses.codex import CodexAdapter
 from multiverse.harnesses.codex.launch import LaunchProtocol
-from multiverse.harnesses.types import LaunchContext, NativeEndpoint, SessionHandle
+from multiverse.harnesses.types import LaunchContext, NativeEndpoint, NativeResult, SessionHandle
 from multiverse.store import read, write
 
 
@@ -76,7 +76,7 @@ class CodexLaunchTest(unittest.TestCase):
     def test_resume_permission_flags_become_grants(self):
         """Resume flags (--sandbox, -s, --ask-for-approval, -a, --dangerously-bypass...) become thread/resume grants
         and malformed ones fail before any native call; fragile because of the many spellings, and a miss silently
-        resumes a full-access agent read-only (e6a11a4)."""
+        resumes a full-access agent read-only; spawn flags and native exclusions must survive too (e6a11a4)."""
         session = SessionHandle('agent', 'codex', '/workspace', native_id=self.native_id)
         cases = [
             (['--dangerously-bypass-approvals-and-sandbox'],
@@ -104,6 +104,22 @@ class CodexLaunchTest(unittest.TestCase):
                     for flag in flags:
                         self.assertNotIn(flag, command.argv)
                     self.assertEqual(settings[preference], flags)
+                    if preference == 'args':
+                        spawned = adapter.spawn(self.context)
+                        for flag in flags:
+                            self.assertIn(flag, spawned.argv, 'Spawn permissions belong to the native TUI')
+                        self.assertEqual(spawned.rpc_proxy.settings['resume_permissions'], {})
+        with self.subTest('native environment exclusions and writable roots'):
+            executor = Mock()
+            executor.rpc.return_value = NativeResult('ok', value={
+                'exclude': ['AWS_*'], 'writable_roots': ['/native-root'], 'workspace_policy': {}})
+            command = CodexAdapter.configured('codex', {'inbox_bridge': True}).spawn(
+                replace(self.context, executor=executor))
+            exclusions = next(command.argv[index + 1] for index, value in enumerate(command.argv[:-1])
+                              if value == '-c' and command.argv[index + 1].startswith('shell_environment_policy.exclude='))
+            self.assertIn('AWS_*', json.loads(exclusions.partition('=')[2]))
+            self.assertIn('/native-root', command.rpc_proxy.settings['roots'])
+            executor.rpc.assert_called_once()
         # No resume grant is inferred from a spawn-only preference.
         adapter = CodexAdapter.configured('codex', {'inbox_bridge': True,
                                           'spawn_args': ['--dangerously-bypass-approvals-and-sandbox']})
