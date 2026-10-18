@@ -589,7 +589,7 @@ class Run:
                         totals["skipped"] += len(data["skipped"])
                         counts["failures"] += len(data["failures"])
                         counts["errors"] += len(data["errors"])
-                        if "." not in target:
+                        if target in self.modules:  # a module's time, not one class's or test's
                             measured[target] = measured.get(target, 0) + sum(data["times"].values())
                     failed = code != 0 or not data or bool(data["failures"] or data["errors"])
                     print(f"[{done}/{len(units)}] {label}: {data['run'] if data else '?'} tests in {seconds:.1f} s"
