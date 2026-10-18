@@ -860,6 +860,23 @@ queue: native resume replies include conversation history and can exceed the
 1 MiB budget used for small control RPCs. Oversized messages still close the
 connection with a runtime diagnostic.
 
+An adapter may supply `for_connection(connection_id, owns_primary)` to give each
+relay connection a protocol view. The owner callback reads current ownership;
+request correlation belongs to the view, while the adapter may share validated
+primary binding state. Core uses that view for request/reply transforms, binding,
+refusal and usage observations, and post-bind naming. Its optional `closed()`
+hook discards only local memory and runs once even if the upstream connection
+fails. Cleanup errors do not change the primary launch's health. Adapters without
+this hook retain their existing shared protocol behavior.
+
+A view can raise `LocalProtocolError` to reject one frame without invoking
+binding, naming, refusal, usage or launch-error callbacks. It supplies a correlated
+string or integer request ID and an explicit reply destination: client for client
+requests or native responses, upstream for native server requests. Core checks
+the frame's ID and direction before replying; a missing ID means drop, and an
+uncorrelated frame or notification gets no fabricated response. Ordinary primary
+validation and transport failures keep their existing diagnostics and loss rules.
+
 The relay adds the bootstrap to the TUI's `thread/start` and exact `thread/resume`
 requests, preserving existing developer instructions. Initial writable roots from
 mv2, user arguments and native configuration are combined in the thread request,
